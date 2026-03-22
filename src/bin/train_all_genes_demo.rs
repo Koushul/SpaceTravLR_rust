@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     let max_genes = next_usize(&args, "--max-genes");
 
     let path = std::env::var("SPACETRAVLR_H5AD").unwrap_or_else(|_| {
-        "/Users/koush/Downloads/snrna_human_tonsil.h5ad".to_string()
+        "/ix/djishnu/shared/djishnu_kor11/training_data_2025/snrna_human_tonsil.h5ad".to_string()
     });
 
     if !std::path::Path::new(&path).exists() {
