@@ -112,6 +112,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         gene_filter: Option<Vec<String>>,
         max_genes: Option<usize>,
         n_parallel: usize,
+        output_dir: &str,
         hud: Option<TrainingHud>,
         device: &AB::Device,
     ) -> anyhow::Result<()>
@@ -124,7 +125,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         use std::io::Write;
         use std::thread;
 
-        let training_dir = "/tmp/training";
+        let training_dir = output_dir;
         fs::create_dir_all(training_dir)?;
 
         // ── Setup: build gene list and pre-cache shared metadata ──────────────

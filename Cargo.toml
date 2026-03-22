@@ -3,6 +3,9 @@ name = "space_trav_lr_rust"
 version = "0.1.0"
 edition = "2024"
 
+[profile.dev]
+incremental = true
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train"] }
 burn-autodiff = { version = "0.16.1" }
