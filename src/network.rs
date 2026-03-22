@@ -88,7 +88,7 @@ impl GeneNetwork {
         })
     }
 
-    pub fn get_modulators(&self, target_gene: &str, tf_ligand_cutoff: f64, max_lr_pairs: Option<usize>) -> Result<Modulators> {
+    pub fn get_modulators(&self, target_gene: &str, tf_ligand_cutoff: f64, _max_lr_pairs: Option<usize>) -> Result<Modulators> {
         let lf = self.network_df.clone().lazy();
 
         // --- 1. Regulators (edge_type == "grn") ---
@@ -144,14 +144,6 @@ impl GeneNetwork {
             }
         }
 
-        // Truncate LR pairs if max_lr_pairs is specified
-        if let Some(max) = max_lr_pairs {
-            if lr_pairs.len() > max {
-                ligands.truncate(max);
-                receptors.truncate(max);
-                lr_pairs.truncate(max);
-            }
-        }
 
         // --- 3. NicheNet Pairs (edge_type == "nichenet") ---
         let regs_len = regulators.len() as u32;

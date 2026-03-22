@@ -193,7 +193,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 g.total_genes = total_genes;
                 g.n_cells = obs_names.len();
                 g.n_clusters = num_clusters;
-                g.push_log(format!(">> {} gene targets queued | {} workers", total_genes, n_parallel.max(1)));
             }
         }
 
@@ -334,15 +333,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         }
 
                         if n_mods == 0 {
-                            if estimator.regulators.is_empty() {
-                                let _ = fs::File::create(format!("{}/{}.orphan", training_dir, gene));
-                            }
+                            let _ = fs::File::create(format!("{}/{}.orphan", training_dir, gene));
                             if let Some(ref h) = hud {
-                                if let Ok(mut g) = h.lock() { g.genes_orphan += 1; g.remove_gene(&gene); }
-                                log_line(&hud, format!(">> orphan {}", gene));
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_orphan += 1;
+                                    g.remove_gene(&gene);
+                                    g.genes_rounds += 1;
+                                }
                             }
+                            log_line(&hud, format!(">> orphan (no modulators) {}", gene));
                             if let Some(ref p) = pb { p.inc(1); }
-                            if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
                             continue;
                         }
 
@@ -374,40 +374,65 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                                 let betadata_path = format!("{}/{}_betadata.csv", training_dir, gene);
                                 if let Ok(mut f) = fs::File::create(betadata_path) {
+                                    // Column names: beta0 first, then one per modulator
+                                    let col_names: Vec<String> =
+                                        std::iter::once("beta0".to_string())
+                                        .chain(estimator.modulators_genes.iter().cloned())
+                                        .collect();
+
                                     if full_cnn {
                                         let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
                                         let all_betas = est_inner.predict_betas(
                                             &x_mock, &xy, &clusters, num_clusters, &device,
                                         );
-                                        let mut header = "CellID,beta0".to_string();
-                                        for m in &estimator.modulators_genes {
-                                            header.push_str(&format!(",{}", m));
-                                        }
+
+                                        // Keep only columns that have at least one non-zero value
+                                        let keep: Vec<usize> = (0..all_betas.ncols())
+                                            .filter(|&j| all_betas.column(j).iter()
+                                                .any(|&v| finite_or_zero_f64(v) != 0.0))
+                                            .collect();
+
+                                        let mut header = "CellID".to_string();
+                                        for &j in &keep { header.push_str(&format!(",{}", col_names[j])); }
                                         let _ = writeln!(f, "{}", header);
+
                                         for (i, cell_id) in obs_names.iter().enumerate() {
                                             let mut row = format!("{}", cell_id);
-                                            for j in 0..all_betas.ncols() {
+                                            for &j in &keep {
                                                 row.push_str(&format!(",{}", finite_or_zero_f64(all_betas[[i, j]])));
                                             }
                                             let _ = writeln!(f, "{}", row);
                                         }
                                     } else {
-                                        let mut header = "Cluster,beta0".to_string();
-                                        for m in &estimator.modulators_genes {
-                                            header.push_str(&format!(",{}", m));
-                                        }
-                                        let _ = writeln!(f, "{}", header);
                                         let mut cluster_ids: Vec<usize> = est_inner
                                             .lasso_coefficients.keys().copied().collect();
                                         cluster_ids.sort();
-                                        for c_id in cluster_ids {
-                                            let coefs = &est_inner.lasso_coefficients[&c_id];
+
+                                        // Materialise all rows as (intercept, coef...) vecs
+                                        let rows: Vec<Vec<f64>> = cluster_ids.iter().map(|&c_id| {
                                             let intercept = finite_or_zero_f64(
                                                 est_inner.lasso_intercepts.get(&c_id).copied().unwrap_or(0.0),
                                             );
-                                            let mut row = format!("{},{}", c_id, intercept);
-                                            for &beta in coefs.column(0).iter() {
-                                                row.push_str(&format!(",{}", finite_or_zero_f64(beta)));
+                                            let coefs = &est_inner.lasso_coefficients[&c_id];
+                                            std::iter::once(intercept)
+                                                .chain(coefs.column(0).iter().map(|&b| finite_or_zero_f64(b)))
+                                                .collect()
+                                        }).collect();
+
+                                        // Keep only columns with at least one non-zero value
+                                        let n_cols = 1 + n_mods;
+                                        let keep: Vec<usize> = (0..n_cols)
+                                            .filter(|&j| rows.iter().any(|r| r[j] != 0.0))
+                                            .collect();
+
+                                        let mut header = "Cluster".to_string();
+                                        for &j in &keep { header.push_str(&format!(",{}", col_names[j])); }
+                                        let _ = writeln!(f, "{}", header);
+
+                                        for (row_vals, &c_id) in rows.iter().zip(cluster_ids.iter()) {
+                                            let mut row = format!("{}", c_id);
+                                            for &j in &keep {
+                                                row.push_str(&format!(",{}", row_vals[j]));
                                             }
                                             let _ = writeln!(f, "{}", row);
                                         }

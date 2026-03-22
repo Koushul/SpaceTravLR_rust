@@ -14,6 +14,191 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
+// ── Palette ───────────────────────────────────────────────────────────────────
+const BG:          Color = Color::Rgb(18, 12, 28);
+const OUTER_BORD:  Color = Color::Rgb(180, 140, 210);
+const TEL_BORD:    Color = Color::Rgb(210, 140, 180);
+const GAUGE_BORD:  Color = Color::Rgb(140, 180, 230);
+const WORK_BORD:   Color = Color::Rgb(200, 140, 220);
+const ROCKET_BORD: Color = Color::Rgb(200, 160, 240);
+const GAUGE_FILL:  Color = Color::Rgb(200, 140, 200);
+const GAUGE_EMPTY: Color = Color::Rgb(35, 22, 45);
+
+const LABEL:  Color = Color::Rgb(255, 160, 185);
+const VALUE:  Color = Color::Rgb(160, 230, 200);
+const LILAC:  Color = Color::Rgb(195, 170, 240);
+const SKY:    Color = Color::Rgb(155, 205, 250);
+const GRAPE:  Color = Color::Rgb(230, 180, 255);
+const MUTED:  Color = Color::Rgb(120, 100, 145);
+const TITLE:  Color = Color::Rgb(240, 190, 220);
+
+const C_WROTE: Color = Color::Rgb(150, 230, 195);
+const C_FAIL:  Color = Color::Rgb(255, 130, 155);
+const C_SKIP:  Color = Color::Rgb(110, 95,  130);
+
+// ── Rocket ────────────────────────────────────────────────────────────────────
+// Compact ASCII rocket — every line is exactly 14 display columns.
+// Panel = 14 content + 2 border = 16 terminal columns.
+
+const ROCKET_PANEL_W: u16 = 16;
+const WINDOW_IDX: usize = 2;
+
+const BODY: [(&str, Color); 8] = [
+    ("      /\\      ", SKY),
+    ("     /  \\     ", SKY),
+    ("    / ** \\    ", SKY),     // window — rendered with colored ◆◆ spans
+    ("    |    |    ", TITLE),
+    ("    |    |    ", TITLE),
+    ("   /| || |\\   ", LILAC),
+    ("  / |____| \\  ", LILAC),
+    ("      ||      ", GRAPE),
+];
+
+const FIRE: [[&str; 2]; 4] = [
+    ["     \\||/     ", "      \\/      "],
+    ["     |**|     ", "      **      "],
+    ["     /||\\     ", "      /\\      "],
+    ["     *||*     ", "      **      "],
+];
+
+const FIRE_RGB: [[(u8, u8, u8); 2]; 4] = [
+    [(255, 220, 100), (255, 150, 50)],
+    [(255, 190,  70), (255, 120, 30)],
+    [(255, 240, 150), (255, 180, 60)],
+    [(255, 200,  90), (255, 100, 20)],
+];
+
+const STARFIELD: [&str; 8] = [
+    "  ·         · ",
+    "        ✦     ",
+    "   ·       ·  ",
+    "         ·    ",
+    " ✦     ·      ",
+    "       ·    ✦ ",
+    "  ·           ",
+    "     ✦    ·   ",
+];
+
+fn rocket_lines(frame: usize) -> Vec<Line<'static>> {
+    let f       = frame % 4;
+    let shimmer = (frame / 3) % BODY.len();
+    let win_c   = if frame % 8 < 4 { GRAPE } else { Color::Rgb(180, 150, 230) };
+
+    let mut lines = Vec::with_capacity(32);
+
+    for (i, (text, base)) in BODY.iter().enumerate() {
+        if i == WINDOW_IDX {
+            lines.push(Line::from(vec![
+                Span::styled("    / ", Style::default().fg(*base)),
+                Span::styled("◆◆", Style::default().fg(win_c).add_modifier(Modifier::BOLD)),
+                Span::styled(" \\    ", Style::default().fg(*base)),
+            ]));
+        } else {
+            let c = if i == shimmer { brighten(*base, 35) } else { *base };
+            let mut s = Style::default().fg(c);
+            if i == shimmer { s = s.add_modifier(Modifier::BOLD); }
+            lines.push(Line::from(Span::styled(*text, s)));
+        }
+    }
+
+    for (ri, text) in FIRE[f].iter().enumerate() {
+        let (r, g, b) = FIRE_RGB[f][ri];
+        lines.push(Line::from(Span::styled(
+            *text,
+            Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    for row in 0..20 {
+        let idx = (row + frame / 4) % STARFIELD.len();
+        let v = 75 + ((row * 13 + frame * 3) % 55) as u8;
+        lines.push(Line::from(Span::styled(
+            STARFIELD[idx],
+            Style::default().fg(Color::Rgb(v, v.saturating_sub(10), v.saturating_add(25))),
+        )));
+    }
+
+    lines
+}
+
+fn brighten(c: Color, amt: u8) -> Color {
+    if let Color::Rgb(r, g, b) = c {
+        Color::Rgb(r.saturating_add(amt), g.saturating_add(amt), b.saturating_add(amt))
+    } else {
+        c
+    }
+}
+
+// ── Workers: multi-column ─────────────────────────────────────────────────────
+const GENE_PAD: usize = 16;
+const STAT_PAD: usize = 26;
+const ENTRY_W:  usize = 2 + GENE_PAD + 5 + STAT_PAD;
+
+fn workers_in_columns(
+    active: &[(&String, &String)],
+    content_w: usize,
+) -> Vec<ListItem<'static>> {
+    if active.is_empty() {
+        return vec![ListItem::new(Line::from(Span::styled(
+            "  ·  idle  ·",
+            Style::default().fg(MUTED),
+        )))];
+    }
+    let n_cols = ((content_w + 3) / (ENTRY_W + 3)).max(1);
+    active
+        .chunks(n_cols)
+        .map(|chunk| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (i, (gene, status)) in chunk.iter().enumerate() {
+                if i > 0 { spans.push(Span::styled(" │ ", Style::default().fg(MUTED))); }
+                let pc = if status.contains("export") { C_WROTE }
+                    else if status.contains("lasso") || status.contains("cnn") { GRAPE }
+                    else if status.contains("fail") { C_FAIL }
+                    else if status.contains("skip") { C_SKIP }
+                    else { LILAC };
+                spans.push(Span::styled("✿ ", Style::default().fg(LABEL)));
+                spans.push(Span::styled(
+                    format!("{:<w$}", gene, w = GENE_PAD),
+                    Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled("  ·  ", Style::default().fg(MUTED)));
+                spans.push(Span::styled(
+                    format!("{:<w$}", status, w = STAT_PAD),
+                    Style::default().fg(pc),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect()
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+fn format_bytes(b: u64) -> String {
+    if b >= 1 << 30      { format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64) }
+    else if b >= 1 << 20 { format!("{:.1} MiB", b as f64 / (1u64 << 20) as f64) }
+    else if b >= 1 << 10 { format!("{:.1} KiB", b as f64 / (1u64 << 10) as f64) }
+    else                 { format!("{} B", b) }
+}
+
+fn scan_dir(dir: &str) -> (u64, usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return (0, 0) };
+    let (mut bytes, mut count) = (0u64, 0usize);
+    for e in entries.flatten() {
+        if let Ok(m) = e.metadata() {
+            if m.is_file() { bytes += m.len(); count += 1; }
+        }
+    }
+    (bytes, count)
+}
+
+fn format_t(secs: f64) -> String {
+    let s = secs as u64;
+    if s >= 3600 { format!("T+{}h{:02}m{:02}s", s / 3600, (s / 60) % 60, s % 60) }
+    else if s >= 60 { format!("T+{}m{:02}s", s / 60, s % 60) }
+    else { format!("T+{}s", s) }
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
 pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
@@ -26,7 +211,14 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
             .with_cpu(CpuRefreshKind::everything())
             .with_memory(MemoryRefreshKind::everything()),
     );
-    let mut last_sys = Instant::now();
+    let mut last_sys      = Instant::now();
+    let mut last_dir_scan = Instant::now();
+    let t0                = Instant::now();
+
+    let mut dir_bytes: u64   = 0;
+    let mut dir_files: usize = 0;
+
+    let output_dir = hud.lock().map(|st| st.output_dir.clone()).unwrap_or_default();
 
     loop {
         if last_sys.elapsed() > Duration::from_millis(350) {
@@ -34,279 +226,196 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
             sys.refresh_memory();
             last_sys = Instant::now();
         }
-
+        if last_dir_scan.elapsed() > Duration::from_secs(2) {
+            (dir_bytes, dir_files) = scan_dir(&output_dir);
+            last_dir_scan = Instant::now();
+        }
         if event::poll(Duration::from_millis(40))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                    if let Ok(mut st) = hud.lock() {
+                    if let Ok(st) = hud.lock() {
                         st.cancel_requested.store(true, Ordering::Relaxed);
-                        st.push_log(">> Q: draining workers…".to_string());
                     }
                 }
             }
         }
 
-        let done = hud.lock().map(|g| g.finished.is_some()).unwrap_or(true);
+        let done  = hud.lock().map(|g| g.finished.is_some()).unwrap_or(true);
+        let frame = (t0.elapsed().as_millis() / 200) as usize;
 
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let bg = Style::default().bg(Color::Rgb(8, 12, 22));
-            frame.render_widget(Block::default().style(bg), area);
+        terminal.draw(|f| {
+            let area = f.area();
+            let bg   = Style::default().bg(BG);
+            f.render_widget(Block::default().style(bg), area);
 
             let Ok(st) = hud.lock() else { return };
 
-            let cpu_pct  = sys.global_cpu_usage();
-            let used_mem = sys.used_memory();
+            let cpu_pct   = sys.global_cpu_usage();
+            let used_mem  = sys.used_memory();
             let total_mem = sys.total_memory().max(1);
-            let mem_pct  = (used_mem as f64 / total_mem as f64) * 100.0;
+            let mem_pct   = (used_mem as f64 / total_mem as f64) * 100.0;
+            let elapsed   = st.elapsed_secs();
 
             let outer = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM))
+                .border_style(Style::default().fg(OUTER_BORD).add_modifier(Modifier::DIM))
                 .style(bg);
             let inner = outer.inner(area);
-            frame.render_widget(outer, area);
+            f.render_widget(outer, area);
 
-            // How many rows to give the ACTIVE WORKERS panel
-            let active_rows = (st.active_genes.len().max(1) as u16 + 2).min(10);
-
-            let chunks = Layout::default()
+            let vchunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(1),            // header
-                    Constraint::Length(5),            // TELEMETRY
-                    Constraint::Length(3),            // GENE INDEX gauge
-                    Constraint::Length(active_rows),  // ACTIVE WORKERS (dynamic)
-                    Constraint::Min(4),               // EVENT LOG
-                    Constraint::Length(1),            // footer
+                    Constraint::Length(1),
+                    Constraint::Min(12),
+                    Constraint::Length(5),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
 
             // ── Header ────────────────────────────────────────────────────────
-            let mode = if st.full_cnn { "CNN // SPATIAL" } else { "SEED // LASSO-ONLY" };
-            let header = Line::from(vec![
-                Span::styled(" ◆ ", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
-                Span::styled("SPACETRAVLR", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(" :: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("NEUROLINK", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" :: {} ", mode), Style::default().fg(Color::Cyan)),
-                Span::styled("◆", Style::default().fg(Color::LightCyan)),
-            ]);
-            frame.render_widget(Paragraph::new(header), chunks[0]);
+            let mode = if st.full_cnn { "CNN ✦ SPATIAL" } else { "SEED ✦ LASSO" };
+            let status_txt = if st.should_cancel() { "DRAINING" } else { "NOMINAL" };
+            let status_c   = if st.should_cancel() { C_FAIL } else { VALUE };
 
-            // ── Telemetry ─────────────────────────────────────────────────────
-            let path_short = if st.dataset_path.len() > 60 {
-                format!("…{}", &st.dataset_path[st.dataset_path.len() - 57..])
-            } else {
-                st.dataset_path.clone()
-            };
-            let eta = st
-                .eta_secs()
-                .map(|s| format!("{:.0}s", s))
-                .unwrap_or_else(|| "—".to_string());
-            let elapsed = st.elapsed_secs();
-            let gpm = if elapsed > 1.0 {
-                format!("{:.2}/min", (st.genes_rounds as f64) * 60.0 / elapsed)
-            } else {
-                "—".to_string()
-            };
-
-            let tel = vec![
-                Line::from(vec![
-                    Span::styled("SRC ", Style::default().fg(Color::Yellow)),
-                    Span::styled(path_short, Style::default().fg(Color::Gray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("GRID ", Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        format!("{} cells  │  {} clusters", st.n_cells, st.n_clusters),
-                        Style::default().fg(Color::White),
-                    ),
-                    Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("WORKERS ", Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        format!("{}", st.n_parallel),
-                        Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("EPOCH ", Style::default().fg(Color::Yellow)),
-                    Span::styled(format!("{}/gene", st.epochs_per_gene), Style::default().fg(Color::White)),
-                    Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("ELAPSED ", Style::default().fg(Color::Yellow)),
-                    Span::styled(format!("{:.0}s", elapsed), Style::default().fg(Color::Green)),
-                    Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("ETA ", Style::default().fg(Color::Yellow)),
-                    Span::styled(eta, Style::default().fg(Color::Green)),
-                    Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("RATE ", Style::default().fg(Color::Yellow)),
-                    Span::styled(gpm, Style::default().fg(Color::Cyan)),
-                ]),
-                Line::from(vec![
-                    Span::styled("CPU ", Style::default().fg(Color::Yellow)),
-                    Span::styled(format!("{cpu_pct:5.1}%"), Style::default().fg(Color::Cyan)),
-                    Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("MEM ", Style::default().fg(Color::Yellow)),
-                    Span::styled(format!("{mem_pct:5.1}%"), Style::default().fg(Color::Cyan)),
-                    Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("RAM ", Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        format!("{}/{} MiB", used_mem / 1024 / 1024, total_mem / 1024 / 1024),
-                        Style::default().fg(Color::Gray),
-                    ),
-                ]),
-            ];
-            frame.render_widget(
-                Paragraph::new(tel)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Rgb(0, 140, 160)))
-                            .title(Span::styled(" TELEMETRY ", Style::default().fg(Color::LightCyan))),
-                    )
-                    .style(bg),
-                chunks[1],
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ✿ ", Style::default().fg(GRAPE).add_modifier(Modifier::BOLD)),
+                    Span::styled("SPACETRAVLR", Style::default().fg(TITLE).add_modifier(Modifier::BOLD)),
+                    Span::styled("  ·  ", Style::default().fg(MUTED)),
+                    Span::styled(format_t(elapsed), Style::default().fg(VALUE).add_modifier(Modifier::BOLD)),
+                    Span::styled("  ·  ", Style::default().fg(MUTED)),
+                    Span::styled(mode, Style::default().fg(SKY)),
+                    Span::styled("  ·  ", Style::default().fg(MUTED)),
+                    Span::styled(status_txt, Style::default().fg(status_c)),
+                    Span::styled(" ✿", Style::default().fg(GRAPE)),
+                ])),
+                vchunks[0],
             );
 
-            // ── Gene index gauge ──────────────────────────────────────────────
+            // ── Main: [telemetry + workers] | rocket ──────────────────────────
+            let hchunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1), Constraint::Length(ROCKET_PANEL_W)])
+                .split(vchunks[1]);
+
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(7), Constraint::Min(4)])
+                .split(hchunks[0]);
+
+            // ── Telemetry ─────────────────────────────────────────────────────
+            let path_s = if st.dataset_path.len() > 55 {
+                format!("…{}", &st.dataset_path[st.dataset_path.len() - 52..])
+            } else { st.dataset_path.clone() };
+            let dir_s = if st.output_dir.len() > 40 {
+                format!("…{}", &st.output_dir[st.output_dir.len() - 37..])
+            } else { st.output_dir.clone() };
+            let eta = st.eta_secs().map(|s| format!("{:.0}s", s)).unwrap_or_else(|| "—".into());
+            let gpm = if elapsed > 1.0 {
+                format!("{:.2}/min", (st.genes_rounds as f64) * 60.0 / elapsed)
+            } else { "—".into() };
+
+            let sep = || Span::styled("  ·  ", Style::default().fg(MUTED));
+            let lbl = |s: &'static str| Span::styled(s, Style::default().fg(LABEL));
+            let val = |s: String, c: Color| Span::styled(s, Style::default().fg(c));
+
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![lbl("SRC  "), val(path_s, MUTED)]),
+                    Line::from(vec![
+                        lbl("GRID  "),
+                        val(format!("{} cells  ·  {} clusters", st.n_cells, st.n_clusters), VALUE),
+                        sep(), lbl("WORKERS  "), val(format!("{}", st.n_parallel), GRAPE),
+                    ]),
+                    Line::from(vec![
+                        lbl("EPOCH  "), val(format!("{}/gene", st.epochs_per_gene), LILAC),
+                        sep(), lbl("ETA  "), val(eta, VALUE),
+                        sep(), lbl("RATE  "), val(gpm, SKY),
+                    ]),
+                    Line::from(vec![
+                        lbl("CPU  "), val(format!("{cpu_pct:5.1}%"), SKY),
+                        sep(), lbl("MEM  "), val(format!("{mem_pct:5.1}%"), SKY),
+                        sep(), lbl("RAM  "),
+                        val(format!("{}/{} MiB", used_mem / 1024 / 1024, total_mem / 1024 / 1024), MUTED),
+                    ]),
+                    Line::from(vec![
+                        lbl("OUT  "), val(dir_s, MUTED),
+                        sep(), lbl("SIZE  "), val(format_bytes(dir_bytes), VALUE),
+                        sep(), lbl("FILES  "), val(format!("{}", dir_files), LILAC),
+                    ]),
+                ])
+                .block(Block::default().borders(Borders::ALL)
+                    .border_style(Style::default().fg(TEL_BORD))
+                    .title(Span::styled(" ✦ TELEMETRY ", Style::default().fg(TITLE).add_modifier(Modifier::BOLD))))
+                .style(bg),
+                left[0],
+            );
+
+            // ── Workers ───────────────────────────────────────────────────────
+            let mut active: Vec<(&String, &String)> = st.active_genes.iter().collect();
+            active.sort_by_key(|(g, _)| g.as_str());
+            let cw = (left[1].width as usize).saturating_sub(2);
+
+            f.render_widget(
+                List::new(workers_in_columns(&active, cw))
+                    .block(Block::default().borders(Borders::ALL)
+                        .border_style(Style::default().fg(WORK_BORD))
+                        .title(Span::styled(
+                            format!(" ✦ ACTIVE WORKERS ({}/{}) ", st.active_genes.len(), st.n_parallel),
+                            Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+                        )))
+                    .style(bg),
+                left[1],
+            );
+
+            // ── Rocket ────────────────────────────────────────────────────────
+            f.render_widget(
+                Paragraph::new(rocket_lines(frame))
+                    .block(Block::default().borders(Borders::ALL)
+                        .border_style(Style::default().fg(ROCKET_BORD))
+                        .title(Span::styled(" 🚀 ", Style::default().fg(GRAPE))))
+                    .style(bg),
+                hchunks[1],
+            );
+
+            // ── Gauge ─────────────────────────────────────────────────────────
             let total = st.total_genes.max(1) as u64;
             let pos   = st.genes_rounds.min(st.total_genes) as u64;
             let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
-            frame.render_widget(
+            f.render_widget(
                 Gauge::default()
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Rgb(80, 200, 255)))
-                            .title(Span::styled(" GENE INDEX ", Style::default().fg(Color::LightCyan))),
-                    )
-                    .gauge_style(
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .bg(Color::Rgb(20, 30, 45))
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    .block(Block::default().borders(Borders::ALL)
+                        .border_style(Style::default().fg(GAUGE_BORD))
+                        .title(Span::styled(" ✦ GENE INDEX ",
+                            Style::default().fg(SKY).add_modifier(Modifier::BOLD))))
+                    .gauge_style(Style::default().fg(GAUGE_FILL).bg(GAUGE_EMPTY).add_modifier(Modifier::BOLD))
                     .ratio(ratio)
                     .label(Span::styled(
-                        format!(
-                            "{}/{}  │  ok {}  skip {}  fail {}  orphan {}",
-                            pos, total, st.genes_done, st.genes_skipped, st.genes_failed, st.genes_orphan
-                        ),
-                        Style::default().fg(Color::Gray),
+                        format!("{}/{}  ·  ok {}  skip {}  fail {}  orphan {}",
+                            pos, total, st.genes_done, st.genes_skipped, st.genes_failed, st.genes_orphan),
+                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
                     )),
-                chunks[2],
-            );
-
-            // ── Active workers ────────────────────────────────────────────────
-            let mut active_sorted: Vec<(&String, &String)> = st.active_genes.iter().collect();
-            active_sorted.sort_by_key(|(g, _)| g.as_str());
-
-            let active_items: Vec<ListItem> = if active_sorted.is_empty() {
-                vec![ListItem::new(Line::from(Span::styled(
-                    "  —  idle  —",
-                    Style::default().fg(Color::DarkGray),
-                )))]
-            } else {
-                active_sorted
-                    .iter()
-                    .map(|(gene, status)| {
-                        let phase_color = if status.contains("export") {
-                            Color::LightGreen
-                        } else if status.contains("lasso") || status.contains("cnn") {
-                            Color::Yellow
-                        } else {
-                            Color::Gray
-                        };
-                        ListItem::new(Line::from(vec![
-                            Span::styled("◈ ", Style::default().fg(Color::LightMagenta)),
-                            Span::styled(
-                                gene.as_str(),
-                                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled("  //  ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(status.as_str(), Style::default().fg(phase_color)),
-                        ]))
-                    })
-                    .collect()
-            };
-
-            frame.render_widget(
-                List::new(active_items)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Rgb(140, 80, 255)))
-                            .title(Span::styled(
-                                format!(
-                                    " ACTIVE WORKERS ({}/{}) ",
-                                    st.active_genes.len(),
-                                    st.n_parallel,
-                                ),
-                                Style::default().fg(Color::LightMagenta),
-                            )),
-                    )
-                    .style(bg),
-                chunks[3],
-            );
-
-            // ── Event log ─────────────────────────────────────────────────────
-            let log_items: Vec<ListItem> = st
-                .log
-                .iter()
-                .map(|l| {
-                    let color = if l.contains("fail") || l.contains("ERROR") {
-                        Color::Red
-                    } else if l.contains("wrote") {
-                        Color::LightGreen
-                    } else if l.contains("orphan") || l.contains("skip") {
-                        Color::DarkGray
-                    } else {
-                        Color::Rgb(140, 190, 215)
-                    };
-                    ListItem::new(Line::from(Span::styled(l.as_str(), Style::default().fg(color))))
-                })
-                .collect();
-            frame.render_widget(
-                List::new(log_items)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Rgb(60, 100, 120)))
-                            .title(Span::styled(" EVENT LOG ", Style::default().fg(Color::Cyan))),
-                    )
-                    .style(bg),
-                chunks[4],
+                vchunks[2],
             );
 
             // ── Footer ────────────────────────────────────────────────────────
             let footer = if st.should_cancel() {
                 Line::from(Span::styled(
-                    " ⚠ draining workers — waiting for current genes to finish ",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ))
+                    " draining — will abort after current genes finish ",
+                    Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)))
             } else {
-                Line::from(Span::styled(
-                    " [q] signal stop after current gene ",
-                    Style::default().fg(Color::DarkGray),
-                ))
+                Line::from(Span::styled(" [q] abort signal ",
+                    Style::default().fg(MUTED)))
             };
-            frame.render_widget(
-                Paragraph::new(footer).wrap(Wrap { trim: true }),
-                chunks[5],
-            );
+            f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: true }), vchunks[3]);
         })?;
 
-        if done {
-            break;
-        }
+        if done { break; }
     }
 
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        crossterm::cursor::Show,
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
     Ok(())
 }

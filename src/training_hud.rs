@@ -1,13 +1,12 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-const LOG_CAP: usize = 24;
-
 #[derive(Debug, Clone)]
 pub struct TrainingHudState {
     pub dataset_path: String,
+    pub output_dir: String,
     pub full_cnn: bool,
     pub epochs_per_gene: usize,
     pub n_parallel: usize,
@@ -16,14 +15,11 @@ pub struct TrainingHudState {
     pub genes_skipped: usize,
     pub genes_failed: usize,
     pub genes_orphan: usize,
-    /// One increment per gene slot finished (progress bar position).
     pub genes_rounds: usize,
-    /// gene → status string ("phase | N mods").  One entry per active worker.
     pub active_genes: HashMap<String, String>,
     pub n_cells: usize,
     pub n_clusters: usize,
     pub started: Instant,
-    pub log: VecDeque<String>,
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
 }
@@ -31,6 +27,7 @@ pub struct TrainingHudState {
 impl TrainingHudState {
     pub fn new(
         dataset_path: String,
+        output_dir: String,
         full_cnn: bool,
         epochs_per_gene: usize,
         n_parallel: usize,
@@ -38,6 +35,7 @@ impl TrainingHudState {
     ) -> Self {
         Self {
             dataset_path,
+            output_dir,
             full_cnn,
             epochs_per_gene,
             n_parallel,
@@ -51,26 +49,17 @@ impl TrainingHudState {
             n_cells: 0,
             n_clusters: 0,
             started: Instant::now(),
-            log: VecDeque::new(),
             finished: None,
             cancel_requested,
         }
     }
 
     pub fn set_gene_status(&mut self, gene: &str, status: impl std::fmt::Display) {
-        self.active_genes
-            .insert(gene.to_string(), status.to_string());
+        self.active_genes.insert(gene.to_string(), status.to_string());
     }
 
     pub fn remove_gene(&mut self, gene: &str) {
         self.active_genes.remove(gene);
-    }
-
-    pub fn push_log(&mut self, line: String) {
-        while self.log.len() >= LOG_CAP {
-            self.log.pop_front();
-        }
-        self.log.push_back(line);
     }
 
     pub fn should_cancel(&self) -> bool {
@@ -97,9 +86,8 @@ impl TrainingHudState {
 pub type TrainingHud = Arc<Mutex<TrainingHudState>>;
 
 pub fn log_line(hud: &Option<TrainingHud>, msg: String) {
-    if let Some(h) = hud {
-        if let Ok(mut g) = h.lock() {
-            g.push_log(msg);
-        }
+    if hud.is_none() {
+        println!("{}", msg);
     }
+    // In TUI mode the event log panel is not shown; messages go to stdout only in plain mode.
 }

@@ -109,7 +109,7 @@ fn main() -> anyhow::Result<()> {
 
         let device: WgpuDevice = Default::default();
         SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
-            &path, 0.1, 32, 0.05, 0.5, Some(100),
+            &path, 0.1, 32, 0.05, 0.5, None,
             epochs, 1e-3, 0.0, 1e-4, 1e-4, 100, 1e-4,
             full_cnn, gene_filter, max_genes, n_parallel, &output_dir, None, &device,
         )?;
@@ -121,6 +121,7 @@ fn main() -> anyhow::Result<()> {
     let cancel = Arc::new(AtomicBool::new(false));
     let hud = Arc::new(Mutex::new(TrainingHudState::new(
         path.clone(),
+        output_dir.clone(),
         full_cnn,
         epochs,
         n_parallel,
@@ -135,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     let handle = thread::spawn(move || {
         let device: WgpuDevice = Default::default();
         SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
-            &path_worker, 0.1, 32, 0.05, 0.5, Some(100),
+            &path_worker, 0.1, 32, 0.05, 0.5, None,
             epochs, 1e-3, 0.0, 1e-4, 1e-4, 100, 1e-4,
             full_cnn, gene_filter_worker, max_genes, n_parallel, &output_dir_worker,
             Some(hud_worker), &device,
