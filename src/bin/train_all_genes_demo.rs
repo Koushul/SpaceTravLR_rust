@@ -1,7 +1,13 @@
+use burn::backend::wgpu::WgpuDevice;
 use burn::backend::Wgpu;
 use burn_autodiff::Autodiff;
 use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
+use space_trav_lr_rust::training_hud::TrainingHudState;
+use space_trav_lr_rust::training_tui::run_training_dashboard;
 use std::env;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 type AB = Autodiff<Wgpu>;
 
@@ -15,22 +21,32 @@ fn print_usage() {
         "\
 Usage: train_all_genes_demo [OPTIONS]
 
-CNN (spatial) mode requires --full.
-
 Options:
-  --full                 Train the CNN head and export per-cell betas (not seed-only / cluster betas)
-  --epochs N             CNN fine-tuning epochs per gene (default: 10)
-  --max-genes N          Train on the first N genes in the h5ad var order (after --genes filter, if any)
-  --genes A,B,C          Comma-separated target gene names (optional)
-  -h, --help             This message
+  --full              CNN spatial mode — per-cell betadata export
+  --epochs N          CNN fine-tuning epochs per gene            (default: 10)
+  --parallel N        Number of parallel gene workers            (default: 1)
+  --max-genes N       Cap to first N genes in var order
+  --genes A,B,C       Comma-separated target gene names
+  --plain             Simple progress bar, no sci-fi TUI
+  -h, --help          This message
 
 Environment:
-  SPACETRAVLR_H5AD       Path to .h5ad (default: built-in demo path)
+  SPACETRAVLR_H5AD    Path to .h5ad (default: built-in path)
 
-Outputs under /tmp/training: <GENE>_betadata.csv
+Outputs: /tmp/training/<GENE>_betadata.csv
 
-Example (5 epochs, 20 genes, CNN mode):
-  cargo run --release --bin train_all_genes_demo -- --full --epochs 5 --max-genes 20
+TUI: CPU / RAM, per-worker active-gene list, event log.
+     Press [q] to drain and stop after current genes finish.
+
+Examples:
+  # seed-only, 4 workers, 50 genes, with TUI
+  cargo run --release --bin train_all_genes_demo -- --parallel 4 --max-genes 50
+
+  # CNN mode, 2 workers, 5 epochs
+  cargo run --release --bin train_all_genes_demo -- --full --epochs 5 --parallel 2 --max-genes 20
+
+  # plain text output (CI / no TTY)
+  cargo run --release --bin train_all_genes_demo -- --plain --max-genes 20
 "
     );
 }
@@ -43,7 +59,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let full_cnn = args.contains(&"--full".to_string());
+    let plain      = args.contains(&"--plain".to_string());
+    let full_cnn   = args.contains(&"--full".to_string());
+    let epochs     = next_usize(&args, "--epochs").unwrap_or(10);
+    let n_parallel = next_usize(&args, "--parallel").unwrap_or(1).max(1);
+    let max_genes  = next_usize(&args, "--max-genes");
 
     let mut gene_filter = None;
     if let Some(pos) = args.iter().position(|r| r == "--genes") {
@@ -57,9 +77,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let epochs = next_usize(&args, "--epochs").unwrap_or(10);
-    let max_genes = next_usize(&args, "--max-genes");
-
     let path = std::env::var("SPACETRAVLR_H5AD").unwrap_or_else(|_| {
         "/ix/djishnu/shared/djishnu_kor11/training_data_2025/snrna_human_tonsil.h5ad".to_string()
     });
@@ -71,51 +88,60 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let device = Default::default();
-
+    // Rayon is used inside lasso / spatial map builders per worker; let it manage its own pool.
     let _ = rayon::ThreadPoolBuilder::new()
         .stack_size(8 * 1024 * 1024)
         .build_global();
 
-    println!("🚀 Starting All-Gene Training Demo");
-    println!("Dataset: {}", path);
-    println!(
-        "Mode: {}",
-        if full_cnn {
-            "Full CNN (Cell-Level Export)"
-        } else {
-            "Seed-Only (Cluster-Level Export)"
-        }
-    );
-    println!("Epochs per gene: {}", epochs);
-    if let Some(n) = max_genes {
-        println!("Gene cap: first {}", n);
-    }
-    if let Some(ref filter) = gene_filter {
-        println!("🔍 Gene filter: {:?}", filter);
-    }
-    println!("--------------------------------------------------");
+    let mode_label = if full_cnn { "Full CNN" } else { "Seed-Only (lasso)" };
 
-    SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
-        path.as_str(),
-        0.1,
-        32,
-        0.05,
-        0.5,
-        Some(100),
-        epochs,
-        1e-3,
-        0.0,
-        1e-4,
-        1e-4,
-        100,
-        1e-4,
+    if plain {
+        println!("🚀 SpaceTravLR  |  {}  |  {} worker(s)  |  {} epochs/gene", mode_label, n_parallel, epochs);
+        println!("Dataset: {}", path);
+        if let Some(n) = max_genes  { println!("Gene cap: {}", n); }
+        if let Some(ref g) = gene_filter { println!("Filter: {:?}", g); }
+        println!("--------------------------------------------------");
+
+        let device: WgpuDevice = Default::default();
+        SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
+            &path, 0.1, 32, 0.05, 0.5, Some(100),
+            epochs, 1e-3, 0.0, 1e-4, 1e-4, 100, 1e-4,
+            full_cnn, gene_filter, max_genes, n_parallel, None, &device,
+        )?;
+        println!("\n✨ Done!");
+        return Ok(());
+    }
+
+    // ── TUI mode ──────────────────────────────────────────────────────────────
+    let cancel = Arc::new(AtomicBool::new(false));
+    let hud = Arc::new(Mutex::new(TrainingHudState::new(
+        path.clone(),
         full_cnn,
-        gene_filter,
-        max_genes,
-        &device,
-    )?;
+        epochs,
+        n_parallel,
+        cancel.clone(),
+    )));
 
-    println!("\n✨ Demo completed successfully!");
+    let path_worker       = path.clone();
+    let gene_filter_worker = gene_filter.clone();
+    let hud_worker        = hud.clone();
+
+    let handle = thread::spawn(move || {
+        let device: WgpuDevice = Default::default();
+        SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
+            &path_worker, 0.1, 32, 0.05, 0.5, Some(100),
+            epochs, 1e-3, 0.0, 1e-4, 1e-4, 100, 1e-4,
+            full_cnn, gene_filter_worker, max_genes, n_parallel, Some(hud_worker), &device,
+        )
+    });
+
+    run_training_dashboard(hud.clone())?;
+
+    match handle.join() {
+        Ok(r)  => r?,
+        Err(_) => anyhow::bail!("training thread panicked"),
+    }
+
+    println!("\n✨ Done!");
     Ok(())
 }

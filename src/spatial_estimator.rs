@@ -1,12 +1,13 @@
 use crate::lasso::GroupLassoParams;
-use std::collections::{HashSet, HashMap};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 use anndata::data::SelectInfoElem;
 use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
 use burn::tensor::backend::AutodiffBackend;
 use ndarray::{Array1, Array2};
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::estimator::{finite_or_zero_f64, ClusteredGCNNWR};
+use crate::training_hud::{log_line, TrainingHud};
 
 pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub adata: Arc<AnnData<AnB>>,
@@ -110,58 +111,73 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         full_cnn: bool,
         gene_filter: Option<Vec<String>>,
         max_genes: Option<usize>,
+        n_parallel: usize,
+        hud: Option<TrainingHud>,
         device: &AB::Device,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        AB: Send + 'static,
+        AB::Device: Clone + Send + 'static,
+    {
         use anndata_hdf5::H5;
         use std::fs;
         use std::io::Write;
+        use std::thread;
 
         let training_dir = "/tmp/training";
         fs::create_dir_all(training_dir)?;
 
-        let adata = Arc::new(AnnData::<H5>::open(H5::open(adata_path)?)?);
-        let all_var_names = adata.var_names().into_vec();
-        
+        // ── Setup: build gene list and pre-cache shared metadata ──────────────
+        let setup_adata = Arc::new(AnnData::<H5>::open(H5::open(adata_path)?)?);
+        let all_var_names = setup_adata.var_names().into_vec();
+
         let mut target_genes = all_var_names.clone();
         if let Some(filter) = gene_filter {
-            println!("🔍 Filtering for specific genes: {:?}", filter);
+            let msg = format!("Filtering for specific genes: {:?}", filter);
+            log_line(&hud, msg.clone());
+            if hud.is_none() { println!("{}", msg); }
             target_genes.retain(|g| filter.contains(g));
-            println!("✅ Retained {} genes for training: {:?}", target_genes.len(), target_genes);
+            let msg = format!("Retained {} genes for training", target_genes.len());
+            log_line(&hud, msg.clone());
+            if hud.is_none() { println!("{}", msg); }
         }
-
         if let Some(n) = max_genes {
             if target_genes.len() > n {
                 target_genes.truncate(n);
                 let preview: Vec<_> = target_genes.iter().take(5).cloned().collect();
-                println!(
-                    "✂️ Using first {} genes in AnnData var order (preview): {:?}",
-                    n, preview
-                );
+                let msg = format!("Using first {} genes (preview: {:?})", n, preview);
+                log_line(&hud, msg.clone());
+                if hud.is_none() { println!("{}", msg); }
             }
         }
 
-        let obs_names = adata.obs_names().into_vec();
+        let obs_names = Arc::new(setup_adata.obs_names().into_vec());
         let species = crate::network::infer_species(&all_var_names);
-        // CRITICAL: Initialize GRN with ALL var_names so modulators can be found
         let global_grn = Arc::new(crate::network::GeneNetwork::new(species, &all_var_names)?);
-        
+
         let total_genes = target_genes.len();
 
-        println!("📂 Pre-caching metadata and coordinates...");
+        let msg = "Pre-caching metadata and coordinates...";
+        log_line(&hud, msg.to_string());
+        if hud.is_none() { println!("{}", msg); }
+
         let cluster_annot = "cell_type_int".to_string();
-        let obs_df = adata.read_obs()?;
-
-        let xy: Array2<f64> = adata.obsm().get_item("spatial")?
-            .ok_or_else(|| anyhow::anyhow!("obsm['spatial'] not found"))?;
-
+        let obs_df = setup_adata.read_obs()?;
+        let xy: Arc<Array2<f64>> = Arc::new(
+            setup_adata
+                .obsm()
+                .get_item("spatial")?
+                .ok_or_else(|| anyhow::anyhow!("obsm['spatial'] not found"))?,
+        );
         let clusters_ser = obs_df.column(&cluster_annot)?;
-        let clusters: Array1<usize> = clusters_ser
-            .as_materialized_series()
-            .cast(&polars::prelude::DataType::Float64)?
-            .f64()?
-            .to_ndarray()?
-            .mapv(|v| v as usize);
-
+        let clusters: Arc<Array1<usize>> = Arc::new(
+            clusters_ser
+                .as_materialized_series()
+                .cast(&polars::prelude::DataType::Float64)?
+                .f64()?
+                .to_ndarray()?
+                .mapv(|v| v as usize),
+        );
         let num_clusters = clusters
             .iter()
             .copied()
@@ -169,131 +185,270 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             .map(|m| m.saturating_add(1))
             .unwrap_or(1);
 
-        let pb = ProgressBar::new(total_genes as u64);
-        pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")?
-            .progress_chars("#>-"));
+        drop(setup_adata); // release; workers open their own handles
 
-        target_genes.into_iter().for_each(|gene| {
-            let csv_path = format!("{}/{}_betadata.csv", training_dir, gene);
-            let orphan_path = format!("{}/{}.orphan", training_dir, gene);
-            let lock_path = format!("{}/{}.lock", training_dir, gene);
-
-            if std::path::Path::new(&csv_path).exists() || std::path::Path::new(&orphan_path).exists() {
-                pb.inc(1);
-                return;
+        if let Some(ref h) = hud {
+            if let Ok(mut g) = h.lock() {
+                g.total_genes = total_genes;
+                g.n_cells = obs_names.len();
+                g.n_clusters = num_clusters;
+                g.push_log(format!(">> {} gene targets queued | {} workers", total_genes, n_parallel.max(1)));
             }
+        }
 
-            if fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).is_err() {
-                pb.inc(1);
-                return;
-            }
+        let pb_opt: Option<ProgressBar> = if hud.is_none() {
+            let pb = ProgressBar::new(total_genes as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")?
+                    .progress_chars("#>-"),
+            );
+            Some(pb)
+        } else {
+            None
+        };
 
-            struct LockGuard(String);
-            impl Drop for LockGuard {
-                fn drop(&mut self) {
-                    let _ = std::fs::remove_file(&self.0);
-                }
-            }
-            let _guard = LockGuard(lock_path.clone());
+        // ── Shared work queue ─────────────────────────────────────────────────
+        let work: Arc<Mutex<VecDeque<String>>> =
+            Arc::new(Mutex::new(target_genes.into_iter().collect()));
 
-            let mut estimator = match Self::new_with_metadata(
-                adata.clone(),
-                gene.clone(),
-                radius,
-                spatial_dim,
-                contact_distance,
-                tf_ligand_cutoff,
-                max_lr_pairs,
-                global_grn.clone(),
-            ).map(Box::new) {
-                Ok(est) => est,
-                Err(e) => {
-                    eprintln!("❌ Failed to create estimator for {}: {:?}", gene, e);
-                    pb.inc(1);
-                    return;
-                }
-            };
+        let n_workers = n_parallel.max(1);
+        let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
 
-            let n_mods = estimator.modulators_genes.len();
-            if n_mods == 0 {
-                // Check if it's truly an orphan or just failed modulators
-                if estimator.regulators.is_empty() {
-                    let orphan_path = format!("{}/{}.orphan", training_dir, gene);
-                    let _ = fs::File::create(orphan_path);
-                }
-                pb.inc(1);
-                return;
-            }
+        for _worker in 0..n_workers {
+            let work        = work.clone();
+            let xy          = xy.clone();
+            let clusters    = clusters.clone();
+            let obs_names   = obs_names.clone();
+            let global_grn  = global_grn.clone();
+            let hud         = hud.clone();
+            let pb          = pb_opt.clone();
+            let device      = device.clone();
+            let adata_path  = adata_path.to_string();
+            let training_dir = training_dir.to_string();
 
-            estimator.seed_only = !full_cnn;
-            
-            if let Ok(_) = estimator.fit_with_cache(
-                &xy,
-                &clusters,
-                num_clusters,
-                epochs,
-                learning_rate,
-                score_threshold,
-                l1_reg,
-                group_reg,
-                n_iter,
-                tol,
-                "lasso",
-                device
-            ) {
-                if let Some(est_inner) = &estimator.estimator {
-                    let betadata_path = format!("{}/{}_betadata.csv", training_dir, gene);
-                    if let Ok(mut f) = fs::File::create(betadata_path) {
-                        if full_cnn {
-                            let x_mock = Array2::<f64>::zeros((xy.nrows(), estimator.modulators_genes.len()));
-                            let all_betas = est_inner.predict_betas(&x_mock, &xy, &clusters, num_clusters, device);
-                            
-                            let mut header = "CellID,beta0".to_string();
-                            for m in &estimator.modulators_genes {
-                                header.push_str(&format!(",{}", m));
+            // scalar params
+            let (radius, spatial_dim, contact_distance, tf_ligand_cutoff) =
+                (radius, spatial_dim, contact_distance, tf_ligand_cutoff);
+            let max_lr_pairs = max_lr_pairs;
+            let (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol) =
+                (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol);
+            let full_cnn = full_cnn;
+            let num_clusters = num_clusters;
+
+            let handle = thread::Builder::new()
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let thread_adata = match H5::open(&adata_path)
+                        .and_then(|f| AnnData::<H5>::open(f))
+                    {
+                        Ok(a) => Arc::new(a),
+                        Err(e) => {
+                            log_line(&hud, format!("ERROR: worker failed to open adata: {}", e));
+                            return;
+                        }
+                    };
+
+                    loop {
+                        // Cancel check
+                        if hud.as_ref()
+                            .and_then(|h| h.lock().ok())
+                            .map(|g| g.should_cancel())
+                            .unwrap_or(false)
+                        {
+                            log_line(&hud, ">> worker: cancel signal received".to_string());
+                            break;
+                        }
+
+                        let gene = match work.lock() {
+                            Ok(mut q) => q.pop_front(),
+                            Err(_) => break,
+                        };
+                        let Some(gene) = gene else { break };
+
+                        let csv_path    = format!("{}/{}_betadata.csv", training_dir, gene);
+                        let orphan_path = format!("{}/{}.orphan", training_dir, gene);
+                        let lock_path   = format!("{}/{}.lock", training_dir, gene);
+
+                        // Skip already-done
+                        if std::path::Path::new(&csv_path).exists()
+                            || std::path::Path::new(&orphan_path).exists()
+                        {
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() { g.genes_skipped += 1; }
+                                log_line(&hud, format!(">> skip (cached) {}", gene));
                             }
-                            let _ = writeln!(f, "{}", header);
-                            
-                            for (i, cell_id) in obs_names.iter().enumerate() {
-                                let mut row = format!("{}", cell_id);
-                                for j in 0..all_betas.ncols() {
-                                    row.push_str(&format!(
-                                        ",{}",
-                                        finite_or_zero_f64(all_betas[[i, j]])
-                                    ));
-                                }
-                                let _ = writeln!(f, "{}", row);
-                            }
-                        } else {
-                            // Seed-Only Format: Cluster, beta0, Mod1, Mod2, ...
-                            let mut header = "Cluster,beta0".to_string();
-                            for m in &estimator.modulators_genes {
-                                header.push_str(&format!(",{}", m));
-                            }
-                            let _ = writeln!(f, "{}", header);
-                            
-                            let mut cluster_ids: Vec<usize> = est_inner.lasso_coefficients.keys().copied().collect::<Vec<_>>();
-                            cluster_ids.sort();
-                            
-                            for c_id in cluster_ids {
-                                let coefs = &est_inner.lasso_coefficients[&c_id];
-                                let intercept = finite_or_zero_f64(
-                                    est_inner.lasso_intercepts.get(&c_id).copied().unwrap_or(0.0),
-                                );
+                            if let Some(ref p) = pb { p.inc(1); }
+                            if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                            continue;
+                        }
 
-                                let mut row = format!("{},{}", c_id, intercept);
-                                for &beta in coefs.column(0).iter() {
-                                    row.push_str(&format!(",{}", finite_or_zero_f64(beta)));
-                                }
-                                let _ = writeln!(f, "{}", row);
+                        // Try to claim this gene via a lock file
+                        if fs::OpenOptions::new()
+                            .write(true).create_new(true).open(&lock_path)
+                            .is_err()
+                        {
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() { g.genes_skipped += 1; }
+                                log_line(&hud, format!(">> skip (lock) {}", gene));
+                            }
+                            if let Some(ref p) = pb { p.inc(1); }
+                            if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                            continue;
+                        }
+                        struct LockGuard(String);
+                        impl Drop for LockGuard {
+                            fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+                        }
+                        let _guard = LockGuard(lock_path);
+
+                        // Register as active
+                        if let Some(ref h) = hud {
+                            if let Ok(mut g) = h.lock() {
+                                g.set_gene_status(&gene, "estimator | ? mods");
                             }
                         }
+
+                        let mut estimator = match Self::new_with_metadata(
+                            thread_adata.clone(),
+                            gene.clone(),
+                            radius, spatial_dim, contact_distance, tf_ligand_cutoff,
+                            max_lr_pairs, global_grn.clone(),
+                        ).map(Box::new) {
+                            Ok(est) => est,
+                            Err(e) => {
+                                log_line(&hud, format!("❌ estimator init failed {}: {}", gene, e));
+                                if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_failed += 1; g.remove_gene(&gene); } }
+                                if let Some(ref p) = pb { p.inc(1); }
+                                if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                                continue;
+                            }
+                        };
+
+                        let n_mods = estimator.modulators_genes.len();
+                        if let Some(ref h) = hud {
+                            if let Ok(mut g) = h.lock() {
+                                g.set_gene_status(&gene, format!("estimator | {} mods", n_mods));
+                            }
+                        }
+
+                        if n_mods == 0 {
+                            if estimator.regulators.is_empty() {
+                                let _ = fs::File::create(format!("{}/{}.orphan", training_dir, gene));
+                            }
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() { g.genes_orphan += 1; g.remove_gene(&gene); }
+                                log_line(&hud, format!(">> orphan {}", gene));
+                            }
+                            if let Some(ref p) = pb { p.inc(1); }
+                            if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                            continue;
+                        }
+
+                        estimator.seed_only = !full_cnn;
+                        let phase_str = if full_cnn {
+                            format!("lasso+cnn | {} mods", n_mods)
+                        } else {
+                            format!("lasso | {} mods", n_mods)
+                        };
+                        if let Some(ref h) = hud {
+                            if let Ok(mut g) = h.lock() { g.set_gene_status(&gene, &phase_str); }
+                        }
+
+                        let fit_ok = estimator
+                            .fit_with_cache(
+                                &xy, &clusters, num_clusters,
+                                epochs, learning_rate, score_threshold,
+                                l1_reg, group_reg, n_iter, tol, "lasso", &device,
+                            )
+                            .is_ok();
+
+                        let mut wrote = false;
+                        if fit_ok {
+                            if let Some(est_inner) = &estimator.estimator {
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        g.set_gene_status(&gene, format!("export | {} mods", n_mods));
+                                    }
+                                }
+                                let betadata_path = format!("{}/{}_betadata.csv", training_dir, gene);
+                                if let Ok(mut f) = fs::File::create(betadata_path) {
+                                    if full_cnn {
+                                        let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
+                                        let all_betas = est_inner.predict_betas(
+                                            &x_mock, &xy, &clusters, num_clusters, &device,
+                                        );
+                                        let mut header = "CellID,beta0".to_string();
+                                        for m in &estimator.modulators_genes {
+                                            header.push_str(&format!(",{}", m));
+                                        }
+                                        let _ = writeln!(f, "{}", header);
+                                        for (i, cell_id) in obs_names.iter().enumerate() {
+                                            let mut row = format!("{}", cell_id);
+                                            for j in 0..all_betas.ncols() {
+                                                row.push_str(&format!(",{}", finite_or_zero_f64(all_betas[[i, j]])));
+                                            }
+                                            let _ = writeln!(f, "{}", row);
+                                        }
+                                    } else {
+                                        let mut header = "Cluster,beta0".to_string();
+                                        for m in &estimator.modulators_genes {
+                                            header.push_str(&format!(",{}", m));
+                                        }
+                                        let _ = writeln!(f, "{}", header);
+                                        let mut cluster_ids: Vec<usize> = est_inner
+                                            .lasso_coefficients.keys().copied().collect();
+                                        cluster_ids.sort();
+                                        for c_id in cluster_ids {
+                                            let coefs = &est_inner.lasso_coefficients[&c_id];
+                                            let intercept = finite_or_zero_f64(
+                                                est_inner.lasso_intercepts.get(&c_id).copied().unwrap_or(0.0),
+                                            );
+                                            let mut row = format!("{},{}", c_id, intercept);
+                                            for &beta in coefs.column(0).iter() {
+                                                row.push_str(&format!(",{}", finite_or_zero_f64(beta)));
+                                            }
+                                            let _ = writeln!(f, "{}", row);
+                                        }
+                                    }
+                                    wrote = true;
+                                }
+                            }
+                        }
+
+                        if wrote {
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() { g.genes_done += 1; }
+                                log_line(&hud, format!(">> wrote {}", gene));
+                            }
+                        } else {
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() { g.genes_failed += 1; }
+                                log_line(&hud, format!(">> fail (fit/export) {}", gene));
+                            }
+                        }
+
+                        // Deregister from active, bump counter
+                        if let Some(ref h) = hud {
+                            if let Ok(mut g) = h.lock() { g.remove_gene(&gene); g.genes_rounds += 1; }
+                        }
+                        if let Some(ref p) = pb { p.inc(1); }
                     }
-                }
+                })
+                .expect("failed to spawn worker thread");
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        if let Some(ref h) = hud {
+            if let Ok(mut g) = h.lock() {
+                g.finished = Some(Ok(()));
             }
-            pb.inc(1);
-        });
+        }
 
         Ok(())
     }
