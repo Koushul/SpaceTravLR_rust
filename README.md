@@ -1,6 +1,101 @@
-# SpaceTravLR (Rust)
+# SpaceTravLR (Rust 🦀️🚀️)
 
-Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR) — spatial gene regulatory network inference and in-silico perturbation.
+Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR)
+
+![SpaceTravLR training dashboard UI](data/example.png)
+
+## Installation
+
+### Prerequisites  
+  On HPC:
+
+  ```bash
+   module load rust
+   export CARGO_HOME=/tmp/cargo # if you have disk quota
+  ```
+
+   Or install from source,
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup update stable
+  rustc --version   # should be >= 1.85
+  ```
+
+### Install the training CLI (recommended)
+
+From your machine:
+
+```bash
+git clone https://github.com/Koushul/SpaceTravLR_rust.git
+cd SpaceTravLR_rust
+```
+
+Then install the **`spacetravlr`** binary into Cargo’s bin directory (usually `~/.cargo/bin`; ensure that directory is on your `PATH`):
+
+```bash
+# Full UI: Ratatui training dashboard (default features)
+cargo install --path . --locked
+
+# Leaner: faster compile, plain progress only (no dashboard dependencies)
+cargo install --path . --locked --no-default-features
+```
+
+Confirm the install:
+
+```bash
+spacetravlr --help
+```
+
+| Install command | What you get |
+|-----------------|----------------|
+| `cargo install --path . --locked` | Dashboard when you run training without `--plain`; pass `--plain` for text-only progress. |
+| `... --no-default-features` | Always plain progress (same as always using `--plain`); skips Ratatui, crossterm, and sysinfo. |
+
+
+1. **Rust toolchain (1.85 or newer)** — this crate uses **edition 2024**. Install or update via [rustup](https://rustup.rs/):
+
+2. **Compute backend** — the **`spacetravlr`** binary prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter. If none is available, it uses Burn’s **NdArray (CPU)** backend. Set `SPACETRAVLR_FORCE_CPU=1` (or `true`) to force CPU.
+
+3. **Repository data** — point `spaceship_config.toml` at your `.h5ad` and keep GRN parquet files where the app expects them (see `data/` and config `data` / `grn` sections).
+
+
+
+`cargo install` only installs **`spacetravlr`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
+
+### Build without installing
+
+To compile in the repo without copying binaries to `~/.cargo/bin`:
+
+```bash
+cargo build --release
+./target/release/spacetravlr --help
+```
+
+Or run directly:
+
+```bash
+cargo run --release -- --help
+```
+
+(`default-run` in `Cargo.toml` is `spacetravlr`, so you do not need `--bin` for that target.)
+
+### Use as a Rust library
+
+In your crate’s `Cargo.toml`:
+
+```toml
+[dependencies]
+space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git" }
+```
+
+To depend on the library **without** the optional TUI stack (smaller dependency graph for library-only use):
+
+```toml
+space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git", default-features = false }
+```
+
+Then `use space_trav_lr_rust::...` as in this repository’s `src/lib.rs` exports.
 
 ## What SpaceTravLR does
 
@@ -52,98 +147,6 @@ The core biological model: genes don't act in isolation. A transcription factor 
 
 The **`spacetravlr`** executable (`src/bin/spacetravlr.rs`) is the only shipped training CLI: **clap**-parsed flags match whether you use the dashboard or `--plain`.
 
-## Installation
-
-### Prerequisites
-
-1. **Rust toolchain (1.85 or newer)** — this crate uses **edition 2024**. Install or update via [rustup](https://rustup.rs/):
-  
-  On HPC:
-
-  ```bash
-   module load rust
-  ```
-
-   Or,
-
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  rustup update stable
-  rustc --version   # should be >= 1.85
-  ```
-
-
-
-2. **Compute backend** — the **`spacetravlr`** binary prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter. If none is available, it uses Burn’s **NdArray (CPU)** backend. Set `SPACETRAVLR_FORCE_CPU=1` (or `true`) to force CPU.
-
-3. **Repository data** — point `spaceship_config.toml` at your `.h5ad` and keep GRN parquet files where the app expects them (see `data/` and config `data` / `grn` sections).
-
-### Install the training CLI (recommended)
-
-From your machine:
-
-```bash
-git clone https://github.com/Koushul/SpaceTravLR_rust.git
-cd SpaceTravLR_rust
-```
-
-Then install the **`spacetravlr`** binary into Cargo’s bin directory (usually `~/.cargo/bin`; ensure that directory is on your `PATH`):
-
-```bash
-# Full UI: Ratatui training dashboard (default features)
-cargo install --path . --locked
-
-# Leaner: faster compile, plain progress only (no dashboard dependencies)
-cargo install --path . --locked --no-default-features
-```
-
-Confirm the install:
-
-```bash
-spacetravlr --help
-```
-
-| Install command | What you get |
-|-----------------|----------------|
-| `cargo install --path . --locked` | Dashboard when you run training without `--plain`; pass `--plain` for text-only progress. |
-| `... --no-default-features` | Always plain progress (same as always using `--plain`); skips Ratatui, crossterm, and sysinfo. |
-
-`cargo install` only installs **`spacetravlr`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
-
-### Build without installing
-
-To compile in the repo without copying binaries to `~/.cargo/bin`:
-
-```bash
-cargo build --release
-./target/release/spacetravlr --help
-```
-
-Or run directly:
-
-```bash
-cargo run --release -- --help
-```
-
-(`default-run` in `Cargo.toml` is `spacetravlr`, so you do not need `--bin` for that target.)
-
-### Use as a Rust library
-
-In your crate’s `Cargo.toml`:
-
-```toml
-[dependencies]
-space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git" }
-```
-
-To depend on the library **without** the optional TUI stack (smaller dependency graph for library-only use):
-
-```toml
-space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git", default-features = false }
-```
-
-Then `use space_trav_lr_rust::...` as in this repository’s `src/lib.rs` exports.
-
 ## Quick start
 
 ```bash
@@ -161,6 +164,7 @@ cargo run --release -- --plain \
 ```
 
 See `cargo run --release -- --help` (or `spacetravlr --help` after install). Options are defined with **clap**; config file path is `-c` / `--config`, dataset override is `--h5ad`.
+
 
 ---
 
