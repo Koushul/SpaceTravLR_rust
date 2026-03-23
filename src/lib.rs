@@ -9,6 +9,7 @@ pub mod network;
 pub mod perturb;
 pub mod training_hud;
 pub mod training_log;
+#[cfg(feature = "tui")]
 pub mod training_tui;
 pub use betadata::{BetaFrame, Betabase, GeneMatrix};
 pub use config::{CnnConfig, SpaceshipConfig};

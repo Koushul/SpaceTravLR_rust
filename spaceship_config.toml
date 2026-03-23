@@ -6,7 +6,7 @@
 
 [data]
 # Path to .h5ad dataset.  Leave empty to use $SPACETRAVLR_H5AD env var.
-adata_path      = "/tmp/kidney_slidetags.h5ad"
+adata_path      = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/ThePerturbedBrain/slideseq_brain_processed.h5ad"
 # Expression layer to read from AnnData
 layer           = "imputed_count"
 # obs column holding integer cluster labels
@@ -22,7 +22,7 @@ contact_distance = 50
 
 [grn]
 # Minimum score for a TF to be included as a ligand-mediated regulator
-tf_ligand_cutoff = 0.5
+tf_ligand_cutoff = 0.15
 # Cap LR pairs in database order when NOT using expression ranking (omit = no limit)
 # max_lr_pairs = 50
 # Keep only the top K LR pairs by mean expression: score = 0.5 * (mean_ligand + mean_receptor)
@@ -57,15 +57,15 @@ seed_only       = true
 # CNN fine-tuning epochs per gene (ignored when seed_only = true)
 epochs          = 10
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
-learning_rate   = 1e-3
+learning_rate   = 2e-4
 # Minimum R² to accept a fit (0.0 = keep everything)
-score_threshold = 0.0
+score_threshold = 0.1
 
 [execution]
 # Number of parallel gene-training workers
 n_parallel  = 1
 # Directory for *_betadata.csv output files
-output_dir  = "/tmp/kidney_betas"
+output_dir  = "/tmp/slideseq_brain"
 
 [perturbation]
 # Multiplier applied to all betas in splash()
@@ -79,4 +79,4 @@ n_propagation     = 4
 #   0.5 → ~3% error, ~12x faster at 5000+ cells
 #   0.3 → ~1% error, ~6x faster
 # Comment out or omit for exact O(N²) computation.
-# ligand_grid_factor = 0.5
+ligand_grid_factor = 0.5

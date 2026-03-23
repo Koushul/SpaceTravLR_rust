@@ -1,16 +1,19 @@
-use burn::backend::wgpu::WgpuDevice;
-use burn::backend::Wgpu;
-use burn_autodiff::Autodiff;
-use space_trav_lr_rust::config::SpaceshipConfig;
-use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
-use space_trav_lr_rust::training_hud::TrainingHudState;
-use space_trav_lr_rust::training_tui::{run_training_dashboard, TrainingDashboardExit};
-use std::env;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
-use std::thread;
+mod backend_pick;
 
-type AB = Autodiff<Wgpu>;
+use backend_pick::{fit_all_genes_dispatch, select_compute, FitAllGenesParams};
+use space_trav_lr_rust::config::SpaceshipConfig;
+#[cfg(feature = "tui")]
+use space_trav_lr_rust::{
+    training_hud::TrainingHudState,
+    training_tui::{run_training_dashboard, TrainingDashboardExit},
+};
+use std::env;
+#[cfg(feature = "tui")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "tui")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "tui")]
+use std::thread;
 
 fn next_usize(args: &[String], flag: &str) -> Option<usize> {
     let i = args.iter().position(|a| a == flag)?;
@@ -46,14 +49,15 @@ Options:
   --lr F              Learning rate
   --n-iter N          Max FISTA iterations
   --tol F             Convergence tolerance
-  --plain             Simple progress bar, no sci-fi TUI
+  --plain             Simple progress bar, no sci-fi TUI (always on if built with --no-default-features)
   -h, --help          This message
 
 All hyperparameters are read from spaceship_config.toml first;
 CLI flags override individual values.
 
 Environment:
-  SPACETRAVLR_H5AD    Fallback path to .h5ad when data.adata_path is empty
+  SPACETRAVLR_H5AD     Fallback path to .h5ad when data.adata_path is empty
+  SPACETRAVLR_FORCE_CPU  Set to 1 or true to use the CPU (NdArray) backend instead of WGPU
 
 Examples:
   # seed-only, 4 workers, 50 genes, custom output dir
@@ -83,7 +87,7 @@ fn main() -> anyhow::Result<()> {
         SpaceshipConfig::load()
     };
 
-    let plain = args.contains(&"--plain".to_string());
+    let plain = args.contains(&"--plain".to_string()) || !cfg!(feature = "tui");
 
     if args.contains(&"--full".to_string()) {
         cfg.training.seed_only = false;
@@ -134,8 +138,11 @@ fn main() -> anyhow::Result<()> {
 
     let mode_label = if full_cnn { "Full CNN" } else { "Seed-Only (lasso)" };
 
+    let compute = select_compute();
+
     if plain {
         println!("🚀 SpaceTravLR  |  {}  |  {} worker(s)  |  {} epochs/gene", mode_label, n_parallel, epochs);
+        println!("Compute:    {}", compute.label());
         println!("Dataset:    {}", path);
         println!("Output dir: {}", output_dir);
         println!("Lasso:      l1={} group={} n_iter={} tol={}", cfg.lasso.l1_reg, cfg.lasso.group_reg, cfg.lasso.n_iter, cfg.lasso.tol);
@@ -144,80 +151,95 @@ fn main() -> anyhow::Result<()> {
         if let Some(ref g) = gene_filter { println!("Filter:     {:?}", g); }
         println!("--------------------------------------------------");
 
-        let device: WgpuDevice = Default::default();
-        SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
-            &path,
-            cfg.spatial.radius,
-            cfg.spatial.spatial_dim,
-            cfg.spatial.contact_distance,
-            cfg.grn.tf_ligand_cutoff,
-            cfg.grn.max_lr_pairs,
-            cfg.grn.top_lr_pairs_by_mean_expression,
-            &cfg.data.layer,
-            &cfg.cnn,
+        let params = FitAllGenesParams {
+            path: &path,
+            radius: cfg.spatial.radius,
+            spatial_dim: cfg.spatial.spatial_dim,
+            contact_distance: cfg.spatial.contact_distance,
+            tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
+            max_lr_pairs: cfg.grn.max_lr_pairs,
+            top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+            layer: &cfg.data.layer,
+            cnn: &cfg.cnn,
             epochs,
-            cfg.training.learning_rate,
-            cfg.training.score_threshold,
-            cfg.lasso.l1_reg,
-            cfg.lasso.group_reg,
-            cfg.lasso.n_iter,
-            cfg.lasso.tol,
-            full_cnn, gene_filter, max_genes, n_parallel, &output_dir, None, &device,
-        )?;
+            learning_rate: cfg.training.learning_rate,
+            score_threshold: cfg.training.score_threshold,
+            l1_reg: cfg.lasso.l1_reg,
+            group_reg: cfg.lasso.group_reg,
+            n_iter: cfg.lasso.n_iter,
+            tol: cfg.lasso.tol,
+            full_cnn,
+            gene_filter,
+            max_genes,
+            n_parallel,
+            output_dir: &output_dir,
+            hud: None,
+        };
+        fit_all_genes_dispatch(&params, &compute)?;
         println!("\n✨ Done!");
         return Ok(());
     }
 
-    // ── TUI mode ──────────────────────────────────────────────────────────────
-    let cancel = Arc::new(AtomicBool::new(false));
-    let hud = Arc::new(Mutex::new(TrainingHudState::new(
-        path.clone(),
-        output_dir.clone(),
-        full_cnn,
-        epochs,
-        n_parallel,
-        cancel.clone(),
-    )));
-
-    let hud_worker = hud.clone();
-
-    let handle = thread::spawn(move || {
-        let device: WgpuDevice = Default::default();
-        SpatialCellularProgramsEstimator::<AB, anndata_hdf5::H5>::fit_all_genes(
-            &path,
-            cfg.spatial.radius,
-            cfg.spatial.spatial_dim,
-            cfg.spatial.contact_distance,
-            cfg.grn.tf_ligand_cutoff,
-            cfg.grn.max_lr_pairs,
-            cfg.grn.top_lr_pairs_by_mean_expression,
-            &cfg.data.layer,
-            &cfg.cnn,
+    #[cfg(feature = "tui")]
+    {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let hud = Arc::new(Mutex::new(TrainingHudState::new(
+            path.clone(),
+            output_dir.clone(),
+            full_cnn,
             epochs,
-            cfg.training.learning_rate,
-            cfg.training.score_threshold,
-            cfg.lasso.l1_reg,
-            cfg.lasso.group_reg,
-            cfg.lasso.n_iter,
-            cfg.lasso.tol,
-            full_cnn, gene_filter, max_genes, n_parallel, &output_dir,
-            Some(hud_worker), &device,
-        )
-    });
+            n_parallel,
+            cancel.clone(),
+        )));
 
-    match run_training_dashboard(hud.clone())? {
-        TrainingDashboardExit::ForceQuit => {
-            eprintln!("\nAborted (Shift+Q).");
-            std::process::exit(130);
+        let hud_worker = hud.clone();
+        let compute_thread = compute.clone();
+
+        let handle = thread::spawn(move || {
+            let params = FitAllGenesParams {
+                path: &path,
+                radius: cfg.spatial.radius,
+                spatial_dim: cfg.spatial.spatial_dim,
+                contact_distance: cfg.spatial.contact_distance,
+                tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
+                max_lr_pairs: cfg.grn.max_lr_pairs,
+                top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                layer: &cfg.data.layer,
+                cnn: &cfg.cnn,
+                epochs,
+                learning_rate: cfg.training.learning_rate,
+                score_threshold: cfg.training.score_threshold,
+                l1_reg: cfg.lasso.l1_reg,
+                group_reg: cfg.lasso.group_reg,
+                n_iter: cfg.lasso.n_iter,
+                tol: cfg.lasso.tol,
+                full_cnn,
+                gene_filter,
+                max_genes,
+                n_parallel,
+                output_dir: &output_dir,
+                hud: Some(hud_worker),
+            };
+            fit_all_genes_dispatch(&params, &compute_thread)
+        });
+
+        match run_training_dashboard(hud.clone())? {
+            TrainingDashboardExit::ForceQuit => {
+                eprintln!("\nAborted (Shift+Q).");
+                std::process::exit(130);
+            }
+            TrainingDashboardExit::Completed => {}
         }
-        TrainingDashboardExit::Completed => {}
+
+        match handle.join() {
+            Ok(r) => r?,
+            Err(_) => anyhow::bail!("training thread panicked"),
+        }
+
+        println!("\n✨ Done!");
+        return Ok(());
     }
 
-    match handle.join() {
-        Ok(r)  => r?,
-        Err(_) => anyhow::bail!("training thread panicked"),
-    }
-
-    println!("\n✨ Done!");
+    #[cfg(not(feature = "tui"))]
     Ok(())
 }

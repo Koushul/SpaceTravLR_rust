@@ -48,21 +48,103 @@ The core biological model: genes don't act in isolation. A transcription factor 
 | `lasso` | FISTA-accelerated sparse group lasso solver |
 | `network` | GRN loading (CellChat LR database, TF–target links) |
 | `config` | TOML config (`spaceship_config.toml`) |
-| `training_tui` | Ratatui-based live training dashboard |
+| `training_tui` | Ratatui-based live training dashboard (optional `tui` feature) |
+
+## Installation
+
+### Prerequisites
+
+1. **Rust toolchain (1.85 or newer)** — this crate uses **edition 2024**. Install or update via [rustup](https://rustup.rs/):
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   rustup update stable
+   rustc --version   # should be >= 1.85
+   ```
+
+2. **Compute backend** — `train_all_genes_demo` prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter (GPU or compatible software stack). If no adapter is available, it automatically uses Burn’s **NdArray (CPU)** backend. To force CPU regardless of GPU, set `SPACETRAVLR_FORCE_CPU=1` (or `true`).
+
+3. **Repository data** — point `spaceship_config.toml` at your `.h5ad` and keep GRN parquet files where the app expects them (see `data/` and config `data` / `grn` sections).
+
+### Install the training CLI (recommended)
+
+From your machine:
+
+```bash
+git clone https://github.com/Koushul/SpaceTravLR_rust.git
+cd SpaceTravLR_rust
+```
+
+Then install the **`train_all_genes_demo`** binary into Cargo’s bin directory (usually `~/.cargo/bin`; ensure that directory is on your `PATH`):
+
+```bash
+# Full UI: Ratatui training dashboard (default features)
+cargo install --path . --locked
+
+# Leaner: faster compile, plain progress only (no dashboard dependencies)
+cargo install --path . --locked --no-default-features
+```
+
+Confirm the install:
+
+```bash
+train_all_genes_demo --help
+```
+
+| Install command | What you get |
+|-----------------|----------------|
+| `cargo install --path . --locked` | Dashboard when you run training without `--plain`; pass `--plain` for text-only progress. |
+| `... --no-default-features` | Always plain progress (same as always using `--plain`); skips Ratatui, crossterm, and sysinfo. |
+
+`cargo install` only installs **`train_all_genes_demo`**. The old **`src/main.rs`** helper is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
+
+### Build without installing
+
+To compile in the repo without copying binaries to `~/.cargo/bin`:
+
+```bash
+cargo build --release
+./target/release/train_all_genes_demo --help
+```
+
+Or run directly:
+
+```bash
+cargo run --release -- --help
+```
+
+(`default-run` in `Cargo.toml` is `train_all_genes_demo`, so you do not need `--bin` for that target.)
+
+### Use as a Rust library
+
+In your crate’s `Cargo.toml`:
+
+```toml
+[dependencies]
+space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git" }
+```
+
+To depend on the library **without** the optional TUI stack (smaller dependency graph for library-only use):
+
+```toml
+space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git", default-features = false }
+```
+
+Then `use space_trav_lr_rust::...` as in this repository’s `src/lib.rs` exports.
 
 ## Quick start
 
 ```bash
-# Train all genes (seed-only lasso, 4 workers)
-cargo run --release --bin train_all_genes_demo -- \
+# Train all genes (seed-only lasso, 4 workers) — default binary is train_all_genes_demo
+cargo run --release -- \
   --parallel 4 --max-genes 50 --output-dir /tmp/betas
 
 # Full CNN mode
-cargo run --release --bin train_all_genes_demo -- \
+cargo run --release -- \
   --full --epochs 5 --parallel 2 --max-genes 20
 ```
 
-See `cargo run --release --bin train_all_genes_demo -- --help` for all options.
+See `cargo run --release -- --help` for all options.
 
 ---
 
