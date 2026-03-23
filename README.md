@@ -11,7 +11,8 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR)
 
   ```bash
    module load rust
-   export CARGO_HOME=/tmp/cargo # if you have disk quota
+   export CARGO_HOME=/tmp/cargo # if you have disk quota issues
+   ## then move the binary somewhere else after compilation
   ```
 
    Or install from source,

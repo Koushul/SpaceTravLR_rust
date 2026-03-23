@@ -10,6 +10,7 @@ use std::time::Instant;
 pub struct RunConfigSummary {
     pub config_source: String,
     pub compute_backend: String,
+    pub compute_notice: String,
     pub layer: String,
     pub cluster_annot: String,
     pub spatial_radius: f64,
@@ -32,6 +33,7 @@ impl RunConfigSummary {
     pub fn build(
         config_path: Option<&Path>,
         compute_backend: &str,
+        compute_notice: &str,
         cfg: &SpaceshipConfig,
         max_genes: Option<usize>,
         gene_filter: Option<&[String]>,
@@ -68,6 +70,7 @@ impl RunConfigSummary {
         Self {
             config_source,
             compute_backend: compute_backend.to_string(),
+            compute_notice: compute_notice.to_string(),
             layer: cfg.data.layer.clone(),
             cluster_annot: cfg.data.cluster_annot.clone(),
             spatial_radius: cfg.spatial.radius,

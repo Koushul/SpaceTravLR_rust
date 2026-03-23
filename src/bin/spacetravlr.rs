@@ -136,27 +136,31 @@ fn parse_gene_filter(cli: &Cli) -> Option<Vec<String>> {
     if genes.is_empty() { None } else { Some(genes) }
 }
 
-fn print_compute_notice(compute: &ComputeChoice) {
+fn compute_notice_text(compute: &ComputeChoice) -> String {
     let details = compute_hardware_details(compute);
     match compute {
-        ComputeChoice::Wgpu(_) => println!("Using WGPU compute backend: {}", details),
+        ComputeChoice::Wgpu(_) => format!("Using WGPU compute backend: {}", details),
         ComputeChoice::NdArray(_) => {
             let forced = std::env::var("SPACETRAVLR_FORCE_CPU")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
             if forced {
-                println!(
+                format!(
                     "SPACETRAVLR_FORCE_CPU: using CPU (NdArray) backend: {}",
                     details
-                );
+                )
             } else {
-                println!(
+                format!(
                     "No WGPU adapter found; using CPU (NdArray) backend: {}",
                     details
-                );
+                )
             }
         }
     }
+}
+
+fn print_compute_notice(compute: &ComputeChoice) {
+    println!("{}", compute_notice_text(compute));
 }
 
 fn print_plain_preamble(
@@ -240,6 +244,7 @@ fn main() -> anyhow::Result<()> {
     let run_summary = RunConfigSummary::build(
         config_path_ref,
         compute.label(),
+        &compute_notice_text(&compute),
         &cfg,
         max_genes,
         gene_filter.as_deref(),

@@ -255,6 +255,15 @@ fn truncate_label(s: &str, max_chars: usize) -> String {
     }
 }
 
+fn compute_hardware_summary(notice: &str, max_chars: usize) -> String {
+    let raw = if let Some((_, rest)) = notice.split_once(':') {
+        rest.trim()
+    } else {
+        notice.trim()
+    };
+    truncate_label(raw, max_chars)
+}
+
 fn fmt_r2_fixed(r: f64) -> String {
     if r.is_finite() {
         format!("{:>7.3}", r)
@@ -497,6 +506,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 "Running"
             };
             let status_c = if st.should_cancel() { C_FAIL } else { VALUE };
+            let hw = compute_hardware_summary(&st.run_config.compute_notice, 44);
 
             f.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -522,6 +532,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Span::styled(mode, Style::default().fg(SKY)),
                     Span::styled("  ·  ", Style::default().fg(MUTED)),
                     Span::styled(status_txt, Style::default().fg(status_c)),
+                    Span::styled("  ·  ", Style::default().fg(MUTED)),
+                    Span::styled(hw, Style::default().fg(MUTED)),
                     Span::styled(" ✿", Style::default().fg(GRAPE)),
                 ])),
                 vchunks[0],
