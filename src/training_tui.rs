@@ -16,30 +16,30 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
-const BG: Color = Color::Rgb(18, 12, 28);
-const OUTER_BORD: Color = Color::Rgb(180, 140, 210);
-const TEL_BORD: Color = Color::Rgb(210, 140, 180);
-const GAUGE_BORD: Color = Color::Rgb(140, 180, 230);
-const WORK_BORD: Color = Color::Rgb(200, 140, 220);
-const ROCKET_BORD: Color = Color::Rgb(200, 160, 240);
-const GAUGE_FILL: Color = Color::Rgb(200, 140, 200);
-const GAUGE_EMPTY: Color = Color::Rgb(35, 22, 45);
+const BG: Color = Color::Rgb(40, 40, 40); // gruvbox dark0
+const OUTER_BORD: Color = Color::Rgb(60, 56, 54); // provided neutral
+const TEL_BORD: Color = Color::Rgb(69, 133, 136); // provided aqua
+const GAUGE_BORD: Color = Color::Rgb(142, 192, 124); // provided green
+const WORK_BORD: Color = Color::Rgb(215, 153, 33); // provided yellow
+const ROCKET_BORD: Color = Color::Rgb(131, 165, 152); // gruvbox dark aqua soft
+const GAUGE_FILL: Color = Color::Rgb(142, 192, 124); // provided green
+const GAUGE_EMPTY: Color = Color::Rgb(60, 56, 54); // provided neutral
 
-const LABEL: Color = Color::Rgb(255, 160, 185);
-const VALUE: Color = Color::Rgb(160, 230, 200);
-const LILAC: Color = Color::Rgb(195, 170, 240);
-const SKY: Color = Color::Rgb(155, 205, 250);
-const GRAPE: Color = Color::Rgb(230, 180, 255);
-const MUTED: Color = Color::Rgb(120, 100, 145);
-const TITLE: Color = Color::Rgb(240, 190, 220);
+const LABEL: Color = Color::Rgb(215, 153, 33); // provided yellow
+const VALUE: Color = Color::Rgb(142, 192, 124); // provided green
+const LILAC: Color = Color::Rgb(184, 187, 38); // gruvbox green bright
+const SKY: Color = Color::Rgb(69, 133, 136); // provided aqua
+const GRAPE: Color = Color::Rgb(211, 134, 155); // gruvbox purple
+const MUTED: Color = Color::Rgb(146, 131, 116); // gruvbox gray/brown
+const TITLE: Color = Color::Rgb(235, 219, 178); // gruvbox light text
 
-const C_WROTE: Color = Color::Rgb(150, 230, 195);
-const C_FAIL: Color = Color::Rgb(255, 130, 155);
-const C_SKIP: Color = Color::Rgb(110, 95, 130);
-const C_TOPR2: Color = Color::Rgb(130, 235, 190);
-const C_BOTR2: Color = Color::Rgb(255, 160, 170);
+const C_WROTE: Color = Color::Rgb(142, 192, 124); // success
+const C_FAIL: Color = Color::Rgb(204, 36, 29); // provided red
+const C_SKIP: Color = Color::Rgb(146, 131, 116); // muted
+const C_TOPR2: Color = Color::Rgb(69, 133, 136); // provided aqua
+const C_BOTR2: Color = Color::Rgb(204, 36, 29); // provided red
 
-const PERF_BORD: Color = Color::Rgb(160, 150, 220);
+const PERF_BORD: Color = Color::Rgb(215, 153, 33); // provided yellow
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
 // Compact ASCII rocket — every line is exactly 14 display columns.
@@ -94,6 +94,8 @@ fn rocket_lines(frame: usize) -> Vec<Line<'static>> {
     };
 
     let mut lines = Vec::with_capacity(32);
+    lines.push(Line::from(Span::raw("              ")));
+    lines.push(Line::from(Span::raw("              ")));
 
     for (i, (text, base)) in BODY.iter().enumerate() {
         if i == WINDOW_IDX {
@@ -408,6 +410,9 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         .unwrap_or_default();
 
     let mut dashboard_exit = TrainingDashboardExit::Completed;
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "operator".to_string());
 
     let perf_cell: RefCell<(u64, Instant, usize, Vec<Line<'static>>)> = RefCell::new((
         0,
@@ -505,6 +510,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     ),
                     Span::styled("  ·  ", Style::default().fg(MUTED)),
                     Span::styled(
+                        format!("@{}", username),
+                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  ·  ", Style::default().fg(MUTED)),
+                    Span::styled(
                         format_t(elapsed),
                         Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
                     ),
@@ -525,17 +535,17 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             let left = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(10),
-                    Constraint::Length(8),
-                    Constraint::Min(4),
-                ])
+                .constraints([Constraint::Length(10), Constraint::Min(4)])
                 .split(hchunks[0]);
+            let top_panels = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(left[0]);
 
             let work_row = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(10), Constraint::Min(40)])
-                .split(left[2]);
+                .split(left[1]);
 
             let sep = || Span::styled("  ·  ", Style::default().fg(MUTED));
             let lbl = |s: &'static str| Span::styled(s, Style::default().fg(LABEL));
@@ -544,7 +554,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let rc = &st.run_config;
             let cfg_disp = truncate_label(
                 &rc.config_source,
-                (left[0].width as usize).saturating_sub(24),
+                (top_panels[0].width as usize).saturating_sub(24),
             );
             f.render_widget(
                 Paragraph::new(vec![
@@ -611,7 +621,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         )),
                 )
                 .style(bg),
-                left[0],
+                top_panels[0],
             );
 
             let path_s = if st.dataset_path.len() > 55 {
@@ -691,7 +701,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         )),
                 )
                 .style(bg),
-                left[1],
+                top_panels[1],
             );
 
             // ── Workers ───────────────────────────────────────────────────────

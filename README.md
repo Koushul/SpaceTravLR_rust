@@ -57,12 +57,22 @@ The **`spacetravlr`** executable (`src/bin/spacetravlr.rs`) is the only shipped 
 ### Prerequisites
 
 1. **Rust toolchain (1.85 or newer)** — this crate uses **edition 2024**. Install or update via [rustup](https://rustup.rs/):
+  
+  On HPC:
 
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   rustup update stable
-   rustc --version   # should be >= 1.85
-   ```
+  ```bash
+   module load rust
+  ```
+
+   Or,
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup update stable
+  rustc --version   # should be >= 1.85
+  ```
+
+
 
 2. **Compute backend** — the **`spacetravlr`** binary prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter. If none is available, it uses Burn’s **NdArray (CPU)** backend. Set `SPACETRAVLR_FORCE_CPU=1` (or `true`) to force CPU.
 

@@ -22,6 +22,7 @@ pub struct SpaceshipConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DataConfig {
     pub adata_path: String,
     pub layer: String,
@@ -29,6 +30,7 @@ pub struct DataConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialConfig {
     pub radius: f64,
     pub spatial_dim: usize,
@@ -36,6 +38,7 @@ pub struct SpatialConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GrnConfig {
     pub tf_ligand_cutoff: f64,
     /// Cap LR pairs in database order (no expression ranking).
@@ -48,6 +51,7 @@ pub struct GrnConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LassoConfig {
     pub l1_reg: f64,
     pub group_reg: f64,
@@ -56,6 +60,7 @@ pub struct LassoConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrainingConfig {
     pub seed_only: bool,
     pub epochs: usize,
@@ -64,6 +69,7 @@ pub struct TrainingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CnnConfig {
     pub adam_beta_1: f64,
     pub adam_beta_2: f64,
@@ -74,12 +80,14 @@ pub struct CnnConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExecutionConfig {
     pub n_parallel: usize,
     pub output_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PerturbationConfig {
     pub beta_scale_factor: f64,
     pub beta_cap: Option<f64>,
