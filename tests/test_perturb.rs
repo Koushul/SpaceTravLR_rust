@@ -1,7 +1,7 @@
-use ndarray::{array, Array2};
+use ndarray::{Array2, array};
 use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
 use space_trav_lr_rust::ligand::calculate_weighted_ligands;
-use space_trav_lr_rust::perturb::{perturb, PerturbConfig};
+use space_trav_lr_rust::perturb::{PerturbConfig, perturb};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -11,28 +11,45 @@ use std::sync::Arc;
 fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<String, usize>) {
     // Gene universe: A (TF), B (ligand), C (receptor), D (target1), E (target2)
     let gene_names: Vec<String> = vec!["A", "B", "C", "D", "E"]
-        .into_iter().map(String::from).collect();
-    let gene2index: HashMap<String, usize> = gene_names.iter().enumerate()
-        .map(|(i, g)| (g.clone(), i)).collect();
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let gene2index: HashMap<String, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.clone(), i))
+        .collect();
 
     let rows = vec!["0".to_string()]; // single cluster
 
     // D = f(A_tf, B_lr_C) → A is TF, B$C is LR pair
     let mut bf_d = BetaFrame::from_parts(
-        "D".into(), rows.clone(),
+        "D".into(),
+        rows.clone(),
         array![0.0],
-        array![[0.5]], vec!["A".into()],          // TF: A with beta=0.5
-        array![[0.3]], vec!["B".into()], vec!["C".into()], // LR: B$C with beta=0.3
-        ndarray::Array2::zeros((1, 0)), vec![], vec![],     // no TFL
+        array![[0.5]],
+        vec!["A".into()], // TF: A with beta=0.5
+        array![[0.3]],
+        vec!["B".into()],
+        vec!["C".into()], // LR: B$C with beta=0.3
+        ndarray::Array2::zeros((1, 0)),
+        vec![],
+        vec![], // no TFL
     );
 
     // E = f(A_tf, D_tf) → both A and D are TFs for E (creates cascade)
     let mut bf_e = BetaFrame::from_parts(
-        "E".into(), rows.clone(),
+        "E".into(),
+        rows.clone(),
         array![0.0],
-        array![[0.4, 0.6]], vec!["A".into(), "D".into()],
-        ndarray::Array2::zeros((1, 0)), vec![], vec![],
-        ndarray::Array2::zeros((1, 0)), vec![], vec![],
+        array![[0.4, 0.6]],
+        vec!["A".into(), "D".into()],
+        ndarray::Array2::zeros((1, 0)),
+        vec![],
+        vec![],
+        ndarray::Array2::zeros((1, 0)),
+        vec![],
+        vec![],
     );
 
     // Expand to cells (all cells = cluster 0)
@@ -46,16 +63,22 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
 
     // Resolve modulator indices
     bf_d.modulator_gene_indices = Some(
-        bf_d.modulator_genes.iter().map(|g| {
-            let plain = g.strip_prefix("beta_").unwrap_or(g);
-            *gene2index.get(plain).unwrap()
-        }).collect()
+        bf_d.modulator_genes
+            .iter()
+            .map(|g| {
+                let plain = g.strip_prefix("beta_").unwrap_or(g);
+                *gene2index.get(plain).unwrap()
+            })
+            .collect(),
     );
     bf_e.modulator_gene_indices = Some(
-        bf_e.modulator_genes.iter().map(|g| {
-            let plain = g.strip_prefix("beta_").unwrap_or(g);
-            *gene2index.get(plain).unwrap()
-        }).collect()
+        bf_e.modulator_genes
+            .iter()
+            .map(|g| {
+                let plain = g.strip_prefix("beta_").unwrap_or(g);
+                *gene2index.get(plain).unwrap()
+            })
+            .collect(),
     );
 
     let mut data = HashMap::new();
@@ -73,9 +96,16 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
     (bb, gene_names, gene2index)
 }
 
-fn make_synthetic_inputs(n_cells: usize) -> (
-    Betabase, Array2<f64>, Vec<String>, Array2<f64>,
-    GeneMatrix, GeneMatrix, HashMap<String, f64>,
+fn make_synthetic_inputs(
+    n_cells: usize,
+) -> (
+    Betabase,
+    Array2<f64>,
+    Vec<String>,
+    Array2<f64>,
+    GeneMatrix,
+    GeneMatrix,
+    HashMap<String, f64>,
 ) {
     let (bb, gene_names, _) = make_synthetic_betabase(n_cells);
 
@@ -85,8 +115,11 @@ fn make_synthetic_inputs(n_cells: usize) -> (
     // Grid coordinates
     let grid_w = (n_cells as f64).sqrt().ceil() as usize;
     let xy = Array2::from_shape_fn((n_cells, 2), |(i, d)| {
-        if d == 0 { (i % grid_w) as f64 * 10.0 }
-        else { (i / grid_w) as f64 * 10.0 }
+        if d == 0 {
+            (i % grid_w) as f64 * 10.0
+        } else {
+            (i / grid_w) as f64 * 10.0
+        }
     });
 
     let mut lr_radii = HashMap::new();
@@ -98,7 +131,15 @@ fn make_synthetic_inputs(n_cells: usize) -> (
     let rw_ligands = GeneMatrix::new(rw_data, vec!["B".to_string()]);
     let rw_tfligands = GeneMatrix::new(Array2::zeros((n_cells, 0)), vec![]);
 
-    (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii)
+    (
+        bb,
+        gene_mtx,
+        gene_names,
+        xy,
+        rw_ligands,
+        rw_tfligands,
+        lr_radii,
+    )
 }
 
 #[test]
@@ -108,11 +149,20 @@ fn test_perturb_knockout_propagates() {
         make_synthetic_inputs(n_cells);
 
     // Knock out gene A (TF for both D and E)
-    let config = PerturbConfig { n_propagation: 2, ..Default::default() };
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy,
-        &rw_ligands, &rw_tfligands,
-        &[("A".to_string(), 0.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 0.0)],
+        &config,
+        &lr_radii,
     );
 
     // A should be 0
@@ -121,11 +171,15 @@ fn test_perturb_knockout_propagates() {
     }
 
     // D should be affected (A is a TF for D)
-    let delta_d: f64 = (0..n_cells).map(|i| (result.simulated[[i, 3]] - gene_mtx[[i, 3]]).abs()).sum::<f64>();
+    let delta_d: f64 = (0..n_cells)
+        .map(|i| (result.simulated[[i, 3]] - gene_mtx[[i, 3]]).abs())
+        .sum::<f64>();
     assert!(delta_d > 0.0, "D should change when A is knocked out");
 
     // E should be affected (A is a TF for E, and D cascades to E)
-    let delta_e: f64 = (0..n_cells).map(|i| (result.simulated[[i, 4]] - gene_mtx[[i, 4]]).abs()).sum::<f64>();
+    let delta_e: f64 = (0..n_cells)
+        .map(|i| (result.simulated[[i, 4]] - gene_mtx[[i, 4]]).abs())
+        .sum::<f64>();
     assert!(delta_e > 0.0, "E should change via cascade from A → D → E");
 }
 
@@ -136,15 +190,28 @@ fn test_perturb_no_change_when_target_at_original() {
         make_synthetic_inputs(n_cells);
 
     // "Perturb" A to its original value (1.0) — should produce no change
-    let config = PerturbConfig { n_propagation: 2, ..Default::default() };
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy,
-        &rw_ligands, &rw_tfligands,
-        &[("A".to_string(), 1.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 1.0)],
+        &config,
+        &lr_radii,
     );
 
     let max_delta = result.delta.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
-    assert!(max_delta < 1e-10, "no perturbation should produce no change, got max_delta={:.4e}", max_delta);
+    assert!(
+        max_delta < 1e-10,
+        "no perturbation should produce no change, got max_delta={:.4e}",
+        max_delta
+    );
 }
 
 #[test]
@@ -153,15 +220,28 @@ fn test_perturb_result_clipped_nonnegative() {
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
         make_synthetic_inputs(n_cells);
 
-    let config = PerturbConfig { n_propagation: 3, ..Default::default() };
+    let config = PerturbConfig {
+        n_propagation: 3,
+        ..Default::default()
+    };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy,
-        &rw_ligands, &rw_tfligands,
-        &[("A".to_string(), 0.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 0.0)],
+        &config,
+        &lr_radii,
     );
 
     for &v in result.simulated.iter() {
-        assert!(v >= 0.0, "simulated expression should be non-negative, got {}", v);
+        assert!(
+            v >= 0.0,
+            "simulated expression should be non-negative, got {}",
+            v
+        );
     }
 }
 
@@ -184,15 +264,41 @@ fn test_perturb_grid_vs_exact_consistency() {
         ..Default::default()
     };
 
-    let exact = perturb(&bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands, &targets, &config_exact, &lr_radii);
-    let grid = perturb(&bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands, &targets, &config_grid, &lr_radii);
+    let exact = perturb(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &targets,
+        &config_exact,
+        &lr_radii,
+    );
+    let grid = perturb(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &targets,
+        &config_grid,
+        &lr_radii,
+    );
 
-    let max_diff = exact.simulated.iter().zip(grid.simulated.iter())
+    let max_diff = exact
+        .simulated
+        .iter()
+        .zip(grid.simulated.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
 
-    assert!(max_diff < 0.5,
-        "grid approx should be close to exact, got max_diff={:.4e}", max_diff);
+    assert!(
+        max_diff < 0.5,
+        "grid approx should be close to exact, got max_diff={:.4e}",
+        max_diff
+    );
 }
 
 #[test]
@@ -211,18 +317,29 @@ fn test_perturb_overexpression() {
     let rw_tfligands = GeneMatrix::new(Array2::zeros((n_cells, 0)), vec![]);
 
     // Overexpress A to 5.0
-    let config = PerturbConfig { n_propagation: 2, ..Default::default() };
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy,
-        &rw_ligands, &rw_tfligands,
-        &[("A".to_string(), 5.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 5.0)],
+        &config,
+        &lr_radii,
     );
 
     for i in 0..n_cells {
         assert!((result.simulated[[i, 0]] - 5.0).abs() < 1e-10);
     }
 
-    let delta_d: f64 = (0..n_cells).map(|i| (result.simulated[[i, 3]] - gene_mtx[[i, 3]]).abs()).sum::<f64>();
+    let delta_d: f64 = (0..n_cells)
+        .map(|i| (result.simulated[[i, 3]] - gene_mtx[[i, 3]]).abs())
+        .sum::<f64>();
     assert!(delta_d > 0.0, "D should change with A overexpression");
 }
 
@@ -232,11 +349,20 @@ fn test_perturb_shape_preserved() {
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
         make_synthetic_inputs(n_cells);
 
-    let config = PerturbConfig { n_propagation: 1, ..Default::default() };
+    let config = PerturbConfig {
+        n_propagation: 1,
+        ..Default::default()
+    };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy,
-        &rw_ligands, &rw_tfligands,
-        &[("A".to_string(), 0.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 0.0)],
+        &config,
+        &lr_radii,
     );
 
     assert_eq!(result.simulated.shape(), gene_mtx.shape());
@@ -319,7 +445,15 @@ fn build_perturb_inputs(
     let rw_tfligands =
         compute_initial_wl(&gene_mtx, &gene_names, &tfl_ligands, &xy, &lr_radii, 1.0);
 
-    (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii)
+    (
+        bb,
+        gene_mtx,
+        gene_names,
+        xy,
+        rw_ligands,
+        rw_tfligands,
+        lr_radii,
+    )
 }
 
 fn compute_initial_wl(
@@ -420,7 +554,9 @@ fn save_inputs_for_python(
     let (nr, nc) = (gene_mtx.nrows(), gene_mtx.ncols());
     for i in 0..nr {
         for j in 0..nc {
-            if j > 0 { write!(f, ",").unwrap(); }
+            if j > 0 {
+                write!(f, ",").unwrap();
+            }
             write!(f, "{}", gene_mtx[[i, j]]).unwrap();
         }
         writeln!(f).unwrap();
@@ -453,7 +589,9 @@ fn save_gene_matrix(gm: &GeneMatrix, path: &str) {
     let mut f = std::fs::File::create(path).unwrap();
     // Header
     for (j, name) in gm.col_names.iter().enumerate() {
-        if j > 0 { write!(f, ",").unwrap(); }
+        if j > 0 {
+            write!(f, ",").unwrap();
+        }
         write!(f, "{}", name).unwrap();
     }
     writeln!(f).unwrap();
@@ -461,7 +599,9 @@ fn save_gene_matrix(gm: &GeneMatrix, path: &str) {
     let (nr, nc) = (gm.data.nrows(), gm.data.ncols());
     for i in 0..nr {
         for j in 0..nc {
-            if j > 0 { write!(f, ",").unwrap(); }
+            if j > 0 {
+                write!(f, ",").unwrap();
+            }
             write!(f, "{}", gm.data[[i, j]]).unwrap();
         }
         writeln!(f).unwrap();
@@ -552,13 +692,17 @@ fn test_perturb_from_tmp_betas() {
     // Save result
     let mut f = std::fs::File::create(format!("{}/result_rust.csv", out_dir)).unwrap();
     for (j, name) in gene_names.iter().enumerate() {
-        if j > 0 { write!(f, ",").unwrap(); }
+        if j > 0 {
+            write!(f, ",").unwrap();
+        }
         write!(f, "{}", name).unwrap();
     }
     writeln!(f).unwrap();
     for i in 0..n_cells {
         for j in 0..gene_names.len() {
-            if j > 0 { write!(f, ",").unwrap(); }
+            if j > 0 {
+                write!(f, ",").unwrap();
+            }
             write!(f, "{:.15e}", result.simulated[[i, j]]).unwrap();
         }
         writeln!(f).unwrap();
@@ -573,7 +717,11 @@ fn test_perturb_from_tmp_betas() {
     println!();
     println!("Perturb result:");
     println!("  target: {} -> {}", target, target_gene_expr);
-    println!("  shape: {} x {}", result.simulated.nrows(), result.simulated.ncols());
+    println!(
+        "  shape: {} x {}",
+        result.simulated.nrows(),
+        result.simulated.ncols()
+    );
     println!("  nonzero delta elements: {} / {}", nonzero, delta.len());
     println!("  max |delta|: {:.6e}", max_delta);
     println!("  mean |delta|: {:.6e}", mean_delta);
@@ -598,9 +746,11 @@ fn bench_perturb() {
     let grid_factor = 0.5;
 
     println!();
-    println!("  {:>5}  {:>10}  {:>10}  {:>8}  {:>10}  {:>10}",
-        "cells", "exact(ms)", "grid(ms)", "speedup", "max_err", "mean_err");
-    println!("  {}",  "-".repeat(70));
+    println!(
+        "  {:>5}  {:>10}  {:>10}  {:>8}  {:>10}  {:>10}",
+        "cells", "exact(ms)", "grid(ms)", "speedup", "max_err", "mean_err"
+    );
+    println!("  {}", "-".repeat(70));
 
     for &n_cells in &[200, 500, 1_000, 2_000, 5_000, 10_000] {
         let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -641,17 +791,57 @@ fn bench_perturb() {
         let targets = vec![(target.clone(), 0.0)];
 
         // Warmup both
-        let _ = perturb(&bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands, &targets, &config_exact, &lr_radii);
-        let _ = perturb(&bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands, &targets, &config_grid, &lr_radii);
+        let _ = perturb(
+            &bb,
+            &gene_mtx,
+            &gene_names,
+            &xy,
+            &rw_ligands,
+            &rw_tfligands,
+            &targets,
+            &config_exact,
+            &lr_radii,
+        );
+        let _ = perturb(
+            &bb,
+            &gene_mtx,
+            &gene_names,
+            &xy,
+            &rw_ligands,
+            &rw_tfligands,
+            &targets,
+            &config_grid,
+            &lr_radii,
+        );
 
         // Exact
         let t0 = Instant::now();
-        let result_exact = perturb(&bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands, &targets, &config_exact, &lr_radii);
+        let result_exact = perturb(
+            &bb,
+            &gene_mtx,
+            &gene_names,
+            &xy,
+            &rw_ligands,
+            &rw_tfligands,
+            &targets,
+            &config_exact,
+            &lr_radii,
+        );
         let exact_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Grid
         let t0 = Instant::now();
-        let result_grid = perturb(&bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands, &targets, &config_grid, &lr_radii);
+        let result_grid = perturb(
+            &bb,
+            &gene_mtx,
+            &gene_names,
+            &xy,
+            &rw_ligands,
+            &rw_tfligands,
+            &targets,
+            &config_grid,
+            &lr_radii,
+        );
         let grid_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Accuracy: compare simulated outputs

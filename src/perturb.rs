@@ -108,24 +108,14 @@ pub fn perturb(
     let mut gene_mtx_1 = gene_mtx.clone();
 
     let max_per_gene: Vec<f64> = (0..n_genes)
-        .map(|j| {
-            gene_mtx
-                .column(j)
-                .iter()
-                .cloned()
-                .fold(0.0f64, f64::max)
-        })
+        .map(|j| gene_mtx.column(j).iter().cloned().fold(0.0f64, f64::max))
         .collect();
 
     let lr_ligands: Vec<String> = bb.ligands_set.iter().cloned().collect();
     let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
 
     for iter in 0..config.n_propagation {
-        eprintln!(
-            "  perturb iteration {}/{}",
-            iter + 1,
-            config.n_propagation
-        );
+        eprintln!("  perturb iteration {}/{}", iter + 1, config.n_propagation);
 
         // 1. Splash all trained genes
         let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
@@ -260,8 +250,13 @@ fn splash_all(
     bb.data
         .iter()
         .map(|(gene_name, bf)| {
-            let splash =
-                bf.splash(rw_ligands, rw_tfligands, gex_df, beta_scale_factor, beta_cap);
+            let splash = bf.splash(
+                rw_ligands,
+                rw_tfligands,
+                gex_df,
+                beta_scale_factor,
+                beta_cap,
+            );
             (gene_name.clone(), splash)
         })
         .collect()
@@ -379,10 +374,7 @@ fn recompute_weighted_ligands(
     let mut radius_groups: HashMap<u64, Vec<usize>> = HashMap::new();
     for (j, name) in lig_names.iter().enumerate() {
         if let Some(&radius) = lr_radii.get(name) {
-            radius_groups
-                .entry(radius.to_bits())
-                .or_default()
-                .push(j);
+            radius_groups.entry(radius.to_bits()).or_default().push(j);
         }
     }
 
@@ -405,4 +397,3 @@ fn recompute_weighted_ligands(
 
     GeneMatrix::new(result_data, lig_names)
 }
-

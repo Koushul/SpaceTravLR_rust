@@ -1,10 +1,10 @@
 use ndarray::{Array2, Axis};
-use rayon::prelude::*;
 use polars::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Compute the amount of ligand received by each cell.
-/// 
+///
 /// Corresponds to `compute_radius_weights_fast` in Python.
 /// Optimized for $O(N \times L)$ memory by avoiding full $N \times N$ matrix storage.
 pub fn calculate_weighted_ligands(
@@ -20,7 +20,8 @@ pub fn calculate_weighted_ligands(
     let mut result = Array2::zeros((n_cells, n_ligands));
 
     // Parallelize over target cells (rows of the result)
-    result.axis_iter_mut(Axis(0))
+    result
+        .axis_iter_mut(Axis(0))
         .into_par_iter()
         .enumerate()
         .for_each(|(i, mut row)| {
@@ -79,10 +80,18 @@ pub fn calculate_weighted_ligands_grid(
     for i in 0..n_cells {
         let x = xy[[i, 0]];
         let y = xy[[i, 1]];
-        if x < x_min { x_min = x; }
-        if x > x_max { x_max = x; }
-        if y < y_min { y_min = y; }
-        if y > y_max { y_max = y; }
+        if x < x_min {
+            x_min = x;
+        }
+        if x > x_max {
+            x_max = x;
+        }
+        if y < y_min {
+            y_min = y;
+        }
+        if y > y_max {
+            y_max = y;
+        }
     }
 
     x_min -= grid_spacing;
@@ -161,8 +170,7 @@ pub fn calculate_weighted_ligands_grid(
 
             for k in 0..n_ligands {
                 unsafe {
-                    *row.get_unchecked_mut(k) =
-                        w00 * *anchor_vals.get_unchecked(a00 + k)
+                    *row.get_unchecked_mut(k) = w00 * *anchor_vals.get_unchecked(a00 + k)
                         + w10 * *anchor_vals.get_unchecked(a10 + k)
                         + w01 * *anchor_vals.get_unchecked(a01 + k)
                         + w11 * *anchor_vals.get_unchecked(a11 + k);
@@ -174,7 +182,7 @@ pub fn calculate_weighted_ligands_grid(
 }
 
 /// Computes received ligands for various radii as specified in lr_info.
-/// 
+///
 /// Args:
 ///     xy: (n_cells, 2) array of coordinates.
 ///     ligands_df: DataFrame with ligand expression (genes as columns).
@@ -185,18 +193,20 @@ pub fn compute_received_ligands(
     lr_info: &DataFrame,
     scale_factor: f64,
 ) -> anyhow::Result<DataFrame> {
-    
     // 1. Group lr_info by radius
     // We need 'ligand' and 'radius' columns
     let radius_col = lr_info.column("radius")?.f64()?;
     let ligand_col = lr_info.column("ligand")?.str()?;
-    
+
     let mut radius_to_ligands: HashMap<u64, Vec<String>> = HashMap::new();
     for i in 0..lr_info.height() {
         if let (Some(r), Some(l)) = (radius_col.get(i), ligand_col.get(i)) {
             // Use u64 bits for hashmap key to avoid float issues
             let r_bits = r.to_bits();
-            radius_to_ligands.entry(r_bits).or_default().push(l.to_string());
+            radius_to_ligands
+                .entry(r_bits)
+                .or_default()
+                .push(l.to_string());
         }
     }
 
@@ -205,7 +215,7 @@ pub fn compute_received_ligands(
     // 2. Process each radius group
     for (r_bits, ligands) in radius_to_ligands {
         let radius = f64::from_bits(r_bits);
-        
+
         // Filter ligands_df for these ligands
         // Ensure we only take ligands present in ligands_df
         let mut valid_ligands = Vec::new();
@@ -237,7 +247,7 @@ pub fn compute_received_ligands(
 
     // 3. Construct final DataFrame and reorder to match ligands_df columns
     let result_df = DataFrame::new(results_cols)?;
-    
+
     // Sort columns to match ligands_df original order (as Python does)
     let original_col_names = ligands_df.get_column_names();
     let sorted_df = result_df.select(original_col_names.iter().map(|s| s.as_str()))?;
@@ -342,7 +352,10 @@ mod tests {
         let lig = array![[1.0], [2.0], [3.0]];
         let result = calculate_weighted_ligands(&xy, &lig, 1.0, 1.0);
         for &v in result.iter() {
-            assert!(v >= 0.0, "Output should be non-negative for non-negative input");
+            assert!(
+                v >= 0.0,
+                "Output should be non-negative for non-negative input"
+            );
         }
     }
 
@@ -376,7 +389,7 @@ mod tests {
         let result = calculate_weighted_ligands(&xy, &lig, 1.0, 1.0);
         let r0 = result[[0, 0]];
         let r3 = result[[3, 0]];
-        assert_abs_diff_eq!(r0, r3, epsilon = 1e-10, );
+        assert_abs_diff_eq!(r0, r3, epsilon = 1e-10,);
 
         let r1 = result[[1, 0]];
         let r2 = result[[2, 0]];
@@ -401,8 +414,11 @@ mod tests {
     #[test]
     fn grid_approx_matches_exact_uniform_field() {
         let xy = Array2::from_shape_fn((100, 2), |(i, d)| {
-            if d == 0 { (i % 10) as f64 * 10.0 }
-            else { (i / 10) as f64 * 10.0 }
+            if d == 0 {
+                (i % 10) as f64 * 10.0
+            } else {
+                (i / 10) as f64 * 10.0
+            }
         });
         let lig = Array2::ones((100, 1));
         let r = 50.0;
@@ -410,10 +426,16 @@ mod tests {
         let exact = calculate_weighted_ligands(&xy, &lig, r, 1.0);
         let grid = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.3);
 
-        let max_err = exact.iter().zip(grid.iter())
+        let max_err = exact
+            .iter()
+            .zip(grid.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f64, f64::max);
-        assert!(max_err < 0.05, "uniform field max error {:.4e} too large", max_err);
+        assert!(
+            max_err < 0.05,
+            "uniform field max error {:.4e} too large",
+            max_err
+        );
     }
 
     #[test]
@@ -424,7 +446,9 @@ mod tests {
         let exact = calculate_weighted_ligands(&xy, &lig, r, 1.0);
         let grid = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.5);
 
-        let diffs: Vec<f64> = exact.iter().zip(grid.iter())
+        let diffs: Vec<f64> = exact
+            .iter()
+            .zip(grid.iter())
             .map(|(a, b)| (a - b).abs())
             .collect();
         let max_err = diffs.iter().cloned().fold(0.0f64, f64::max);
@@ -444,15 +468,28 @@ mod tests {
         let coarse = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.8);
         let fine = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.3);
 
-        let err_coarse = exact.iter().zip(coarse.iter())
-            .map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-        let err_fine = exact.iter().zip(fine.iter())
-            .map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+        let err_coarse = exact
+            .iter()
+            .zip(coarse.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        let err_fine = exact
+            .iter()
+            .zip(fine.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
 
-        assert!(err_coarse > 1e-12, "coarse grid should differ from exact, got {:.4e}", err_coarse);
-        assert!(err_fine <= err_coarse,
+        assert!(
+            err_coarse > 1e-12,
+            "coarse grid should differ from exact, got {:.4e}",
+            err_coarse
+        );
+        assert!(
+            err_fine <= err_coarse,
             "finer grid should be more accurate: fine={:.4e} > coarse={:.4e}",
-            err_fine, err_coarse);
+            err_fine,
+            err_coarse
+        );
     }
 
     #[test]
@@ -482,8 +519,11 @@ mod tests {
     #[test]
     fn grid_approx_symmetry() {
         let xy = Array2::from_shape_fn((64, 2), |(i, d)| {
-            if d == 0 { (i % 8) as f64 * 20.0 }
-            else { (i / 8) as f64 * 20.0 }
+            if d == 0 {
+                (i % 8) as f64 * 20.0
+            } else {
+                (i / 8) as f64 * 20.0
+            }
         });
         let lig = Array2::ones((64, 1));
         let result = calculate_weighted_ligands_grid(&xy, &lig, 40.0, 1.0, 0.3);
@@ -518,8 +558,12 @@ mod tests {
             let max_err = (0..150)
                 .map(|i| (exact[[i, col]] - grid[[i, col]]).abs())
                 .fold(0.0f64, f64::max);
-            assert!(max_err < 0.3,
-                "ligand column {} max error {:.4e} too large", col, max_err);
+            assert!(
+                max_err < 0.3,
+                "ligand column {} max error {:.4e} too large",
+                col,
+                max_err
+            );
         }
     }
 }

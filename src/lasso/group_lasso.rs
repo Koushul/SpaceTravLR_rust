@@ -36,10 +36,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ndarray::{s, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, s};
 use rayon::prelude::*;
 
-use crate::lasso::fista::{minimise as fista_minimise, FistaProblem, IterInfo};
+use crate::lasso::fista::{FistaProblem, IterInfo, minimise as fista_minimise};
 use crate::lasso::prox::l1_l2_prox;
 use crate::lasso::singular_values::find_largest_singular_value;
 use crate::lasso::subsampling::SubsamplingScheme;
@@ -259,9 +259,7 @@ impl GroupLasso {
 
         // Centre X for numerical stability
         let x_means = if self.params.fit_intercept {
-            x.mean_axis(Axis(0))
-                .unwrap()
-                .insert_axis(Axis(0)) // shape: (1, p)
+            x.mean_axis(Axis(0)).unwrap().insert_axis(Axis(0)) // shape: (1, p)
         } else {
             Array2::zeros((1, p))
         };
@@ -348,7 +346,13 @@ impl GroupLasso {
                 let norm: f64 = mask
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, &m)| if m { Some(coef[[i, col]].powi(2)) } else { None })
+                    .filter_map(|(i, &m)| {
+                        if m {
+                            Some(coef[[i, col]].powi(2))
+                        } else {
+                            None
+                        }
+                    })
                     .sum::<f64>()
                     .sqrt();
                 penalty += reg * norm;
@@ -434,10 +438,16 @@ impl GroupLasso {
             if let Some(ref f) = self.fitted {
                 (f.intercept.clone(), f.coef.clone())
             } else {
-                (Array2::zeros((1, num_targets)), Array2::zeros((p, num_targets)))
+                (
+                    Array2::zeros((1, num_targets)),
+                    Array2::zeros((p, num_targets)),
+                )
             }
         } else {
-            (Array2::zeros((1, num_targets)), Array2::zeros((p, num_targets)))
+            (
+                Array2::zeros((1, num_targets)),
+                Array2::zeros((p, num_targets)),
+            )
         };
 
         let w0 = Self::join(&init_intercept, &init_coef);
@@ -519,8 +529,8 @@ impl GroupLasso {
     /// Boolean mask: `true` for features with non-negligible coefficients.
     pub fn sparsity_mask(&self) -> Result<Array1<bool>, GroupLassoError> {
         let fitted = self.fitted.as_ref().ok_or(GroupLassoError::NotFitted)?;
-        let mean_abs: f64 = fitted.coef.iter().map(|v| v.abs()).sum::<f64>()
-            / fitted.coef.len() as f64;
+        let mean_abs: f64 =
+            fitted.coef.iter().map(|v| v.abs()).sum::<f64>() / fitted.coef.len() as f64;
         let threshold = 1e-10 * mean_abs;
         let coef_mean_across_targets: Array1<f64> = fitted.coef.mean_axis(Axis(1)).unwrap();
         Ok(coef_mean_across_targets.mapv(|v| v.abs() > threshold))
@@ -629,7 +639,12 @@ impl ClusteredGroupLasso {
             ));
         }
 
-        let unique_ids: Vec<i64> = clusters.iter().cloned().collect::<HashSet<_>>().into_iter().collect();
+        let unique_ids: Vec<i64> = clusters
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
 
         // Prepare data for each cluster
         let mut cluster_data = Vec::new();
@@ -640,7 +655,7 @@ impl ClusteredGroupLasso {
                 .filter(|(_, c)| **c == id)
                 .map(|(i, _)| i)
                 .collect();
-            
+
             let x_cluster = x.select(Axis(0), &indices);
             let y_cluster = y.select(Axis(0), &indices);
             cluster_data.push((id, x_cluster, y_cluster));
@@ -692,8 +707,16 @@ impl ClusteredGroupLasso {
             ));
         }
 
-        let unique_ids: Vec<i64> = clusters.iter().cloned().collect::<HashSet<_>>().into_iter().collect();
-        let num_targets = self.models.values().next()
+        let unique_ids: Vec<i64> = clusters
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let num_targets = self
+            .models
+            .values()
+            .next()
             .and_then(|m| m.fitted.as_ref())
             .map(|f| f.coef.ncols())
             .unwrap_or(1);
@@ -769,7 +792,11 @@ mod tests {
     fn simple_xy() -> (Array2<f64>, Array2<f64>) {
         let n = 50_usize;
         let x = Array2::from_shape_fn((n, 2), |(i, j)| {
-            if j == 0 { i as f64 / n as f64 } else { (n - i) as f64 / n as f64 }
+            if j == 0 {
+                i as f64 / n as f64
+            } else {
+                (n - i) as f64 / n as f64
+            }
         });
         let y = Array2::from_shape_fn((n, 1), |(i, _)| 2.0 * x[[i, 0]] + 3.0 * x[[i, 1]]);
         (x, y)
@@ -777,12 +804,10 @@ mod tests {
 
     fn xy_with_intercept() -> (Array2<f64>, Array2<f64>) {
         let n = 80_usize;
-        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
-            match j {
-                0 => (i as f64) / n as f64,
-                1 => ((n - i) as f64) / n as f64,
-                _ => 0.5 * (i as f64) / n as f64,
-            }
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => (i as f64) / n as f64,
+            1 => ((n - i) as f64) / n as f64,
+            _ => 0.5 * (i as f64) / n as f64,
         });
         let y = Array2::from_shape_fn((n, 1), |(i, _)| {
             5.0 + 2.0 * x[[i, 0]] + 3.0 * x[[i, 1]] + 1.0 * x[[i, 2]]
@@ -793,12 +818,8 @@ mod tests {
     fn sparse_xy() -> (Array2<f64>, Array2<f64>) {
         // y depends on features 0,1 but not 2,3,4
         let n = 100_usize;
-        let x = Array2::from_shape_fn((n, 5), |(i, j)| {
-            ((i * 7 + j * 13) % 97) as f64 / 97.0
-        });
-        let y = Array2::from_shape_fn((n, 1), |(i, _)| {
-            2.0 * x[[i, 0]] - 1.5 * x[[i, 1]]
-        });
+        let x = Array2::from_shape_fn((n, 5), |(i, j)| ((i * 7 + j * 13) % 97) as f64 / 97.0);
+        let y = Array2::from_shape_fn((n, 1), |(i, _)| 2.0 * x[[i, 0]] - 1.5 * x[[i, 1]]);
         (x, y)
     }
 
@@ -885,9 +906,17 @@ mod tests {
         let pred = model.predict(&x).unwrap();
         let y_mean = y.mean().unwrap();
         let ss_tot: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
-        let ss_res: f64 = y.iter().zip(pred.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+        let ss_res: f64 = y
+            .iter()
+            .zip(pred.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
         let r2 = 1.0 - ss_res / ss_tot;
-        assert!(r2 > 0.99, "R² should be very high with intercept, got {}", r2);
+        assert!(
+            r2 > 0.99,
+            "R² should be very high with intercept, got {}",
+            r2
+        );
     }
 
     #[test]
@@ -954,7 +983,10 @@ mod tests {
         });
         let _ = model.fit(&x, &y, None);
         let x_t = model.transform(&x).unwrap();
-        assert!(x_t.ncols() <= x.ncols(), "Transform should reduce or maintain columns");
+        assert!(
+            x_t.ncols() <= x.ncols(),
+            "Transform should reduce or maintain columns"
+        );
         assert!(x_t.ncols() > 0, "At least one feature should survive");
         assert_eq!(x_t.nrows(), x.nrows(), "Row count should be preserved");
     }
@@ -1039,7 +1071,10 @@ mod tests {
         // So coefficients from m1 should be smaller (more regularised)
         let norm1: f64 = m1.fitted.as_ref().unwrap().coef.iter().map(|v| v * v).sum();
         let norm2: f64 = m2.fitted.as_ref().unwrap().coef.iter().map(|v| v * v).sum();
-        assert!(norm1 <= norm2 + 1e-6, "GroupSize scaling should produce sparser result");
+        assert!(
+            norm1 <= norm2 + 1e-6,
+            "GroupSize scaling should produce sparser result"
+        );
     }
 
     #[test]
@@ -1090,7 +1125,8 @@ mod tests {
 
         let y_mean = y.mean().unwrap();
         let ss_tot: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
-        let ss_res: f64 = y.iter()
+        let ss_res: f64 = y
+            .iter()
             .zip(pred.iter())
             .map(|(yi, yhat)| (yi - yhat).powi(2))
             .sum();
@@ -1130,8 +1166,10 @@ mod tests {
         let _ = model.fit(&x, &y, None);
         let coef = &model.fitted.as_ref().unwrap().coef;
         // Group 1 (feature 1) should be more suppressed
-        assert!(coef[[0, 0]].abs() > coef[[1, 0]].abs(),
-            "Feature 0 (low reg) should be larger than feature 1 (high reg)");
+        assert!(
+            coef[[0, 0]].abs() > coef[[1, 0]].abs(),
+            "Feature 0 (low reg) should be larger than feature 1 (high reg)"
+        );
     }
 
     #[test]
@@ -1179,7 +1217,9 @@ mod tests {
         let (x, y) = simple_xy();
         let n = x.nrows();
         let mut clusters = Array1::zeros(n);
-        for i in 25..n { clusters[i] = 1; }
+        for i in 25..n {
+            clusters[i] = 1;
+        }
 
         let mut model = ClusteredGroupLasso::new(GroupLassoParams {
             groups: vec![0, 0],
@@ -1212,7 +1252,9 @@ mod tests {
         let (x, y) = simple_xy();
         let n = x.nrows();
         let mut clusters = Array1::zeros(n);
-        for i in 25..n { clusters[i] = 1; }
+        for i in 25..n {
+            clusters[i] = 1;
+        }
 
         let mut model = ClusteredGroupLasso::new(GroupLassoParams {
             groups: vec![0, 0],

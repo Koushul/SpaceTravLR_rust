@@ -10,7 +10,7 @@ keywords = ["spatial", "transcriptomics", "grn", "single-cell", "machine-learnin
 categories = ["science", "command-line-utilities"]
 rust-version = "1.85"
 exclude = [".agent/", ".agents/", ".claude/", "skills-lock.json"]
-default-run = "train_all_genes_demo"
+default-run = "spacetravlr"
 autobins = false
 
 [profile.dev]
@@ -26,8 +26,8 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo"]
 dev-main = []
 
 [[bin]]
-name = "train_all_genes_demo"
-path = "src/bin/train_all_genes_demo.rs"
+name = "spacetravlr"
+path = "src/bin/spacetravlr.rs"
 
 [[bin]]
 name = "space_trav_lr_rust"
@@ -58,6 +58,7 @@ polars = { version = "0.51", default-features = false, features = [
     "zip_with",
 ] }
 anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 ndarray-npy = "0.9"

@@ -101,13 +101,17 @@ impl Subsampler {
     pub fn new(num_rows: usize, scheme: SubsamplingScheme, seed: u64) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let current_indices = get_row_indices(num_rows, &scheme, &mut rng);
-        Self { scheme, num_rows, current_indices, rng }
+        Self {
+            scheme,
+            num_rows,
+            current_indices,
+            rng,
+        }
     }
 
     /// Draw a fresh set of indices (call after each gradient step).
     pub fn update_indices(&mut self) {
-        self.current_indices =
-            get_row_indices(self.num_rows, &self.scheme, &mut self.rng);
+        self.current_indices = get_row_indices(self.num_rows, &self.scheme, &mut self.rng);
     }
 
     /// Return the subsampled view of `x` using the *current* indices.
@@ -219,7 +223,10 @@ mod tests {
         s.update_indices();
         let second = s.current_indices.clone();
         assert_eq!(second.len(), 10);
-        assert_ne!(first, second, "Different draws should differ (with high probability)");
+        assert_ne!(
+            first, second,
+            "Different draws should differ (with high probability)"
+        );
     }
 
     #[test]

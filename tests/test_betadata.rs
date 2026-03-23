@@ -1,4 +1,4 @@
-use ndarray::{array, Array2};
+use ndarray::{Array2, array};
 use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -82,7 +82,12 @@ fn test_splash_identity_mapping() {
 fn test_splash_expanded_cells() {
     let mut bf = make_test_betaframe();
 
-    let obs: Vec<String> = vec!["cell0".into(), "cell1".into(), "cell2".into(), "cell3".into()];
+    let obs: Vec<String> = vec![
+        "cell0".into(),
+        "cell1".into(),
+        "cell2".into(),
+        "cell3".into(),
+    ];
     let clusters = [0usize, 0, 1, 1];
     let mapping = Arc::new(BetaFrame::compute_cell_mapping(
         &bf.row_labels,
@@ -93,14 +98,8 @@ fn test_splash_expanded_cells() {
     assert_eq!(bf.n_cells, 4);
     assert_eq!(*bf.cell_to_beta_row, vec![0, 0, 1, 1]);
 
-    let rw_lig = GeneMatrix::new(
-        array![[3.0], [2.0], [1.0], [0.5]],
-        vec!["C".to_string()],
-    );
-    let rw_tfl = GeneMatrix::new(
-        array![[2.0], [1.0], [0.5], [0.3]],
-        vec!["C".to_string()],
-    );
+    let rw_lig = GeneMatrix::new(array![[3.0], [2.0], [1.0], [0.5]], vec!["C".to_string()]);
+    let rw_tfl = GeneMatrix::new(array![[2.0], [1.0], [0.5], [0.3]], vec!["C".to_string()]);
     let gex = GeneMatrix::new(
         array![
             [1.5, 0.8, 3.0, 2.0],
@@ -315,10 +314,21 @@ fn build_splash_inputs(
         lig_set.extend(frame.ligands.iter().cloned());
         lig_set.extend(frame.tfl_ligands.iter().cloned());
     }
-    let all_genes_vec: Vec<String> = { let mut v: Vec<_> = all_genes.into_iter().collect(); v.sort(); v };
-    let lig_genes: Vec<String> = { let mut v: Vec<_> = lig_set.into_iter().collect(); v.sort(); v };
+    let all_genes_vec: Vec<String> = {
+        let mut v: Vec<_> = all_genes.into_iter().collect();
+        v.sort();
+        v
+    };
+    let lig_genes: Vec<String> = {
+        let mut v: Vec<_> = lig_set.into_iter().collect();
+        v.sort();
+        v
+    };
 
-    let gex_df = GeneMatrix::new(Array2::from_elem((n_cells, all_genes_vec.len()), 1.0), all_genes_vec);
+    let gex_df = GeneMatrix::new(
+        Array2::from_elem((n_cells, all_genes_vec.len()), 1.0),
+        all_genes_vec,
+    );
     let rw_data = Array2::from_elem((n_cells, lig_genes.len()), 1.0);
     let rw_ligands = GeneMatrix::new(rw_data.clone(), lig_genes.clone());
     let rw_ligands_tfl = GeneMatrix::new(rw_data, lig_genes);
@@ -352,11 +362,15 @@ fn test_splash_from_tmp_betas() {
         let mut wtr = std::fs::File::create(&csv_path).unwrap();
         use std::io::Write;
         write!(wtr, "cell").unwrap();
-        for col in &result.col_names { write!(wtr, ",{}", col).unwrap(); }
+        for col in &result.col_names {
+            write!(wtr, ",{}", col).unwrap();
+        }
         writeln!(wtr).unwrap();
         for i in 0..result.n_rows() {
             write!(wtr, "cell_{}", i).unwrap();
-            for j in 0..result.col_names.len() { write!(wtr, ",{}", result.data[[i, j]]).unwrap(); }
+            for j in 0..result.col_names.len() {
+                write!(wtr, ",{}", result.data[[i, j]]).unwrap();
+            }
             writeln!(wtr).unwrap();
         }
     }

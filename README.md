@@ -48,7 +48,9 @@ The core biological model: genes don't act in isolation. A transcription factor 
 | `lasso` | FISTA-accelerated sparse group lasso solver |
 | `network` | GRN loading (CellChat LR database, TF–target links) |
 | `config` | TOML config (`spaceship_config.toml`) |
-| `training_tui` | Ratatui-based live training dashboard (optional `tui` feature) |
+| `training_tui` | Full-screen training dashboard; **Run configuration** panel shows effective TOML/CLI parameters (optional `tui` feature) |
+
+The **`spacetravlr`** executable (`src/bin/spacetravlr.rs`) is the only shipped training CLI: **clap**-parsed flags match whether you use the dashboard or `--plain`.
 
 ## Installation
 
@@ -62,7 +64,7 @@ The core biological model: genes don't act in isolation. A transcription factor 
    rustc --version   # should be >= 1.85
    ```
 
-2. **Compute backend** — `train_all_genes_demo` prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter (GPU or compatible software stack). If no adapter is available, it automatically uses Burn’s **NdArray (CPU)** backend. To force CPU regardless of GPU, set `SPACETRAVLR_FORCE_CPU=1` (or `true`).
+2. **Compute backend** — the **`spacetravlr`** binary prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter. If none is available, it uses Burn’s **NdArray (CPU)** backend. Set `SPACETRAVLR_FORCE_CPU=1` (or `true`) to force CPU.
 
 3. **Repository data** — point `spaceship_config.toml` at your `.h5ad` and keep GRN parquet files where the app expects them (see `data/` and config `data` / `grn` sections).
 
@@ -75,7 +77,7 @@ git clone https://github.com/Koushul/SpaceTravLR_rust.git
 cd SpaceTravLR_rust
 ```
 
-Then install the **`train_all_genes_demo`** binary into Cargo’s bin directory (usually `~/.cargo/bin`; ensure that directory is on your `PATH`):
+Then install the **`spacetravlr`** binary into Cargo’s bin directory (usually `~/.cargo/bin`; ensure that directory is on your `PATH`):
 
 ```bash
 # Full UI: Ratatui training dashboard (default features)
@@ -88,7 +90,7 @@ cargo install --path . --locked --no-default-features
 Confirm the install:
 
 ```bash
-train_all_genes_demo --help
+spacetravlr --help
 ```
 
 | Install command | What you get |
@@ -96,7 +98,7 @@ train_all_genes_demo --help
 | `cargo install --path . --locked` | Dashboard when you run training without `--plain`; pass `--plain` for text-only progress. |
 | `... --no-default-features` | Always plain progress (same as always using `--plain`); skips Ratatui, crossterm, and sysinfo. |
 
-`cargo install` only installs **`train_all_genes_demo`**. The old **`src/main.rs`** helper is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
+`cargo install` only installs **`spacetravlr`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
 
 ### Build without installing
 
@@ -104,7 +106,7 @@ To compile in the repo without copying binaries to `~/.cargo/bin`:
 
 ```bash
 cargo build --release
-./target/release/train_all_genes_demo --help
+./target/release/spacetravlr --help
 ```
 
 Or run directly:
@@ -113,7 +115,7 @@ Or run directly:
 cargo run --release -- --help
 ```
 
-(`default-run` in `Cargo.toml` is `train_all_genes_demo`, so you do not need `--bin` for that target.)
+(`default-run` in `Cargo.toml` is `spacetravlr`, so you do not need `--bin` for that target.)
 
 ### Use as a Rust library
 
@@ -135,16 +137,20 @@ Then `use space_trav_lr_rust::...` as in this repository’s `src/lib.rs` export
 ## Quick start
 
 ```bash
-# Train all genes (seed-only lasso, 4 workers) — default binary is train_all_genes_demo
+# Train (seed-only lasso, 4 workers, line-oriented logs)
+cargo run --release -- --plain \
+  --parallel 4 --max-genes 50 --output-dir /tmp/betas
+
+# Same flags with full-screen dashboard (default when built with `tui` feature)
 cargo run --release -- \
   --parallel 4 --max-genes 50 --output-dir /tmp/betas
 
 # Full CNN mode
-cargo run --release -- \
+cargo run --release -- --plain \
   --full --epochs 5 --parallel 2 --max-genes 20
 ```
 
-See `cargo run --release -- --help` for all options.
+See `cargo run --release -- --help` (or `spacetravlr --help` after install). Options are defined with **clap**; config file path is `-c` / `--config`, dataset override is `--h5ad`.
 
 ---
 
@@ -741,7 +747,7 @@ First column is `Cluster` (seed-only, integer cluster IDs) or `CellID` (CNN, per
 
 ```bash
 # Train betas (required for benchmarks)
-cargo run --release --bin train_all_genes_demo -- \
+cargo run --release -- --plain \
   --parallel 8 --output-dir /tmp/kidney_betas
 
 # Splash benchmarks

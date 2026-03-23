@@ -1,13 +1,98 @@
+use crate::config::SpaceshipConfig;
 use crate::estimator::ClusterTrainingSummary;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
+pub struct RunConfigSummary {
+    pub config_source: String,
+    pub compute_backend: String,
+    pub layer: String,
+    pub cluster_annot: String,
+    pub spatial_radius: f64,
+    pub spatial_dim: usize,
+    pub contact_distance: f64,
+    pub tf_ligand_cutoff: f64,
+    pub max_lr_pairs: String,
+    pub top_lr_pairs: String,
+    pub l1_reg: f64,
+    pub group_reg: f64,
+    pub n_iter: usize,
+    pub tol: f64,
+    pub learning_rate: f64,
+    pub score_threshold: f64,
+    pub epochs_per_gene: usize,
+    pub gene_selection: String,
+}
+
+impl RunConfigSummary {
+    pub fn build(
+        config_path: Option<&Path>,
+        compute_backend: &str,
+        cfg: &SpaceshipConfig,
+        max_genes: Option<usize>,
+        gene_filter: Option<&[String]>,
+    ) -> Self {
+        let config_source = config_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "spaceship_config.toml (search path)".to_string());
+
+        let max_lr_pairs = cfg
+            .grn
+            .max_lr_pairs
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let top_lr_pairs = cfg
+            .grn
+            .top_lr_pairs_by_mean_expression
+            .map(|n| format!("{}", n))
+            .unwrap_or_else(|| "—".to_string());
+
+        let gene_selection = match (gene_filter, max_genes) {
+            (Some(genes), _) if !genes.is_empty() => {
+                let take = 4usize.min(genes.len());
+                let head: Vec<_> = genes.iter().take(take).cloned().collect();
+                let mut s = head.join(", ");
+                if genes.len() > take {
+                    s.push_str(&format!(" (+{} more)", genes.len() - take));
+                }
+                s
+            }
+            (None, Some(n)) => format!("first {} genes (var order)", n),
+            _ => "all genes (var order)".to_string(),
+        };
+
+        Self {
+            config_source,
+            compute_backend: compute_backend.to_string(),
+            layer: cfg.data.layer.clone(),
+            cluster_annot: cfg.data.cluster_annot.clone(),
+            spatial_radius: cfg.spatial.radius,
+            spatial_dim: cfg.spatial.spatial_dim,
+            contact_distance: cfg.spatial.contact_distance,
+            tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
+            max_lr_pairs,
+            top_lr_pairs,
+            l1_reg: cfg.lasso.l1_reg,
+            group_reg: cfg.lasso.group_reg,
+            n_iter: cfg.lasso.n_iter,
+            tol: cfg.lasso.tol,
+            learning_rate: cfg.training.learning_rate,
+            score_threshold: cfg.training.score_threshold,
+            epochs_per_gene: cfg.training.epochs,
+            gene_selection,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct TrainingHudState {
     pub dataset_path: String,
     pub output_dir: String,
+    pub run_config: RunConfigSummary,
     pub full_cnn: bool,
     pub epochs_per_gene: usize,
     pub n_parallel: usize,
@@ -33,6 +118,7 @@ impl TrainingHudState {
     pub fn new(
         dataset_path: String,
         output_dir: String,
+        run_config: RunConfigSummary,
         full_cnn: bool,
         epochs_per_gene: usize,
         n_parallel: usize,
@@ -41,6 +127,7 @@ impl TrainingHudState {
         Self {
             dataset_path,
             output_dir,
+            run_config,
             full_cnn,
             epochs_per_gene,
             n_parallel,
@@ -72,8 +159,7 @@ impl TrainingHudState {
         if summaries.is_empty() {
             return;
         }
-        let mean: f64 =
-            summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
+        let mean: f64 = summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
         self.gene_r2_mean.push((gene.to_string(), mean));
 
         for s in summaries {
@@ -89,7 +175,8 @@ impl TrainingHudState {
     }
 
     pub fn set_gene_status(&mut self, gene: &str, status: impl std::fmt::Display) {
-        self.active_genes.insert(gene.to_string(), status.to_string());
+        self.active_genes
+            .insert(gene.to_string(), status.to_string());
     }
 
     pub fn remove_gene(&mut self, gene: &str) {

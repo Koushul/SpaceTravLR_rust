@@ -5,11 +5,11 @@
 //! improvement in the estimated eigenvalue falls below `tol`.
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rand_distr::{Distribution, StandardNormal};
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use rand_distr::{Distribution, StandardNormal};
 
-use crate::lasso::subsampling::{get_row_indices, select_rows, SubsamplingScheme};
+use crate::lasso::subsampling::{SubsamplingScheme, get_row_indices, select_rows};
 
 const LIPSCHITZ_MAXITS: usize = 20;
 const LIPSCHITZ_TOL: f64 = 5e-3;
@@ -79,7 +79,7 @@ pub fn find_largest_singular_value(
     let n0 = norm2(&v);
     v.mapv_inplace(|x| x / n0);
 
-    let mut s = n0;     // current eigenvalue estimate (will be overwritten immediately)
+    let mut s = n0; // current eigenvalue estimate (will be overwritten immediately)
     let mut s_best = s;
 
     for i in 0..maxits {

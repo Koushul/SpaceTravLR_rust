@@ -6,7 +6,7 @@
 
 [data]
 # Path to .h5ad dataset.  Leave empty to use $SPACETRAVLR_H5AD env var.
-adata_path      = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/ThePerturbedBrain/slideseq_brain_processed.h5ad"
+# adata_path      = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/ThePerturbedBrain/slideseq_brain_processed.h5ad"
 # Expression layer to read from AnnData
 layer           = "imputed_count"
 # obs column holding integer cluster labels

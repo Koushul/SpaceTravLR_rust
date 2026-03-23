@@ -46,7 +46,9 @@ fn next_momentum(t: f64) -> f64 {
 /// Squared Frobenius norm of `a - b`.
 #[inline]
 fn sq_frob_diff(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
-    Zip::from(a).and(b).fold(0.0, |acc, &x, &y| acc + (x - y).powi(2))
+    Zip::from(a)
+        .and(b)
+        .fold(0.0, |acc, &x, &y| acc + (x - y).powi(2))
 }
 
 /// Frobenius norm of `a`.
@@ -69,11 +71,11 @@ fn flat_dot(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
 fn continue_backtracking(
     problem: &impl FistaProblem,
     new_x: &Array2<f64>,
-    y: &Array2<f64>,         // momentum point
+    y: &Array2<f64>, // momentum point
     lipschitz: f64,
 ) -> bool {
     let f_new = problem.smooth_loss(new_x);
-    let f_y   = problem.smooth_loss(y);
+    let f_y = problem.smooth_loss(y);
     let grad_y = problem.smooth_grad(y);
 
     let update = Array2::from_shape_fn(new_x.raw_dim(), |(r, c)| new_x[[r, c]] - y[[r, c]]);
@@ -91,7 +93,7 @@ fn continue_backtracking(
 fn update_step(
     problem: &impl FistaProblem,
     x: &Array2<f64>,
-    y: &Array2<f64>,   // momentum point
+    y: &Array2<f64>, // momentum point
     t: f64,
     lipschitz: f64,
 ) -> (Array2<f64>, Array2<f64>, f64) {
@@ -200,7 +202,11 @@ where
         let rel_change = norm_change / norm_x;
 
         if let Some(ref mut cb) = callback {
-            cb(&IterInfo { iteration: iter, norm_change, lipschitz: l });
+            cb(&IterInfo {
+                iteration: iter,
+                norm_change,
+                lipschitz: l,
+            });
         }
 
         if rel_change < tol {
@@ -344,7 +350,10 @@ mod tests {
     fn fista_shifted_l1_known_solution() {
         // Fixed point with this FISTA's 0.5/L gradient step:
         // w = prox(w - 0.5*(w-3)/L, L) = max(0.5w + 1.5 - 0.1/L, 0) → w = 2.8 at L=1
-        let problem = ShiftedL1 { target: 3.0, lambda: 0.1 };
+        let problem = ShiftedL1 {
+            target: 3.0,
+            lambda: 0.1,
+        };
         let w0 = array![[0.0]];
         let result = minimise(&problem, w0, 1.0, 1000, 1e-12, None::<fn(&IterInfo)>);
         assert!(result.converged);
@@ -385,12 +394,19 @@ mod tests {
         };
         let w0 = Array2::zeros((2, 1));
         let result = minimise(&problem, w0, 0.001, 1000, 1e-8, None::<fn(&IterInfo)>);
-        assert!(result.lipschitz > 0.001, "Backtracking should grow L from initial underestimate");
+        assert!(
+            result.lipschitz > 0.001,
+            "Backtracking should grow L from initial underestimate"
+        );
     }
 
     #[test]
     fn next_momentum_values() {
-        assert_abs_diff_eq!(next_momentum(1.0), 0.5 + 0.5 * 5.0_f64.sqrt(), epsilon = 1e-12);
+        assert_abs_diff_eq!(
+            next_momentum(1.0),
+            0.5 + 0.5 * 5.0_f64.sqrt(),
+            epsilon = 1e-12
+        );
         let t2 = next_momentum(1.0);
         let t3 = next_momentum(t2);
         assert!(t3 > t2, "Momentum sequence should be increasing");

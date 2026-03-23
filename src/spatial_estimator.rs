@@ -1,14 +1,14 @@
 use crate::config::CnnConfig;
+use crate::estimator::{ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use crate::training_hud::{TrainingHud, log_line};
 use anndata::data::SelectInfoElem;
 use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
 use burn::tensor::backend::AutodiffBackend;
-use ndarray::{Array1, Array2};
 use indicatif::{ProgressBar, ProgressStyle};
-use crate::estimator::{finite_or_zero_f64, ClusteredGCNNWR};
-use crate::training_hud::{log_line, TrainingHud};
+use ndarray::{Array1, Array2};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 fn compute_gene_mean_expression<AnB: Backend>(
     adata: &AnnData<AnB>,
@@ -207,11 +207,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         if let Some(filter) = gene_filter {
             let msg = format!("Filtering for specific genes: {:?}", filter);
             log_line(&hud, msg.clone());
-            if hud.is_none() { println!("{}", msg); }
+            if hud.is_none() {
+                println!("{}", msg);
+            }
             target_genes.retain(|g| filter.contains(g));
             let msg = format!("Retained {} genes for training", target_genes.len());
             log_line(&hud, msg.clone());
-            if hud.is_none() { println!("{}", msg); }
+            if hud.is_none() {
+                println!("{}", msg);
+            }
         }
         if let Some(n) = max_genes {
             if target_genes.len() > n {
@@ -219,7 +223,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let preview: Vec<_> = target_genes.iter().take(5).cloned().collect();
                 let msg = format!("Using first {} genes (preview: {:?})", n, preview);
                 log_line(&hud, msg.clone());
-                if hud.is_none() { println!("{}", msg); }
+                if hud.is_none() {
+                    println!("{}", msg);
+                }
             }
         }
 
@@ -231,7 +237,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         let msg = "Pre-caching metadata and coordinates...";
         log_line(&hud, msg.to_string());
-        if hud.is_none() { println!("{}", msg); }
+        if hud.is_none() {
+            println!("{}", msg);
+        }
 
         let cluster_annot = "cell_type_int".to_string();
         let obs_df = setup_adata.read_obs()?;
@@ -309,15 +317,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
 
         for _worker in 0..n_workers {
-            let work        = work.clone();
-            let xy          = xy.clone();
-            let clusters    = clusters.clone();
-            let obs_names   = obs_names.clone();
-            let global_grn  = global_grn.clone();
-            let hud         = hud.clone();
-            let pb          = pb_opt.clone();
-            let device      = device.clone();
-            let adata_path  = adata_path.to_string();
+            let work = work.clone();
+            let xy = xy.clone();
+            let clusters = clusters.clone();
+            let obs_names = obs_names.clone();
+            let global_grn = global_grn.clone();
+            let hud = hud.clone();
+            let pb = pb_opt.clone();
+            let device = device.clone();
+            let adata_path = adata_path.to_string();
             let training_dir = training_dir.to_string();
 
             // scalar params
@@ -328,8 +336,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let gene_mean_arc = gene_mean_arc.clone();
             let layer_w = layer_for_workers.clone();
             let cnn_w = cnn_for_workers.clone();
-            let (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol) =
-                (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol);
+            let (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol) = (
+                epochs,
+                learning_rate,
+                score_threshold,
+                l1_reg,
+                group_reg,
+                n_iter,
+                tol,
+            );
             let full_cnn = full_cnn;
             let num_clusters = num_clusters;
 
@@ -348,7 +363,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
                     loop {
                         // Cancel check
-                        if hud.as_ref()
+                        if hud
+                            .as_ref()
                             .and_then(|h| h.lock().ok())
                             .map(|g| g.should_cancel())
                             .unwrap_or(false)
@@ -363,39 +379,59 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         };
                         let Some(gene) = gene else { break };
 
-                        let csv_path    = format!("{}/{}_betadata.csv", training_dir, gene);
+                        let csv_path = format!("{}/{}_betadata.csv", training_dir, gene);
                         let orphan_path = format!("{}/{}.orphan", training_dir, gene);
-                        let lock_path   = format!("{}/{}.lock", training_dir, gene);
+                        let lock_path = format!("{}/{}.lock", training_dir, gene);
 
                         // Skip already-done
                         if std::path::Path::new(&csv_path).exists()
                             || std::path::Path::new(&orphan_path).exists()
                         {
                             if let Some(ref h) = hud {
-                                if let Ok(mut g) = h.lock() { g.genes_skipped += 1; }
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_skipped += 1;
+                                }
                                 log_line(&hud, format!(">> skip (cached) {}", gene));
                             }
-                            if let Some(ref p) = pb { p.inc(1); }
-                            if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                            if let Some(ref p) = pb {
+                                p.inc(1);
+                            }
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_rounds += 1;
+                                }
+                            }
                             continue;
                         }
 
                         // Try to claim this gene via a lock file
                         if fs::OpenOptions::new()
-                            .write(true).create_new(true).open(&lock_path)
+                            .write(true)
+                            .create_new(true)
+                            .open(&lock_path)
                             .is_err()
                         {
                             if let Some(ref h) = hud {
-                                if let Ok(mut g) = h.lock() { g.genes_skipped += 1; }
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_skipped += 1;
+                                }
                                 log_line(&hud, format!(">> skip (lock) {}", gene));
                             }
-                            if let Some(ref p) = pb { p.inc(1); }
-                            if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                            if let Some(ref p) = pb {
+                                p.inc(1);
+                            }
+                            if let Some(ref h) = hud {
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_rounds += 1;
+                                }
+                            }
                             continue;
                         }
                         struct LockGuard(String);
                         impl Drop for LockGuard {
-                            fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+                            fn drop(&mut self) {
+                                let _ = fs::remove_file(&self.0);
+                            }
                         }
                         let _guard = LockGuard(lock_path);
 
@@ -424,9 +460,20 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             Ok(est) => est,
                             Err(e) => {
                                 log_line(&hud, format!("❌ estimator init failed {}: {}", gene, e));
-                                if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_failed += 1; g.remove_gene(&gene); } }
-                                if let Some(ref p) = pb { p.inc(1); }
-                                if let Some(ref h) = hud { if let Ok(mut g) = h.lock() { g.genes_rounds += 1; } }
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        g.genes_failed += 1;
+                                        g.remove_gene(&gene);
+                                    }
+                                }
+                                if let Some(ref p) = pb {
+                                    p.inc(1);
+                                }
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        g.genes_rounds += 1;
+                                    }
+                                }
                                 continue;
                             }
                         };
@@ -448,7 +495,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             }
                             log_line(&hud, format!(">> orphan (no modulators) {}", gene));
-                            if let Some(ref p) = pb { p.inc(1); }
+                            if let Some(ref p) = pb {
+                                p.inc(1);
+                            }
                             continue;
                         }
 
@@ -459,7 +508,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             format!("lasso | {} mods", n_mods)
                         };
                         if let Some(ref h) = hud {
-                            if let Ok(mut g) = h.lock() { g.set_gene_status(&gene, &phase_str); }
+                            if let Ok(mut g) = h.lock() {
+                                g.set_gene_status(&gene, &phase_str);
+                            }
                         }
 
                         let fit_ok = estimator
@@ -486,32 +537,39 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             if let Some(est_inner) = &estimator.estimator {
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
-                                        g.set_gene_status(&gene, format!("export | {} mods", n_mods));
+                                        g.set_gene_status(
+                                            &gene,
+                                            format!("export | {} mods", n_mods),
+                                        );
                                     }
                                 }
                                 let betadata_path =
                                     format!("{}/{}_betadata.csv", training_dir, gene);
-                                let col_names: Vec<String> =
-                                    std::iter::once("beta0".to_string())
-                                        .chain(
-                                            estimator
-                                                .modulators_genes
-                                                .iter()
-                                                .map(|m| format!("beta_{}", m)),
-                                        )
-                                        .collect();
+                                let col_names: Vec<String> = std::iter::once("beta0".to_string())
+                                    .chain(
+                                        estimator
+                                            .modulators_genes
+                                            .iter()
+                                            .map(|m| format!("beta_{}", m)),
+                                    )
+                                    .collect();
 
                                 if full_cnn {
                                     let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
                                     let all_betas = est_inner.predict_betas(
-                                        &x_mock, &xy, &clusters, num_clusters, &device,
+                                        &x_mock,
+                                        &xy,
+                                        &clusters,
+                                        num_clusters,
+                                        &device,
                                     );
 
                                     let keep: Vec<usize> = (0..all_betas.ncols())
                                         .filter(|&j| {
-                                            all_betas.column(j).iter().any(|&v| {
-                                                finite_or_zero_f64(v) != 0.0
-                                            })
+                                            all_betas
+                                                .column(j)
+                                                .iter()
+                                                .any(|&v| finite_or_zero_f64(v) != 0.0)
                                         })
                                         .collect();
 
@@ -533,8 +591,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 gene
                                             ),
                                         );
-                                    } else if let Ok(mut f) = fs::File::create(&betadata_path)
-                                    {
+                                    } else if let Ok(mut f) = fs::File::create(&betadata_path) {
                                         let mut header = "CellID".to_string();
                                         for &j in &keep {
                                             header.push_str(&format!(",{}", col_names[j]));
@@ -554,11 +611,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         wrote = true;
                                     }
                                 } else {
-                                    let mut cluster_ids: Vec<usize> = est_inner
-                                        .lasso_coefficients
-                                        .keys()
-                                        .copied()
-                                        .collect();
+                                    let mut cluster_ids: Vec<usize> =
+                                        est_inner.lasso_coefficients.keys().copied().collect();
                                     cluster_ids.sort();
 
                                     let rows: Vec<Vec<f64>> = cluster_ids
@@ -585,9 +639,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
                                     let n_cols = 1 + n_mods;
                                     let keep: Vec<usize> = (0..n_cols)
-                                        .filter(|&j| {
-                                            rows.iter().any(|r| r[j] != 0.0)
-                                        })
+                                        .filter(|&j| rows.iter().any(|r| r[j] != 0.0))
                                         .collect();
 
                                     if !keep.iter().any(|&j| j >= 1) {
@@ -608,16 +660,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 gene
                                             ),
                                         );
-                                    } else if let Ok(mut f) = fs::File::create(&betadata_path)
-                                    {
+                                    } else if let Ok(mut f) = fs::File::create(&betadata_path) {
                                         let mut header = "Cluster".to_string();
                                         for &j in &keep {
                                             header.push_str(&format!(",{}", col_names[j]));
                                         }
                                         let _ = writeln!(f, "{}", header);
 
-                                        for (row_vals, &c_id) in
-                                            rows.iter().zip(cluster_ids.iter())
+                                        for (row_vals, &c_id) in rows.iter().zip(cluster_ids.iter())
                                         {
                                             let mut row = format!("{}", c_id);
                                             for &j in &keep {
@@ -649,12 +699,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
                         if n_mods > 0 {
                             if let Some(est) = estimator.estimator.as_ref() {
-                                let safe_gene =
-                                    gene.replace(['/', '\\'], "_");
-                                let log_path = format!(
-                                    "{}/log/{}.log",
-                                    training_dir, safe_gene
-                                );
+                                let safe_gene = gene.replace(['/', '\\'], "_");
+                                let log_path = format!("{}/log/{}.log", training_dir, safe_gene);
                                 let _ = crate::training_log::write_gene_training_log(
                                     std::path::Path::new(&log_path),
                                     &gene,
@@ -680,9 +726,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
                         // Deregister from active, bump counter
                         if let Some(ref h) = hud {
-                            if let Ok(mut g) = h.lock() { g.remove_gene(&gene); g.genes_rounds += 1; }
+                            if let Ok(mut g) = h.lock() {
+                                g.remove_gene(&gene);
+                                g.genes_rounds += 1;
+                            }
                         }
-                        if let Some(ref p) = pb { p.inc(1); }
+                        if let Some(ref p) = pb {
+                            p.inc(1);
+                        }
                     }
                 })
                 .expect("failed to spawn worker thread");
@@ -724,15 +775,25 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         let target_expr = self.get_gene_expression(&self.target_gene)?;
 
         let mut all_unique_genes: HashSet<String> = HashSet::new();
-        for g in &self.regulators { all_unique_genes.insert(g.clone()); }
-        for g in &self.ligands { all_unique_genes.insert(g.clone()); }
-        for g in &self.receptors { all_unique_genes.insert(g.clone()); }
-        for g in &self.tfl_ligands { all_unique_genes.insert(g.clone()); }
-        for g in &self.tfl_regulators { all_unique_genes.insert(g.clone()); }
-        
+        for g in &self.regulators {
+            all_unique_genes.insert(g.clone());
+        }
+        for g in &self.ligands {
+            all_unique_genes.insert(g.clone());
+        }
+        for g in &self.receptors {
+            all_unique_genes.insert(g.clone());
+        }
+        for g in &self.tfl_ligands {
+            all_unique_genes.insert(g.clone());
+        }
+        for g in &self.tfl_regulators {
+            all_unique_genes.insert(g.clone());
+        }
+
         let unique_genes_vec: Vec<String> = all_unique_genes.into_iter().collect::<Vec<_>>();
         let expr_matrix = self.get_multiple_gene_expressions(&unique_genes_vec)?;
-        
+
         let mut gene_to_idx: HashMap<String, usize> = HashMap::new();
         for (i, g) in unique_genes_vec.iter().enumerate() {
             gene_to_idx.insert(g.clone(), i);
@@ -741,12 +802,12 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         let n_obs = self.adata.n_obs();
         let total_modulators = self.regulators.len() + self.lr_pairs.len() + self.tfl_pairs.len();
         let mut x_modulators = Array2::<f64>::zeros((n_obs, total_modulators));
-        
+
         for (i, gene) in self.regulators.iter().enumerate() {
             let idx = gene_to_idx[gene];
             x_modulators.column_mut(i).assign(&expr_matrix.column(idx));
         }
-        
+
         let offset_lr = self.regulators.len();
         for (i, pair) in self.lr_pairs.iter().enumerate() {
             let parts: Vec<&str> = pair.split('$').collect::<Vec<_>>();
@@ -758,7 +819,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 x_modulators.column_mut(offset_lr + i).assign(&interaction);
             }
         }
-        
+
         let offset_tfl = offset_lr + self.lr_pairs.len();
         for (i, pair) in self.tfl_pairs.iter().enumerate() {
             let parts: Vec<&str> = pair.split('#').collect::<Vec<_>>();
@@ -773,9 +834,15 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         if self.estimator.is_none() {
             let mut groups = Vec::new();
-            for _ in 0..self.regulators.len() { groups.push(0); }
-            for _ in 0..self.lr_pairs.len() { groups.push(1); }
-            for _ in 0..self.tfl_pairs.len() { groups.push(2); }
+            for _ in 0..self.regulators.len() {
+                groups.push(0);
+            }
+            for _ in 0..self.lr_pairs.len() {
+                groups.push(1);
+            }
+            for _ in 0..self.tfl_pairs.len() {
+                groups.push(2);
+            }
 
             let params = GroupLassoParams {
                 l1_reg,
@@ -821,7 +888,10 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         device: &AB::Device,
     ) -> anyhow::Result<()> {
         let obs_df = self.adata.read_obs()?;
-        let xy: Array2<f64> = self.adata.obsm().get_item("spatial")?
+        let xy: Array2<f64> = self
+            .adata
+            .obsm()
+            .get_item("spatial")?
             .ok_or_else(|| anyhow::anyhow!("obsm['spatial'] not found"))?;
         let clusters_ser = obs_df.column(&self.cluster_annot)?;
         let clusters: Array1<usize> = clusters_ser
@@ -866,10 +936,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             gene_indices.push(idx);
         }
 
-        let slice = [
-            SelectInfoElem::full(),
-            SelectInfoElem::Index(gene_indices),
-        ];
+        let slice = [SelectInfoElem::full(), SelectInfoElem::Index(gene_indices)];
 
         if self.layer != "X" && !self.layer.is_empty() {
             if let Some(layer_elem) = self.adata.layers().get(&self.layer) {
@@ -882,7 +949,10 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         let x_elem = self.adata.x();
         if x_elem.is_none() {
-            return Err(anyhow::anyhow!("X is empty and layer {} not found", self.layer));
+            return Err(anyhow::anyhow!(
+                "X is empty and layer {} not found",
+                self.layer
+            ));
         }
         let data: Array2<f64> = x_elem
             .slice(slice)?

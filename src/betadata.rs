@@ -210,8 +210,13 @@ impl BetaFrame {
         tfl_regulators: Vec<String>,
     ) -> Self {
         let n = row_labels.len();
-        let modulator_genes =
-            Self::compute_modulator_genes(&tfs, &ligands, &receptors, &tfl_ligands, &tfl_regulators);
+        let modulator_genes = Self::compute_modulator_genes(
+            &tfs,
+            &ligands,
+            &receptors,
+            &tfl_ligands,
+            &tfl_regulators,
+        );
 
         Self {
             gene_name,
@@ -378,8 +383,13 @@ impl BetaFrame {
         let lr_betas = Self::extract_cols(&data, &lr_indices, n_rows);
         let tfl_betas = Self::extract_cols(&data, &tfl_indices, n_rows);
 
-        let modulator_genes =
-            Self::compute_modulator_genes(&tfs, &ligands, &receptors, &tfl_ligands, &tfl_regulators);
+        let modulator_genes = Self::compute_modulator_genes(
+            &tfs,
+            &ligands,
+            &receptors,
+            &tfl_ligands,
+            &tfl_regulators,
+        );
 
         Ok(Self {
             gene_name,
@@ -443,13 +453,21 @@ impl BetaFrame {
             .map(|(i, g)| (g.strip_prefix("beta_").unwrap_or(g.as_str()), i))
             .collect();
 
-        let tf_oi: Vec<usize> = self.tfs.iter()
+        let tf_oi: Vec<usize> = self
+            .tfs
+            .iter()
             .map(|t| gene_to_out.get(t.as_str()).copied().unwrap_or(0))
             .collect();
 
         // LR work items with pre-resolved flat indices into input matrices
         #[derive(Clone)]
-        struct LrWork { beta_col: usize, rec_oi: usize, lig_oi: usize, wl_col: usize, gex_col: usize }
+        struct LrWork {
+            beta_col: usize,
+            rec_oi: usize,
+            lig_oi: usize,
+            wl_col: usize,
+            gex_col: usize,
+        }
         let lr_work: Vec<LrWork> = (0..n_lr)
             .filter_map(|j| {
                 Some(LrWork {
@@ -463,7 +481,13 @@ impl BetaFrame {
             .collect();
 
         #[derive(Clone)]
-        struct TflWork { beta_col: usize, lig_oi: usize, reg_oi: usize, gex_col: usize, wl_col: usize }
+        struct TflWork {
+            beta_col: usize,
+            lig_oi: usize,
+            reg_oi: usize,
+            gex_col: usize,
+            wl_col: usize,
+        }
         let tfl_work: Vec<TflWork> = (0..n_tfl)
             .filter_map(|j| {
                 Some(TflWork {
@@ -492,48 +516,45 @@ impl BetaFrame {
         // Row-by-row parallel processing: each cell's result row (~2KB) fits in L1
         let mut result = vec![0.0f64; n * n_out];
 
-        result
-            .par_chunks_mut(n_out)
-            .enumerate()
-            .for_each(|(i, r)| {
-                let br = unsafe { *map.get_unchecked(i) };
-                let rw_base = i * rw_nc;
-                let rw_tfl_base = i * rw_tfl_nc;
-                let gex_base = i * gex_nc;
+        result.par_chunks_mut(n_out).enumerate().for_each(|(i, r)| {
+            let br = unsafe { *map.get_unchecked(i) };
+            let rw_base = i * rw_nc;
+            let rw_tfl_base = i * rw_tfl_nc;
+            let gex_base = i * gex_nc;
 
-                // 1. TF derivatives (no scale_factor)
-                let tf_base = br * n_tfs;
-                for j in 0..n_tfs {
-                    unsafe {
-                        *r.get_unchecked_mut(*tf_oi.get_unchecked(j))
-                            += *tf_flat.get_unchecked(tf_base + j);
-                    }
+            // 1. TF derivatives (no scale_factor)
+            let tf_base = br * n_tfs;
+            for j in 0..n_tfs {
+                unsafe {
+                    *r.get_unchecked_mut(*tf_oi.get_unchecked(j)) +=
+                        *tf_flat.get_unchecked(tf_base + j);
                 }
+            }
 
-                // 2+3. LR derivatives
-                let lr_beta_base = br * n_lr;
-                for lw in &lr_work {
-                    let beta = unsafe { *lr_flat.get_unchecked(lr_beta_base + lw.beta_col) };
-                    let wl = unsafe { *rw_flat.get_unchecked(rw_base + lw.wl_col) };
-                    let gex = unsafe { *gex_flat.get_unchecked(gex_base + lw.gex_col) };
+            // 2+3. LR derivatives
+            let lr_beta_base = br * n_lr;
+            for lw in &lr_work {
+                let beta = unsafe { *lr_flat.get_unchecked(lr_beta_base + lw.beta_col) };
+                let wl = unsafe { *rw_flat.get_unchecked(rw_base + lw.wl_col) };
+                let gex = unsafe { *gex_flat.get_unchecked(gex_base + lw.gex_col) };
 
-                    if gex > 0.0 {
-                        unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * scale_factor };
-                    }
-                    unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex * scale_factor };
+                if gex > 0.0 {
+                    unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * scale_factor };
                 }
+                unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex * scale_factor };
+            }
 
-                // 4+5. TFL derivatives
-                let tfl_beta_base = br * n_tfl;
-                for tw in &tfl_work {
-                    let beta = unsafe { *tfl_flat.get_unchecked(tfl_beta_base + tw.beta_col) };
-                    let gex_reg = unsafe { *gex_flat.get_unchecked(gex_base + tw.gex_col) };
-                    let wl = unsafe { *rw_tfl_flat.get_unchecked(rw_tfl_base + tw.wl_col) };
+            // 4+5. TFL derivatives
+            let tfl_beta_base = br * n_tfl;
+            for tw in &tfl_work {
+                let beta = unsafe { *tfl_flat.get_unchecked(tfl_beta_base + tw.beta_col) };
+                let gex_reg = unsafe { *gex_flat.get_unchecked(gex_base + tw.gex_col) };
+                let wl = unsafe { *rw_tfl_flat.get_unchecked(rw_tfl_base + tw.wl_col) };
 
-                    unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * scale_factor };
-                    unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl * scale_factor };
-                }
-            });
+                unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * scale_factor };
+                unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl * scale_factor };
+            }
+        });
 
         let mut result_arr = Array2::from_shape_vec((n, n_out), result).unwrap();
 
@@ -582,9 +603,7 @@ impl Betabase {
         let pb = indicatif::ProgressBar::new(paths.len() as u64);
         pb.set_style(
             indicatif::ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} Reading betadata",
-                )?
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} Reading betadata")?
                 .progress_chars("#>-"),
         );
 
@@ -664,4 +683,3 @@ impl Betabase {
         })
     }
 }
-
