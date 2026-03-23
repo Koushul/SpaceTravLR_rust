@@ -204,6 +204,9 @@ fn format_t(secs: f64) -> String {
 }
 
 fn truncate_label(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {
@@ -212,7 +215,32 @@ fn truncate_label(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn build_perf_panel_lines(st: &TrainingHudState) -> Vec<Line<'static>> {
+fn fmt_r2_fixed(r: f64) -> String {
+    if r.is_finite() {
+        format!("{:>7.3}", r)
+    } else {
+        format!("{:>7}", "—")
+    }
+}
+
+fn perf_r2_columns(inner_w: usize) -> (usize, usize) {
+    const MID: usize = 2;
+    const R2_COL: usize = 7;
+    let w = inner_w.max(MID + 2);
+    let half = (w - MID) / 2;
+    let gene_w = half.saturating_sub(R2_COL);
+    (half, gene_w)
+}
+
+fn rule_line(inner_w: usize) -> Line<'static> {
+    let n = inner_w.clamp(8, 128);
+    Line::from(Span::styled(
+        "─".repeat(n),
+        Style::default().fg(MUTED),
+    ))
+}
+
+fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'static>> {
     let n_genes = st.gene_r2_mean.len();
     if n_genes == 0 {
         return vec![Line::from(Span::styled(
@@ -220,6 +248,8 @@ fn build_perf_panel_lines(st: &TrainingHudState) -> Vec<Line<'static>> {
             Style::default().fg(MUTED),
         ))];
     }
+
+    let (half, gene_w) = perf_r2_columns(inner_w);
 
     let grand: f64 =
         st.gene_r2_mean.iter().map(|(_, r)| r).sum::<f64>() / n_genes as f64;
@@ -272,35 +302,37 @@ fn build_perf_panel_lines(st: &TrainingHudState) -> Vec<Line<'static>> {
         ]));
     }
 
-    lines.push(Line::from(Span::styled("────────────────────────────", Style::default().fg(MUTED))));
+    lines.push(rule_line(inner_w));
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<18}", "▲ best"),
+            format!("{:<hw$}", "▲ best", hw = half),
             Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().fg(MUTED)),
         Span::styled(
-            format!("{:<18}", "▼ worst"),
+            format!("{:<hw$}", "▼ worst", hw = half),
             Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
         ),
     ]));
     for ((g_hi, r_hi), (g_lo, r_lo)) in top5.into_iter().zip(bot5.into_iter()) {
+        let g_hi_s = truncate_label(&g_hi, gene_w);
+        let g_lo_s = truncate_label(&g_lo, gene_w);
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{:<12}", truncate_label(&g_hi, 11)),
+                format!("{:<gw$}", g_hi_s, gw = gene_w),
                 Style::default().fg(TITLE),
             ),
             Span::styled(
-                format!(" {:>5}", format!("{:.3}", r_hi)),
+                fmt_r2_fixed(r_hi),
                 Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default().fg(MUTED)),
             Span::styled(
-                format!("{:<12}", truncate_label(&g_lo, 11)),
+                format!("{:<gw$}", g_lo_s, gw = gene_w),
                 Style::default().fg(TITLE),
             ),
             Span::styled(
-                format!(" {:>5}", format!("{:.3}", r_lo)),
+                fmt_r2_fixed(r_lo),
                 Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -346,9 +378,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
     let mut dashboard_exit = TrainingDashboardExit::Completed;
 
-    let perf_cell: RefCell<(u64, Instant, Vec<Line<'static>>)> = RefCell::new((
+    let perf_cell: RefCell<(u64, Instant, usize, Vec<Line<'static>>)> = RefCell::new((
         0,
         Instant::now() - Duration::from_secs(3600),
+        0,
         vec![Line::from(Span::styled(
             "  ·  no R² yet  ·",
             Style::default().fg(MUTED),
@@ -449,7 +482,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             let work_row = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(10), Constraint::Length(36)])
+                .constraints([Constraint::Min(10), Constraint::Min(40)])
                 .split(left[1]);
 
             // ── Telemetry ─────────────────────────────────────────────────────
@@ -517,22 +550,24 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 work_row[0],
             );
 
-            // ── R² performance (throttled rebuild) ────────────────────────────
+            // ── R² performance (throttled rebuild; width-aware columns) ─────
+            let perf_inner = work_row[1].width.saturating_sub(2) as usize;
             {
                 let now = Instant::now();
                 let mut cell = perf_cell.borrow_mut();
                 let stale_gen = st.perf_stats_generation != cell.0;
                 let stale_t = now.duration_since(cell.1) > Duration::from_millis(450);
-                if stale_gen || stale_t {
-                    cell.2 = build_perf_panel_lines(&st);
+                let stale_w = cell.2 != perf_inner;
+                if stale_gen || stale_t || stale_w {
+                    cell.3 = build_perf_panel_lines(&st, perf_inner);
                     cell.0 = st.perf_stats_generation;
                     cell.1 = now;
+                    cell.2 = perf_inner;
                 }
             }
-            let perf_snapshot = perf_cell.borrow().2.clone();
+            let perf_snapshot = perf_cell.borrow().3.clone();
             f.render_widget(
                 Paragraph::new(perf_snapshot)
-                    .wrap(Wrap { trim: false })
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
