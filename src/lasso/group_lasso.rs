@@ -184,6 +184,9 @@ pub struct GroupLasso {
     /// Learned coefficients; `None` until `fit` is called.
     pub fitted: Option<FittedCoefficients>,
 
+    /// FISTA iterations from the last `fit` call (0 before any successful minimise).
+    pub last_fista_iterations: usize,
+
     // Column means used for centering (needed to correct the intercept).
     x_means: Option<Array2<f64>>,
 
@@ -201,6 +204,7 @@ impl GroupLasso {
             group_ids: None,
             feature_group_ids: None,
             fitted: None,
+            last_fista_iterations: 0,
             x_means: None,
             lipschitz: None,
         }
@@ -465,6 +469,7 @@ impl GroupLasso {
             None::<fn(&IterInfo)>,
         );
 
+        self.last_fista_iterations = result.iterations;
         self.lipschitz = Some(result.lipschitz);
         let (mut intercept, coef) = Self::split(&result.coef);
 

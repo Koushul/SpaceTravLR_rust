@@ -1,5 +1,5 @@
-use crate::training_hud::TrainingHud;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crate::training_hud::{TrainingHud, TrainingHudState};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -9,6 +9,7 @@ use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
+use std::cell::RefCell;
 use std::io::stdout;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -35,6 +36,10 @@ const TITLE:  Color = Color::Rgb(240, 190, 220);
 const C_WROTE: Color = Color::Rgb(150, 230, 195);
 const C_FAIL:  Color = Color::Rgb(255, 130, 155);
 const C_SKIP:  Color = Color::Rgb(110, 95,  130);
+const C_TOPR2: Color = Color::Rgb(130, 235, 190);
+const C_BOTR2: Color = Color::Rgb(255, 160, 170);
+
+const PERF_BORD: Color = Color::Rgb(160, 150, 220);
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
 // Compact ASCII rocket — every line is exactly 14 display columns.
@@ -198,8 +203,127 @@ fn format_t(secs: f64) -> String {
     else { format!("T+{}s", s) }
 }
 
+fn truncate_label(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{}…", t)
+    }
+}
+
+fn build_perf_panel_lines(st: &TrainingHudState) -> Vec<Line<'static>> {
+    let n_genes = st.gene_r2_mean.len();
+    if n_genes == 0 {
+        return vec![Line::from(Span::styled(
+            "  ·  no R² yet  ·",
+            Style::default().fg(MUTED),
+        ))];
+    }
+
+    let grand: f64 =
+        st.gene_r2_mean.iter().map(|(_, r)| r).sum::<f64>() / n_genes as f64;
+
+    let mut v = st.gene_r2_mean.clone();
+    v.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top5: Vec<(String, f64)> = v.iter().take(5).cloned().collect();
+    v.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let bot5: Vec<(String, f64)> = v.iter().take(5).cloned().collect();
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(12);
+    lines.push(Line::from(vec![
+        Span::styled("μ R²/gene ", Style::default().fg(LABEL)),
+        Span::styled(
+            format!("{:.3}", grand),
+            Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let mut cluster_parts: Vec<(usize, f64)> = st
+        .cluster_r2_sum
+        .iter()
+        .zip(st.cluster_r2_count.iter())
+        .enumerate()
+        .filter_map(|(i, (&sum, &cnt))| {
+            if cnt > 0 {
+                Some((i, sum / f64::from(cnt)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    cluster_parts.sort_by_key(|(i, _)| *i);
+
+    if !cluster_parts.is_empty() {
+        let cl_mean: f64 =
+            cluster_parts.iter().map(|(_, r)| r).sum::<f64>() / cluster_parts.len() as f64;
+        lines.push(Line::from(vec![
+            Span::styled("μ R²/cluster ", Style::default().fg(LABEL)),
+            Span::styled(
+                format!("{:.3}", cl_mean),
+                Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(Span::styled("────────────────────────────", Style::default().fg(MUTED))));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<18}", "▲ best"),
+            Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default().fg(MUTED)),
+        Span::styled(
+            format!("{:<18}", "▼ worst"),
+            Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    for ((g_hi, r_hi), (g_lo, r_lo)) in top5.into_iter().zip(bot5.into_iter()) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<12}", truncate_label(&g_hi, 11)),
+                Style::default().fg(TITLE),
+            ),
+            Span::styled(
+                format!(" {:>5}", format!("{:.3}", r_hi)),
+                Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("{:<12}", truncate_label(&g_lo, 11)),
+                Style::default().fg(TITLE),
+            ),
+            Span::styled(
+                format!(" {:>5}", format!("{:.3}", r_lo)),
+                Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    lines
+}
+
 // ── Dashboard ─────────────────────────────────────────────────────────────────
-pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingDashboardExit {
+    Completed,
+    /// User pressed Shift+Q — terminal restored; caller should exit the process without waiting on workers.
+    ForceQuit,
+}
+
+fn is_shift_q(key: &event::KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('q' | 'Q'))
+}
+
+pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashboardExit> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
@@ -220,6 +344,17 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
 
     let output_dir = hud.lock().map(|st| st.output_dir.clone()).unwrap_or_default();
 
+    let mut dashboard_exit = TrainingDashboardExit::Completed;
+
+    let perf_cell: RefCell<(u64, Instant, Vec<Line<'static>>)> = RefCell::new((
+        0,
+        Instant::now() - Duration::from_secs(3600),
+        vec![Line::from(Span::styled(
+            "  ·  no R² yet  ·",
+            Style::default().fg(MUTED),
+        ))],
+    ));
+
     loop {
         if last_sys.elapsed() > Duration::from_millis(350) {
             sys.refresh_cpu_all();
@@ -232,6 +367,13 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
         }
         if event::poll(Duration::from_millis(40))? {
             if let Event::Key(key) = event::read()? {
+                if is_shift_q(&key) {
+                    if let Ok(st) = hud.lock() {
+                        st.cancel_requested.store(true, Ordering::Relaxed);
+                    }
+                    dashboard_exit = TrainingDashboardExit::ForceQuit;
+                    break;
+                }
                 if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
                     if let Ok(st) = hud.lock() {
                         st.cancel_requested.store(true, Ordering::Relaxed);
@@ -268,7 +410,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
                 .margin(1)
                 .constraints([
                     Constraint::Length(1),
-                    Constraint::Min(12),
+                    Constraint::Min(16),
                     Constraint::Length(5),
                     Constraint::Length(1),
                 ])
@@ -302,8 +444,13 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
 
             let left = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(7), Constraint::Min(4)])
+                .constraints([Constraint::Length(7), Constraint::Min(6)])
                 .split(hchunks[0]);
+
+            let work_row = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(10), Constraint::Length(36)])
+                .split(left[1]);
 
             // ── Telemetry ─────────────────────────────────────────────────────
             let path_s = if st.dataset_path.len() > 55 {
@@ -356,7 +503,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
             // ── Workers ───────────────────────────────────────────────────────
             let mut active: Vec<(&String, &String)> = st.active_genes.iter().collect();
             active.sort_by_key(|(g, _)| g.as_str());
-            let cw = (left[1].width as usize).saturating_sub(2);
+            let cw = (work_row[0].width as usize).saturating_sub(2);
 
             f.render_widget(
                 List::new(workers_in_columns(&active, cw))
@@ -367,7 +514,36 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
                             Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
                         )))
                     .style(bg),
-                left[1],
+                work_row[0],
+            );
+
+            // ── R² performance (throttled rebuild) ────────────────────────────
+            {
+                let now = Instant::now();
+                let mut cell = perf_cell.borrow_mut();
+                let stale_gen = st.perf_stats_generation != cell.0;
+                let stale_t = now.duration_since(cell.1) > Duration::from_millis(450);
+                if stale_gen || stale_t {
+                    cell.2 = build_perf_panel_lines(&st);
+                    cell.0 = st.perf_stats_generation;
+                    cell.1 = now;
+                }
+            }
+            let perf_snapshot = perf_cell.borrow().2.clone();
+            f.render_widget(
+                Paragraph::new(perf_snapshot)
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(PERF_BORD))
+                            .title(Span::styled(
+                                " ✦ LASSO R² ",
+                                Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                            )),
+                    )
+                    .style(bg),
+                work_row[1],
             );
 
             // ── Rocket ────────────────────────────────────────────────────────
@@ -406,7 +582,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
                     " draining — will abort after current genes finish ",
                     Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)))
             } else {
-                Line::from(Span::styled(" [q] abort signal ",
+                Line::from(Span::styled(
+                    " [q] graceful stop   [Shift+Q] kill CLI now ",
                     Style::default().fg(MUTED)))
             };
             f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: true }), vchunks[3]);
@@ -417,5 +594,5 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<()> {
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
-    Ok(())
+    Ok(dashboard_exit)
 }

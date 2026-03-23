@@ -6,23 +6,6 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR) �
 
 SpaceTravLR learns how genes regulate each other across cells in a tissue, then simulates what happens when you knock out or overexpress a gene.
 
-```mermaid
-flowchart LR
-    subgraph Training ["Training (fit_all_genes)"]
-        A[("AnnData\n.h5ad")] --> B["Gene expression\n+ spatial coords"]
-        B --> C["Group Lasso\nper cluster"]
-        C --> D[("Beta files\n*_betadata.csv")]
-    end
-    subgraph Inference ["Perturbation (perturb)"]
-        D --> E["Load Betabase"]
-        E --> F["splash()\npartial derivatives"]
-        F --> G["Propagate through\nspatial network"]
-        G --> H["Simulated\nexpression"]
-    end
-    style Training fill:#1a1a2e,stroke:#e94560,color:#eee
-    style Inference fill:#1a1a2e,stroke:#0f3460,color:#eee
-```
-
 The core biological model: genes don't act in isolation. A transcription factor (TF) in cell A can regulate a target gene in cell A. But a ligand expressed by cell B can also regulate genes in nearby cell A — the signal decays with distance following a Gaussian kernel.
 
 ```
@@ -53,37 +36,7 @@ The core biological model: genes don't act in isolation. A transcription factor 
 
 ## Architecture
 
-```mermaid
-graph TD
-    subgraph core ["Core modules"]
-        betadata["betadata\nBetaFrame / Betabase\nsplash()"]
-        perturb["perturb\nperturb()"]
-        ligand["ligand\ncalculate_weighted_ligands"]
-    end
-    subgraph training ["Training"]
-        estimator["estimator\nClusteredGCNNWR"]
-        spatial["spatial_estimator\nfit_all_genes"]
-        lasso["lasso\nFISTA + Group Lasso"]
-        network["network\nGRN / CellChat DB"]
-    end
-    subgraph infra ["Infrastructure"]
-        config["config\nTOML config"]
-        tui["training_tui\nRatatui dashboard"]
-    end
 
-    spatial --> estimator --> lasso
-    spatial --> network
-    spatial --> betadata
-    perturb --> betadata
-    perturb --> ligand
-    config --> spatial
-    config --> perturb
-    tui --> spatial
-
-    style core fill:#0f3460,stroke:#e94560,color:#eee
-    style training fill:#1a1a2e,stroke:#16213e,color:#eee
-    style infra fill:#16213e,stroke:#533483,color:#eee
-```
 
 | Module | Description |
 |---|---|
@@ -310,24 +263,6 @@ This is O(N² × L) where N = cells and L = ligands per radius group. Two implem
 
 ### What it does
 
-```mermaid
-flowchart TD
-    START(["Set target gene\nto desired expression"]) --> S
-
-    subgraph LOOP ["Propagation loop (×3-4 iterations)"]
-        direction TB
-        S["splash() all genes\n∂y/∂x for each modulator"] --> U["Update expression\ngex = original + delta"]
-        U --> R["Recompute received ligands\nGaussian kernel over space"]
-        R --> SWAP["Delta swap\nreplace direct ligand Δ\nwith received ligand Δ"]
-        SWAP --> P["perturb_all_cells\nΔy = Σ splash · Δx"]
-        P --> CLIP["Pin targets + clip\nto observed range"]
-        CLIP -->|"next\niteration"| S
-    end
-
-    CLIP --> RESULT(["Simulated\ngene expression"])
-
-    style LOOP fill:#16213e,stroke:#e94560,color:#eee
-```
 
 Each propagation iteration:
 
@@ -413,16 +348,6 @@ The grid approximation eliminates the O(N²) bottleneck entirely. The key insigh
 ```
 
 **How it works:**
-
-```mermaid
-flowchart LR
-    A["1. Place anchors\non regular grid\nspacing = r × factor\n─────\nO(1)"] --> B["2. Exact sum at\neach anchor\nover all N cells\n─────\nO(A × N × L)"]
-    B --> C["3. Bilinear interpolate\nfrom 4 nearest\nanchors to each cell\n─────\nO(N × L)"]
-
-    style A fill:#0f3460,stroke:#e94560,color:#eee
-    style B fill:#0f3460,stroke:#e94560,color:#eee
-    style C fill:#0f3460,stroke:#e94560,color:#eee
-```
 
 1. Place anchor points on a regular grid with spacing = `radius × grid_factor`
 2. Compute exact received ligands at each anchor by summing over all N cells: O(A × N × L)
@@ -564,39 +489,6 @@ The bilinear interpolation introduces O(h²/r²) ≈ 3% relative error (at grid_
 
 The training side (`lasso/` module) implements a sparse group lasso solver using FISTA (Fast Iterative Shrinkage-Thresholding Algorithm).
 
-```mermaid
-flowchart TD
-    subgraph input ["Input"]
-        X["Feature matrix X\n(cells × modulators)"]
-        Y["Target expression y\n(cells × 1)"]
-    end
-
-    subgraph fista ["FISTA Solver"]
-        direction TB
-        GRAD["Gradient step\nz = w - (1/L)·X'(Xw - y)"] --> PROX["Proximal operator\nw = prox(z)"]
-        PROX --> MOM["Nesterov momentum\naccelerate convergence"]
-        MOM --> CHECK{"Converged?"}
-        CHECK -->|No| RESTART{"Gradient ·\nupdate > 0?"}
-        RESTART -->|Yes| RESET["Reset momentum\n(adaptive restart)"]
-        RESTART -->|No| GRAD
-        RESET --> GRAD
-        CHECK -->|Yes| OUT["Sparse betas"]
-    end
-
-    subgraph prox_detail ["Proximal operator (two-stage)"]
-        direction LR
-        L1["L1 soft-threshold\nper coefficient\n(within-group sparsity)"] --> L2["L2 group shrinkage\nper group block\n(group sparsity)"]
-    end
-
-    X --> GRAD
-    Y --> GRAD
-    PROX -.-> L1
-
-    style input fill:#1a1a2e,stroke:#533483,color:#eee
-    style fista fill:#16213e,stroke:#e94560,color:#eee
-    style prox_detail fill:#0f3460,stroke:#e94560,color:#eee
-```
-
 ### Mathematical formulation
 
 Minimise over **w**:
@@ -669,31 +561,6 @@ prox_l2(w_g, reg) = w_g · max(0, 1 - reg/‖w_g‖₂)
 
 The `fit_all_genes` pipeline trains all genes in parallel using a shared work queue with file-based locking for multi-process coordination:
 
-```mermaid
-flowchart LR
-    subgraph shared ["Shared (Arc)"]
-        GEX["Gene expression"]
-        XY["Coordinates"]
-        GRN["GRN network"]
-    end
-
-    subgraph workers ["Worker threads"]
-        W1["Worker 1\ngene A"]
-        W2["Worker 2\ngene B"]
-        W3["Worker 3\ngene C"]
-        W4["Worker 4\ngene D"]
-    end
-
-    GEX & XY & GRN --> W1 & W2 & W3 & W4
-
-    W1 -->|".lock"| F1["A_betadata.csv"]
-    W2 -->|".lock"| F2["B_betadata.csv"]
-    W3 -->|".lock"| F3["C_betadata.csv"]
-    W4 -->|".lock"| F4["D_betadata.csv"]
-
-    style shared fill:#0f3460,stroke:#e94560,color:#eee
-    style workers fill:#16213e,stroke:#533483,color:#eee
-```
 
 - **Arc sharing**: Coordinates, cluster assignments, and the GRN are loaded once and shared across all worker threads via `Arc`
 - **Lock files**: Each gene creates a `.lock` file during training, allowing multiple processes to train different genes concurrently without duplication
@@ -793,7 +660,7 @@ First column is `Cluster` (seed-only, integer cluster IDs) or `CellID` (CNN, per
 ```bash
 # Train betas (required for benchmarks)
 cargo run --release --bin train_all_genes_demo -- \
-  --parallel 4 --max-genes 50 --output-dir /tmp/betas
+  --parallel 8 --output-dir /tmp/kidney_betas
 
 # Splash benchmarks
 cargo test bench_splash --release -- --nocapture

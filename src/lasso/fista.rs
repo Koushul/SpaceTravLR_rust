@@ -120,6 +120,8 @@ pub struct FistaResult {
     pub lipschitz: f64,
     /// Whether the algorithm converged within `n_iter` iterations.
     pub converged: bool,
+    /// Number of FISTA iterations actually executed (1..=n_iter).
+    pub iterations: usize,
 }
 
 /// Run FISTA to minimise `f(w) + g(w)` starting from `w0`.
@@ -202,11 +204,21 @@ where
         }
 
         if rel_change < tol {
-            return FistaResult { coef: x, lipschitz: l, converged: true };
+            return FistaResult {
+                coef: x,
+                lipschitz: l,
+                converged: true,
+                iterations: iter + 1,
+            };
         }
     }
 
-    FistaResult { coef: x, lipschitz: l, converged: false }
+    FistaResult {
+        coef: x,
+        lipschitz: l,
+        converged: false,
+        iterations: n_iter,
+    }
 }
 
 #[cfg(test)]

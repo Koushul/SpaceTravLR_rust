@@ -6,6 +6,10 @@ edition = "2024"
 [profile.dev]
 incremental = true
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train"] }
 burn-autodiff = { version = "0.16.1" }

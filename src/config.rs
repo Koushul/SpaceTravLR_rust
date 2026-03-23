@@ -10,6 +10,8 @@ pub struct SpaceshipConfig {
     #[serde(default)]
     pub grn: GrnConfig,
     #[serde(default)]
+    pub cnn: CnnConfig,
+    #[serde(default)]
     pub lasso: LassoConfig,
     #[serde(default)]
     pub training: TrainingConfig,
@@ -36,7 +38,13 @@ pub struct SpatialConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrnConfig {
     pub tf_ligand_cutoff: f64,
+    /// Cap LR pairs in database order (no expression ranking).
     pub max_lr_pairs: Option<usize>,
+    /// Keep only this many LR pairs with highest mean expression
+    /// (average of ligand and receptor means across cells). Requires a full
+    /// pass over the expression matrix at pipeline start. Ignores `max_lr_pairs`
+    /// when set.
+    pub top_lr_pairs_by_mean_expression: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +61,16 @@ pub struct TrainingConfig {
     pub epochs: usize,
     pub learning_rate: f64,
     pub score_threshold: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CnnConfig {
+    pub adam_beta_1: f64,
+    pub adam_beta_2: f64,
+    pub adam_epsilon: f64,
+    pub weight_decay: Option<f64>,
+    pub grad_clip_norm: Option<f64>,
+    pub spatial_feature_radius: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +116,20 @@ impl Default for GrnConfig {
         Self {
             tf_ligand_cutoff: 0.5,
             max_lr_pairs: None,
+            top_lr_pairs_by_mean_expression: None,
+        }
+    }
+}
+
+impl Default for CnnConfig {
+    fn default() -> Self {
+        Self {
+            adam_beta_1: 0.9,
+            adam_beta_2: 0.999,
+            adam_epsilon: 1e-5,
+            weight_decay: None,
+            grad_clip_norm: None,
+            spatial_feature_radius: 100.0,
         }
     }
 }
@@ -150,6 +182,7 @@ impl Default for SpaceshipConfig {
             data: DataConfig::default(),
             spatial: SpatialConfig::default(),
             grn: GrnConfig::default(),
+            cnn: CnnConfig::default(),
             lasso: LassoConfig::default(),
             training: TrainingConfig::default(),
             execution: ExecutionConfig::default(),

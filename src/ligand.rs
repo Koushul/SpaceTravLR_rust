@@ -382,4 +382,144 @@ mod tests {
         let r2 = result[[2, 0]];
         assert_abs_diff_eq!(r1, r2, epsilon = 1e-10);
     }
+
+    // ── Grid approximation tests ─────────────────────────────────────────
+
+    fn make_random_cells(n: usize, spread: f64) -> (Array2<f64>, Array2<f64>) {
+        let mut xy = Array2::zeros((n, 2));
+        let mut lig = Array2::zeros((n, 2));
+        for i in 0..n {
+            let t = i as f64 / n as f64;
+            xy[[i, 0]] = (t * 7.3 + 0.5).sin() * spread;
+            xy[[i, 1]] = (t * 11.1 + 1.3).cos() * spread;
+            lig[[i, 0]] = ((t * 3.7).sin() + 1.0).max(0.0);
+            lig[[i, 1]] = ((t * 5.1).cos() + 1.0).max(0.0);
+        }
+        (xy, lig)
+    }
+
+    #[test]
+    fn grid_approx_matches_exact_uniform_field() {
+        let xy = Array2::from_shape_fn((100, 2), |(i, d)| {
+            if d == 0 { (i % 10) as f64 * 10.0 }
+            else { (i / 10) as f64 * 10.0 }
+        });
+        let lig = Array2::ones((100, 1));
+        let r = 50.0;
+
+        let exact = calculate_weighted_ligands(&xy, &lig, r, 1.0);
+        let grid = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.3);
+
+        let max_err = exact.iter().zip(grid.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_err < 0.05, "uniform field max error {:.4e} too large", max_err);
+    }
+
+    #[test]
+    fn grid_approx_accuracy_vs_exact() {
+        let (xy, lig) = make_random_cells(200, 500.0);
+        let r = 100.0;
+
+        let exact = calculate_weighted_ligands(&xy, &lig, r, 1.0);
+        let grid = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.5);
+
+        let diffs: Vec<f64> = exact.iter().zip(grid.iter())
+            .map(|(a, b)| (a - b).abs())
+            .collect();
+        let max_err = diffs.iter().cloned().fold(0.0f64, f64::max);
+        let mean_err = diffs.iter().sum::<f64>() / diffs.len() as f64;
+
+        assert!(max_err < 0.5, "max error {:.4e}", max_err);
+        assert!(mean_err < 0.01, "mean error {:.4e}", mean_err);
+    }
+
+    #[test]
+    fn grid_approx_tighter_factor_less_error() {
+        // Need enough cells that grid doesn't fall back to exact (n_anchors < n_cells)
+        let (xy, lig) = make_random_cells(500, 200.0);
+        let r = 150.0;
+
+        let exact = calculate_weighted_ligands(&xy, &lig, r, 1.0);
+        let coarse = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.8);
+        let fine = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.3);
+
+        let err_coarse = exact.iter().zip(coarse.iter())
+            .map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+        let err_fine = exact.iter().zip(fine.iter())
+            .map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+
+        assert!(err_coarse > 1e-12, "coarse grid should differ from exact, got {:.4e}", err_coarse);
+        assert!(err_fine <= err_coarse,
+            "finer grid should be more accurate: fine={:.4e} > coarse={:.4e}",
+            err_fine, err_coarse);
+    }
+
+    #[test]
+    fn grid_approx_preserves_shape_and_sign() {
+        let (xy, lig) = make_random_cells(50, 200.0);
+        let result = calculate_weighted_ligands_grid(&xy, &lig, 50.0, 1.0, 0.5);
+
+        assert_eq!(result.shape(), &[50, 2]);
+        for &v in result.iter() {
+            assert!(v >= 0.0, "grid approx produced negative value: {}", v);
+        }
+    }
+
+    #[test]
+    fn grid_approx_respects_scale_factor() {
+        let (xy, lig) = make_random_cells(80, 300.0);
+        let r = 80.0;
+
+        let r1 = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.5);
+        let r3 = calculate_weighted_ligands_grid(&xy, &lig, r, 3.0, 0.5);
+
+        for (a, b) in r1.iter().zip(r3.iter()) {
+            assert_abs_diff_eq!(b, &(a * 3.0), epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn grid_approx_symmetry() {
+        let xy = Array2::from_shape_fn((64, 2), |(i, d)| {
+            if d == 0 { (i % 8) as f64 * 20.0 }
+            else { (i / 8) as f64 * 20.0 }
+        });
+        let lig = Array2::ones((64, 1));
+        let result = calculate_weighted_ligands_grid(&xy, &lig, 40.0, 1.0, 0.3);
+
+        assert_abs_diff_eq!(result[[0, 0]], result[[7, 0]], epsilon = 1e-6);
+        assert_abs_diff_eq!(result[[0, 0]], result[[56, 0]], epsilon = 1e-6);
+        assert_abs_diff_eq!(result[[0, 0]], result[[63, 0]], epsilon = 1e-6);
+    }
+
+    #[test]
+    fn grid_falls_back_to_exact_when_few_cells() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let lig = array![[1.0], [2.0], [3.0]];
+
+        let exact = calculate_weighted_ligands(&xy, &lig, 0.5, 1.0);
+        let grid = calculate_weighted_ligands_grid(&xy, &lig, 0.5, 1.0, 0.3);
+
+        for (a, b) in exact.iter().zip(grid.iter()) {
+            assert_abs_diff_eq!(a, b, epsilon = 1e-14);
+        }
+    }
+
+    #[test]
+    fn grid_approx_multiple_ligands() {
+        let (xy, lig) = make_random_cells(150, 400.0);
+        let r = 80.0;
+
+        let exact = calculate_weighted_ligands(&xy, &lig, r, 1.0);
+        let grid = calculate_weighted_ligands_grid(&xy, &lig, r, 1.0, 0.3);
+
+        for col in 0..2 {
+            let max_err = (0..150)
+                .map(|i| (exact[[i, col]] - grid[[i, col]]).abs())
+                .fold(0.0f64, f64::max);
+            assert!(max_err < 0.3,
+                "ligand column {} max error {:.4e} too large", col, max_err);
+        }
+    }
 }

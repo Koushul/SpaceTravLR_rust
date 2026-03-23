@@ -6,7 +6,7 @@
 
 [data]
 # Path to .h5ad dataset.  Leave empty to use $SPACETRAVLR_H5AD env var.
-adata_path      = ""
+adata_path      = "/tmp/kidney_slidetags.h5ad"
 # Expression layer to read from AnnData
 layer           = "imputed_count"
 # obs column holding integer cluster labels
@@ -14,23 +14,38 @@ cluster_annot   = "cell_type_int"
 
 [spatial]
 # Radius for spatial neighbor detection
-radius           = 0.1
+radius           = 200
 # Grid resolution for spatial convolution kernel
 spatial_dim      = 32
 # Distance threshold for contact-based signaling
-contact_distance = 0.05
+contact_distance = 50
 
 [grn]
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.5
-# Cap on ligand-receptor pairs per gene (comment out or omit for no limit)
-# max_lr_pairs   = 50
+# Cap LR pairs in database order when NOT using expression ranking (omit = no limit)
+# max_lr_pairs = 50
+# Keep only the top K LR pairs by mean expression: score = 0.5 * (mean_ligand + mean_receptor)
+# across all cells, using [data].layer. When set, max_lr_pairs is ignored.
+# top_lr_pairs_by_mean_expression = 100
+
+[cnn]
+# Adam hyperparameters (CNN fine-tuning when seed_only = false)
+adam_beta_1 = 0.9
+adam_beta_2 = 0.999
+adam_epsilon = 1e-5
+# L2 weight decay on CNN params (omit or comment out for none)
+# weight_decay = 1e-4
+# Clip gradient L2 norm (omit for no clipping)
+# grad_clip_norm = 1.0
+# Radius passed to create_spatial_features for CNN inputs (coordinate units)
+spatial_feature_radius = 100.0
 
 [lasso]
 # Element-wise L1 penalty
-l1_reg    = 1e-4
+l1_reg    = 1e-9
 # Group-L2 penalty
-group_reg = 1e-4
+group_reg = 1e-9
 # Max FISTA iterations
 n_iter    = 100
 # Relative convergence tolerance
@@ -41,7 +56,7 @@ tol       = 1e-4
 seed_only       = true
 # CNN fine-tuning epochs per gene (ignored when seed_only = true)
 epochs          = 10
-# Adam learning rate for CNN
+# Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
 learning_rate   = 1e-3
 # Minimum R² to accept a fit (0.0 = keep everything)
 score_threshold = 0.0
@@ -50,7 +65,7 @@ score_threshold = 0.0
 # Number of parallel gene-training workers
 n_parallel  = 1
 # Directory for *_betadata.csv output files
-output_dir  = "/tmp/training"
+output_dir  = "/tmp/kidney_betas"
 
 [perturbation]
 # Multiplier applied to all betas in splash()

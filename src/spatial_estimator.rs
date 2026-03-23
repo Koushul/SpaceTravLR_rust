@@ -1,3 +1,4 @@
+use crate::config::CnnConfig;
 use crate::lasso::GroupLassoParams;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,51 @@ use ndarray::{Array1, Array2};
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::estimator::{finite_or_zero_f64, ClusteredGCNNWR};
 use crate::training_hud::{log_line, TrainingHud};
+
+fn compute_gene_mean_expression<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    layer: &str,
+) -> anyhow::Result<HashMap<String, f64>> {
+    let var_names = adata.var_names().into_vec();
+    let n_obs = adata.n_obs();
+    if n_obs == 0 {
+        return Ok(HashMap::new());
+    }
+    let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
+    let data: Array2<f64> = if layer != "X" && !layer.is_empty() {
+        if let Some(layer_elem) = adata.layers().get(layer) {
+            layer_elem
+                .slice(slice)?
+                .ok_or_else(|| anyhow::anyhow!("Failed to slice layer {}", layer))?
+        } else {
+            let x_elem = adata.x();
+            if x_elem.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Layer '{}' not found and X is empty",
+                    layer
+                ));
+            }
+            x_elem
+                .slice(slice)?
+                .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
+        }
+    } else {
+        let x_elem = adata.x();
+        if x_elem.is_none() {
+            return Err(anyhow::anyhow!("X is empty"));
+        }
+        x_elem
+            .slice(slice)?
+            .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
+    };
+    let inv_n = 1.0 / n_obs as f64;
+    let mut out = HashMap::with_capacity(var_names.len());
+    for (j, name) in var_names.iter().enumerate() {
+        let sum: f64 = data.column(j).iter().sum();
+        out.insert(name.clone(), sum * inv_n);
+    }
+    Ok(out)
+}
 
 pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub adata: Arc<AnnData<AnB>>,
@@ -42,12 +88,21 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         contact_distance: f64,
         tf_ligand_cutoff: f64,
         max_lr_pairs: Option<usize>,
+        top_lr_pairs_by_mean_expression: Option<usize>,
+        gene_mean_expression: Option<Arc<HashMap<String, f64>>>,
         grn: Arc<crate::network::GeneNetwork>,
+        layer: String,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
         let cluster_annot = "cell_type_int".to_string();
 
-        let modulators = grn.get_modulators(&target_gene_str, tf_ligand_cutoff, max_lr_pairs)?;
+        let modulators = grn.get_modulators(
+            &target_gene_str,
+            tf_ligand_cutoff,
+            max_lr_pairs,
+            top_lr_pairs_by_mean_expression,
+            gene_mean_expression.as_deref(),
+        )?;
         let mut modulators_genes_ordered = modulators.regulators.clone();
         modulators_genes_ordered.extend(modulators.lr_pairs.clone());
         modulators_genes_ordered.extend(modulators.tfl_pairs.clone());
@@ -57,7 +112,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             target_gene,
             spatial_dim,
             cluster_annot,
-            layer: "imputed_count".to_string(),
+            layer,
             radius,
             contact_distance,
             grn,
@@ -89,7 +144,19 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         let adata_var_names = adata.var_names().into_vec();
         let species = crate::network::infer_species(&adata_var_names);
         let grn = Arc::new(crate::network::GeneNetwork::new(species, &adata_var_names)?);
-        Self::new_with_metadata(adata, target_gene, radius, spatial_dim, contact_distance, tf_ligand_cutoff, max_lr_pairs, grn)
+        Self::new_with_metadata(
+            adata,
+            target_gene,
+            radius,
+            spatial_dim,
+            contact_distance,
+            tf_ligand_cutoff,
+            max_lr_pairs,
+            None,
+            None,
+            grn,
+            "imputed_count".to_string(),
+        )
     }
 }
 
@@ -101,6 +168,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         contact_distance: f64,
         tf_ligand_cutoff: f64,
         max_lr_pairs: Option<usize>,
+        top_lr_pairs_by_mean_expression: Option<usize>,
+        layer: &str,
+        cnn: &CnnConfig,
         epochs: usize,
         learning_rate: f64,
         score_threshold: f64,
@@ -127,6 +197,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         let training_dir = output_dir;
         fs::create_dir_all(training_dir)?;
+        fs::create_dir_all(format!("{training_dir}/log"))?;
 
         // ── Setup: build gene list and pre-cache shared metadata ──────────────
         let setup_adata = Arc::new(AnnData::<H5>::open(H5::open(adata_path)?)?);
@@ -186,6 +257,27 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             .map(|m| m.saturating_add(1))
             .unwrap_or(1);
 
+        let gene_mean_arc: Option<Arc<HashMap<String, f64>>> =
+            if top_lr_pairs_by_mean_expression.is_some() {
+                let msg = format!(
+                    "Computing per-gene mean expression (layer: {}) for LR ranking...",
+                    layer
+                );
+                log_line(&hud, msg.clone());
+                if hud.is_none() {
+                    println!("{}", msg);
+                }
+                Some(Arc::new(compute_gene_mean_expression(
+                    setup_adata.as_ref(),
+                    layer,
+                )?))
+            } else {
+                None
+            };
+
+        let layer_for_workers = layer.to_string();
+        let cnn_for_workers = cnn.clone();
+
         drop(setup_adata); // release; workers open their own handles
 
         if let Some(ref h) = hud {
@@ -193,6 +285,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 g.total_genes = total_genes;
                 g.n_cells = obs_names.len();
                 g.n_clusters = num_clusters;
+                g.init_cluster_perf_buckets(num_clusters);
             }
         }
 
@@ -231,6 +324,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let (radius, spatial_dim, contact_distance, tf_ligand_cutoff) =
                 (radius, spatial_dim, contact_distance, tf_ligand_cutoff);
             let max_lr_pairs = max_lr_pairs;
+            let top_lr_pairs_by_mean_expression = top_lr_pairs_by_mean_expression;
+            let gene_mean_arc = gene_mean_arc.clone();
+            let layer_w = layer_for_workers.clone();
+            let cnn_w = cnn_for_workers.clone();
             let (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol) =
                 (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol);
             let full_cnn = full_cnn;
@@ -312,9 +409,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         let mut estimator = match Self::new_with_metadata(
                             thread_adata.clone(),
                             gene.clone(),
-                            radius, spatial_dim, contact_distance, tf_ligand_cutoff,
-                            max_lr_pairs, global_grn.clone(),
-                        ).map(Box::new) {
+                            radius,
+                            spatial_dim,
+                            contact_distance,
+                            tf_ligand_cutoff,
+                            max_lr_pairs,
+                            top_lr_pairs_by_mean_expression,
+                            gene_mean_arc.clone(),
+                            global_grn.clone(),
+                            layer_w.clone(),
+                        )
+                        .map(Box::new)
+                        {
                             Ok(est) => est,
                             Err(e) => {
                                 log_line(&hud, format!("❌ estimator init failed {}: {}", gene, e));
@@ -358,13 +464,24 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
                         let fit_ok = estimator
                             .fit_with_cache(
-                                &xy, &clusters, num_clusters,
-                                epochs, learning_rate, score_threshold,
-                                l1_reg, group_reg, n_iter, tol, "lasso", &device,
+                                &xy,
+                                &clusters,
+                                num_clusters,
+                                epochs,
+                                learning_rate,
+                                score_threshold,
+                                l1_reg,
+                                group_reg,
+                                n_iter,
+                                tol,
+                                "lasso",
+                                &cnn_w,
+                                &device,
                             )
                             .is_ok();
 
                         let mut wrote = false;
+                        let mut orphan_zero_mod_betas = false;
                         if fit_ok {
                             if let Some(est_inner) = &estimator.estimator {
                                 if let Some(ref h) = hud {
@@ -372,85 +489,192 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         g.set_gene_status(&gene, format!("export | {} mods", n_mods));
                                     }
                                 }
-                                let betadata_path = format!("{}/{}_betadata.csv", training_dir, gene);
-                                if let Ok(mut f) = fs::File::create(betadata_path) {
-                                    // Column names: beta0 first, then one per modulator
-                                    let col_names: Vec<String> =
-                                        std::iter::once("beta0".to_string())
-                                        .chain(estimator.modulators_genes.iter().map(|m| format!("beta_{}", m)))
+                                let betadata_path =
+                                    format!("{}/{}_betadata.csv", training_dir, gene);
+                                let col_names: Vec<String> =
+                                    std::iter::once("beta0".to_string())
+                                        .chain(
+                                            estimator
+                                                .modulators_genes
+                                                .iter()
+                                                .map(|m| format!("beta_{}", m)),
+                                        )
                                         .collect();
 
-                                    if full_cnn {
-                                        let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
-                                        let all_betas = est_inner.predict_betas(
-                                            &x_mock, &xy, &clusters, num_clusters, &device,
+                                if full_cnn {
+                                    let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
+                                    let all_betas = est_inner.predict_betas(
+                                        &x_mock, &xy, &clusters, num_clusters, &device,
+                                    );
+
+                                    let keep: Vec<usize> = (0..all_betas.ncols())
+                                        .filter(|&j| {
+                                            all_betas.column(j).iter().any(|&v| {
+                                                finite_or_zero_f64(v) != 0.0
+                                            })
+                                        })
+                                        .collect();
+
+                                    if !keep.iter().any(|&j| j >= 1) {
+                                        let _ = fs::File::create(format!(
+                                            "{}/{}.orphan",
+                                            training_dir, gene
+                                        ));
+                                        orphan_zero_mod_betas = true;
+                                        if let Some(ref h) = hud {
+                                            if let Ok(mut g) = h.lock() {
+                                                g.genes_orphan += 1;
+                                            }
+                                        }
+                                        log_line(
+                                            &hud,
+                                            format!(
+                                                ">> orphan (no non-zero modulator betas) {}",
+                                                gene
+                                            ),
                                         );
-
-                                        // Keep only columns that have at least one non-zero value
-                                        let keep: Vec<usize> = (0..all_betas.ncols())
-                                            .filter(|&j| all_betas.column(j).iter()
-                                                .any(|&v| finite_or_zero_f64(v) != 0.0))
-                                            .collect();
-
+                                    } else if let Ok(mut f) = fs::File::create(&betadata_path)
+                                    {
                                         let mut header = "CellID".to_string();
-                                        for &j in &keep { header.push_str(&format!(",{}", col_names[j])); }
+                                        for &j in &keep {
+                                            header.push_str(&format!(",{}", col_names[j]));
+                                        }
                                         let _ = writeln!(f, "{}", header);
 
                                         for (i, cell_id) in obs_names.iter().enumerate() {
                                             let mut row = format!("{}", cell_id);
                                             for &j in &keep {
-                                                row.push_str(&format!(",{}", finite_or_zero_f64(all_betas[[i, j]])));
+                                                row.push_str(&format!(
+                                                    ",{}",
+                                                    finite_or_zero_f64(all_betas[[i, j]])
+                                                ));
                                             }
                                             let _ = writeln!(f, "{}", row);
                                         }
-                                    } else {
-                                        let mut cluster_ids: Vec<usize> = est_inner
-                                            .lasso_coefficients.keys().copied().collect();
-                                        cluster_ids.sort();
+                                        wrote = true;
+                                    }
+                                } else {
+                                    let mut cluster_ids: Vec<usize> = est_inner
+                                        .lasso_coefficients
+                                        .keys()
+                                        .copied()
+                                        .collect();
+                                    cluster_ids.sort();
 
-                                        // Materialise all rows as (intercept, coef...) vecs
-                                        let rows: Vec<Vec<f64>> = cluster_ids.iter().map(|&c_id| {
+                                    let rows: Vec<Vec<f64>> = cluster_ids
+                                        .iter()
+                                        .map(|&c_id| {
                                             let intercept = finite_or_zero_f64(
-                                                est_inner.lasso_intercepts.get(&c_id).copied().unwrap_or(0.0),
+                                                est_inner
+                                                    .lasso_intercepts
+                                                    .get(&c_id)
+                                                    .copied()
+                                                    .unwrap_or(0.0),
                                             );
                                             let coefs = &est_inner.lasso_coefficients[&c_id];
                                             std::iter::once(intercept)
-                                                .chain(coefs.column(0).iter().map(|&b| finite_or_zero_f64(b)))
+                                                .chain(
+                                                    coefs
+                                                        .column(0)
+                                                        .iter()
+                                                        .map(|&b| finite_or_zero_f64(b)),
+                                                )
                                                 .collect()
-                                        }).collect();
+                                        })
+                                        .collect();
 
-                                        // Keep only columns with at least one non-zero value
-                                        let n_cols = 1 + n_mods;
-                                        let keep: Vec<usize> = (0..n_cols)
-                                            .filter(|&j| rows.iter().any(|r| r[j] != 0.0))
-                                            .collect();
+                                    let n_cols = 1 + n_mods;
+                                    let keep: Vec<usize> = (0..n_cols)
+                                        .filter(|&j| {
+                                            rows.iter().any(|r| r[j] != 0.0)
+                                        })
+                                        .collect();
 
+                                    if !keep.iter().any(|&j| j >= 1) {
+                                        let _ = fs::File::create(format!(
+                                            "{}/{}.orphan",
+                                            training_dir, gene
+                                        ));
+                                        orphan_zero_mod_betas = true;
+                                        if let Some(ref h) = hud {
+                                            if let Ok(mut g) = h.lock() {
+                                                g.genes_orphan += 1;
+                                            }
+                                        }
+                                        log_line(
+                                            &hud,
+                                            format!(
+                                                ">> orphan (no non-zero modulator betas) {}",
+                                                gene
+                                            ),
+                                        );
+                                    } else if let Ok(mut f) = fs::File::create(&betadata_path)
+                                    {
                                         let mut header = "Cluster".to_string();
-                                        for &j in &keep { header.push_str(&format!(",{}", col_names[j])); }
+                                        for &j in &keep {
+                                            header.push_str(&format!(",{}", col_names[j]));
+                                        }
                                         let _ = writeln!(f, "{}", header);
 
-                                        for (row_vals, &c_id) in rows.iter().zip(cluster_ids.iter()) {
+                                        for (row_vals, &c_id) in
+                                            rows.iter().zip(cluster_ids.iter())
+                                        {
                                             let mut row = format!("{}", c_id);
                                             for &j in &keep {
                                                 row.push_str(&format!(",{}", row_vals[j]));
                                             }
                                             let _ = writeln!(f, "{}", row);
                                         }
+                                        wrote = true;
                                     }
-                                    wrote = true;
                                 }
                             }
                         }
 
                         if wrote {
                             if let Some(ref h) = hud {
-                                if let Ok(mut g) = h.lock() { g.genes_done += 1; }
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_done += 1;
+                                }
                                 log_line(&hud, format!(">> wrote {}", gene));
                             }
-                        } else {
+                        } else if !orphan_zero_mod_betas {
                             if let Some(ref h) = hud {
-                                if let Ok(mut g) = h.lock() { g.genes_failed += 1; }
+                                if let Ok(mut g) = h.lock() {
+                                    g.genes_failed += 1;
+                                }
                                 log_line(&hud, format!(">> fail (fit/export) {}", gene));
+                            }
+                        }
+
+                        if n_mods > 0 {
+                            if let Some(est) = estimator.estimator.as_ref() {
+                                let safe_gene =
+                                    gene.replace(['/', '\\'], "_");
+                                let log_path = format!(
+                                    "{}/log/{}.log",
+                                    training_dir, safe_gene
+                                );
+                                let _ = crate::training_log::write_gene_training_log(
+                                    std::path::Path::new(&log_path),
+                                    &gene,
+                                    !full_cnn,
+                                    epochs,
+                                    learning_rate,
+                                    n_iter,
+                                    tol,
+                                    &est.cluster_training_summaries,
+                                );
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        if !est.cluster_training_summaries.is_empty() {
+                                            g.record_training_metrics(
+                                                &gene,
+                                                &est.cluster_training_summaries,
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -487,13 +711,14 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         clusters: &Array1<usize>,
         num_clusters: usize,
         epochs: usize,
-        _learning_rate: f64,
+        learning_rate: f64,
         _score_threshold: f64,
         l1_reg: f64,
         group_reg: f64,
         n_iter: usize,
         tol: f64,
         _estimator_type: &str,
+        cnn: &CnnConfig,
         device: &AB::Device,
     ) -> anyhow::Result<()> {
         let target_expr = self.get_gene_expression(&self.target_gene)?;
@@ -560,7 +785,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 tol,
                 ..Default::default()
             };
-            let mut est = ClusteredGCNNWR::new(params, self.spatial_dim);
+            let mut est =
+                ClusteredGCNNWR::new(params, self.spatial_dim, cnn.spatial_feature_radius);
             est.group_reg_vec = self.group_reg_vec.clone();
             self.estimator = Some(est);
         }
@@ -574,7 +800,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 num_clusters,
                 device,
                 epochs,
+                learning_rate,
                 self.seed_only,
+                cnn,
             );
         }
         Ok(())
@@ -609,7 +837,22 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             .map(|m| m.saturating_add(1))
             .unwrap_or(1);
 
-        self.fit_with_cache(&xy, &clusters, num_clusters, epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol, estimator_type, device)
+        let cnn = CnnConfig::default();
+        self.fit_with_cache(
+            &xy,
+            &clusters,
+            num_clusters,
+            epochs,
+            learning_rate,
+            score_threshold,
+            l1_reg,
+            group_reg,
+            n_iter,
+            tol,
+            estimator_type,
+            &cnn,
+            device,
+        )
     }
 
     pub fn get_multiple_gene_expressions(&self, genes: &[String]) -> anyhow::Result<Array2<f64>> {

@@ -1,3 +1,4 @@
+use crate::estimator::ClusterTrainingSummary;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +23,10 @@ pub struct TrainingHudState {
     pub started: Instant,
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
+    pub cluster_r2_sum: Vec<f64>,
+    pub cluster_r2_count: Vec<u32>,
+    pub gene_r2_mean: Vec<(String, f64)>,
+    pub perf_stats_generation: u64,
 }
 
 impl TrainingHudState {
@@ -51,7 +56,36 @@ impl TrainingHudState {
             started: Instant::now(),
             finished: None,
             cancel_requested,
+            cluster_r2_sum: Vec::new(),
+            cluster_r2_count: Vec::new(),
+            gene_r2_mean: Vec::new(),
+            perf_stats_generation: 0,
         }
+    }
+
+    pub fn init_cluster_perf_buckets(&mut self, n_clusters: usize) {
+        self.cluster_r2_sum.resize(n_clusters, 0.0);
+        self.cluster_r2_count.resize(n_clusters, 0);
+    }
+
+    pub fn record_training_metrics(&mut self, gene: &str, summaries: &[ClusterTrainingSummary]) {
+        if summaries.is_empty() {
+            return;
+        }
+        let mean: f64 =
+            summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
+        self.gene_r2_mean.push((gene.to_string(), mean));
+
+        for s in summaries {
+            let c = s.cluster_id;
+            if c >= self.cluster_r2_sum.len() {
+                self.cluster_r2_sum.resize(c + 1, 0.0);
+                self.cluster_r2_count.resize(c + 1, 0);
+            }
+            self.cluster_r2_sum[c] += s.lasso_r2;
+            self.cluster_r2_count[c] = self.cluster_r2_count[c].saturating_add(1);
+        }
+        self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
     }
 
     pub fn set_gene_status(&mut self, gene: &str, status: impl std::fmt::Display) {

@@ -4,7 +4,7 @@ use burn_autodiff::Autodiff;
 use space_trav_lr_rust::config::SpaceshipConfig;
 use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
 use space_trav_lr_rust::training_hud::TrainingHudState;
-use space_trav_lr_rust::training_tui::run_training_dashboard;
+use space_trav_lr_rust::training_tui::{run_training_dashboard, TrainingDashboardExit};
 use std::env;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -152,6 +152,9 @@ fn main() -> anyhow::Result<()> {
             cfg.spatial.contact_distance,
             cfg.grn.tf_ligand_cutoff,
             cfg.grn.max_lr_pairs,
+            cfg.grn.top_lr_pairs_by_mean_expression,
+            &cfg.data.layer,
+            &cfg.cnn,
             epochs,
             cfg.training.learning_rate,
             cfg.training.score_threshold,
@@ -187,6 +190,9 @@ fn main() -> anyhow::Result<()> {
             cfg.spatial.contact_distance,
             cfg.grn.tf_ligand_cutoff,
             cfg.grn.max_lr_pairs,
+            cfg.grn.top_lr_pairs_by_mean_expression,
+            &cfg.data.layer,
+            &cfg.cnn,
             epochs,
             cfg.training.learning_rate,
             cfg.training.score_threshold,
@@ -199,7 +205,13 @@ fn main() -> anyhow::Result<()> {
         )
     });
 
-    run_training_dashboard(hud.clone())?;
+    match run_training_dashboard(hud.clone())? {
+        TrainingDashboardExit::ForceQuit => {
+            eprintln!("\nAborted (Shift+Q).");
+            std::process::exit(130);
+        }
+        TrainingDashboardExit::Completed => {}
+    }
 
     match handle.join() {
         Ok(r)  => r?,

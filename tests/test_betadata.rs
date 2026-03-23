@@ -330,6 +330,7 @@ fn build_splash_inputs(
 }
 
 #[test]
+#[ignore]
 fn test_splash_from_tmp_betas() {
     let betas_dir = "/tmp/betas";
     if !std::path::Path::new(betas_dir).exists() {
@@ -364,6 +365,7 @@ fn test_splash_from_tmp_betas() {
 }
 
 #[test]
+#[ignore]
 fn bench_splash() {
     use std::time::Instant;
 

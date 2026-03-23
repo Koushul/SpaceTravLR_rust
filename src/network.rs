@@ -88,7 +88,14 @@ impl GeneNetwork {
         })
     }
 
-    pub fn get_modulators(&self, target_gene: &str, tf_ligand_cutoff: f64, _max_lr_pairs: Option<usize>) -> Result<Modulators> {
+    pub fn get_modulators(
+        &self,
+        target_gene: &str,
+        tf_ligand_cutoff: f64,
+        max_lr_pairs: Option<usize>,
+        top_lr_pairs_by_mean_expression: Option<usize>,
+        gene_mean_expression: Option<&HashMap<String, f64>>,
+    ) -> Result<Modulators> {
         let lf = self.network_df.clone().lazy();
 
         // --- 1. Regulators (edge_type == "grn") ---
@@ -144,6 +151,14 @@ impl GeneNetwork {
             }
         }
 
+        Self::select_lr_pairs(
+            &mut ligands,
+            &mut receptors,
+            &mut lr_pairs,
+            max_lr_pairs,
+            top_lr_pairs_by_mean_expression,
+            gene_mean_expression,
+        );
 
         // --- 3. NicheNet Pairs (edge_type == "nichenet") ---
         let regs_len = regulators.len() as u32;
@@ -217,6 +232,59 @@ impl GeneNetwork {
             lr_pairs,
             tfl_pairs,
         })
+    }
+
+    fn lr_pair_mean_expr_score(
+        ligand: &str,
+        receptor: &str,
+        means: &HashMap<String, f64>,
+    ) -> f64 {
+        let ml = means.get(ligand).copied().unwrap_or(0.0);
+        let mr = means.get(receptor).copied().unwrap_or(0.0);
+        0.5 * (ml + mr)
+    }
+
+    fn select_lr_pairs(
+        ligands: &mut Vec<String>,
+        receptors: &mut Vec<String>,
+        lr_pairs: &mut Vec<String>,
+        max_lr_pairs: Option<usize>,
+        top_by_mean_expr: Option<usize>,
+        gene_mean_expression: Option<&HashMap<String, f64>>,
+    ) {
+        let n = lr_pairs.len();
+        if n == 0 {
+            return;
+        }
+
+        if let (Some(k), Some(means)) = (top_by_mean_expr, gene_mean_expression) {
+            let k = k.min(n);
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                let sa = Self::lr_pair_mean_expr_score(&ligands[a], &receptors[a], means);
+                let sb = Self::lr_pair_mean_expr_score(&ligands[b], &receptors[b], means);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut new_l = Vec::with_capacity(k);
+            let mut new_r = Vec::with_capacity(k);
+            let mut new_p = Vec::with_capacity(k);
+            for &i in order.iter().take(k) {
+                new_l.push(ligands[i].clone());
+                new_r.push(receptors[i].clone());
+                new_p.push(lr_pairs[i].clone());
+            }
+            *ligands = new_l;
+            *receptors = new_r;
+            *lr_pairs = new_p;
+            return;
+        }
+
+        if let Some(k) = max_lr_pairs {
+            let k = k.min(n);
+            ligands.truncate(k);
+            receptors.truncate(k);
+            lr_pairs.truncate(k);
+        }
     }
 }
 
