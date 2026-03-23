@@ -1,0 +1,67 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  SpaceTravLR — Spaceship Config                                            ║
+# ║  All training hyperparameters in one place.                                ║
+# ║  CLI flags (--epochs, --parallel, etc.) override values here.              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+[data]
+# Path to .h5ad dataset.  Leave empty to use $SPACETRAVLR_H5AD env var.
+adata_path      = ""
+# Expression layer to read from AnnData
+layer           = "imputed_count"
+# obs column holding integer cluster labels
+cluster_annot   = "cell_type_int"
+
+[spatial]
+# Radius for spatial neighbor detection
+radius           = 0.1
+# Grid resolution for spatial convolution kernel
+spatial_dim      = 32
+# Distance threshold for contact-based signaling
+contact_distance = 0.05
+
+[grn]
+# Minimum score for a TF to be included as a ligand-mediated regulator
+tf_ligand_cutoff = 0.5
+# Cap on ligand-receptor pairs per gene (comment out or omit for no limit)
+# max_lr_pairs   = 50
+
+[lasso]
+# Element-wise L1 penalty
+l1_reg    = 1e-4
+# Group-L2 penalty
+group_reg = 1e-4
+# Max FISTA iterations
+n_iter    = 100
+# Relative convergence tolerance
+tol       = 1e-4
+
+[training]
+# true = lasso-only (cluster-level betas), false = lasso + CNN (cell-level betas)
+seed_only       = true
+# CNN fine-tuning epochs per gene (ignored when seed_only = true)
+epochs          = 10
+# Adam learning rate for CNN
+learning_rate   = 1e-3
+# Minimum R² to accept a fit (0.0 = keep everything)
+score_threshold = 0.0
+
+[execution]
+# Number of parallel gene-training workers
+n_parallel  = 1
+# Directory for *_betadata.csv output files
+output_dir  = "/tmp/training"
+
+[perturbation]
+# Multiplier applied to all betas in splash()
+beta_scale_factor = 1.0
+# Clamp betas to [-cap, cap] after scaling (comment out or omit for no cap)
+# beta_cap        = 10.0
+# Number of signal propagation rounds
+n_propagation     = 4
+# Approximate received ligands using a spatial grid for faster perturbation.
+# Value is grid_spacing / radius (smaller = more accurate, larger = faster).
+#   0.5 → ~3% error, ~12x faster at 5000+ cells
+#   0.3 → ~1% error, ~6x faster
+# Comment out or omit for exact O(N²) computation.
+# ligand_grid_factor = 0.5

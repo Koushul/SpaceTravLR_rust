@@ -115,7 +115,6 @@ mod tests {
 
     #[test]
     fn singular_value_identity() {
-        // σ_max of the 3×3 identity is 1.0
         let eye = Array2::<f64>::eye(3);
         let sv = find_largest_singular_value(&eye, 0, &SubsamplingScheme::None, None, None);
         assert_abs_diff_eq!(sv, 1.0, epsilon = 0.05);
@@ -123,9 +122,69 @@ mod tests {
 
     #[test]
     fn singular_value_scaled_identity() {
-        // σ_max of 5·I₃ is 5.0
         let x = Array2::<f64>::eye(3) * 5.0;
         let sv = find_largest_singular_value(&x, 1, &SubsamplingScheme::None, None, None);
         assert_abs_diff_eq!(sv, 5.0, epsilon = 0.1);
+    }
+
+    #[test]
+    fn singular_value_diagonal() {
+        // diag(1, 2, 7, 3) → σ_max = 7
+        let mut d = Array2::<f64>::zeros((4, 4));
+        d[[0, 0]] = 1.0;
+        d[[1, 1]] = 2.0;
+        d[[2, 2]] = 7.0;
+        d[[3, 3]] = 3.0;
+        let sv = find_largest_singular_value(&d, 42, &SubsamplingScheme::None, None, None);
+        assert_abs_diff_eq!(sv, 7.0, epsilon = 0.2);
+    }
+
+    #[test]
+    fn singular_value_rank1_matrix() {
+        // rank-1: u v^T where u = [1,2,3], v = [1,1] → σ = ||u|| * ||v|| = √14 * √2
+        // Actually σ_max of u*v^T = ||u||*||v||
+        let u = ndarray::array![[1.0], [2.0], [3.0]];
+        let v = ndarray::array![[1.0, 1.0]];
+        let x = u.dot(&v); // 3×2 rank-1
+        let expected = (1.0 + 4.0 + 9.0_f64).sqrt() * 2.0_f64.sqrt();
+        let sv = find_largest_singular_value(&x, 7, &SubsamplingScheme::None, Some(50), None);
+        assert_abs_diff_eq!(sv, expected, epsilon = 0.1);
+    }
+
+    #[test]
+    fn singular_value_rectangular_tall() {
+        // [[1,0],[0,2],[0,0]] → σ_max = 2
+        let x = ndarray::array![[1.0, 0.0], [0.0, 2.0], [0.0, 0.0]];
+        let sv = find_largest_singular_value(&x, 0, &SubsamplingScheme::None, None, None);
+        assert_abs_diff_eq!(sv, 2.0, epsilon = 0.1);
+    }
+
+    #[test]
+    fn singular_value_rectangular_wide() {
+        // [[3,0,0],[0,1,0]] → σ_max = 3
+        let x = ndarray::array![[3.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let sv = find_largest_singular_value(&x, 0, &SubsamplingScheme::None, None, None);
+        assert_abs_diff_eq!(sv, 3.0, epsilon = 0.15);
+    }
+
+    #[test]
+    fn singular_value_positive_for_nonzero_matrix() {
+        let x = ndarray::array![[1.0, 2.0], [3.0, 4.0]];
+        let sv = find_largest_singular_value(&x, 0, &SubsamplingScheme::None, None, None);
+        assert!(sv > 0.0);
+    }
+
+    #[test]
+    fn singular_value_deterministic_with_same_seed() {
+        let x = ndarray::array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let sv1 = find_largest_singular_value(&x, 42, &SubsamplingScheme::None, None, None);
+        let sv2 = find_largest_singular_value(&x, 42, &SubsamplingScheme::None, None, None);
+        assert_abs_diff_eq!(sv1, sv2, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn norm2_known_values() {
+        let v = Array1::from_vec(vec![3.0, 4.0]);
+        assert_abs_diff_eq!(norm2(&v), 5.0, epsilon = 1e-15);
     }
 }

@@ -377,7 +377,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     // Column names: beta0 first, then one per modulator
                                     let col_names: Vec<String> =
                                         std::iter::once("beta0".to_string())
-                                        .chain(estimator.modulators_genes.iter().cloned())
+                                        .chain(estimator.modulators_genes.iter().map(|m| format!("beta_{}", m)))
                                         .collect();
 
                                     if full_cnn {

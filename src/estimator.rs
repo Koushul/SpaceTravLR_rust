@@ -366,3 +366,218 @@ pub fn create_spatial_features(
         });
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_abs_diff_eq;
+    use ndarray::array;
+
+    #[test]
+    fn finite_or_zero_f64_normal() {
+        assert_abs_diff_eq!(finite_or_zero_f64(3.14), 3.14, epsilon = 1e-15);
+        assert_abs_diff_eq!(finite_or_zero_f64(-2.0), -2.0, epsilon = 1e-15);
+        assert_abs_diff_eq!(finite_or_zero_f64(0.0), 0.0, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn finite_or_zero_f64_special() {
+        assert_abs_diff_eq!(finite_or_zero_f64(f64::NAN), 0.0, epsilon = 1e-15);
+        assert_abs_diff_eq!(finite_or_zero_f64(f64::INFINITY), 0.0, epsilon = 1e-15);
+        assert_abs_diff_eq!(finite_or_zero_f64(f64::NEG_INFINITY), 0.0, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn finite_or_zero_f32_special() {
+        assert_eq!(finite_or_zero_f32(f32::NAN), 0.0);
+        assert_eq!(finite_or_zero_f32(f32::INFINITY), 0.0);
+        assert_eq!(finite_or_zero_f32(1.5), 1.5);
+    }
+
+    #[test]
+    fn min_max_finite_col_normal() {
+        let data = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
+        let (lo, hi) = min_max_finite_col(data.column(0));
+        assert_eq!(lo, 1.0);
+        assert_eq!(hi, 5.0);
+    }
+
+    #[test]
+    fn min_max_finite_col_with_nan() {
+        let data = array![[f64::NAN], [2.0], [5.0]];
+        let (lo, hi) = min_max_finite_col(data.column(0));
+        assert_eq!(lo, 2.0);
+        assert_eq!(hi, 5.0);
+    }
+
+    #[test]
+    fn min_max_finite_col_all_nan() {
+        let data = array![[f64::NAN], [f64::NAN]];
+        let (lo, hi) = min_max_finite_col(data.column(0));
+        assert_eq!(lo, 0.0);
+        assert_eq!(hi, 0.0);
+    }
+
+    #[test]
+    fn spatial_features_shape() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let clusters = Array1::from_vec(vec![0, 1, 0, 1]);
+        let sf = create_spatial_features(&xy, &clusters, 2, 100.0);
+        assert_eq!(sf.shape(), &[4, 2]);
+    }
+
+    #[test]
+    fn spatial_features_self_count() {
+        // Each cell is within radius of itself (distance = 0)
+        let xy = array![[0.0, 0.0], [1000.0, 1000.0]];
+        let clusters = Array1::from_vec(vec![0, 1]);
+        let sf = create_spatial_features(&xy, &clusters, 2, 1.0); // small radius
+        // Cell 0: only itself in radius → cluster 0 count = 1
+        assert_abs_diff_eq!(sf[[0, 0]], 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[0, 1]], 0.0, epsilon = 1e-10);
+        // Cell 1: only itself → cluster 1 count = 1
+        assert_abs_diff_eq!(sf[[1, 0]], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[1, 1]], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn spatial_features_all_in_radius() {
+        // All cells within radius of each other
+        let xy = array![[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]];
+        let clusters = Array1::from_vec(vec![0, 1, 0]);
+        let sf = create_spatial_features(&xy, &clusters, 2, 10.0);
+        // Cell 0: sees cells 0,2 (cluster 0) and cell 1 (cluster 1)
+        assert_abs_diff_eq!(sf[[0, 0]], 2.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[0, 1]], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn spatial_features_radius_boundary() {
+        // Cell 0 at origin, cell 1 at (1,0). Radius = 1.0 → distance = 1.0 ≤ radius
+        let xy = array![[0.0, 0.0], [1.0, 0.0]];
+        let clusters = Array1::from_vec(vec![0, 0]);
+        let sf = create_spatial_features(&xy, &clusters, 1, 1.0);
+        // Both cells within radius of each other
+        assert_abs_diff_eq!(sf[[0, 0]], 2.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[1, 0]], 2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn spatial_features_just_outside_radius() {
+        // Cell 0 at origin, cell 1 at (1.01, 0). Radius = 1.0 → distance > radius
+        let xy = array![[0.0, 0.0], [1.01, 0.0]];
+        let clusters = Array1::from_vec(vec![0, 0]);
+        let sf = create_spatial_features(&xy, &clusters, 1, 1.0);
+        // Each cell only sees itself
+        assert_abs_diff_eq!(sf[[0, 0]], 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[1, 0]], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn spatial_features_nan_handling() {
+        let xy = array![[f64::NAN, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let clusters = Array1::from_vec(vec![0, 0, 1]);
+        let sf = create_spatial_features(&xy, &clusters, 2, 100.0);
+        // Cell 0 has NaN coords → row should be all zeros
+        assert_abs_diff_eq!(sf[[0, 0]], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[0, 1]], 0.0, epsilon = 1e-10);
+        // Cells 1,2 should not count cell 0
+        assert_abs_diff_eq!(sf[[1, 0]], 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[1, 1]], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn xyc2spatial_shape() {
+        let xy = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]];
+        let clusters = Array1::from_vec(vec![0, 1, 0]);
+        let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8);
+        assert_eq!(maps.shape(), &[3, 2, 8, 8]);
+    }
+
+    #[test]
+    fn xyc2spatial_only_own_cluster_nonzero() {
+        // Cell 0 is cluster 0 → only channel 0 should have nonzero entries
+        let xy = array![[0.5, 0.5], [1.5, 1.5]];
+        let clusters = Array1::from_vec(vec![0, 1]);
+        let maps = xyc2spatial_fast(&xy, &clusters, 2, 4, 4);
+
+        // Cell 0, cluster 0 channel should have nonzero values
+        let ch0_sum: f32 = maps.slice(ndarray::s![0, 0, .., ..]).iter().sum();
+        assert!(ch0_sum > 0.0, "Own cluster channel should be nonzero");
+
+        // Cell 0, cluster 1 channel should be zero
+        let ch1_sum: f32 = maps.slice(ndarray::s![0, 1, .., ..]).iter().sum();
+        assert_abs_diff_eq!(ch1_sum, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn xyc2spatial_inverse_distance_positive() {
+        let xy = array![[0.5, 0.5]];
+        let clusters = Array1::from_vec(vec![0]);
+        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4);
+        // All values in the active channel should be positive (1/d > 0)
+        for &v in maps.slice(ndarray::s![0, 0, .., ..]).iter() {
+            assert!(v > 0.0, "Inverse distance should be positive");
+        }
+    }
+
+    #[test]
+    fn xyc2spatial_closer_grid_points_higher_value() {
+        let xy = array![[0.0, 1.0]]; // at the top-left area
+        let clusters = Array1::from_vec(vec![0]);
+        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4);
+        let channel = maps.slice(ndarray::s![0, 0, .., ..]);
+        // The grid point closest to the cell should have the highest value
+        let max_val = channel.iter().cloned().fold(0.0_f32, f32::max);
+        assert!(max_val > 0.0);
+    }
+
+    #[test]
+    fn xyc2spatial_nan_cell_is_zero() {
+        let xy = array![[f64::NAN, 0.0], [1.0, 1.0]];
+        let clusters = Array1::from_vec(vec![0, 0]);
+        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4);
+        let cell0_sum: f32 = maps.slice(ndarray::s![0, .., .., ..]).iter().sum();
+        assert_abs_diff_eq!(cell0_sum, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn xyc2spatial_deterministic() {
+        let xy = array![[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]];
+        let clusters = Array1::from_vec(vec![0, 1, 0]);
+        let m1 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4);
+        let m2 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4);
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn spatial_features_symmetry() {
+        // Two cells at same distance from each other, both cluster 0
+        let xy = array![[0.0, 0.0], [1.0, 0.0]];
+        let clusters = Array1::from_vec(vec![0, 0]);
+        let sf = create_spatial_features(&xy, &clusters, 1, 10.0);
+        assert_abs_diff_eq!(sf[[0, 0]], sf[[1, 0]], epsilon = 1e-10);
+    }
+
+    #[test]
+    fn spatial_features_nonnegative() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [0.5, 0.5]];
+        let clusters = Array1::from_vec(vec![0, 1, 0]);
+        let sf = create_spatial_features(&xy, &clusters, 2, 5.0);
+        for &v in sf.iter() {
+            assert!(v >= 0.0, "Spatial features (counts) must be non-negative");
+        }
+    }
+
+    #[test]
+    fn spatial_features_large_cluster_count() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0]];
+        let clusters = Array1::from_vec(vec![0, 5]);
+        let sf = create_spatial_features(&xy, &clusters, 10, 100.0);
+        assert_eq!(sf.ncols(), 10);
+        assert_abs_diff_eq!(sf[[0, 0]], 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(sf[[0, 5]], 1.0, epsilon = 1e-10);
+        // Other cluster columns should be zero
+        assert_abs_diff_eq!(sf[[0, 1]], 0.0, epsilon = 1e-10);
+    }
+}

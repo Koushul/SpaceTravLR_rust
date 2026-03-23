@@ -762,12 +762,38 @@ mod tests {
     use approx::assert_abs_diff_eq;
 
     fn simple_xy() -> (Array2<f64>, Array2<f64>) {
-        // y = 2·x₀ + 3·x₁ (no noise, two features in one group)
         let n = 50_usize;
         let x = Array2::from_shape_fn((n, 2), |(i, j)| {
             if j == 0 { i as f64 / n as f64 } else { (n - i) as f64 / n as f64 }
         });
         let y = Array2::from_shape_fn((n, 1), |(i, _)| 2.0 * x[[i, 0]] + 3.0 * x[[i, 1]]);
+        (x, y)
+    }
+
+    fn xy_with_intercept() -> (Array2<f64>, Array2<f64>) {
+        let n = 80_usize;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
+            match j {
+                0 => (i as f64) / n as f64,
+                1 => ((n - i) as f64) / n as f64,
+                _ => 0.5 * (i as f64) / n as f64,
+            }
+        });
+        let y = Array2::from_shape_fn((n, 1), |(i, _)| {
+            5.0 + 2.0 * x[[i, 0]] + 3.0 * x[[i, 1]] + 1.0 * x[[i, 2]]
+        });
+        (x, y)
+    }
+
+    fn sparse_xy() -> (Array2<f64>, Array2<f64>) {
+        // y depends on features 0,1 but not 2,3,4
+        let n = 100_usize;
+        let x = Array2::from_shape_fn((n, 5), |(i, j)| {
+            ((i * 7 + j * 13) % 97) as f64 / 97.0
+        });
+        let y = Array2::from_shape_fn((n, 1), |(i, _)| {
+            2.0 * x[[i, 0]] - 1.5 * x[[i, 1]]
+        });
         (x, y)
     }
 
@@ -788,7 +814,6 @@ mod tests {
 
     #[test]
     fn unregularised_group_recovers_coefficients() {
-        // With negligible regularisation, MSE solution should match OLS closely.
         let (x, y) = simple_xy();
         let mut model = GroupLasso::new(GroupLassoParams {
             groups: vec![0, 1],
@@ -801,7 +826,6 @@ mod tests {
         });
         let _ = model.fit(&x, &y, None);
         let coef = &model.fitted.as_ref().unwrap().coef;
-        // True coefficients are [2, 3]
         assert_abs_diff_eq!(coef[[0, 0]], 2.0, epsilon = 0.2);
         assert_abs_diff_eq!(coef[[1, 0]], 3.0, epsilon = 0.2);
     }
@@ -810,8 +834,8 @@ mod tests {
     fn high_group_reg_drives_coef_to_zero() {
         let (x, y) = simple_xy();
         let mut model = GroupLasso::new(GroupLassoParams {
-            groups: vec![0, 0], // both features in the same group
-            group_reg: 100.0,   // extreme regularisation
+            groups: vec![0, 0],
+            group_reg: 100.0,
             l1_reg: 0.0,
             n_iter: 300,
             ..Default::default()
@@ -824,9 +848,302 @@ mod tests {
     }
 
     #[test]
+    fn high_l1_reg_drives_coef_to_zero() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 0.0,
+            l1_reg: 100.0,
+            n_iter: 300,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let coef = &model.fitted.as_ref().unwrap().coef;
+        for &v in coef.iter() {
+            assert_abs_diff_eq!(v, 0.0, epsilon = 1e-3);
+        }
+    }
+
+    #[test]
+    fn intercept_recovery() {
+        let (x, y) = xy_with_intercept();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1, 2],
+            group_reg: 1e-8,
+            l1_reg: 1e-8,
+            n_iter: 5000,
+            tol: 1e-12,
+            fit_intercept: true,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let pred = model.predict(&x).unwrap();
+        let y_mean = y.mean().unwrap();
+        let ss_tot: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
+        let ss_res: f64 = y.iter().zip(pred.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+        let r2 = 1.0 - ss_res / ss_tot;
+        assert!(r2 > 0.99, "R² should be very high with intercept, got {}", r2);
+    }
+
+    #[test]
+    fn no_intercept_zero() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 1e-6,
+            l1_reg: 1e-6,
+            n_iter: 500,
+            fit_intercept: false,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let fitted = model.fitted.as_ref().unwrap();
+        assert_abs_diff_eq!(fitted.intercept[[0, 0]], 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn sparsity_mask_identifies_active_features() {
+        let (x, y) = sparse_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1, 2, 3, 4],
+            group_reg: 0.01,
+            l1_reg: 0.01,
+            n_iter: 1000,
+            tol: 1e-10,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let mask = model.sparsity_mask().unwrap();
+        let active_count = mask.iter().filter(|&&b| b).count();
+        assert!(active_count >= 1, "At least one feature should be active");
+        assert!(active_count <= 5, "Active count should be ≤ total features");
+    }
+
+    #[test]
+    fn chosen_groups_subset() {
+        let (x, y) = sparse_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0, 1, 1, 2],
+            group_reg: 0.01,
+            l1_reg: 0.01,
+            n_iter: 1000,
+            tol: 1e-10,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let groups = model.chosen_groups().unwrap();
+        assert!(!groups.is_empty(), "At least one group should be chosen");
+        assert!(groups.len() <= 3, "At most 3 groups should be chosen");
+    }
+
+    #[test]
+    fn transform_reduces_columns() {
+        let (x, y) = sparse_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1, 2, 3, 4],
+            group_reg: 0.01,
+            l1_reg: 0.01,
+            n_iter: 1000,
+            tol: 1e-10,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let x_t = model.transform(&x).unwrap();
+        assert!(x_t.ncols() <= x.ncols(), "Transform should reduce or maintain columns");
+        assert!(x_t.ncols() > 0, "At least one feature should survive");
+        assert_eq!(x_t.nrows(), x.nrows(), "Row count should be preserved");
+    }
+
+    #[test]
+    fn predict_before_fit_errors() {
+        let model = GroupLasso::new(GroupLassoParams::default());
+        let x = Array2::zeros((5, 3));
+        assert!(model.predict(&x).is_err());
+    }
+
+    #[test]
+    fn shape_mismatch_errors() {
+        let x = Array2::zeros((10, 3));
+        let y = Array2::zeros((5, 1));
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1, 2],
+            ..Default::default()
+        });
+        assert!(model.fit(&x, &y, None).is_err());
+    }
+
+    #[test]
+    fn groups_length_mismatch_errors() {
+        let x = Array2::zeros((10, 3));
+        let y = Array2::zeros((10, 1));
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1], // only 2 but X has 3 features
+            ..Default::default()
+        });
+        assert!(model.fit(&x, &y, None).is_err());
+    }
+
+    #[test]
+    fn warm_start_reuses_coefficients() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0],
+            group_reg: 0.001,
+            l1_reg: 0.001,
+            n_iter: 100,
+            warm_start: true,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let coef1 = model.fitted.as_ref().unwrap().coef.clone();
+
+        // Second fit with warm start should converge faster or to similar solution
+        let _ = model.fit(&x, &y, None);
+        let coef2 = model.fitted.as_ref().unwrap().coef.clone();
+
+        // Both should be roughly the same solution
+        for i in 0..coef1.nrows() {
+            assert_abs_diff_eq!(coef1[[i, 0]], coef2[[i, 0]], epsilon = 0.1);
+        }
+    }
+
+    #[test]
+    fn scale_reg_group_size_increases_penalty() {
+        let (x, y) = simple_xy();
+        let mut m1 = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0],
+            group_reg: 0.1,
+            l1_reg: 0.0,
+            scale_reg: ScaleReg::GroupSize,
+            n_iter: 300,
+            ..Default::default()
+        });
+        let _ = m1.fit(&x, &y, None);
+
+        let mut m2 = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0],
+            group_reg: 0.1,
+            l1_reg: 0.0,
+            scale_reg: ScaleReg::None,
+            n_iter: 300,
+            ..Default::default()
+        });
+        let _ = m2.fit(&x, &y, None);
+
+        // GroupSize scaling with group of size 2 → multiplied by √2
+        // So coefficients from m1 should be smaller (more regularised)
+        let norm1: f64 = m1.fitted.as_ref().unwrap().coef.iter().map(|v| v * v).sum();
+        let norm2: f64 = m2.fitted.as_ref().unwrap().coef.iter().map(|v| v * v).sum();
+        assert!(norm1 <= norm2 + 1e-6, "GroupSize scaling should produce sparser result");
+    }
+
+    #[test]
+    fn regulariser_nonnegative() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 0.1,
+            l1_reg: 0.1,
+            n_iter: 200,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let coef = &model.fitted.as_ref().unwrap().coef;
+        let pen = model.regulariser(coef);
+        assert!(pen >= 0.0, "Regulariser must be non-negative");
+    }
+
+    #[test]
+    fn regulariser_zero_for_zero_coefs() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 100.0,
+            l1_reg: 100.0,
+            n_iter: 300,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let zero_coef = Array2::zeros((2, 1));
+        let pen = model.regulariser(&zero_coef);
+        assert_abs_diff_eq!(pen, 0.0, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn r2_positive_for_good_fit() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 1e-6,
+            l1_reg: 1e-6,
+            n_iter: 500,
+            tol: 1e-8,
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let pred = model.predict(&x).unwrap();
+
+        let y_mean = y.mean().unwrap();
+        let ss_tot: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
+        let ss_res: f64 = y.iter()
+            .zip(pred.iter())
+            .map(|(yi, yhat)| (yi - yhat).powi(2))
+            .sum();
+        let r2 = 1.0 - ss_res / ss_tot;
+        assert!(r2 > 0.9, "R² should be high for noiseless data, got {}", r2);
+    }
+
+    #[test]
+    fn frobenius_lipschitz_mode() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 0.01,
+            l1_reg: 0.01,
+            frobenius_lipschitz: true,
+            n_iter: 300,
+            ..Default::default()
+        });
+        let result = model.fit(&x, &y, None);
+        assert!(result.is_ok() || matches!(result, Err(GroupLassoError::ConvergenceWarning)));
+        assert!(model.fitted.is_some());
+    }
+
+    #[test]
+    fn new_with_regs_per_group() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new_with_regs(
+            GroupLassoParams {
+                groups: vec![0, 1],
+                group_reg: 0.0,
+                l1_reg: 0.0,
+                n_iter: 300,
+                ..Default::default()
+            },
+            vec![0.001, 100.0], // low reg on group 0, high on group 1
+        );
+        let _ = model.fit(&x, &y, None);
+        let coef = &model.fitted.as_ref().unwrap().coef;
+        // Group 1 (feature 1) should be more suppressed
+        assert!(coef[[0, 0]].abs() > coef[[1, 0]].abs(),
+            "Feature 0 (low reg) should be larger than feature 1 (high reg)");
+    }
+
+    #[test]
+    fn predict_shape_mismatch_errors() {
+        let (x, y) = simple_xy();
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0],
+            ..Default::default()
+        });
+        let _ = model.fit(&x, &y, None);
+        let bad_x = Array2::zeros((5, 5)); // wrong number of features
+        assert!(model.predict(&bad_x).is_err());
+    }
+
+    #[test]
     fn clustered_fit_predict() {
         let (x, y) = simple_xy();
-        // Create 2 clusters: first 25 rows and last 25 rows
         let n = x.nrows();
         let mut clusters = Array1::zeros(n);
         for i in 25..n {
@@ -847,9 +1164,76 @@ mod tests {
         let pred = model.predict(&x, &clusters).unwrap();
         assert_eq!(pred.shape(), &[n, 1]);
 
-        // Verify that predictions are reasonably close to y
         for i in 0..n {
             assert_abs_diff_eq!(pred[[i, 0]], y[[i, 0]], epsilon = 0.5);
         }
+    }
+
+    #[test]
+    fn clustered_coefficients_per_cluster() {
+        let (x, y) = simple_xy();
+        let n = x.nrows();
+        let mut clusters = Array1::zeros(n);
+        for i in 25..n { clusters[i] = 1; }
+
+        let mut model = ClusteredGroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0],
+            group_reg: 0.001,
+            l1_reg: 0.001,
+            n_iter: 200,
+            ..Default::default()
+        });
+        model.fit(&x, &y, &clusters).unwrap();
+
+        let coeffs = model.coefficients();
+        assert!(coeffs.contains_key(&0));
+        assert!(coeffs.contains_key(&1));
+        let (coef0, int0) = &coeffs[&0];
+        assert_eq!(coef0.nrows(), 2);
+        assert_eq!(int0.ncols(), 1);
+    }
+
+    #[test]
+    fn clustered_shape_mismatch_errors() {
+        let x = Array2::zeros((10, 2));
+        let y = Array2::zeros((10, 1));
+        let clusters = Array1::zeros(5); // wrong length
+        let mut model = ClusteredGroupLasso::new(GroupLassoParams::default());
+        assert!(model.fit(&x, &y, &clusters).is_err());
+    }
+
+    #[test]
+    fn clustered_sparsity_mask() {
+        let (x, y) = simple_xy();
+        let n = x.nrows();
+        let mut clusters = Array1::zeros(n);
+        for i in 25..n { clusters[i] = 1; }
+
+        let mut model = ClusteredGroupLasso::new(GroupLassoParams {
+            groups: vec![0, 0],
+            group_reg: 0.001,
+            l1_reg: 0.001,
+            n_iter: 200,
+            ..Default::default()
+        });
+        model.fit(&x, &y, &clusters).unwrap();
+        let masks = model.sparsity_mask().unwrap();
+        assert_eq!(masks.len(), 2);
+    }
+
+    #[test]
+    fn default_groups_one_per_feature() {
+        let x = Array2::from_shape_fn((30, 3), |(i, j)| (i + j) as f64 / 30.0);
+        let y = Array2::from_shape_fn((30, 1), |(i, _)| x[[i, 0]] + x[[i, 1]]);
+        let mut model = GroupLasso::new(GroupLassoParams {
+            groups: vec![], // empty → each feature gets its own group
+            group_reg: 0.01,
+            l1_reg: 0.01,
+            n_iter: 200,
+            ..Default::default()
+        });
+        let result = model.fit(&x, &y, None);
+        assert!(result.is_ok() || matches!(result, Err(GroupLassoError::ConvergenceWarning)));
+        assert!(model.fitted.is_some());
     }
 }

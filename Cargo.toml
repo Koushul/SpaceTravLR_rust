@@ -24,6 +24,8 @@ anndata-hdf5 = "0.5"
 # Add polars if needed for dataframes, but maybe anndata handles it
 polars = { version = "0.51", features = ["lazy", "ndarray", "dtype-full", "parquet"] }
 anyhow = "1.0"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 ndarray-npy = "0.9"
 polars-utils = "0.51"
 ratatui = "0.29"

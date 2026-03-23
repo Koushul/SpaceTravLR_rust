@@ -8,7 +8,6 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
 use std::sync::Arc;
-use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     type AB = Autodiff<Wgpu>;

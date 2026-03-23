@@ -219,3 +219,68 @@ impl GeneNetwork {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_species_mouse_genes() {
+        let genes: Vec<String> = vec![
+            "Gapdh", "Actb", "Sox2", "Pou5f1", "Nanog", "Klf4", "Myc", "Bmp4",
+            "Fgf2", "Wnt3a", "Shh", "Notch1", "Dll1", "Jag1", "Hes1",
+        ].into_iter().map(String::from).collect();
+        assert_eq!(infer_species(&genes), "mouse");
+    }
+
+    #[test]
+    fn infer_species_human_genes() {
+        let genes: Vec<String> = vec![
+            "GAPDH", "ACTB", "SOX2", "POU5F1", "NANOG", "KLF4", "MYC", "BMP4",
+            "FGF2", "WNT3A", "SHH", "NOTCH1", "DLL1", "JAG1", "HES1",
+        ].into_iter().map(String::from).collect();
+        assert_eq!(infer_species(&genes), "human");
+    }
+
+    #[test]
+    fn infer_species_mixed_defaults_to_majority() {
+        // Mostly mouse-style
+        let genes: Vec<String> = vec![
+            "Gapdh", "Actb", "Sox2", "Pou5f1", "Nanog", "Klf4", "Myc",
+            "BRCA1", "TP53",
+        ].into_iter().map(String::from).collect();
+        assert_eq!(infer_species(&genes), "mouse");
+    }
+
+    #[test]
+    fn infer_species_empty_defaults_human() {
+        let genes: Vec<String> = vec![];
+        let result = infer_species(&genes);
+        assert_eq!(result, "human");
+    }
+
+    #[test]
+    fn infer_species_numeric_genes() {
+        // Genes with numbers like "123" → no uppercase letters
+        let genes: Vec<String> = vec!["123", "456", "789"]
+            .into_iter().map(String::from).collect();
+        let result = infer_species(&genes);
+        assert!(result == "human" || result == "mouse");
+    }
+
+    #[test]
+    fn modulators_struct_fields() {
+        let m = Modulators {
+            regulators: vec!["A".into()],
+            ligands: vec!["B".into()],
+            receptors: vec!["C".into()],
+            tfl_ligands: vec!["D".into()],
+            tfl_regulators: vec!["E".into()],
+            lr_pairs: vec!["B$C".into()],
+            tfl_pairs: vec!["D#E".into()],
+        };
+        assert_eq!(m.regulators.len(), 1);
+        assert_eq!(m.lr_pairs[0], "B$C");
+        assert_eq!(m.tfl_pairs[0], "D#E");
+    }
+}

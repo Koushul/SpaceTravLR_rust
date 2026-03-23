@@ -1,11 +1,16 @@
+pub mod betadata;
+pub mod config;
 pub mod model;
 pub mod estimator;
 pub mod lasso;
 pub mod spatial_estimator;
 pub mod ligand;
 pub mod network;
+pub mod perturb;
 pub mod training_hud;
 pub mod training_tui;
+pub use betadata::{BetaFrame, Betabase, GeneMatrix};
+pub use config::SpaceshipConfig;
 pub use estimator::ClusteredGCNNWR;
 pub use spatial_estimator::SpatialCellularProgramsEstimator;
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};

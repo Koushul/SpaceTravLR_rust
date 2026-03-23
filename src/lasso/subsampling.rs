@@ -130,6 +130,7 @@ use rand::Rng;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array2;
 
     #[test]
     fn fraction_scheme_selects_correct_count() {
@@ -137,7 +138,6 @@ mod tests {
         let scheme = SubsamplingScheme::Fraction(0.5);
         let indices = get_row_indices(100, &scheme, &mut rng);
         assert_eq!(indices.len(), 50);
-        // sorted
         assert!(indices.windows(2).all(|w| w[0] < w[1]));
     }
 
@@ -153,5 +153,89 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let indices = get_row_indices(50, &SubsamplingScheme::None, &mut rng);
         assert_eq!(indices, (0..50).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn count_scheme_exact() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let scheme = SubsamplingScheme::Count(7);
+        let indices = get_row_indices(20, &scheme, &mut rng);
+        assert_eq!(indices.len(), 7);
+        assert!(indices.windows(2).all(|w| w[0] < w[1]));
+        assert!(*indices.last().unwrap() < 20);
+    }
+
+    #[test]
+    fn indices_are_valid_range() {
+        let mut rng = ChaCha8Rng::seed_from_u64(99);
+        let indices = get_row_indices(10, &SubsamplingScheme::Fraction(0.3), &mut rng);
+        for &i in &indices {
+            assert!(i < 10);
+        }
+    }
+
+    #[test]
+    fn indices_no_duplicates() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let indices = get_row_indices(50, &SubsamplingScheme::Fraction(0.8), &mut rng);
+        let mut unique = indices.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), indices.len());
+    }
+
+    #[test]
+    fn select_rows_correct() {
+        let x = Array2::from_shape_fn((5, 3), |(i, j)| (i * 10 + j) as f64);
+        let selected = select_rows(&x.view(), &[1, 3]);
+        assert_eq!(selected.nrows(), 2);
+        assert_eq!(selected.ncols(), 3);
+        assert_eq!(selected[[0, 0]], 10.0);
+        assert_eq!(selected[[1, 0]], 30.0);
+    }
+
+    #[test]
+    fn num_sampled_rows_consistency() {
+        assert_eq!(SubsamplingScheme::None.num_sampled_rows(100), 100);
+        assert_eq!(SubsamplingScheme::Fraction(0.25).num_sampled_rows(100), 25);
+        assert_eq!(SubsamplingScheme::Count(42).num_sampled_rows(100), 42);
+        assert_eq!(SubsamplingScheme::Sqrt.num_sampled_rows(100), 10);
+    }
+
+    #[test]
+    fn fraction_method_consistency() {
+        let f = SubsamplingScheme::Fraction(0.5).fraction(100);
+        assert!((f - 0.5).abs() < 1e-10);
+
+        let f_none = SubsamplingScheme::None.fraction(100);
+        assert!((f_none - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn subsampler_updates_indices() {
+        let mut s = Subsampler::new(100, SubsamplingScheme::Fraction(0.1), 42);
+        assert_eq!(s.current_indices.len(), 10);
+        let first = s.current_indices.clone();
+        s.update_indices();
+        let second = s.current_indices.clone();
+        assert_eq!(second.len(), 10);
+        assert_ne!(first, second, "Different draws should differ (with high probability)");
+    }
+
+    #[test]
+    fn subsampler_none_borrows() {
+        let s = Subsampler::new(5, SubsamplingScheme::None, 0);
+        let x = Array2::from_shape_fn((5, 2), |(i, j)| (i + j) as f64);
+        let cow = s.subsample(&x);
+        assert!(matches!(cow, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn subsampler_fraction_owns() {
+        let s = Subsampler::new(10, SubsamplingScheme::Fraction(0.5), 0);
+        let x = Array2::from_shape_fn((10, 2), |(i, j)| (i + j) as f64);
+        let cow = s.subsample(&x);
+        assert!(matches!(cow, std::borrow::Cow::Owned(_)));
+        assert_eq!(cow.nrows(), 5);
     }
 }
