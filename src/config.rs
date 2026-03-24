@@ -19,6 +19,8 @@ pub struct SpaceshipConfig {
     pub execution: ExecutionConfig,
     #[serde(default)]
     pub perturbation: PerturbationConfig,
+    #[serde(default)]
+    pub model_export: ModelExportConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,13 +61,109 @@ pub struct LassoConfig {
     pub tol: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CnnTrainingMode {
+    Minimal,
+    Full,
+    #[default]
+    Hybrid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HybridCnnGatingConfig {
+    /// Smallest cluster cell count must be at least this for CNN (sample-complexity gate).
+    pub min_cells_per_cluster_for_cnn: usize,
+    /// If modulator count exceeds this, Moran's p must pass `moran_p_value_max_when_over_modulator_cap`.
+    pub max_modulators_soft_for_cnn: Option<usize>,
+    pub moran_k_neighbors: usize,
+    pub moran_permutations: usize,
+    pub moran_p_value_max: f64,
+    pub moran_p_value_max_when_over_modulator_cap: Option<f64>,
+    pub require_all_clusters_lasso_converged: bool,
+    /// If None, `TrainingConfig.score_threshold` is used as the minimum mean lasso R² for CNN.
+    pub min_mean_lasso_r2_for_cnn: Option<f64>,
+    pub min_mean_target_expression_for_cnn: Option<f64>,
+    pub hybrid_modulator_spatial_weight: f64,
+    pub cnn_force_genes_file: Option<String>,
+    pub cnn_skip_genes_file: Option<String>,
+    /// If set, phase 1 only records candidates; phase 2 runs CNN for the top-K by `rank_score`.
+    pub hybrid_cnn_top_k: Option<usize>,
+    /// 0 = conservative (stricter Moran p and mean R² gates → fewer CNNs). 1 = permissive.
+    /// 0.5 reproduces the effective thresholds implied by `moran_p_value_max` / mean R² alone (legacy behavior).
+    #[serde(default = "default_hybrid_cnn_permissiveness")]
+    pub hybrid_cnn_permissiveness: f64,
+}
+
+fn default_hybrid_cnn_permissiveness() -> f64 {
+    0.5
+}
+
+impl Default for HybridCnnGatingConfig {
+    fn default() -> Self {
+        Self {
+            min_cells_per_cluster_for_cnn: 80,
+            max_modulators_soft_for_cnn: Some(256),
+            moran_k_neighbors: 8,
+            moran_permutations: 99,
+            moran_p_value_max: 0.05,
+            moran_p_value_max_when_over_modulator_cap: Some(0.01),
+            require_all_clusters_lasso_converged: true,
+            min_mean_lasso_r2_for_cnn: None,
+            min_mean_target_expression_for_cnn: None,
+            hybrid_modulator_spatial_weight: 1.0,
+            cnn_force_genes_file: None,
+            cnn_skip_genes_file: None,
+            hybrid_cnn_top_k: None,
+            hybrid_cnn_permissiveness: default_hybrid_cnn_permissiveness(),
+        }
+    }
+}
+
+impl HybridCnnGatingConfig {
+    fn permissiveness_t(&self) -> f64 {
+        self.hybrid_cnn_permissiveness.clamp(0.0, 1.0)
+    }
+
+    pub fn effective_moran_p_max(&self) -> f64 {
+        let t = self.permissiveness_t();
+        let f = 0.3 + 1.4 * t;
+        (self.moran_p_value_max * f).clamp(1e-12, 1.0)
+    }
+
+    pub fn effective_moran_p_strict(&self) -> f64 {
+        let base = self
+            .moran_p_value_max_when_over_modulator_cap
+            .unwrap_or(self.moran_p_value_max);
+        let t = self.permissiveness_t();
+        let f = 0.3 + 1.4 * t;
+        (base * f).clamp(1e-12, 1.0)
+    }
+
+    pub fn effective_min_mean_lasso_r2(&self, base_min_r2: f64) -> f64 {
+        let t = self.permissiveness_t();
+        let r2f = 1.4 - 0.8 * t;
+        (base_min_r2 * r2f).max(0.0)
+    }
+}
+
+fn default_training_mode_option() -> Option<CnnTrainingMode> {
+    Some(CnnTrainingMode::Hybrid)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrainingConfig {
+    /// Kept for CLI/back-compat; hybrid runs lasso first per gene regardless.
     pub seed_only: bool,
+    #[serde(default = "default_training_mode_option")]
+    pub mode: Option<CnnTrainingMode>,
     pub epochs: usize,
     pub learning_rate: f64,
     pub score_threshold: f64,
+    #[serde(default)]
+    pub hybrid: HybridCnnGatingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +195,17 @@ pub struct PerturbationConfig {
     /// Smaller = more accurate, larger = faster.  Omit or comment out for
     /// exact O(N²) computation.
     pub ligand_grid_factor: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelExportConfig {
+    /// Export trained CNN weights for genes that run per-cell CNN refinement.
+    pub save_cnn_weights: bool,
+    /// Write .npz with deflate compression (recommended).
+    pub compressed_npz: bool,
+    /// Subdirectory under [execution].output_dir for model artifacts.
+    pub output_subdir: String,
 }
 
 impl Default for DataConfig {
@@ -157,9 +266,11 @@ impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             seed_only: true,
+            mode: Some(CnnTrainingMode::Hybrid),
             epochs: 10,
             learning_rate: 1e-3,
             score_threshold: 0.0,
+            hybrid: HybridCnnGatingConfig::default(),
         }
     }
 }
@@ -184,6 +295,16 @@ impl Default for PerturbationConfig {
     }
 }
 
+impl Default for ModelExportConfig {
+    fn default() -> Self {
+        Self {
+            save_cnn_weights: false,
+            compressed_npz: true,
+            output_subdir: "saved_models".into(),
+        }
+    }
+}
+
 impl Default for SpaceshipConfig {
     fn default() -> Self {
         Self {
@@ -195,6 +316,7 @@ impl Default for SpaceshipConfig {
             training: TrainingConfig::default(),
             execution: ExecutionConfig::default(),
             perturbation: PerturbationConfig::default(),
+            model_export: ModelExportConfig::default(),
         }
     }
 }
@@ -224,18 +346,24 @@ impl SpaceshipConfig {
         Self::default()
     }
 
+    pub fn resolved_cnn_mode(&self) -> CnnTrainingMode {
+        self.training
+            .mode
+            .unwrap_or(CnnTrainingMode::Hybrid)
+    }
+
     pub fn full_cnn(&self) -> bool {
-        !self.training.seed_only
+        matches!(self.resolved_cnn_mode(), CnnTrainingMode::Full)
+    }
+
+    pub fn min_mean_lasso_r2_for_hybrid_cnn(&self) -> f64 {
+        self.training
+            .hybrid
+            .min_mean_lasso_r2_for_cnn
+            .unwrap_or(self.training.score_threshold)
     }
 
     pub fn resolve_adata_path(&self) -> String {
-        if self.data.adata_path.is_empty() {
-            std::env::var("SPACETRAVLR_H5AD").unwrap_or_else(|_| {
-                "/ix/djishnu/shared/djishnu_kor11/training_data_2025/snrna_human_tonsil.h5ad"
-                    .to_string()
-            })
-        } else {
-            self.data.adata_path.clone()
-        }
+        self.data.adata_path.trim().to_string()
     }
 }

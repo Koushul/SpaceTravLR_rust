@@ -1,4 +1,4 @@
-use crate::config::SpaceshipConfig;
+use crate::config::{CnnTrainingMode, SpaceshipConfig};
 use crate::estimator::ClusterTrainingSummary;
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,6 +27,7 @@ pub struct RunConfigSummary {
     pub score_threshold: f64,
     pub epochs_per_gene: usize,
     pub gene_selection: String,
+    pub cnn_training_mode: String,
 }
 
 impl RunConfigSummary {
@@ -52,6 +53,13 @@ impl RunConfigSummary {
             .top_lr_pairs_by_mean_expression
             .map(|n| format!("{}", n))
             .unwrap_or_else(|| "—".to_string());
+
+        let cnn_training_mode = match cfg.resolved_cnn_mode() {
+            CnnTrainingMode::Minimal => "minimal",
+            CnnTrainingMode::Full => "full",
+            CnnTrainingMode::Hybrid => "hybrid",
+        }
+        .to_string();
 
         let gene_selection = match (gene_filter, max_genes) {
             (Some(genes), _) if !genes.is_empty() => {
@@ -87,6 +95,7 @@ impl RunConfigSummary {
             score_threshold: cfg.training.score_threshold,
             epochs_per_gene: cfg.training.epochs,
             gene_selection,
+            cnn_training_mode,
         }
     }
 }
@@ -97,6 +106,8 @@ pub struct TrainingHudState {
     pub output_dir: String,
     pub run_config: RunConfigSummary,
     pub full_cnn: bool,
+    pub genes_exported_seed_only: usize,
+    pub genes_exported_cnn: usize,
     pub epochs_per_gene: usize,
     pub n_parallel: usize,
     pub total_genes: usize,
@@ -132,6 +143,8 @@ impl TrainingHudState {
             output_dir,
             run_config,
             full_cnn,
+            genes_exported_seed_only: 0,
+            genes_exported_cnn: 0,
             epochs_per_gene,
             n_parallel,
             total_genes: 0,
@@ -156,6 +169,14 @@ impl TrainingHudState {
     pub fn init_cluster_perf_buckets(&mut self, n_clusters: usize) {
         self.cluster_r2_sum.resize(n_clusters, 0.0);
         self.cluster_r2_count.resize(n_clusters, 0);
+    }
+
+    pub fn record_gene_export_mode(&mut self, per_cell_cnn: bool) {
+        if per_cell_cnn {
+            self.genes_exported_cnn = self.genes_exported_cnn.saturating_add(1);
+        } else {
+            self.genes_exported_seed_only = self.genes_exported_seed_only.saturating_add(1);
+        }
     }
 
     pub fn record_training_metrics(&mut self, gene: &str, summaries: &[ClusterTrainingSummary]) {

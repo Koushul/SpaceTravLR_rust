@@ -166,6 +166,32 @@ cargo run --release -- --plain \
 
 See `cargo run --release -- --help` (or `spacetravlr --help` after install). Options are defined with **clap**; config file path is `-c` / `--config`, dataset override is `--h5ad`.
 
+## UI Screenshot
+
+![SpaceTravLR training dashboard UI](data/example.png)
+
+## Export CNN Weights (Compressed) + PyTorch Loading
+
+Enable model export in `spaceship_config.toml`:
+
+```toml
+[model_export]
+save_cnn_weights = true
+compressed_npz = true
+output_subdir = "saved_models"
+```
+
+When a gene runs per-cell CNN refinement, SpaceTravLR writes compressed `.npz` files to:
+`<execution.output_dir>/saved_models/<gene>_cnn_weights.npz`
+
+Use the provided Python example to load exported weights into an equivalent PyTorch model:
+
+```bash
+python scripts/load_cnn_npz_pytorch.py \
+  --npz /tmp/slideseq_brain/saved_models/MY_GENE_cnn_weights.npz \
+  --cluster 0
+```
+
 
 ---
 

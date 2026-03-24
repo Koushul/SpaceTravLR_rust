@@ -1,3 +1,4 @@
+use crate::cnn_gating::CnnGateDecision;
 use crate::estimator::ClusterTrainingSummary;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -7,11 +8,13 @@ pub fn write_gene_training_log(
     log_path: &Path,
     gene: &str,
     seed_only: bool,
+    per_cell_cnn_export: bool,
     epochs: usize,
     learning_rate: f64,
     lasso_n_iter_max: usize,
     lasso_tol: f64,
     summaries: &[ClusterTrainingSummary],
+    gate: Option<&CnnGateDecision>,
 ) -> std::io::Result<()> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -22,11 +25,45 @@ pub fn write_gene_training_log(
     writeln!(w, "format\tspacetravlr_training_log\tv1")?;
     writeln!(w, "gene\t{}", gene)?;
     writeln!(w, "seed_only\t{}", seed_only)?;
+    writeln!(w, "per_cell_cnn_export\t{}", per_cell_cnn_export)?;
     writeln!(w, "cnn_epochs_config\t{}", epochs)?;
     writeln!(w, "learning_rate\t{}", learning_rate)?;
     writeln!(w, "lasso_n_iter_max\t{}", lasso_n_iter_max)?;
     writeln!(w, "lasso_tol\t{}", lasso_tol)?;
     writeln!(w)?;
+
+    if let Some(g) = gate {
+        writeln!(w, "# hybrid_cnn_gate (empty use_cnn means non-hybrid or pass-2 full CNN)")?;
+        writeln!(w, "gate_use_cnn\t{}", g.use_cnn)?;
+        writeln!(w, "gate_reason\t{}", g.reason.replace('\t', " "))?;
+        writeln!(
+            w,
+            "gate_min_cells_per_cluster\t{}",
+            g.min_cells_per_cluster
+        )?;
+        writeln!(w, "gate_n_modulators\t{}", g.n_modulators)?;
+        writeln!(w, "gate_n_lr_pairs\t{}", g.n_lr_pairs)?;
+        writeln!(w, "gate_n_tfl_pairs\t{}", g.n_tfl_pairs)?;
+        writeln!(
+            w,
+            "gate_modulator_spatial_fraction\t{:.6}",
+            g.modulator_spatial_fraction
+        )?;
+        writeln!(w, "gate_mean_lasso_r2\t{:.6}", g.mean_lasso_r2)?;
+        writeln!(w, "gate_all_lasso_converged\t{}", g.all_lasso_converged)?;
+        writeln!(w, "gate_moran_i\t{:.8}", g.moran_i)?;
+        writeln!(w, "gate_moran_p_value\t{:.8}", g.moran_p_value)?;
+        writeln!(w, "gate_moran_permutations\t{}", g.moran_permutations)?;
+        writeln!(w, "gate_forced_allowlist\t{}", g.forced_by_allowlist)?;
+        writeln!(w, "gate_blocked_skip_list\t{}", g.blocked_by_denylist)?;
+        if let Some(m) = g.mean_target_expression {
+            writeln!(w, "gate_mean_target_expression\t{:.8}", m)?;
+        } else {
+            writeln!(w, "gate_mean_target_expression\tNA")?;
+        }
+        writeln!(w, "gate_rank_score\t{:.6}", g.rank_score)?;
+        writeln!(w)?;
+    }
 
     writeln!(
         w,

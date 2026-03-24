@@ -5,13 +5,13 @@ use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
 };
-use space_trav_lr_rust::config::SpaceshipConfig;
+use space_trav_lr_rust::config::{CnnTrainingMode, SpaceshipConfig};
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_hud::TrainingHudState;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_training_dashboard};
-use std::path::PathBuf;
+use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_adata_path_prompt, run_training_dashboard};
+use std::path::{Path, PathBuf};
 #[cfg(feature = "tui")]
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "tui")]
@@ -38,7 +38,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "AnnData .h5ad (overrides config and SPACETRAVLR_H5AD)"
+        help = "AnnData .h5ad path (overrides config data.adata_path)"
     )]
     h5ad: Option<PathBuf>,
 
@@ -47,6 +47,13 @@ struct Cli {
 
     #[arg(long, help = "Seed-only: cluster-level betas (default)")]
     seed_only: bool,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        help = "minimal | full | hybrid — per-gene CNN gating when hybrid (overrides --full / --seed-only)"
+    )]
+    training_mode: Option<String>,
 
     #[arg(long, value_name = "N", help = "CNN fine-tuning epochs per gene")]
     epochs: Option<usize>,
@@ -92,9 +99,11 @@ struct Cli {
 fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     if cli.full {
         cfg.training.seed_only = false;
+        cfg.training.mode = Some(CnnTrainingMode::Full);
     }
     if cli.seed_only {
         cfg.training.seed_only = true;
+        cfg.training.mode = Some(CnnTrainingMode::Minimal);
     }
     if let Some(v) = cli.epochs {
         cfg.training.epochs = v;
@@ -122,6 +131,24 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     }
     if let Some(p) = &cli.h5ad {
         cfg.data.adata_path = p.display().to_string();
+    }
+    if let Some(ref m) = cli.training_mode {
+        let m = m.to_ascii_lowercase();
+        match m.as_str() {
+            "minimal" | "seed" | "seed-only" => {
+                cfg.training.mode = Some(CnnTrainingMode::Minimal);
+                cfg.training.seed_only = true;
+            }
+            "full" | "cnn" => {
+                cfg.training.mode = Some(CnnTrainingMode::Full);
+                cfg.training.seed_only = false;
+            }
+            "hybrid" => {
+                cfg.training.mode = Some(CnnTrainingMode::Hybrid);
+                cfg.training.seed_only = true;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -191,8 +218,8 @@ fn print_plain_preamble(
         summary.l1_reg, summary.group_reg, summary.n_iter, summary.tol
     );
     println!(
-        "Training:    lr={}  score≥{}",
-        summary.learning_rate, summary.score_threshold
+        "Training:    mode={}  lr={}  score≥{}",
+        summary.cnn_training_mode, summary.learning_rate, summary.score_threshold
     );
     println!(
         "GRN:         tf_lig≥{}  max_lr={}  top_lr={}",
@@ -200,6 +227,24 @@ fn print_plain_preamble(
     );
     println!("Genes:       {}", summary.gene_selection);
     println!("{}", "—".repeat(60));
+}
+
+fn expand_user_path(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if s == "~" {
+        return std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| s.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(h) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            return format!("{}/{}", h.trim_end_matches('/'), rest);
+        }
+    }
+    s.to_string()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -215,15 +260,50 @@ fn main() -> anyhow::Result<()> {
     let max_genes = cli.max_genes;
     let gene_filter = parse_gene_filter(&cli);
 
-    let path = cfg.resolve_adata_path();
+    let use_dashboard = cfg!(feature = "tui") && !cli.plain;
+    let compute = select_compute_backend();
 
-    if !std::path::Path::new(&path).exists() {
-        anyhow::bail!(
-            "Dataset not found at {}. Use --h5ad, set data.adata_path in config, or SPACETRAVLR_H5AD.",
-            path
-        );
+    if cfg.resolve_adata_path().is_empty() {
+        #[cfg(feature = "tui")]
+        {
+            if use_dashboard {
+                print_compute_notice(&compute);
+                match run_adata_path_prompt()? {
+                    None => {
+                        eprintln!("No dataset path; exiting.");
+                        return Ok(());
+                    }
+                    Some(p) => {
+                        cfg.data.adata_path = p;
+                    }
+                }
+            } else {
+                anyhow::bail!(
+                    "No AnnData path. Use --h5ad, set data.adata_path in config, or omit --plain for an interactive path prompt."
+                );
+            }
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            anyhow::bail!(
+                "No AnnData path. Use --h5ad or set data.adata_path in spaceship_config.toml."
+            );
+        }
     }
 
+    let path = expand_user_path(&cfg.data.adata_path);
+    cfg.data.adata_path = path.clone();
+
+    if !Path::new(&path).exists() {
+        anyhow::bail!("Dataset not found at {}.", path);
+    }
+
+    let mode_label = match cfg.resolved_cnn_mode() {
+        CnnTrainingMode::Minimal => "Seed-only lasso",
+        CnnTrainingMode::Full => "CNN spatial",
+        CnnTrainingMode::Hybrid => "Hybrid gated CNN",
+    };
+    #[cfg(feature = "tui")]
     let full_cnn = cfg.full_cnn();
     let epochs = cfg.training.epochs;
     let n_parallel = cfg.execution.n_parallel;
@@ -233,13 +313,6 @@ fn main() -> anyhow::Result<()> {
         .stack_size(8 * 1024 * 1024)
         .build_global();
 
-    let mode_label = if full_cnn {
-        "CNN spatial"
-    } else {
-        "Seed-only lasso"
-    };
-
-    let compute = select_compute_backend();
     let config_path_ref = cli.config.as_deref();
     let run_summary = RunConfigSummary::build(
         config_path_ref,
@@ -249,8 +322,6 @@ fn main() -> anyhow::Result<()> {
         max_genes,
         gene_filter.as_deref(),
     );
-
-    let use_dashboard = cfg!(feature = "tui") && !cli.plain;
 
     if !use_dashboard {
         print_compute_notice(&compute);
@@ -272,11 +343,15 @@ fn main() -> anyhow::Result<()> {
             group_reg: cfg.lasso.group_reg,
             n_iter: cfg.lasso.n_iter,
             tol: cfg.lasso.tol,
-            full_cnn,
+            cnn_training_mode: cfg.resolved_cnn_mode(),
+            hybrid_pass2_full_cnn: false,
+            hybrid_gating: &cfg.training.hybrid,
+            min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
             gene_filter: gene_filter.clone(),
             max_genes,
             n_parallel,
             output_dir: &output_dir,
+            model_export: &cfg.model_export,
             hud: None,
         };
         fit_all_genes_dispatch(&params, &compute)?;
@@ -320,11 +395,15 @@ fn main() -> anyhow::Result<()> {
                 group_reg: cfg.lasso.group_reg,
                 n_iter: cfg.lasso.n_iter,
                 tol: cfg.lasso.tol,
-                full_cnn,
+                cnn_training_mode: cfg.resolved_cnn_mode(),
+                hybrid_pass2_full_cnn: false,
+                hybrid_gating: &cfg.training.hybrid,
+                min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
                 gene_filter,
                 max_genes,
                 n_parallel,
                 output_dir: &output_dir,
+                model_export: &cfg.model_export,
                 hud: Some(hud_worker),
             };
             fit_all_genes_dispatch(&params, &compute_thread)

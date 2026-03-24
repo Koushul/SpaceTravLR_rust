@@ -7,33 +7,33 @@ use burn::tensor::{Tensor, backend::Backend};
 
 #[derive(Module, Debug)]
 pub struct CellularNicheNetwork<B: Backend> {
-    conv_layers: VisionEncoder<B>,
-    spatial_features_mlp: SpatialMLP<B>,
-    mlp: HeadMLP<B>,
+    pub(crate) conv_layers: VisionEncoder<B>,
+    pub(crate) spatial_features_mlp: SpatialMLP<B>,
+    pub(crate) mlp: HeadMLP<B>,
     pub anchors: Tensor<B, 1>,
 }
 
 #[derive(Module, Debug)]
 pub struct VisionEncoder<B: Backend> {
-    conv1: Conv2d<B>,
-    bn1: BatchNorm<B, 2>,
-    conv2: Conv2d<B>,
-    bn2: BatchNorm<B, 2>,
-    conv3: Conv2d<B>,
-    bn3: BatchNorm<B, 2>,
+    pub(crate) conv1: Conv2d<B>,
+    pub(crate) bn1: BatchNorm<B, 2>,
+    pub(crate) conv2: Conv2d<B>,
+    pub(crate) bn2: BatchNorm<B, 2>,
+    pub(crate) conv3: Conv2d<B>,
+    pub(crate) bn3: BatchNorm<B, 2>,
 }
 
 #[derive(Module, Debug)]
 pub struct SpatialMLP<B: Backend> {
-    l1: Linear<B>,
-    l2: Linear<B>,
-    l3: Linear<B>,
+    pub(crate) l1: Linear<B>,
+    pub(crate) l2: Linear<B>,
+    pub(crate) l3: Linear<B>,
 }
 
 #[derive(Module, Debug)]
 pub struct HeadMLP<B: Backend> {
-    l1: Linear<B>,
-    l2: Linear<B>,
+    pub(crate) l1: Linear<B>,
+    pub(crate) l2: Linear<B>,
 }
 
 #[derive(burn::config::Config)]

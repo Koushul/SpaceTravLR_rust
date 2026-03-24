@@ -10,7 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
 use std::cell::RefCell;
-use std::io::stdout;
+use std::io::{self, stdout, Write};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -380,6 +381,160 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
     lines
 }
 
+fn expand_user_path_input(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if s == "~" {
+        return std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| s.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(h) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            return format!("{}/{}", h.trim_end_matches('/'), rest);
+        }
+    }
+    s.to_string()
+}
+
+/// Full-screen prompt when no `.h5ad` path is configured. **Enter** confirms, **Esc** cancels.
+pub fn run_adata_path_prompt() -> anyhow::Result<Option<String>> {
+    enable_raw_mode()?;
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen, crossterm::cursor::Show)?;
+    let backend = CrosstermBackend::new(out);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut input = String::new();
+    let mut err_line: Option<String> = None;
+
+    let result = loop {
+        terminal.draw(|f| {
+            let area = f.area();
+            let bg = Style::default().bg(BG);
+            f.render_widget(Block::default().style(bg), area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(TEL_BORD))
+                .title(Span::styled(
+                    " Select AnnData (.h5ad) ",
+                    Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                ));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(1)
+                .constraints([
+                    Constraint::Length(4),
+                    Constraint::Min(2),
+                    Constraint::Length(2),
+                ])
+                .split(inner);
+
+            let help = Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No dataset path was set in config or on the command line.",
+                    Style::default().fg(MUTED),
+                )),
+                Line::from(Span::styled(
+                    "Type the full path to your spatial .h5ad file, then press Enter.",
+                    Style::default().fg(VALUE),
+                )),
+                Line::from(Span::styled(
+                    "Esc cancel  ·  ~ and ~/ are expanded",
+                    Style::default().fg(MUTED),
+                )),
+            ])
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(OUTER_BORD)),
+            );
+            f.render_widget(help, chunks[0]);
+
+            let path_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(SKY))
+                .title(Span::styled(" path ", Style::default().fg(LABEL)));
+            let path_para = Paragraph::new(Line::from(vec![Span::styled(
+                if input.is_empty() {
+                    " "
+                } else {
+                    input.as_str()
+                },
+                Style::default().fg(TITLE),
+            )]))
+            .block(path_block);
+            f.render_widget(path_para, chunks[1]);
+
+            let msg = err_line.as_deref().unwrap_or(" ");
+            let err_c = if err_line.is_some() {
+                C_FAIL
+            } else {
+                MUTED
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(err_c))))
+                    .wrap(Wrap { trim: true }),
+                chunks[2],
+            );
+        })?;
+
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc => break None,
+            KeyCode::Enter => {
+                let expanded = expand_user_path_input(&input);
+                if expanded.is_empty() {
+                    err_line = Some("Path cannot be empty.".to_string());
+                    continue;
+                }
+                if !Path::new(&expanded).exists() {
+                    err_line = Some(format!("Not found: {}", expanded));
+                    continue;
+                }
+                if !expanded.to_lowercase().ends_with(".h5ad") {
+                    err_line = Some("File should end with .h5ad".to_string());
+                    continue;
+                }
+                break Some(expanded);
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                err_line = None;
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+                err_line = None;
+            }
+            _ => {}
+        }
+    };
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )?;
+    let _ = io::stdout().flush();
+    Ok(result)
+}
+
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingDashboardExit {
@@ -495,10 +650,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .split(inner);
 
             // ── Header ────────────────────────────────────────────────────────
-            let mode = if st.full_cnn {
-                "CNN spatial"
-            } else {
-                "Seed-only lasso"
+            let mode = match st.run_config.cnn_training_mode.as_str() {
+                "full" => "CNN spatial",
+                "hybrid" => "Hybrid gated CNN",
+                _ => "Seed-only lasso",
             };
             let status_txt = if st.should_cancel() {
                 "Stopping"
@@ -622,6 +777,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         ),
                     ]),
                     Line::from(vec![lbl("GENES  "), val(rc.gene_selection.clone(), TITLE)]),
+                    Line::from(vec![
+                        lbl("TRAIN_MODE  "),
+                        val(rc.cnn_training_mode.clone(), SKY),
+                    ]),
                 ])
                 .block(
                     Block::default()
@@ -668,6 +827,16 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         sep(),
                         lbl("WORKERS  "),
                         val(format!("{}", st.n_parallel), GRAPE),
+                    ]),
+                    Line::from(vec![
+                        lbl("EXPORT  "),
+                        val(
+                            format!(
+                                "seed-only {}  ·  CNN {}",
+                                st.genes_exported_seed_only, st.genes_exported_cnn
+                            ),
+                            VALUE,
+                        ),
                     ]),
                     Line::from(vec![
                         lbl("EPOCH  "),

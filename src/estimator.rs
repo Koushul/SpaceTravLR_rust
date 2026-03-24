@@ -277,6 +277,126 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         }
     }
 
+    pub fn fit_cnn_refinement(
+        &mut self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        xy: &Array2<f64>,
+        clusters: &Array1<usize>,
+        num_clusters: usize,
+        device: &B::Device,
+        epochs: usize,
+        learning_rate: f64,
+        cnn: &CnnConfig,
+    ) {
+        let n_samples = x.nrows();
+        let spatial_features =
+            crate::estimator::create_spatial_features(xy, clusters, num_clusters, self.spatial_feature_radius);
+        let spatial_maps = crate::estimator::xyc2spatial_fast(
+            xy,
+            clusters,
+            num_clusters,
+            self.spatial_dim,
+            self.spatial_dim,
+        );
+
+        let mut summaries_by_cluster: HashMap<usize, ClusterTrainingSummary> = self
+            .cluster_training_summaries
+            .iter()
+            .cloned()
+            .map(|s| (s.cluster_id, s))
+            .collect();
+
+        for c_id in 0..num_clusters {
+            if !self.models.contains_key(&c_id) {
+                continue;
+            }
+            let indices: Vec<usize> =
+                (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
+            if indices.is_empty() {
+                continue;
+            }
+
+            let mut model = match self.models.remove(&c_id) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            let cluster_n = indices.len();
+            let n_modulators = x.ncols();
+            let x_c = x.select(Axis(0), &indices);
+            let y_c = y.select(Axis(0), &indices);
+
+            let x_tensor = Tensor::<B, 2>::from_data(
+                burn::tensor::TensorData::new(
+                    x_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
+                    [cluster_n, n_modulators],
+                ),
+                device,
+            );
+            let y_tensor = Tensor::<B, 1>::from_data(
+                burn::tensor::TensorData::new(
+                    y_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
+                    [cluster_n],
+                ),
+                device,
+            );
+            let sf_c = spatial_features.select(Axis(0), &indices);
+            let sf_tensor = Tensor::<B, 2>::from_data(
+                burn::tensor::TensorData::new(
+                    sf_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
+                    [cluster_n, num_clusters],
+                ),
+                device,
+            );
+            let sm_c = spatial_maps.select(Axis(0), &indices);
+            let sm_tensor = Tensor::<B, 4>::from_data(
+                burn::tensor::TensorData::new(
+                    sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
+                    [cluster_n, num_clusters, self.spatial_dim, self.spatial_dim],
+                ),
+                device,
+            );
+
+            let mut adam = AdamConfig::new()
+                .with_beta_1(cnn.adam_beta_1 as f32)
+                .with_beta_2(cnn.adam_beta_2 as f32)
+                .with_epsilon(cnn.adam_epsilon as f32);
+            if let Some(wd) = cnn.weight_decay {
+                adam = adam.with_weight_decay(Some(WeightDecayConfig::new(wd as f32)));
+            }
+            if let Some(gc) = cnn.grad_clip_norm {
+                adam = adam.with_grad_clipping(Some(GradientClippingConfig::Norm(gc as f32)));
+            }
+            let mut optim = adam.init::<B, CellularNicheNetwork<B>>();
+            let mut cnn_train_mse_epochs = Vec::with_capacity(epochs);
+            for _epoch in 0..epochs {
+                let y_pred =
+                    model.forward(sm_tensor.clone(), x_tensor.clone(), sf_tensor.clone());
+                let loss = burn::nn::loss::MseLoss::new().forward(
+                    y_pred,
+                    y_tensor.clone(),
+                    burn::nn::loss::Reduction::Mean,
+                );
+                let mse = finite_or_zero_f32(loss.clone().into_scalar().elem());
+                cnn_train_mse_epochs.push(mse);
+                let grads = loss.backward();
+                let grads = burn::optim::GradientsParams::from_grads(grads, &model);
+                model = optim.step(learning_rate, model, grads);
+            }
+
+            self.models.insert(c_id, model);
+
+            if let Some(s) = summaries_by_cluster.get_mut(&c_id) {
+                s.cnn_train_mse_epochs = cnn_train_mse_epochs;
+            }
+        }
+
+        let mut ordered: Vec<ClusterTrainingSummary> = summaries_by_cluster.into_values().collect();
+        ordered.sort_by_key(|s| s.cluster_id);
+        self.cluster_training_summaries = ordered;
+    }
+
     pub fn predict_betas(
         &self,
         x: &Array2<f64>,

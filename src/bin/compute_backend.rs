@@ -2,7 +2,9 @@ use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
 use burn_autodiff::Autodiff;
-use space_trav_lr_rust::config::CnnConfig;
+use space_trav_lr_rust::config::{
+    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig,
+};
 use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
 use space_trav_lr_rust::training_hud::TrainingHud;
 
@@ -89,11 +91,15 @@ pub(crate) struct FitAllGenesParams<'a> {
     pub group_reg: f64,
     pub n_iter: usize,
     pub tol: f64,
-    pub full_cnn: bool,
+    pub cnn_training_mode: CnnTrainingMode,
+    pub hybrid_pass2_full_cnn: bool,
+    pub hybrid_gating: &'a HybridCnnGatingConfig,
+    pub min_mean_lasso_r2_for_cnn: f64,
     pub gene_filter: Option<Vec<String>>,
     pub max_genes: Option<usize>,
     pub n_parallel: usize,
     pub output_dir: &'a str,
+    pub model_export: &'a ModelExportConfig,
     pub hud: Option<TrainingHud>,
 }
 
@@ -120,11 +126,15 @@ pub(crate) fn fit_all_genes_dispatch(
                 p.group_reg,
                 p.n_iter,
                 p.tol,
-                p.full_cnn,
+                p.cnn_training_mode,
+                p.hybrid_pass2_full_cnn,
+                p.hybrid_gating,
+                p.min_mean_lasso_r2_for_cnn,
                 p.gene_filter.clone(),
                 p.max_genes,
                 p.n_parallel,
                 p.output_dir,
+                p.model_export,
                 p.hud.clone(),
                 device,
             )
@@ -149,11 +159,15 @@ pub(crate) fn fit_all_genes_dispatch(
             p.group_reg,
             p.n_iter,
             p.tol,
-            p.full_cnn,
+            p.cnn_training_mode,
+            p.hybrid_pass2_full_cnn,
+            p.hybrid_gating,
+            p.min_mean_lasso_r2_for_cnn,
             p.gene_filter.clone(),
             p.max_genes,
             p.n_parallel,
             p.output_dir,
+            p.model_export,
             p.hud.clone(),
             device,
         ),

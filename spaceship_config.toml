@@ -5,7 +5,7 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 [data]
-# Path to .h5ad dataset.  Leave empty to use $SPACETRAVLR_H5AD env var.
+# Path to .h5ad dataset. Leave empty for interactive prompt (TUI) or pass --h5ad.
 # adata_path      = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/ThePerturbedBrain/slideseq_brain_processed.h5ad"
 # Expression layer to read from AnnData
 layer           = "imputed_count"
@@ -52,14 +52,32 @@ n_iter    = 100
 tol       = 1e-4
 
 [training]
-# true = lasso-only (cluster-level betas), false = lasso + CNN (cell-level betas)
+# Default when omitted: hybrid (per-gene CNN gating). Use minimal / full to force one path for all genes.
+mode            = "hybrid"
 seed_only       = true
-# CNN fine-tuning epochs per gene (ignored when seed_only = true)
 epochs          = 10
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
 learning_rate   = 2e-4
-# Minimum R² to accept a fit (0.0 = keep everything)
+# Minimum mean lasso R² to allow CNN in hybrid mode (also used when hybrid.min_mean_lasso_r2_for_cnn is unset)
 score_threshold = 0.1
+
+# Hybrid gating (only when mode = "hybrid"); see src/cnn_gating.rs / log gate_* fields
+[training.hybrid]
+min_cells_per_cluster_for_cnn = 80
+max_modulators_soft_for_cnn = 600
+moran_k_neighbors = 8
+moran_permutations = 99
+moran_p_value_max = 0.05
+moran_p_value_max_when_over_modulator_cap = 0.01
+require_all_clusters_lasso_converged = true
+# min_mean_lasso_r2_for_cnn = 0.15
+# min_mean_target_expression_for_cnn = 0.01
+hybrid_modulator_spatial_weight = 1.0
+# 0 = stricter gates (fewer CNNs), 1 = looser; 0.5 matches pre-knob behavior (default if omitted)
+hybrid_cnn_permissiveness = 1
+# cnn_force_genes_file = "path/to/allow.txt"
+# cnn_skip_genes_file = "path/to/skip.txt"
+# hybrid_cnn_top_k = 50
 
 [execution]
 # Number of parallel gene-training workers
@@ -80,3 +98,11 @@ n_propagation     = 4
 #   0.3 → ~1% error, ~6x faster
 # Comment out or omit for exact O(N²) computation.
 ligand_grid_factor = 0.5
+
+[model_export]
+# Export CNN model weights (for genes that run per-cell CNN refinement).
+save_cnn_weights = true
+# Use compressed .npz (numpy savez_compressed format).
+compressed_npz = true
+# Subdirectory under [execution].output_dir (currently fixed to "saved_models")
+output_subdir = "saved_models"
