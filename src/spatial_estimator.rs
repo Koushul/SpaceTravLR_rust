@@ -660,7 +660,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 g.total_genes = total_genes;
                 g.n_cells = obs_names.len();
                 g.n_clusters = num_clusters;
-                g.init_cluster_perf_buckets(num_clusters);
             }
         }
 

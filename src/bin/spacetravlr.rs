@@ -1,16 +1,18 @@
 mod compute_backend;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use serde_json::Value;
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
 };
 use space_trav_lr_rust::config::{CnnTrainingMode, SpaceshipConfig};
+use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_hud::TrainingHudState;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_adata_path_prompt, run_training_dashboard};
+use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "tui")]
 use std::sync::atomic::AtomicBool;
@@ -36,14 +38,62 @@ impl From<TrainingModeArg> for CnnTrainingMode {
     }
 }
 
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Write spacetravlr_run_summary.html (AnnData summary + config / optional manifest).
+    RunSummary(RunSummaryCli),
+}
+
+#[derive(Parser, Debug, Clone)]
+struct RunSummaryCli {
+    #[arg(long, value_name = "PATH", help = "AnnData .h5ad (default: data.adata_path)")]
+    h5ad: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Training output directory (default: execution.output_dir)"
+    )]
+    output_dir: Option<PathBuf>,
+    #[arg(
+        short = 'c',
+        long,
+        value_name = "PATH",
+        help = "spaceship_config.toml (defaults to cwd discovery if omitted)"
+    )]
+    config: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "obs column for cluster count (default: data.cluster_annot)"
+    )]
+    cluster_key: Option<String>,
+    #[arg(long, help = "documented in the report only")]
+    layer: Option<String>,
+    #[arg(long, help = "override run id (default: manifest or AnnData stem)")]
+    run_id: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "optional JSON manifest from training"
+    )]
+    manifest: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "*_betadata.csv",
+        help = "glob for counting betadata CSVs in the output directory"
+    )]
+    betadata_pattern: String,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "spacetravlr",
     version,
     about = "SpaceTravLR — spatial GRN training from single-cell spatial AnnData (.h5ad).",
-    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard."
+    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training."
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
     #[arg(
         short = 'c',
         long,
@@ -219,6 +269,74 @@ fn print_plain_preamble(
     println!("{}", "—".repeat(60));
 }
 
+fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
+    let cfg = match rs.config.as_ref().or(cli.config.as_ref()) {
+        Some(p) => SpaceshipConfig::from_file(p)?,
+        None => SpaceshipConfig::load(),
+    };
+
+    let adata_path = rs
+        .h5ad
+        .clone()
+        .or_else(|| {
+            let p = expand_user_path(&cfg.resolve_adata_path());
+            if p.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(p))
+            }
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No AnnData path: pass --h5ad or set data.adata_path in spaceship_config.toml."
+            )
+        })?;
+
+    let output_dir = rs
+        .output_dir
+        .clone()
+        .or_else(|| {
+            let d = expand_user_path(cfg.execution.output_dir.trim());
+            if d.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(d))
+            }
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No output directory: pass --output-dir or set execution.output_dir in config."
+            )
+        })?;
+
+    if !Path::new(&adata_path).exists() {
+        anyhow::bail!("AnnData not found at {}.", adata_path.display());
+    }
+
+    let manifest: Option<Value> = rs
+        .manifest
+        .as_ref()
+        .map(|p| {
+            let s = std::fs::read_to_string(p)?;
+            let v: Value = serde_json::from_str(&s)?;
+            Ok::<_, anyhow::Error>(v)
+        })
+        .transpose()?;
+
+    let path = write_run_summary_html(RunSummaryParams {
+        adata_path: &adata_path,
+        output_dir: &output_dir,
+        cfg: &cfg,
+        cluster_key: rs.cluster_key.as_deref(),
+        layer_override: rs.layer.as_deref(),
+        run_id: rs.run_id.as_deref(),
+        manifest: manifest.as_ref(),
+        betadata_pattern: rs.betadata_pattern.as_str(),
+    })?;
+    println!("{}", path.display());
+    Ok(())
+}
+
 fn expand_user_path(s: &str) -> String {
     let s = s.trim();
     if s.is_empty() {
@@ -240,6 +358,10 @@ fn expand_user_path(s: &str) -> String {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if let Some(Commands::RunSummary(rs)) = &cli.command {
+        return run_run_summary(&cli, rs);
+    }
+
     let mut cfg = match &cli.config {
         Some(path) => SpaceshipConfig::from_file(path)?,
         None => SpaceshipConfig::load(),
@@ -258,13 +380,14 @@ fn main() -> anyhow::Result<()> {
         {
             if use_dashboard {
                 print_compute_notice(&compute);
-                match run_adata_path_prompt()? {
+                match run_dataset_paths_prompt(cfg.execution.output_dir.trim())? {
                     None => {
                         eprintln!("No dataset path; exiting.");
                         return Ok(());
                     }
-                    Some(p) => {
-                        cfg.data.adata_path = p;
+                    Some((h5ad, out_dir)) => {
+                        cfg.data.adata_path = h5ad;
+                        cfg.execution.output_dir = out_dir;
                     }
                 }
             } else {

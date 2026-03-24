@@ -6,8 +6,15 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR)
 
 ## Installation
 
-### Prerequisites  
-  On HPC:
+  Quick setup:
+
+  ```bash
+  echo 'export PATH="$PATH:/ix/djishnu/shared/djishnu_kor11/rust/SpaceTravLR_rust/bin"' >> ~/.bashrc
+  source ~/.bashrc
+  ```
+
+
+  Or, compile it from scratch:
 
   ```bash
    module load rust
@@ -192,6 +199,20 @@ python scripts/load_cnn_npz_pytorch.py \
   --cluster 0
 ```
 
+## HTML run summary
+
+After training (or anytime you have an `.h5ad` and output directory), emit a small browser report (styled via embedded CSS, same layout tokens as the SpaceTravLR run-summary template):
+
+```bash
+cargo run --release --bin spacetravlr -- run-summary \
+  --h5ad /path/to/dataset.h5ad \
+  --output-dir /tmp/training \
+  -c spaceship_config.toml
+```
+
+Paths default from `spaceship_config.toml` when `--h5ad` / `--output-dir` are omitted. Optional `--manifest` merges training JSON fields when present.
+
+Writes `spacetravlr_run_summary.html` only (AnnData shape, cluster counts, detected spatial key, optional manifest/config fields). No figure generation.
 
 ---
 

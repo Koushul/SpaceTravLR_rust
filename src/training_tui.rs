@@ -37,10 +37,9 @@ const TITLE: Color = Color::Rgb(235, 219, 178); // gruvbox light text
 const C_WROTE: Color = Color::Rgb(142, 192, 124); // success
 const C_FAIL: Color = Color::Rgb(204, 36, 29); // provided red
 const C_SKIP: Color = Color::Rgb(146, 131, 116); // muted
-const C_TOPR2: Color = Color::Rgb(69, 133, 136); // provided aqua
-const C_BOTR2: Color = Color::Rgb(204, 36, 29); // provided red
-
-const PERF_BORD: Color = Color::Rgb(215, 153, 33); // provided yellow
+const C_TOPR2: Color = Color::Rgb(69, 133, 136); // aqua
+const C_BOTR2: Color = Color::Rgb(204, 36, 29); // red
+const PERF_BORD: Color = Color::Rgb(215, 153, 33); // yellow
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
 // Compact ASCII rocket — every line is exactly 14 display columns.
@@ -298,62 +297,25 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
 
     let (half, gene_w) = perf_r2_columns(inner_w);
 
-    let grand: f64 = st.gene_r2_mean.iter().map(|(_, r)| r).sum::<f64>() / n_genes as f64;
-
     let mut v = st.gene_r2_mean.clone();
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let top5: Vec<(String, f64)> = v.iter().take(5).cloned().collect();
     v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let bot5: Vec<(String, f64)> = v.iter().take(5).cloned().collect();
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(12);
-    lines.push(Line::from(vec![
-        Span::styled("μ R²/gene ", Style::default().fg(LABEL)),
-        Span::styled(
-            format!("{:.3}", grand),
-            Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let mut cluster_parts: Vec<(usize, f64)> = st
-        .cluster_r2_sum
-        .iter()
-        .zip(st.cluster_r2_count.iter())
-        .enumerate()
-        .filter_map(|(i, (&sum, &cnt))| {
-            if cnt > 0 {
-                Some((i, sum / f64::from(cnt)))
-            } else {
-                None
-            }
-        })
-        .collect();
-    cluster_parts.sort_by_key(|(i, _)| *i);
-
-    if !cluster_parts.is_empty() {
-        let cl_mean: f64 =
-            cluster_parts.iter().map(|(_, r)| r).sum::<f64>() / cluster_parts.len() as f64;
-        lines.push(Line::from(vec![
-            Span::styled("μ R²/cluster ", Style::default().fg(LABEL)),
-            Span::styled(
-                format!("{:.3}", cl_mean),
-                Style::default().fg(SKY).add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
-
-    lines.push(rule_line(inner_w));
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(8);
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<hw$}", "▲ best", hw = half),
+            format!("{:<hw$}", "▲ best R²", hw = half),
             Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().fg(MUTED)),
         Span::styled(
-            format!("{:<hw$}", "▼ worst", hw = half),
+            format!("{:<hw$}", "▼ worst R²", hw = half),
             Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
         ),
     ]));
+    lines.push(rule_line(inner_w));
     for ((g_hi, r_hi), (g_lo, r_lo)) in top5.into_iter().zip(bot5.into_iter()) {
         let g_hi_s = truncate_label(&g_hi, gene_w);
         let g_lo_s = truncate_label(&g_lo, gene_w);
@@ -399,74 +361,134 @@ fn expand_user_path_input(s: &str) -> String {
     s.to_string()
 }
 
-/// Full-screen prompt when no `.h5ad` path is configured. **Enter** confirms, **Esc** cancels.
-pub fn run_adata_path_prompt() -> anyhow::Result<Option<String>> {
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
+    let y = area.y.saturating_add(area.height.saturating_sub(height) / 2);
+    Rect::new(x, y, width, height)
+}
+
+fn prompt_aborts(key: &event::KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('q' | 'Q')))
+}
+
+/// When no `.h5ad` path is configured: compact centered prompts for AnnData then output directory.
+/// **Enter** confirms each step. **Esc** or **Shift+Q** exits without starting training.
+pub fn run_dataset_paths_prompt(default_output_dir: &str) -> anyhow::Result<Option<(String, String)>> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, crossterm::cursor::Show)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut input = String::new();
+    let default_out = default_output_dir.trim().to_string();
+    let mut step: u8 = 0;
+    let mut adata_input = String::new();
+    let mut output_input = default_out.clone();
     let mut err_line: Option<String> = None;
 
     let result = loop {
         terminal.draw(|f| {
             let area = f.area();
-            let bg = Style::default().bg(BG);
-            f.render_widget(Block::default().style(bg), area);
+            f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+
+            let popup_w = ((area.width * 55) / 100).clamp(48, 72).min(area.width.saturating_sub(4));
+            let popup_h = 13u16.min(area.height.saturating_sub(2));
+            let popup_area = centered_rect(area, popup_w, popup_h);
+
+            let (title, help): (&str, Vec<Line>) = if step == 0 {
+                (
+                    " AnnData (.h5ad) ",
+                    vec![
+                        Line::from(Span::styled(
+                            "No dataset path in config or CLI.",
+                            Style::default().fg(MUTED),
+                        )),
+                        Line::from(Span::styled(
+                            "Path to spatial .h5ad, then Enter.",
+                            Style::default().fg(VALUE),
+                        )),
+                        Line::from(Span::styled(
+                            "Esc / Shift+Q exit · ~/ expanded",
+                            Style::default().fg(MUTED),
+                        )),
+                    ],
+                )
+            } else {
+                let adata_disp = if adata_input.chars().count() > 48 {
+                    format!(
+                        "{}…",
+                        adata_input.chars().take(45).collect::<String>()
+                    )
+                } else {
+                    adata_input.clone()
+                };
+                (
+                    " Output directory ",
+                    vec![
+                        Line::from(Span::styled(
+                            format!("AnnData: {adata_disp}"),
+                            Style::default().fg(MUTED),
+                        )),
+                        Line::from(Span::styled(
+                            "Directory for *_betadata.csv (created if missing).",
+                            Style::default().fg(VALUE),
+                        )),
+                        Line::from(Span::styled(
+                            "Esc / Shift+Q exit · Enter confirm",
+                            Style::default().fg(MUTED),
+                        )),
+                    ],
+                )
+            };
+
+            let input_ref = if step == 0 {
+                &adata_input
+            } else {
+                &output_input
+            };
 
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(TEL_BORD))
                 .title(Span::styled(
-                    " Select AnnData (.h5ad) ",
+                    title,
                     Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
                 ));
-            let inner = block.inner(area);
-            f.render_widget(block, area);
+            let inner = block.inner(popup_area);
+            f.render_widget(block, popup_area);
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(4),
-                    Constraint::Min(2),
+                    Constraint::Length(6),
+                    Constraint::Length(3),
                     Constraint::Length(2),
                 ])
                 .split(inner);
 
-            let help = Paragraph::new(vec![
-                Line::from(Span::styled(
-                    "No dataset path was set in config or on the command line.",
-                    Style::default().fg(MUTED),
-                )),
-                Line::from(Span::styled(
-                    "Type the full path to your spatial .h5ad file, then press Enter.",
-                    Style::default().fg(VALUE),
-                )),
-                Line::from(Span::styled(
-                    "Esc cancel  ·  ~ and ~/ are expanded",
-                    Style::default().fg(MUTED),
-                )),
-            ])
-            .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(OUTER_BORD)),
-            );
-            f.render_widget(help, chunks[0]);
+            let help_w = Paragraph::new(help)
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(OUTER_BORD)),
+                );
+            f.render_widget(help_w, chunks[0]);
 
             let path_block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(SKY))
                 .title(Span::styled(" path ", Style::default().fg(LABEL)));
             let path_para = Paragraph::new(Line::from(vec![Span::styled(
-                if input.is_empty() {
+                if input_ref.is_empty() {
                     " "
                 } else {
-                    input.as_str()
+                    input_ref.as_str()
                 },
                 Style::default().fg(TITLE),
             )]))
@@ -495,30 +517,54 @@ pub fn run_adata_path_prompt() -> anyhow::Result<Option<String>> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if prompt_aborts(&key) {
+            break None;
+        }
+
+        let input_mut = if step == 0 {
+            &mut adata_input
+        } else {
+            &mut output_input
+        };
+
         match key.code {
-            KeyCode::Esc => break None,
             KeyCode::Enter => {
-                let expanded = expand_user_path_input(&input);
+                let expanded = expand_user_path_input(input_mut);
+                if step == 0 {
+                    if expanded.is_empty() {
+                        err_line = Some("Path cannot be empty.".to_string());
+                        continue;
+                    }
+                    if !Path::new(&expanded).exists() {
+                        err_line = Some(format!("Not found: {}", expanded));
+                        continue;
+                    }
+                    if !expanded.to_lowercase().ends_with(".h5ad") {
+                        err_line = Some("File should end with .h5ad".to_string());
+                        continue;
+                    }
+                    adata_input = expanded;
+                    err_line = None;
+                    step = 1;
+                    continue;
+                }
                 if expanded.is_empty() {
-                    err_line = Some("Path cannot be empty.".to_string());
+                    err_line = Some("Output directory cannot be empty.".to_string());
                     continue;
                 }
-                if !Path::new(&expanded).exists() {
-                    err_line = Some(format!("Not found: {}", expanded));
+                let p = Path::new(&expanded);
+                if p.exists() && !p.is_dir() {
+                    err_line = Some("Path exists but is not a directory.".to_string());
                     continue;
                 }
-                if !expanded.to_lowercase().ends_with(".h5ad") {
-                    err_line = Some("File should end with .h5ad".to_string());
-                    continue;
-                }
-                break Some(expanded);
+                break Some((adata_input.clone(), expanded));
             }
             KeyCode::Backspace => {
-                input.pop();
+                input_mut.pop();
                 err_line = None;
             }
-            KeyCode::Char(c) => {
-                input.push(c);
+            KeyCode::Char(c) if !c.is_control() => {
+                input_mut.push(c);
                 err_line = None;
             }
             _ => {}
@@ -909,7 +955,6 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 work_row[0],
             );
 
-            // ── R² performance (throttled rebuild; width-aware columns) ─────
             let perf_inner = work_row[1].width.saturating_sub(2) as usize;
             {
                 let now = Instant::now();

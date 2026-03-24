@@ -543,6 +543,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "build_html"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10b322c8c13b6b775e5befd834d2a27c683506f1100b56a7b39d33c28024ba54"
+
+[[package]]
 name = "built"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1001,8 +1007,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -6038,10 +6046,13 @@ dependencies = [
  "anndata-hdf5",
  "anyhow",
  "approx",
+ "build_html",
  "burn",
  "burn-autodiff",
+ "chrono",
  "clap",
  "crossterm 0.28.1",
+ "glob",
  "indicatif",
  "ndarray 0.16.1",
  "ndarray-npy",
@@ -6054,6 +6065,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "serde",
+ "serde_json",
  "sysinfo",
  "toml",
  "wgpu",
