@@ -12,6 +12,30 @@ pub struct Modulators {
     pub tfl_pairs: Vec<String>,
 }
 
+impl Modulators {
+    pub fn apply_modulator_mask(
+        mut self,
+        use_tf_modulators: bool,
+        use_lr_modulators: bool,
+        use_tfl_modulators: bool,
+    ) -> Self {
+        if !use_tf_modulators {
+            self.regulators.clear();
+        }
+        if !use_lr_modulators {
+            self.ligands.clear();
+            self.receptors.clear();
+            self.lr_pairs.clear();
+        }
+        if !use_tfl_modulators {
+            self.tfl_ligands.clear();
+            self.tfl_regulators.clear();
+            self.tfl_pairs.clear();
+        }
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct GeneNetwork {
     pub species: String,
@@ -356,5 +380,22 @@ mod tests {
         assert_eq!(m.regulators.len(), 1);
         assert_eq!(m.lr_pairs[0], "B$C");
         assert_eq!(m.tfl_pairs[0], "D#E");
+    }
+
+    #[test]
+    fn apply_modulator_mask_lr_only() {
+        let m = Modulators {
+            regulators: vec!["A".into()],
+            ligands: vec!["B".into()],
+            receptors: vec!["C".into()],
+            tfl_ligands: vec!["D".into()],
+            tfl_regulators: vec!["E".into()],
+            lr_pairs: vec!["B$C".into()],
+            tfl_pairs: vec!["D#E".into()],
+        };
+        let m = m.apply_modulator_mask(false, true, false);
+        assert!(m.regulators.is_empty());
+        assert_eq!(m.lr_pairs.len(), 1);
+        assert!(m.tfl_pairs.is_empty());
     }
 }

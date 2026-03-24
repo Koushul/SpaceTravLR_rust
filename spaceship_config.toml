@@ -28,6 +28,10 @@ tf_ligand_cutoff = 0.15
 # Keep only the top K LR pairs by mean expression: score = 0.5 * (mean_ligand + mean_receptor)
 # across all cells, using [data].layer. When set, max_lr_pairs is ignored.
 # top_lr_pairs_by_mean_expression = 100
+# Subset modulator groups (default all true). Set false to ablate TF / LR / TF–ligand (NicheNet) features.
+# use_tf_modulators = true
+# use_lr_modulators = true
+# use_tfl_modulators = true
 
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)

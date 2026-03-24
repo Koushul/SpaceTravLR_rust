@@ -212,6 +212,49 @@ impl TrainingHudState {
 
 pub type TrainingHud = Arc<Mutex<TrainingHudState>>;
 
+/// After a run with the dashboard, explain when nothing wrote betadata (TUI hides per-gene `println!`).
+pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
+    let Some(h) = hud else {
+        return;
+    };
+    let Ok(g) = h.lock() else {
+        return;
+    };
+    if g.total_genes == 0 {
+        return;
+    }
+    let exported = g.genes_exported_seed_only + g.genes_exported_cnn;
+    if exported > 0 {
+        return;
+    }
+    if g.genes_rounds < g.total_genes {
+        return;
+    }
+    if g.genes_failed == 0 && g.genes_orphan == 0 && g.genes_skipped >= g.total_genes {
+        eprintln!(
+            "\nNote: no new *_betadata.csv files were written — every gene was skipped (outputs already exist or another process holds a .lock)."
+        );
+        return;
+    }
+    eprintln!("\n=== No betadata CSVs were written this run ===");
+    eprintln!("Genes queued: {}", g.total_genes);
+    eprintln!(
+        "  skipped (existing CSV / lock): {}",
+        g.genes_skipped
+    );
+    eprintln!(
+        "  failed (init or fit — check {}/log/ for details): {}",
+        g.output_dir, g.genes_failed
+    );
+    eprintln!(
+        "  orphan (no modulators in GRN for that target): {}",
+        g.genes_orphan
+    );
+    eprintln!(
+        "Typical fixes: set [data].layer and [data].cluster_annot to match the .h5ad; ensure obsm has spatial / X_spatial / spatial_loc (≥2 cols); verify species/GRN covers your gene symbols; relax --genes filter."
+    );
+}
+
 pub fn log_line(hud: &Option<TrainingHud>, msg: String) {
     if hud.is_none() {
         println!("{}", msg);

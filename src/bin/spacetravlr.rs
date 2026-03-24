@@ -230,8 +230,27 @@ fn print_compute_notice(compute: &ComputeChoice) {
     println!("{}", compute_notice_text(compute));
 }
 
+fn grn_modulator_label(cfg: &SpaceshipConfig) -> String {
+    let mut parts = Vec::new();
+    if cfg.grn.use_tf_modulators {
+        parts.push("TF");
+    }
+    if cfg.grn.use_lr_modulators {
+        parts.push("LR");
+    }
+    if cfg.grn.use_tfl_modulators {
+        parts.push("TFL");
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join("+")
+    }
+}
+
 fn print_plain_preamble(
     summary: &RunConfigSummary,
+    cfg: &SpaceshipConfig,
     dataset: &str,
     output_dir: &str,
     mode: &str,
@@ -262,8 +281,11 @@ fn print_plain_preamble(
         summary.cnn_training_mode, summary.learning_rate, summary.score_threshold
     );
     println!(
-        "GRN:         tf_lig≥{}  max_lr={}  top_lr={}",
-        summary.tf_ligand_cutoff, summary.max_lr_pairs, summary.top_lr_pairs
+        "GRN:         tf_lig≥{}  max_lr={}  top_lr={}  mods={}",
+        summary.tf_ligand_cutoff,
+        summary.max_lr_pairs,
+        summary.top_lr_pairs,
+        grn_modulator_label(cfg)
     );
     println!("Genes:       {}", summary.gene_selection);
     println!("{}", "—".repeat(60));
@@ -438,7 +460,7 @@ fn main() -> anyhow::Result<()> {
 
     if !use_dashboard {
         print_compute_notice(&compute);
-        print_plain_preamble(&run_summary, &path, &output_dir, mode_label, n_parallel);
+        print_plain_preamble(&run_summary, &cfg, &path, &output_dir, mode_label, n_parallel);
         let params = FitAllGenesParams {
             path: &path,
             radius: cfg.spatial.radius,
@@ -447,7 +469,11 @@ fn main() -> anyhow::Result<()> {
             tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
             max_lr_pairs: cfg.grn.max_lr_pairs,
             top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+            use_tf_modulators: cfg.grn.use_tf_modulators,
+            use_lr_modulators: cfg.grn.use_lr_modulators,
+            use_tfl_modulators: cfg.grn.use_tfl_modulators,
             layer: &cfg.data.layer,
+            cluster_annot: &cfg.data.cluster_annot,
             cnn: &cfg.cnn,
             epochs,
             learning_rate: cfg.training.learning_rate,
@@ -499,7 +525,11 @@ fn main() -> anyhow::Result<()> {
                 tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
                 max_lr_pairs: cfg.grn.max_lr_pairs,
                 top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                use_tf_modulators: cfg.grn.use_tf_modulators,
+                use_lr_modulators: cfg.grn.use_lr_modulators,
+                use_tfl_modulators: cfg.grn.use_tfl_modulators,
                 layer: &cfg.data.layer,
+                cluster_annot: &cfg.data.cluster_annot,
                 cnn: &cfg.cnn,
                 epochs,
                 learning_rate: cfg.training.learning_rate,

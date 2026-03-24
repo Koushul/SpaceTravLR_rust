@@ -71,6 +71,7 @@ pub fn predict_lasso_y(
     yhat
 }
 
+/// All-pairs distances per cell — roughly **O(n² log n)**. Only used for hybrid Moran gating.
 fn symmetrized_knn_indices(xy: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
     let n = xy.nrows();
     if n == 0 {

@@ -4,7 +4,7 @@ use crate::cnn_gating::{
 use crate::config::{CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig};
 use crate::estimator::{ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
-use crate::training_hud::{TrainingHud, log_line};
+use crate::training_hud::{TrainingHud, log_line, print_training_outcome_banner};
 use anndata::data::SelectInfoElem;
 use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
 use burn::tensor::backend::AutodiffBackend;
@@ -59,6 +59,114 @@ fn compute_gene_mean_expression<AnB: Backend>(
         out.insert(name.clone(), sum * inv_n);
     }
     Ok(out)
+}
+
+fn load_spatial_coords_f64<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<Array2<f64>> {
+    const KEYS: [&str; 3] = ["spatial", "X_spatial", "spatial_loc"];
+    for key in KEYS {
+        if let Some(arr) = adata.obsm().get_item::<Array2<f64>>(key)? {
+            if arr.nrows() > 0 && arr.ncols() >= 2 {
+                return Ok(arr);
+            }
+        }
+        if let Some(arr) = adata.obsm().get_item::<Array2<f32>>(key)? {
+            if arr.nrows() > 0 && arr.ncols() >= 2 {
+                return Ok(arr.mapv(|v| v as f64));
+            }
+        }
+    }
+    let obsm_keys = adata.obsm().keys();
+    anyhow::bail!(
+        "No usable 2D spatial coordinates in obsm (tried {:?}, need ≥2 columns). obsm keys: {:?}.",
+        KEYS.as_slice(),
+        obsm_keys
+    );
+}
+
+fn ensure_expression_layer_readable<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    layer: &str,
+) -> anyhow::Result<()> {
+    let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
+    if layer != "X" && !layer.is_empty() {
+        if adata.layers().get(layer).is_none() {
+            let keys = adata.layers().keys();
+            let preview: Vec<String> = keys.into_iter().take(20).collect();
+            anyhow::bail!(
+                "Expression layer {:?} is missing from AnnData.layers. Known keys (first 20): {:?}. Fix [data].layer in spaceship_config.toml or use \"X\".",
+                layer,
+                preview
+            );
+        }
+    }
+    let data: Array2<f64> = if layer != "X" && !layer.is_empty() {
+        let layer_elem = adata
+            .layers()
+            .get(layer)
+            .expect("layer checked above");
+        layer_elem
+            .slice(slice)?
+            .ok_or_else(|| anyhow::anyhow!("Failed to slice layer {:?}", layer))?
+    } else {
+        let x_elem = adata.x();
+        if x_elem.is_none() {
+            anyhow::bail!("AnnData has no X matrix; set [data].layer to a valid layer name.");
+        }
+        x_elem
+            .slice(slice)?
+            .ok_or_else(|| anyhow::anyhow!("Failed to read X matrix"))?
+    };
+    if data.nrows() != adata.n_obs() {
+        anyhow::bail!(
+            "Expression matrix has {} rows but n_obs is {}; check layer / AnnData integrity.",
+            data.nrows(),
+            adata.n_obs()
+        );
+    }
+    Ok(())
+}
+
+fn validate_training_inputs<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    cluster_annot: &str,
+    layer: &str,
+    n_targets: usize,
+) -> anyhow::Result<()> {
+    if adata.n_obs() == 0 {
+        anyhow::bail!("AnnData has 0 cells (n_obs=0); nothing to train.");
+    }
+    if adata.var_names().into_vec().is_empty() {
+        anyhow::bail!("AnnData has 0 genes (n_vars=0); nothing to train.");
+    }
+    if n_targets == 0 {
+        anyhow::bail!(
+            "Gene list is empty after --genes / max_genes filters; widen the filter or remove --genes."
+        );
+    }
+    let obs = adata.read_obs()?;
+    if obs.column(cluster_annot).is_err() {
+        let names: Vec<String> = obs
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .take(25)
+            .collect();
+        anyhow::bail!(
+            "obs column {:?} not found (needed for per-cluster training). First obs columns: {:?}. Set [data].cluster_annot in spaceship_config.toml.",
+            cluster_annot,
+            names
+        );
+    }
+    let col = obs.column(cluster_annot)?;
+    col.cast(&polars::prelude::DataType::Float64).map_err(|e| {
+        anyhow::anyhow!(
+            "obs column {:?} must be numeric (or castable to float) for cluster ids: {}",
+            cluster_annot,
+            e
+        )
+    })?;
+    ensure_expression_layer_readable(adata, layer)?;
+    Ok(())
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -420,19 +528,28 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         max_lr_pairs: Option<usize>,
         top_lr_pairs_by_mean_expression: Option<usize>,
         gene_mean_expression: Option<Arc<HashMap<String, f64>>>,
+        use_tf_modulators: bool,
+        use_lr_modulators: bool,
+        use_tfl_modulators: bool,
         grn: Arc<crate::network::GeneNetwork>,
         layer: String,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
         let cluster_annot = "cell_type_int".to_string();
 
-        let modulators = grn.get_modulators(
-            &target_gene_str,
-            tf_ligand_cutoff,
-            max_lr_pairs,
-            top_lr_pairs_by_mean_expression,
-            gene_mean_expression.as_deref(),
-        )?;
+        let modulators = grn
+            .get_modulators(
+                &target_gene_str,
+                tf_ligand_cutoff,
+                max_lr_pairs,
+                top_lr_pairs_by_mean_expression,
+                gene_mean_expression.as_deref(),
+            )?
+            .apply_modulator_mask(
+                use_tf_modulators,
+                use_lr_modulators,
+                use_tfl_modulators,
+            );
         let mut modulators_genes_ordered = modulators.regulators.clone();
         modulators_genes_ordered.extend(modulators.lr_pairs.clone());
         modulators_genes_ordered.extend(modulators.tfl_pairs.clone());
@@ -484,6 +601,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             max_lr_pairs,
             None,
             None,
+            true,
+            true,
+            true,
             grn,
             "imputed_count".to_string(),
         )
@@ -500,7 +620,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         tf_ligand_cutoff: f64,
         max_lr_pairs: Option<usize>,
         top_lr_pairs_by_mean_expression: Option<usize>,
+        use_tf_modulators: bool,
+        use_lr_modulators: bool,
+        use_tfl_modulators: bool,
         layer: &str,
+        cluster_annot: &str,
         cnn: &CnnConfig,
         epochs: usize,
         learning_rate: f64,
@@ -570,21 +694,17 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         let total_genes = target_genes.len();
 
+        validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
+
         let msg = "Pre-caching metadata and coordinates...";
         log_line(&hud, msg.to_string());
         if hud.is_none() {
             println!("{}", msg);
         }
 
-        let cluster_annot = "cell_type_int".to_string();
         let obs_df = setup_adata.read_obs()?;
-        let xy: Arc<Array2<f64>> = Arc::new(
-            setup_adata
-                .obsm()
-                .get_item("spatial")?
-                .ok_or_else(|| anyhow::anyhow!("obsm['spatial'] not found"))?,
-        );
-        let clusters_ser = obs_df.column(&cluster_annot)?;
+        let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
+        let clusters_ser = obs_df.column(cluster_annot)?;
         let clusters: Arc<Array1<usize>> = Arc::new(
             clusters_ser
                 .as_materialized_series()
@@ -622,10 +742,25 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 None
             };
 
-        let neighbors = Arc::new(build_neighbors(
-            xy.as_ref(),
-            hybrid_gating.moran_k_neighbors.max(1),
-        ));
+        let neighbors: Arc<Vec<Vec<usize>>> =
+            if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
+                let n_cells = xy.nrows();
+                let k = hybrid_gating.moran_k_neighbors.max(1);
+                let mut msg = format!(
+                    "Building kNN graph for Moran's I ({} cells, k={})…",
+                    n_cells, k
+                );
+                if n_cells > 8_000 {
+                    msg.push_str(" (this step is O(n²) per cell; very large n can take a long time)");
+                }
+                log_line(&hud, msg.clone());
+                if hud.is_none() {
+                    println!("{}", msg);
+                }
+                Arc::new(build_neighbors(xy.as_ref(), k))
+            } else {
+                Arc::new(Vec::new())
+            };
 
         let (force_genes, skip_genes) =
             if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
@@ -699,6 +834,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 (radius, spatial_dim, contact_distance, tf_ligand_cutoff);
             let max_lr_pairs = max_lr_pairs;
             let top_lr_pairs_by_mean_expression = top_lr_pairs_by_mean_expression;
+            let use_tf_modulators = use_tf_modulators;
+            let use_lr_modulators = use_lr_modulators;
+            let use_tfl_modulators = use_tfl_modulators;
             let gene_mean_arc = gene_mean_arc.clone();
             let layer_w = layer_for_workers.clone();
             let cnn_w = cnn_for_workers.clone();
@@ -827,6 +965,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             max_lr_pairs,
                             top_lr_pairs_by_mean_expression,
                             gene_mean_arc.clone(),
+                            use_tf_modulators,
+                            use_lr_modulators,
+                            use_tfl_modulators,
                             global_grn.clone(),
                             layer_w.clone(),
                         )
@@ -1290,7 +1431,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         tf_ligand_cutoff,
                         max_lr_pairs,
                         top_lr_pairs_by_mean_expression,
+                        use_tf_modulators,
+                        use_lr_modulators,
+                        use_tfl_modulators,
                         layer,
+                        cluster_annot,
                         cnn,
                         epochs,
                         learning_rate,
@@ -1314,6 +1459,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 }
             }
         }
+
+        print_training_outcome_banner(&hud);
 
         if let Some(ref h) = hud {
             if let Ok(mut g) = h.lock() {

@@ -50,6 +50,12 @@ pub struct GrnConfig {
     /// pass over the expression matrix at pipeline start. Ignores `max_lr_pairs`
     /// when set.
     pub top_lr_pairs_by_mean_expression: Option<usize>,
+    #[serde(default = "default_true")]
+    pub use_tf_modulators: bool,
+    #[serde(default = "default_true")]
+    pub use_lr_modulators: bool,
+    #[serde(default = "default_true")]
+    pub use_tfl_modulators: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +105,10 @@ pub struct HybridCnnGatingConfig {
 
 fn default_hybrid_cnn_permissiveness() -> f64 {
     0.5
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for HybridCnnGatingConfig {
@@ -235,6 +245,9 @@ impl Default for GrnConfig {
             tf_ligand_cutoff: 0.5,
             max_lr_pairs: None,
             top_lr_pairs_by_mean_expression: None,
+            use_tf_modulators: true,
+            use_lr_modulators: true,
+            use_tfl_modulators: true,
         }
     }
 }
