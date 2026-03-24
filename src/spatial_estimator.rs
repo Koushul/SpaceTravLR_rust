@@ -666,15 +666,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         if let Some(filter) = gene_filter {
             let msg = format!("Filtering for specific genes: {:?}", filter);
             log_line(&hud, msg.clone());
-            if hud.is_none() {
-                println!("{}", msg);
-            }
             target_genes.retain(|g| filter.contains(g));
             let msg = format!("Retained {} genes for training", target_genes.len());
             log_line(&hud, msg.clone());
-            if hud.is_none() {
-                println!("{}", msg);
-            }
         }
         if let Some(n) = max_genes {
             if target_genes.len() > n {
@@ -682,9 +676,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let preview: Vec<_> = target_genes.iter().take(5).cloned().collect();
                 let msg = format!("Using first {} genes (preview: {:?})", n, preview);
                 log_line(&hud, msg.clone());
-                if hud.is_none() {
-                    println!("{}", msg);
-                }
             }
         }
 
@@ -698,9 +689,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         let msg = "Pre-caching metadata and coordinates...";
         log_line(&hud, msg.to_string());
-        if hud.is_none() {
-            println!("{}", msg);
-        }
 
         let obs_df = setup_adata.read_obs()?;
         let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
@@ -720,6 +708,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             .map(|m| m.saturating_add(1))
             .unwrap_or(1);
 
+        if let Some(ref h) = hud {
+            if let Ok(mut g) = h.lock() {
+                g.total_genes = total_genes;
+                g.n_cells = setup_adata.n_obs();
+                g.n_clusters = num_clusters;
+            }
+        }
+
         let compute_mean_for_hybrid = matches!(cnn_training_mode, CnnTrainingMode::Hybrid)
             && !hybrid_pass2_full_cnn
             && hybrid_gating.min_mean_target_expression_for_cnn.is_some();
@@ -731,9 +727,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     layer
                 );
                 log_line(&hud, msg.clone());
-                if hud.is_none() {
-                    println!("{}", msg);
-                }
                 Some(Arc::new(compute_gene_mean_expression(
                     setup_adata.as_ref(),
                     layer,
@@ -754,9 +747,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     msg.push_str(" (this step is O(n²) per cell; very large n can take a long time)");
                 }
                 log_line(&hud, msg.clone());
-                if hud.is_none() {
-                    println!("{}", msg);
-                }
                 Arc::new(build_neighbors(xy.as_ref(), k))
             } else {
                 Arc::new(Vec::new())
@@ -789,14 +779,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let cnn_for_workers = cnn.clone();
 
         drop(setup_adata); // release; workers open their own handles
-
-        if let Some(ref h) = hud {
-            if let Ok(mut g) = h.lock() {
-                g.total_genes = total_genes;
-                g.n_cells = obs_names.len();
-                g.n_clusters = num_clusters;
-            }
-        }
 
         let pb_opt: Option<ProgressBar> = if hud.is_none() {
             let pb = ProgressBar::new(total_genes as u64);

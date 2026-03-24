@@ -10,6 +10,7 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR)
 
   ```bash
   echo 'export PATH="$PATH:/ix/djishnu/shared/djishnu_kor11/rust/SpaceTravLR_rust/bin"' >> ~/.bashrc
+  echo 'export PATH="$PATH:/ihome/ylee/kor11/.cargo/bin"' >> ~/.bashrc
   source ~/.bashrc
   ```
 
