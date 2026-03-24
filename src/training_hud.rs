@@ -55,7 +55,7 @@ impl RunConfigSummary {
             .unwrap_or_else(|| "—".to_string());
 
         let cnn_training_mode = match cfg.resolved_cnn_mode() {
-            CnnTrainingMode::Minimal => "minimal",
+            CnnTrainingMode::Seed => "seed",
             CnnTrainingMode::Full => "full",
             CnnTrainingMode::Hybrid => "hybrid",
         }

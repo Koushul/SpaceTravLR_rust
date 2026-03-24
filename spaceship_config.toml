@@ -39,7 +39,7 @@ adam_epsilon = 1e-5
 # Clip gradient L2 norm (omit for no clipping)
 # grad_clip_norm = 1.0
 # Radius passed to create_spatial_features for CNN inputs (coordinate units)
-spatial_feature_radius = 100.0
+spatial_feature_radius = 200.0
 
 [lasso]
 # Element-wise L1 penalty
@@ -52,9 +52,8 @@ n_iter    = 100
 tol       = 1e-4
 
 [training]
-# Default when omitted: hybrid (per-gene CNN gating). Use minimal / full to force one path for all genes.
-mode            = "hybrid"
-seed_only       = true
+# Default when omitted: seed. Use full or hybrid to enable CNN paths.
+mode            = "seed"
 epochs          = 10
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
 learning_rate   = 2e-4
@@ -81,9 +80,9 @@ hybrid_cnn_permissiveness = 1
 
 [execution]
 # Number of parallel gene-training workers
-n_parallel  = 1
+n_parallel  = 9
 # Directory for *_betadata.csv output files
-output_dir  = "/tmp/slideseq_brain"
+output_dir  = "/tmp/slidetags_kidney"
 
 [perturbation]
 # Multiplier applied to all betas in splash()

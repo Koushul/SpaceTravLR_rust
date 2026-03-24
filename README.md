@@ -161,7 +161,7 @@ cargo run --release -- \
 
 # Full CNN mode
 cargo run --release -- --plain \
-  --full --epochs 5 --parallel 2 --max-genes 20
+  --training-mode full --epochs 5 --parallel 2 --max-genes 20
 ```
 
 See `cargo run --release -- --help` (or `spacetravlr --help` after install). Options are defined with **clap**; config file path is `-c` / `--config`, dataset override is `--h5ad`.

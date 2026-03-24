@@ -19,6 +19,23 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "tui")]
 use std::thread;
 
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum TrainingModeArg {
+    Full,
+    Seed,
+    Hybrid,
+}
+
+impl From<TrainingModeArg> for CnnTrainingMode {
+    fn from(value: TrainingModeArg) -> Self {
+        match value {
+            TrainingModeArg::Full => CnnTrainingMode::Full,
+            TrainingModeArg::Seed => CnnTrainingMode::Seed,
+            TrainingModeArg::Hybrid => CnnTrainingMode::Hybrid,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "spacetravlr",
@@ -42,18 +59,13 @@ struct Cli {
     )]
     h5ad: Option<PathBuf>,
 
-    #[arg(long, help = "CNN spatial mode (per-cell betadata export)")]
-    full: bool,
-
-    #[arg(long, help = "Seed-only: cluster-level betas (default)")]
-    seed_only: bool,
-
     #[arg(
         long,
         value_name = "MODE",
-        help = "minimal | full | hybrid — per-gene CNN gating when hybrid (overrides --full / --seed-only)"
+        value_enum,
+        help = "full | seed | hybrid (default: seed)"
     )]
-    training_mode: Option<String>,
+    training_mode: Option<TrainingModeArg>,
 
     #[arg(long, value_name = "N", help = "CNN fine-tuning epochs per gene")]
     epochs: Option<usize>,
@@ -97,14 +109,6 @@ struct Cli {
 }
 
 fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
-    if cli.full {
-        cfg.training.seed_only = false;
-        cfg.training.mode = Some(CnnTrainingMode::Full);
-    }
-    if cli.seed_only {
-        cfg.training.seed_only = true;
-        cfg.training.mode = Some(CnnTrainingMode::Minimal);
-    }
     if let Some(v) = cli.epochs {
         cfg.training.epochs = v;
     }
@@ -133,22 +137,8 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
         cfg.data.adata_path = p.display().to_string();
     }
     if let Some(ref m) = cli.training_mode {
-        let m = m.to_ascii_lowercase();
-        match m.as_str() {
-            "minimal" | "seed" | "seed-only" => {
-                cfg.training.mode = Some(CnnTrainingMode::Minimal);
-                cfg.training.seed_only = true;
-            }
-            "full" | "cnn" => {
-                cfg.training.mode = Some(CnnTrainingMode::Full);
-                cfg.training.seed_only = false;
-            }
-            "hybrid" => {
-                cfg.training.mode = Some(CnnTrainingMode::Hybrid);
-                cfg.training.seed_only = true;
-            }
-            _ => {}
-        }
+        cfg.training.mode = Some(m.clone().into());
+        cfg.training.seed_only = !matches!(cfg.training.mode, Some(CnnTrainingMode::Full));
     }
 }
 
@@ -299,9 +289,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mode_label = match cfg.resolved_cnn_mode() {
-        CnnTrainingMode::Minimal => "Seed-only lasso",
-        CnnTrainingMode::Full => "CNN spatial",
-        CnnTrainingMode::Hybrid => "Hybrid gated CNN",
+        CnnTrainingMode::Seed => "seed",
+        CnnTrainingMode::Full => "full",
+        CnnTrainingMode::Hybrid => "hybrid",
     };
     #[cfg(feature = "tui")]
     let full_cnn = cfg.full_cnn();

@@ -64,7 +64,8 @@ pub struct LassoConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CnnTrainingMode {
-    Minimal,
+    #[serde(alias = "minimal", alias = "seed-only")]
+    Seed,
     Full,
     #[default]
     Hybrid,
@@ -149,7 +150,7 @@ impl HybridCnnGatingConfig {
 }
 
 fn default_training_mode_option() -> Option<CnnTrainingMode> {
-    Some(CnnTrainingMode::Hybrid)
+    Some(CnnTrainingMode::Seed)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +267,7 @@ impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             seed_only: true,
-            mode: Some(CnnTrainingMode::Hybrid),
+            mode: Some(CnnTrainingMode::Seed),
             epochs: 10,
             learning_rate: 1e-3,
             score_threshold: 0.0,
@@ -349,7 +350,7 @@ impl SpaceshipConfig {
     pub fn resolved_cnn_mode(&self) -> CnnTrainingMode {
         self.training
             .mode
-            .unwrap_or(CnnTrainingMode::Hybrid)
+            .unwrap_or(CnnTrainingMode::Seed)
     }
 
     pub fn full_cnn(&self) -> bool {

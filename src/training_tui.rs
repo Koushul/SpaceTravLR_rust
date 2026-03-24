@@ -651,9 +651,9 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Header ────────────────────────────────────────────────────────
             let mode = match st.run_config.cnn_training_mode.as_str() {
-                "full" => "CNN spatial",
-                "hybrid" => "Hybrid gated CNN",
-                _ => "Seed-only lasso",
+                "full" => "full",
+                "hybrid" => "hybrid",
+                _ => "seed",
             };
             let status_txt = if st.should_cancel() {
                 "Stopping"
