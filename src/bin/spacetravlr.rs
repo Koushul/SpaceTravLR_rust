@@ -6,7 +6,7 @@ use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
 };
-use space_trav_lr_rust::config::{CnnTrainingMode, SpaceshipConfig};
+use space_trav_lr_rust::config::{expand_user_path, CnnTrainingMode, SpaceshipConfig};
 use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
@@ -359,24 +359,6 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn expand_user_path(s: &str) -> String {
-    let s = s.trim();
-    if s.is_empty() {
-        return String::new();
-    }
-    if s == "~" {
-        return std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| s.to_string());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Ok(h) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-            return format!("{}/{}", h.trim_end_matches('/'), rest);
-        }
-    }
-    s.to_string()
-}
-
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -428,6 +410,13 @@ fn main() -> anyhow::Result<()> {
 
     let path = expand_user_path(&cfg.data.adata_path);
     cfg.data.adata_path = path.clone();
+
+    let network_data_dir: Option<String> = cfg
+        .grn
+        .network_data_dir
+        .as_ref()
+        .map(|s| expand_user_path(s.trim()))
+        .filter(|s| !s.is_empty());
 
     if !Path::new(&path).exists() {
         anyhow::bail!("Dataset not found at {}.", path);
@@ -492,6 +481,7 @@ fn main() -> anyhow::Result<()> {
             output_dir: &output_dir,
             model_export: &cfg.model_export,
             hud: None,
+            network_data_dir: network_data_dir.clone(),
         };
         fit_all_genes_dispatch(&params, &compute)?;
         println!("Finished.");
@@ -515,6 +505,7 @@ fn main() -> anyhow::Result<()> {
 
         let hud_worker = hud.clone();
         let compute_thread = compute.clone();
+        let network_data_dir_thread = network_data_dir.clone();
 
         let handle = thread::spawn(move || {
             let params = FitAllGenesParams {
@@ -548,6 +539,7 @@ fn main() -> anyhow::Result<()> {
                 output_dir: &output_dir,
                 model_export: &cfg.model_export,
                 hud: Some(hud_worker),
+                network_data_dir: network_data_dir_thread,
             };
             fit_all_genes_dispatch(&params, &compute_thread)
         });

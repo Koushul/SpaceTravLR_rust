@@ -42,6 +42,9 @@ pub struct SpatialConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrnConfig {
+    /// Directory containing `{mouse|human}_network.parquet`. Overrides `SPACETRAVLR_DATA_DIR` and
+    /// built-in search (manifest / cwd walk). Tilde and `~/` expanded like `data.adata_path`.
+    pub network_data_dir: Option<String>,
     pub tf_ligand_cutoff: f64,
     /// Cap LR pairs in database order (no expression ranking).
     pub max_lr_pairs: Option<usize>,
@@ -242,6 +245,7 @@ impl Default for SpatialConfig {
 impl Default for GrnConfig {
     fn default() -> Self {
         Self {
+            network_data_dir: None,
             tf_ligand_cutoff: 0.5,
             max_lr_pairs: None,
             top_lr_pairs_by_mean_expression: None,
@@ -333,6 +337,25 @@ impl Default for SpaceshipConfig {
             model_export: ModelExportConfig::default(),
         }
     }
+}
+
+/// Expand `~` / `~/` in a path string (HOME / USERPROFILE).
+pub fn expand_user_path(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if s == "~" {
+        return std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| s.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(h) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            return format!("{}/{}", h.trim_end_matches('/'), rest);
+        }
+    }
+    s.to_string()
 }
 
 impl SpaceshipConfig {

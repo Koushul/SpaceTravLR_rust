@@ -66,7 +66,7 @@ spacetravlr --help
 
 2. **Compute backend** — the **`spacetravlr`** binary prefers **WGPU** when [wgpu](https://github.com/gfx-rs/wgpu) can acquire an adapter. If none is available, it uses Burn’s **NdArray (CPU)** backend. Set `SPACETRAVLR_FORCE_CPU=1` (or `true`) to force CPU.
 
-3. **Repository data** — point `spaceship_config.toml` at your `.h5ad` and keep GRN parquet files where the app expects them (see `data/` and config `data` / `grn` sections).
+3. **GRN parquet files** — training needs `mouse_network.parquet` and/or `human_network.parquet` (inferred from gene naming). Resolution order: `[grn].network_data_dir` in `spaceship_config.toml`, then the **`SPACETRAVLR_DATA_DIR`** environment variable (directory containing those files), then the crate’s `data/` from build metadata, then the executable’s `data/` or `../data/`, then walking up from the process current directory looking for `data/`, then `./data/` under cwd. You do **not** need to run the CLI from the repository root if one of these finds the files.
 
 
 

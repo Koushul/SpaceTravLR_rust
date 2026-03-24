@@ -1,6 +1,94 @@
-use anyhow::Result;
+use crate::config::expand_user_path;
+use anyhow::{Context, Result};
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+/// Environment variable: directory containing `mouse_network.parquet` / `human_network.parquet`.
+pub const SPACETRAVLR_DATA_DIR_ENV: &str = "SPACETRAVLR_DATA_DIR";
+
+fn push_tried(tried: &mut Vec<String>, p: &Path) {
+    tried.push(p.display().to_string());
+}
+
+fn try_file_path(path: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
+    push_tried(tried, &path);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Resolve `{species}_network.parquet` using config override, env, build-time manifest, exe-relative
+/// paths, and cwd ancestors (so training works when the process cwd is not the repo root).
+pub fn resolve_species_network_parquet(
+    species: &str,
+    config_network_data_dir: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let filename = format!("{}_network.parquet", species);
+    let mut tried: Vec<String> = Vec::new();
+
+    if let Some(dir) = config_network_data_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        let base = PathBuf::from(expand_user_path(dir));
+        let candidate = base.join(&filename);
+        if let Some(p) = try_file_path(candidate, &mut tried) {
+            return Ok(p);
+        }
+    }
+
+    if let Ok(dir) = std::env::var(SPACETRAVLR_DATA_DIR_ENV) {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            let candidate = PathBuf::from(expand_user_path(dir)).join(&filename);
+            if let Some(p) = try_file_path(candidate, &mut tried) {
+                return Ok(p);
+            }
+        }
+    }
+
+    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+        let candidate = Path::new(manifest).join("data").join(&filename);
+        if let Some(p) = try_file_path(candidate, &mut tried) {
+            return Ok(p);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for rel in ["data", "../data"] {
+                let candidate = parent.join(rel).join(&filename);
+                if let Some(p) = try_file_path(candidate, &mut tried) {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    for _ in 0..10 {
+        let candidate = dir.join("data").join(&filename);
+        if let Some(p) = try_file_path(candidate, &mut tried) {
+            return Ok(p);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    let cwd_rel = Path::new("data").join(&filename);
+    if let Some(p) = try_file_path(cwd_rel, &mut tried) {
+        return Ok(p);
+    }
+
+    anyhow::bail!(
+        "Could not find GRN network file {:?} for species {:?}. Set [{}], add [grn].network_data_dir in spaceship_config.toml, or run from a directory that contains data/ with that file. Tried:\n  {}",
+        filename,
+        species,
+        SPACETRAVLR_DATA_DIR_ENV,
+        tried.join("\n  ")
+    );
+}
 
 pub struct Modulators {
     pub regulators: Vec<String>,
@@ -81,14 +169,22 @@ pub fn infer_species(var_names: &[String]) -> &'static str {
 }
 
 impl GeneNetwork {
-    pub fn new(species: &str, var_names: &[String]) -> Result<Self> {
-        let network_path = format!("data/{}_network.parquet", species);
+    pub fn new(
+        species: &str,
+        var_names: &[String],
+        network_data_dir: Option<&str>,
+    ) -> Result<Self> {
+        let path = resolve_species_network_parquet(species, network_data_dir)
+            .with_context(|| format!("load GRN for species {:?}", species))?;
+        let network_path = path.to_string_lossy().into_owned();
 
         let full_df = LazyFrame::scan_parquet(
             polars_utils::plpath::PlPath::from_string(network_path.clone()),
             ScanArgsParquet::default(),
-        )?
-        .collect()?;
+        )
+        .with_context(|| format!("scan_parquet {:?}", network_path))?
+        .collect()
+        .with_context(|| format!("read GRN parquet {:?}", network_path))?;
 
         let mut source_keep = Vec::new();
         let var_names_set: HashSet<&str> = var_names.iter().map(|s| s.as_str()).collect();
@@ -311,6 +407,7 @@ impl GeneNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn infer_species_mouse_genes() {
@@ -397,5 +494,47 @@ mod tests {
         assert!(m.regulators.is_empty());
         assert_eq!(m.lr_pairs.len(), 1);
         assert!(m.tfl_pairs.is_empty());
+    }
+
+    #[test]
+    fn resolve_mouse_with_explicit_config_data_dir() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let p = resolve_species_network_parquet("mouse", Some(dir.to_str().unwrap())).unwrap();
+        assert!(p.ends_with("mouse_network.parquet"));
+        assert!(p.is_file());
+    }
+
+    #[test]
+    fn resolve_human_with_explicit_config_data_dir() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let p = resolve_species_network_parquet("human", Some(dir.to_str().unwrap())).unwrap();
+        assert!(p.ends_with("human_network.parquet"));
+        assert!(p.is_file());
+    }
+
+    #[test]
+    fn resolve_mouse_none_config_uses_search_path() {
+        let p = resolve_species_network_parquet("mouse", None).unwrap();
+        assert!(p.ends_with("mouse_network.parquet"));
+        assert!(p.is_file());
+    }
+
+    #[test]
+    fn resolve_error_lists_tried_paths() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let err = resolve_species_network_parquet("definitely_missing_species_xyz", Some(dir.to_str().unwrap()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("definitely_missing_species_xyz_network.parquet"));
+        assert!(err.contains(SPACETRAVLR_DATA_DIR_ENV));
+        assert!(err.contains("Tried:"));
+    }
+
+    #[test]
+    fn gene_network_new_loads_mouse_from_manifest_data_dir() {
+        let genes: Vec<String> = vec!["Gapdh".into(), "Actb".into()];
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let net = GeneNetwork::new("mouse", &genes, Some(dir.to_str().unwrap())).unwrap();
+        assert!(net.network_path.ends_with("mouse_network.parquet"));
     }
 }

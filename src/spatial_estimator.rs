@@ -10,6 +10,7 @@ use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
 use burn::tensor::backend::AutodiffBackend;
 use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array1, Array2, Array4};
+use polars::prelude::DataFrame;
 use ndarray_npy::NpzWriter;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -131,7 +132,7 @@ fn validate_training_inputs<AnB: Backend>(
     cluster_annot: &str,
     layer: &str,
     n_targets: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DataFrame> {
     if adata.n_obs() == 0 {
         anyhow::bail!("AnnData has 0 cells (n_obs=0); nothing to train.");
     }
@@ -166,7 +167,7 @@ fn validate_training_inputs<AnB: Backend>(
         )
     })?;
     ensure_expression_layer_readable(adata, layer)?;
-    Ok(())
+    Ok(obs)
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -590,7 +591,11 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     ) -> anyhow::Result<Self> {
         let adata_var_names = adata.var_names().into_vec();
         let species = crate::network::infer_species(&adata_var_names);
-        let grn = Arc::new(crate::network::GeneNetwork::new(species, &adata_var_names)?);
+        let grn = Arc::new(crate::network::GeneNetwork::new(
+            species,
+            &adata_var_names,
+            None,
+        )?);
         Self::new_with_metadata(
             adata,
             target_gene,
@@ -643,12 +648,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         output_dir: &str,
         model_export: &ModelExportConfig,
         hud: Option<TrainingHud>,
+        network_data_dir: Option<&str>,
         device: &AB::Device,
     ) -> anyhow::Result<()>
     where
         AB: Send + 'static,
         AB::Device: Clone + Send + 'static,
     {
+        let hud_for_done = hud.clone();
+        let result = (|| -> anyhow::Result<()> {
         use anndata_hdf5::H5;
         use std::fs;
         use std::io::Write;
@@ -680,18 +688,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         }
 
         let obs_names = Arc::new(setup_adata.obs_names().into_vec());
-        let species = crate::network::infer_species(&all_var_names);
-        let global_grn = Arc::new(crate::network::GeneNetwork::new(species, &all_var_names)?);
-
         let total_genes = target_genes.len();
 
-        validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
-
-        let msg = "Pre-caching metadata and coordinates...";
-        log_line(&hud, msg.to_string());
-
-        let obs_df = setup_adata.read_obs()?;
-        let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
+        let obs_df = validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
         let clusters_ser = obs_df.column(cluster_annot)?;
         let clusters: Arc<Array1<usize>> = Arc::new(
             clusters_ser
@@ -715,6 +714,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 g.n_clusters = num_clusters;
             }
         }
+
+        let species = crate::network::infer_species(&all_var_names);
+        let global_grn = Arc::new(crate::network::GeneNetwork::new(
+            species,
+            &all_var_names,
+            network_data_dir,
+        )?);
+
+        let msg = "Pre-caching metadata and coordinates...";
+        log_line(&hud, msg.to_string());
+
+        let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
 
         let compute_mean_for_hybrid = matches!(cnn_training_mode, CnnTrainingMode::Hybrid)
             && !hybrid_pass2_full_cnn
@@ -1436,6 +1447,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         output_dir,
                         model_export,
                         hud,
+                        network_data_dir,
                         device,
                     );
                 }
@@ -1444,13 +1456,19 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         print_training_outcome_banner(&hud);
 
-        if let Some(ref h) = hud {
+        Ok(())
+        })();
+
+        if let Some(ref h) = hud_for_done {
             if let Ok(mut g) = h.lock() {
-                g.finished = Some(Ok(()));
+                g.finished = Some(match &result {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                });
             }
         }
 
-        Ok(())
+        result
     }
 }
 

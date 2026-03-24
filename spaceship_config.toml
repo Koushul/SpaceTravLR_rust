@@ -21,6 +21,8 @@ spatial_dim      = 32
 contact_distance = 50
 
 [grn]
+# Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
+# network_data_dir = "/path/to/your/data"
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.15
 # Cap LR pairs in database order when NOT using expression ranking (omit = no limit)

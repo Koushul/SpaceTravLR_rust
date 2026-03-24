@@ -15,7 +15,9 @@ pub mod training_log;
 pub mod training_tui;
 pub use betadata::{BetaFrame, Betabase, GeneMatrix};
 pub use cnn_gating::CnnGateDecision;
-pub use config::{CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, SpaceshipConfig};
+pub use config::{
+    expand_user_path, CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, SpaceshipConfig,
+};
 pub use estimator::{ClusterTrainingSummary, ClusteredGCNNWR};
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use spatial_estimator::SpatialCellularProgramsEstimator;

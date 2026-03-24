@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "single-cell-rna-qc": {
+      "source": "smithery.ai",
+      "sourceType": "well-known",
+      "computedHash": "fe7496b416f55ff77da627c9c3c466e9dd6b3024a369b33e28f26b5099f57356"
+    }
+  }
+}
