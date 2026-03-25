@@ -58,6 +58,7 @@ pub struct ClusteredGCNNWR<B: AutodiffBackend> {
     pub lasso_coefficients: HashMap<usize, Array2<f64>>,
     pub lasso_intercepts: HashMap<usize, f64>,
     pub group_reg_vec: Option<Vec<f64>>,
+    pub regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>>,
     pub cluster_training_summaries: Vec<ClusterTrainingSummary>,
 }
 
@@ -72,6 +73,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             lasso_coefficients: HashMap::new(),
             lasso_intercepts: HashMap::new(),
             group_reg_vec: None,
+            regulator_masks_by_cluster: None,
             cluster_training_summaries: Vec::new(),
         }
     }
@@ -117,6 +119,18 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     }
 
                     let x_c = x.select(Axis(0), &indices);
+                    let mut x_c = x_c;
+                    if let Some(mask) = self
+                        .regulator_masks_by_cluster
+                        .as_ref()
+                        .and_then(|m| m.get(&c_id))
+                    {
+                        for (j, allowed) in mask.iter().copied().enumerate().take(x_c.ncols()) {
+                            if !allowed {
+                                x_c.column_mut(j).fill(0.0);
+                            }
+                        }
+                    }
                     let y_c = y.select(Axis(0), &indices).insert_axis(Axis(1));
 
                     let mut lasso = if let Some(regs) = &self.group_reg_vec {
@@ -325,6 +339,18 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             let cluster_n = indices.len();
             let n_modulators = x.ncols();
             let x_c = x.select(Axis(0), &indices);
+            let mut x_c = x_c;
+            if let Some(mask) = self
+                .regulator_masks_by_cluster
+                .as_ref()
+                .and_then(|m| m.get(&c_id))
+            {
+                for (j, allowed) in mask.iter().copied().enumerate().take(x_c.ncols()) {
+                    if !allowed {
+                        x_c.column_mut(j).fill(0.0);
+                    }
+                }
+            }
             let y_c = y.select(Axis(0), &indices);
 
             let x_tensor = Tensor::<B, 2>::from_data(

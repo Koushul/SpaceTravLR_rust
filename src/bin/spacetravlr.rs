@@ -496,6 +496,12 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|s| expand_user_path(s.trim()))
         .filter(|s| !s.is_empty());
+    let tf_priors_feather: Option<String> = cfg
+        .grn
+        .tf_priors_feather
+        .as_ref()
+        .map(|s| expand_user_path(s.trim()))
+        .filter(|s| !s.is_empty());
 
     if !Path::new(&path).exists() {
         anyhow::bail!("Dataset not found at {}.", path);
@@ -565,6 +571,7 @@ fn main() -> anyhow::Result<()> {
             model_export: &cfg.model_export,
             hud: None,
             network_data_dir: network_data_dir.clone(),
+            tf_priors_feather: tf_priors_feather.clone(),
         };
         fit_all_genes_dispatch(&params, &compute)?;
         println!("Finished.");
@@ -623,6 +630,7 @@ fn main() -> anyhow::Result<()> {
                 model_export: &cfg.model_export,
                 hud: Some(hud_worker),
                 network_data_dir: network_data_dir_thread,
+                tf_priors_feather: tf_priors_feather.clone(),
             };
             fit_all_genes_dispatch(&params, &compute_thread)
         });

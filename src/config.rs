@@ -46,6 +46,9 @@ pub struct GrnConfig {
     /// Directory containing `{mouse|human}_network.parquet`. Overrides `SPACETRAVLR_DATA_DIR` and
     /// built-in search (manifest / cwd walk). Tilde and `~/` expanded like `data.adata_path`.
     pub network_data_dir: Option<String>,
+    /// Optional Feather/IPC file containing TF priors with columns:
+    /// `source` (TF), `target` (gene), `cell_type` (obs.cell_type label).
+    pub tf_priors_feather: Option<String>,
     pub tf_ligand_cutoff: f64,
     /// Cap LR pairs in database order (no expression ranking).
     pub max_lr_pairs: Option<usize>,
@@ -247,6 +250,7 @@ impl Default for GrnConfig {
     fn default() -> Self {
         Self {
             network_data_dir: None,
+            tf_priors_feather: None,
             tf_ligand_cutoff: 0.2,
             max_lr_pairs: None,
             top_lr_pairs_by_mean_expression: None,

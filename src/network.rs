@@ -124,6 +124,101 @@ impl Modulators {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct TfPriors {
+    by_target_cell_type: HashMap<String, HashMap<String, Vec<String>>>,
+    by_target_any: HashMap<String, Vec<String>>,
+}
+
+impl TfPriors {
+    pub fn from_feather(path: &str, var_names: &[String]) -> Result<Self> {
+        let priors_path = expand_user_path(path);
+        let df = LazyFrame::scan_ipc(
+            polars_utils::plpath::PlPath::from_string(priors_path.clone()),
+            ScanArgsIpc::default(),
+        )
+        .with_context(|| format!("scan_ipc TF priors {:?}", priors_path))?
+        .collect()
+        .with_context(|| format!("read TF priors {:?}", priors_path))?;
+
+        for req in ["source", "target", "cell_type"] {
+            if df.column(req).is_err() {
+                anyhow::bail!(
+                    "TF priors file {:?} missing required column {:?}. Expected columns: source, target, cell_type.",
+                    priors_path,
+                    req
+                );
+            }
+        }
+
+        let source_s = df.column("source")?.cast(&DataType::String)?;
+        let target_s = df.column("target")?.cast(&DataType::String)?;
+        let cell_type_s = df.column("cell_type")?.cast(&DataType::String)?;
+        let source = source_s.str()?;
+        let target = target_s.str()?;
+        let cell_type = cell_type_s.str()?;
+
+        let var_set: HashSet<&str> = var_names.iter().map(|s| s.as_str()).collect();
+
+        let mut by_target_cell_type: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+        let mut by_target_any: HashMap<String, Vec<String>> = HashMap::new();
+        let mut seen_tct: HashSet<(String, String, String)> = HashSet::new();
+        let mut seen_tgt: HashSet<(String, String)> = HashSet::new();
+
+        for i in 0..df.height() {
+            let Some(src) = source.get(i).map(str::trim) else {
+                continue;
+            };
+            let Some(tgt) = target.get(i).map(str::trim) else {
+                continue;
+            };
+            let Some(ct) = cell_type.get(i).map(str::trim) else {
+                continue;
+            };
+            if src.is_empty() || tgt.is_empty() || ct.is_empty() {
+                continue;
+            }
+            if !var_set.contains(src) || !var_set.contains(tgt) {
+                continue;
+            }
+
+            let src_s = src.to_string();
+            let tgt_s = tgt.to_string();
+            let ct_s = ct.to_string();
+
+            if seen_tgt.insert((tgt_s.clone(), src_s.clone())) {
+                by_target_any
+                    .entry(tgt_s.clone())
+                    .or_default()
+                    .push(src_s.clone());
+            }
+            if seen_tct.insert((tgt_s.clone(), ct_s.clone(), src_s.clone())) {
+                by_target_cell_type
+                    .entry(tgt_s)
+                    .or_default()
+                    .entry(ct_s)
+                    .or_default()
+                    .push(src_s);
+            }
+        }
+
+        Ok(Self {
+            by_target_cell_type,
+            by_target_any,
+        })
+    }
+
+    pub fn tfs_for_target_any(&self, target: &str) -> Option<&Vec<String>> {
+        self.by_target_any.get(target)
+    }
+
+    pub fn tfs_for_target_cell_type(&self, target: &str, cell_type: &str) -> Option<&Vec<String>> {
+        self.by_target_cell_type
+            .get(target)
+            .and_then(|m| m.get(cell_type))
+    }
+}
+
 #[derive(Clone)]
 pub struct GeneNetwork {
     pub species: String,

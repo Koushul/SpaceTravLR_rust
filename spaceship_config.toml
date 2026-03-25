@@ -23,6 +23,8 @@ contact_distance = 50
 [grn]
 # Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
 # network_data_dir = "/path/to/your/data"
+# Optional: Feather/IPC TF priors with columns: source, target, cell_type.
+# tf_priors_feather = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/SlideTagsKidney/xenium_skin_links.feather"
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.15
 # Cap LR pairs in database order when NOT using expression ranking (omit = no limit)

@@ -6,11 +6,13 @@ use crate::config::{CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExpo
 use crate::estimator::{ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
 use crate::training_hud::{TrainingHud, log_line, print_training_outcome_banner};
-use anndata::data::SelectInfoElem;
-use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
+use anndata::data::{ArrayConvert, SelectInfoElem};
+use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend, ElemCollectionOp};
+use anndata_hdf5::H5;
 use burn::tensor::backend::AutodiffBackend;
 use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array1, Array2, Array4};
+use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 use polars::prelude::DataFrame;
 use ndarray_npy::NpzWriter;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -28,7 +30,60 @@ fn compute_gene_mean_expression<AnB: Backend>(
         return Ok(HashMap::new());
     }
     let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
-    let data: Array2<f64> = if layer != "X" && !layer.is_empty() {
+    let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
+    let inv_n = 1.0 / n_obs as f64;
+    let mut out = HashMap::with_capacity(var_names.len());
+    for (j, name) in var_names.iter().enumerate() {
+        let sum: f64 = data.column(j).iter().sum();
+        out.insert(name.clone(), sum * inv_n);
+    }
+    Ok(out)
+}
+
+fn csr_to_dense_f64(csr: &CsrMatrix<f64>) -> Array2<f64> {
+    let mut out = Array2::<f64>::zeros((csr.nrows(), csr.ncols()));
+    for (r, c, v) in csr.triplet_iter() {
+        out[[r, c]] = *v;
+    }
+    out
+}
+
+fn csc_to_dense_f64(csc: &CscMatrix<f64>) -> Array2<f64> {
+    let mut out = Array2::<f64>::zeros((csc.nrows(), csc.ncols()));
+    for (r, c, v) in csc.triplet_iter() {
+        out[[r, c]] = *v;
+    }
+    out
+}
+
+fn array_data_to_dense_f64(data: ArrayData) -> anyhow::Result<Array2<f64>> {
+    match data {
+        ArrayData::Array(d) => d.try_convert(),
+        ArrayData::CsrMatrix(csr) => {
+            let csr_f64: CsrMatrix<f64> = csr.try_convert()?;
+            Ok(csr_to_dense_f64(&csr_f64))
+        }
+        ArrayData::CscMatrix(csc) => {
+            let csc_f64: CscMatrix<f64> = csc.try_convert()?;
+            Ok(csc_to_dense_f64(&csc_f64))
+        }
+        ArrayData::CsrNonCanonical(non) => match non.canonicalize() {
+            Ok(csr) => {
+                let csr_f64: CsrMatrix<f64> = csr.try_convert()?;
+                Ok(csr_to_dense_f64(&csr_f64))
+            }
+            Err(_) => anyhow::bail!("Failed to canonicalize non-canonical CSR matrix."),
+        },
+        ArrayData::DataFrame(_) => anyhow::bail!("Expected matrix array data, found dataframe."),
+    }
+}
+
+fn read_expression_matrix_dense_f64<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    layer: &str,
+    slice: &[SelectInfoElem],
+) -> anyhow::Result<Array2<f64>> {
+    let data: ArrayData = if layer != "X" && !layer.is_empty() {
         if let Some(layer_elem) = adata.layers().get(layer) {
             layer_elem
                 .slice(slice)?
@@ -54,13 +109,7 @@ fn compute_gene_mean_expression<AnB: Backend>(
             .slice(slice)?
             .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
     };
-    let inv_n = 1.0 / n_obs as f64;
-    let mut out = HashMap::with_capacity(var_names.len());
-    for (j, name) in var_names.iter().enumerate() {
-        let sum: f64 = data.column(j).iter().sum();
-        out.insert(name.clone(), sum * inv_n);
-    }
-    Ok(out)
+    array_data_to_dense_f64(data)
 }
 
 fn load_spatial_coords_f64<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<Array2<f64>> {
@@ -101,23 +150,7 @@ fn ensure_expression_layer_readable<AnB: Backend>(
             );
         }
     }
-    let data: Array2<f64> = if layer != "X" && !layer.is_empty() {
-        let layer_elem = adata
-            .layers()
-            .get(layer)
-            .expect("layer checked above");
-        layer_elem
-            .slice(slice)?
-            .ok_or_else(|| anyhow::anyhow!("Failed to slice layer {:?}", layer))?
-    } else {
-        let x_elem = adata.x();
-        if x_elem.is_none() {
-            anyhow::bail!("AnnData has no X matrix; set [data].layer to a valid layer name.");
-        }
-        x_elem
-            .slice(slice)?
-            .ok_or_else(|| anyhow::anyhow!("Failed to read X matrix"))?
-    };
+    let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
     if data.nrows() != adata.n_obs() {
         anyhow::bail!(
             "Expression matrix has {} rows but n_obs is {}; check layer / AnnData integrity.",
@@ -169,6 +202,296 @@ fn validate_training_inputs<AnB: Backend>(
     })?;
     ensure_expression_layer_readable(adata, layer)?;
     Ok(obs)
+}
+
+fn build_cluster_to_cell_type_map(
+    obs_df: &DataFrame,
+    cluster_annot: &str,
+) -> anyhow::Result<HashMap<usize, String>> {
+    let cell_col = match obs_df.column("cell_type") {
+        Ok(c) => c,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let clusters_ser = obs_df
+        .column(cluster_annot)?
+        .as_materialized_series()
+        .cast(&polars::prelude::DataType::Float64)?;
+    let cell_ser = cell_col
+        .as_materialized_series()
+        .cast(&polars::prelude::DataType::String)?;
+
+    let mut counts: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    for (c, ct) in clusters_ser.iter().zip(cell_ser.iter()) {
+        let cluster_v = c.extract::<f64>();
+        let cell_t = ct.to_string();
+        if let Some(v) = cluster_v {
+            if v.is_finite() && cell_t != "null" && !cell_t.trim().is_empty() {
+                let cid = v as usize;
+                *counts
+                    .entry(cid)
+                    .or_default()
+                    .entry(cell_t)
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    for (cid, m) in counts {
+        if let Some((best, _)) = m.into_iter().max_by_key(|(_, n)| *n) {
+            out.insert(cid, best);
+        }
+    }
+    Ok(out)
+}
+
+fn detect_spatial_obsm_key<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<String> {
+    for key in ["spatial", "X_spatial", "spatial_loc"] {
+        if let Some(arr) = adata.obsm().get_item::<Array2<f64>>(key)? {
+            if arr.nrows() > 0 && arr.ncols() >= 2 {
+                return Ok(key.to_string());
+            }
+        }
+        if let Some(arr) = adata.obsm().get_item::<Array2<f32>>(key)? {
+            if arr.nrows() > 0 && arr.ncols() >= 2 {
+                return Ok(key.to_string());
+            }
+        }
+    }
+    anyhow::bail!("No spatial coordinates found in obsm for minimal reproducibility export.");
+}
+
+fn dense_to_csr_f64(arr: &Array2<f64>) -> anyhow::Result<CsrMatrix<f64>> {
+    let nrows = arr.nrows();
+    let ncols = arr.ncols();
+    let mut indptr = Vec::with_capacity(nrows + 1);
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    indptr.push(0);
+    for i in 0..nrows {
+        for j in 0..ncols {
+            let v = arr[[i, j]];
+            if v != 0.0 {
+                indices.push(j);
+                data.push(v);
+            }
+        }
+        indptr.push(indices.len());
+    }
+    CsrMatrix::try_from_csr_data(nrows, ncols, indptr, indices, data)
+        .map_err(|e| anyhow::anyhow!("build CSR from dense failed: {}", e))
+}
+
+fn ensure_sparse_array_data(data: ArrayData) -> anyhow::Result<ArrayData> {
+    match data {
+        ArrayData::CsrMatrix(_) | ArrayData::CscMatrix(_) | ArrayData::CsrNonCanonical(_) => {
+            Ok(data)
+        }
+        ArrayData::Array(d) => {
+            let dense: Array2<f64> = d.try_convert()?;
+            Ok(ArrayData::from(dense_to_csr_f64(&dense)?))
+        }
+        ArrayData::DataFrame(_) => anyhow::bail!("Expected matrix data, found dataframe."),
+    }
+}
+
+fn build_spatial_maps_flat_csr(
+    spatial_maps: &Array4<f32>,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    spatial_dim: usize,
+) -> anyhow::Result<CsrMatrix<f64>> {
+    let n_cells = spatial_maps.shape()[0];
+    let hw = spatial_dim * spatial_dim;
+    let total_cols = num_clusters * hw;
+    let mut indptr = Vec::with_capacity(n_cells + 1);
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    indptr.push(0);
+
+    for cell in 0..n_cells {
+        let c = clusters[cell];
+        if c >= num_clusters {
+            indptr.push(indices.len());
+            continue;
+        }
+        let base = c * hw;
+        for i in 0..spatial_dim {
+            for j in 0..spatial_dim {
+                let v = spatial_maps[[cell, c, i, j]] as f64;
+                if v != 0.0 {
+                    indices.push(base + i * spatial_dim + j);
+                    data.push(v);
+                }
+            }
+        }
+        indptr.push(indices.len());
+    }
+    CsrMatrix::try_from_csr_data(n_cells, total_cols, indptr, indices, data)
+        .map_err(|e| anyhow::anyhow!("build CSR for spatial maps failed: {}", e))
+}
+
+fn export_minimal_repro_adata_with_cache(
+    src: &AnnData<H5>,
+    output_dir: &str,
+    layer: &str,
+    cluster_annot: &str,
+    xy: &Array2<f64>,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    spatial_dim: usize,
+    spatial_feature_radius: f64,
+) -> anyhow::Result<String> {
+    let out_path = format!("{}/spacetravlr_minimal_repro.h5ad", output_dir);
+    let dst = AnnData::<H5>::new(&out_path)?;
+
+    dst.set_obs_names(src.obs_names())?;
+    dst.set_var_names(src.var_names())?;
+
+    let obs = src.read_obs()?;
+    let cell_type = obs
+        .column("cell_type")
+        .map_err(|_| anyhow::anyhow!("obs.cell_type is required for minimal reproducibility file"))?
+        .clone();
+    let cell_type_int = obs
+        .column("cell_type_int")
+        .map_err(|_| anyhow::anyhow!("obs.cell_type_int is required for minimal reproducibility file"))?
+        .clone();
+    let obs_min = DataFrame::new(vec![cell_type, cell_type_int])?;
+    dst.set_obs(obs_min)?;
+
+    let spatial_key = detect_spatial_obsm_key(src)?;
+    let spatial_xy = if let Some(arr) = src.obsm().get_item::<Array2<f64>>(&spatial_key)? {
+        arr
+    } else {
+        src.obsm()
+            .get_item::<Array2<f32>>(&spatial_key)?
+            .ok_or_else(|| anyhow::anyhow!("spatial key {:?} not readable", spatial_key))?
+            .mapv(|v| v as f64)
+    };
+    dst.obsm().add(&spatial_key, spatial_xy)?;
+
+    let x_data = if let Some(xe) = src.layers().get("imputed_count") {
+        xe.get::<ArrayData>()?
+            .ok_or_else(|| anyhow::anyhow!("imputed_count exists but cannot be read"))?
+    } else {
+        src.x()
+            .get::<ArrayData>()?
+            .ok_or_else(|| anyhow::anyhow!("source X is empty"))?
+    };
+    dst.set_x(ensure_sparse_array_data(x_data)?)?;
+
+    for layer_name in ["imputed_count", "normalized_count", "raw_count"] {
+        if let Some(elem) = src.layers().get(layer_name) {
+            let data: ArrayData = match elem.get::<ArrayData>() {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(e) => {
+                    if layer_name == layer {
+                        return Err(e.into());
+                    }
+                    continue;
+                }
+            };
+            dst.layers().add(layer_name, ensure_sparse_array_data(data)?)?;
+        }
+    }
+
+    if dst.layers().get(layer).is_none() && layer != "X" {
+        anyhow::bail!(
+            "Configured layer {:?} is missing from minimal reproducibility AnnData.",
+            layer
+        );
+    }
+
+    let spatial_features = crate::estimator::create_spatial_features(
+        xy,
+        clusters,
+        num_clusters,
+        spatial_feature_radius,
+    );
+    let spatial_maps = crate::estimator::xyc2spatial_fast(
+        xy,
+        clusters,
+        num_clusters,
+        spatial_dim,
+        spatial_dim,
+    );
+    let spatial_features_csr = dense_to_csr_f64(&spatial_features)?;
+    let spatial_maps_flat_csr =
+        build_spatial_maps_flat_csr(&spatial_maps, clusters, num_clusters, spatial_dim)?;
+
+    dst.obsm()
+        .add("spacetravlr_spatial_features", spatial_features_csr)?;
+    dst.obsm()
+        .add("spacetravlr_spatial_maps_flat", spatial_maps_flat_csr)?;
+    dst.uns()
+        .add("spacetravlr_cache_cluster_annot", cluster_annot.to_string())?;
+    dst.uns()
+        .add("spacetravlr_cache_spatial_dim", spatial_dim as i64)?;
+    dst.uns()
+        .add("spacetravlr_cache_num_clusters", num_clusters as i64)?;
+    dst.uns()
+        .add("spacetravlr_cache_spatial_feature_radius", spatial_feature_radius)?;
+
+    dst.close()?;
+    Ok(out_path)
+}
+
+fn verify_minimal_repro_adata_loadable(
+    path: &str,
+    layer: &str,
+    cluster_annot: &str,
+) -> anyhow::Result<()> {
+    let adata = AnnData::<H5>::open(H5::open(path)?)?;
+    let obs = adata.read_obs()?;
+    if obs.column("cell_type").is_err() || obs.column("cell_type_int").is_err() {
+        anyhow::bail!("Minimal AnnData missing required obs columns.");
+    }
+    if obs.column(cluster_annot).is_err() {
+        anyhow::bail!(
+            "Minimal AnnData missing cluster annotation column {:?}.",
+            cluster_annot
+        );
+    }
+    if adata.layers().get("imputed_count").is_none() {
+        anyhow::bail!("Minimal AnnData missing layer imputed_count.");
+    }
+    if layer != "X" && adata.layers().get(layer).is_none() {
+        anyhow::bail!(
+            "Minimal AnnData missing configured training layer {:?}.",
+            layer
+        );
+    }
+    let x_dtype = adata
+        .x()
+        .dtype()
+        .ok_or_else(|| anyhow::anyhow!("Minimal AnnData X is empty"))?;
+    if !matches!(
+        x_dtype,
+        anndata::backend::DataType::CsrMatrix(_)
+            | anndata::backend::DataType::CscMatrix(_)
+    ) {
+        anyhow::bail!("X is not sparse in minimal AnnData: {:?}", x_dtype);
+    }
+    for layer_name in ["imputed_count", "normalized_count", "raw_count"] {
+        if let Some(elem) = adata.layers().get(layer_name) {
+            let dtype = elem
+                .dtype()
+                .ok_or_else(|| anyhow::anyhow!("layer {:?} is empty", layer_name))?;
+            if !matches!(
+                dtype,
+                anndata::backend::DataType::CsrMatrix(_)
+                    | anndata::backend::DataType::CscMatrix(_)
+            ) {
+                anyhow::bail!("Layer {:?} is not sparse: {:?}", layer_name, dtype);
+            }
+        }
+    }
+    validate_training_inputs(&adata, cluster_annot, layer, 1)?;
+    let _xy = load_spatial_coords_f64(&adata)?;
+    adata.close()?;
+    Ok(())
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -514,6 +837,7 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub tfl_pairs: Vec<String>,
     pub modulators_genes: Vec<String>,
     pub max_lr_pairs: Option<usize>,
+    pub regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>>,
     pub seed_only: bool,
     pub estimator: Option<ClusteredGCNNWR<AB>>,
     pub group_reg_vec: Option<Vec<f64>>,
@@ -534,6 +858,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         use_lr_modulators: bool,
         use_tfl_modulators: bool,
         grn: Arc<crate::network::GeneNetwork>,
+        tf_priors: Option<Arc<crate::network::TfPriors>>,
+        cluster_to_cell_type: Option<Arc<HashMap<usize, String>>>,
         layer: String,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
@@ -552,9 +878,63 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 use_lr_modulators,
                 use_tfl_modulators,
             );
-        let mut modulators_genes_ordered = modulators.regulators.clone();
+        let mut regulators = modulators.regulators.clone();
+        let mut tfl_ligands = modulators.tfl_ligands.clone();
+        let mut tfl_regulators = modulators.tfl_regulators.clone();
+        let mut tfl_pairs = modulators.tfl_pairs.clone();
+        let mut regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>> = None;
+
+        if use_tf_modulators {
+            if let Some(priors) = tf_priors.as_ref() {
+                if let Some(prior_union) = priors.tfs_for_target_any(&target_gene_str) {
+                    if !prior_union.is_empty() {
+                        regulators = prior_union.clone();
+                        let allowed: HashSet<&str> = regulators.iter().map(|s| s.as_str()).collect();
+                        let mut filtered_tfl_l = Vec::new();
+                        let mut filtered_tfl_r = Vec::new();
+                        let mut filtered_tfl_p = Vec::new();
+                        for ((lig, reg), pair) in tfl_ligands
+                            .iter()
+                            .zip(tfl_regulators.iter())
+                            .zip(tfl_pairs.iter())
+                        {
+                            if allowed.contains(reg.as_str()) {
+                                filtered_tfl_l.push(lig.clone());
+                                filtered_tfl_r.push(reg.clone());
+                                filtered_tfl_p.push(pair.clone());
+                            }
+                        }
+                        tfl_ligands = filtered_tfl_l;
+                        tfl_regulators = filtered_tfl_r;
+                        tfl_pairs = filtered_tfl_p;
+
+                        if let Some(cluster_map) = cluster_to_cell_type.as_ref() {
+                            let mut masks = HashMap::new();
+                            for (cluster_id, cell_type) in cluster_map.iter() {
+                                if let Some(tf_ct) =
+                                    priors.tfs_for_target_cell_type(&target_gene_str, cell_type)
+                                {
+                                    let allowed_ct: HashSet<&str> =
+                                        tf_ct.iter().map(|s| s.as_str()).collect();
+                                    let mask = regulators
+                                        .iter()
+                                        .map(|tf| allowed_ct.contains(tf.as_str()))
+                                        .collect::<Vec<bool>>();
+                                    masks.insert(*cluster_id, mask);
+                                }
+                            }
+                            if !masks.is_empty() {
+                                regulator_masks_by_cluster = Some(masks);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut modulators_genes_ordered = regulators.clone();
         modulators_genes_ordered.extend(modulators.lr_pairs.clone());
-        modulators_genes_ordered.extend(modulators.tfl_pairs.clone());
+        modulators_genes_ordered.extend(tfl_pairs.clone());
 
         Ok(Self {
             adata,
@@ -566,15 +946,16 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             contact_distance,
             grn,
             tf_ligand_cutoff,
-            regulators: modulators.regulators,
+            regulators,
             ligands: modulators.ligands,
             receptors: modulators.receptors,
-            tfl_ligands: modulators.tfl_ligands,
-            tfl_regulators: modulators.tfl_regulators,
+            tfl_ligands,
+            tfl_regulators,
             lr_pairs: modulators.lr_pairs,
-            tfl_pairs: modulators.tfl_pairs,
+            tfl_pairs,
             modulators_genes: modulators_genes_ordered,
             max_lr_pairs,
+            regulator_masks_by_cluster,
             seed_only: false,
             estimator: None,
             group_reg_vec: None,
@@ -611,6 +992,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             true,
             true,
             grn,
+            None,
+            None,
             "imputed_count".to_string(),
         )
     }
@@ -650,6 +1033,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         model_export: &ModelExportConfig,
         hud: Option<TrainingHud>,
         network_data_dir: Option<&str>,
+        tf_priors_feather: Option<&str>,
         device: &AB::Device,
     ) -> anyhow::Result<()>
     where
@@ -727,6 +1111,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             .max()
             .map(|m| m.saturating_add(1))
             .unwrap_or(1);
+        let cluster_to_cell_type =
+            Arc::new(build_cluster_to_cell_type_map(&obs_df, cluster_annot)?);
+        if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
+            log_line(
+                &hud,
+                "TF priors provided, but obs.cell_type was not found; using target-level TF priors without per-cell_type masking.".to_string(),
+            );
+        }
 
         if let Some(ref h) = hud {
             if let Ok(mut g) = h.lock() {
@@ -743,11 +1135,43 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             &all_var_names,
             network_data_dir,
         )?);
+        let tf_priors = if let Some(path) = tf_priors_feather {
+            let loaded = crate::network::TfPriors::from_feather(path, &all_var_names)?;
+            let msg = format!("Loaded TF priors from {}", path);
+            log_line(&hud, msg);
+            Some(Arc::new(loaded))
+        } else {
+            None
+        };
 
         let msg = "Pre-caching metadata and coordinates...";
         log_line(&hud, msg.to_string());
 
         let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
+        if cluster_annot != "cell_type_int" {
+            anyhow::bail!(
+                "Minimal reproducibility export keeps only obs.cell_type and obs.cell_type_int; set [data].cluster_annot = \"cell_type_int\"."
+            );
+        }
+        let reproducible_adata_path = export_minimal_repro_adata_with_cache(
+            setup_adata.as_ref(),
+            training_dir,
+            layer,
+            cluster_annot,
+            xy.as_ref(),
+            clusters.as_ref(),
+            num_clusters,
+            spatial_dim,
+            cnn.spatial_feature_radius,
+        )?;
+        verify_minimal_repro_adata_loadable(&reproducible_adata_path, layer, cluster_annot)?;
+        log_line(
+            &hud,
+            format!(
+                "Wrote minimal reproducibility AnnData with sparse X/layers and cached spatial tensors: {}",
+                reproducible_adata_path
+            ),
+        );
 
         let compute_mean_for_hybrid = matches!(cnn_training_mode, CnnTrainingMode::Hybrid)
             && !hybrid_pass2_full_cnn
@@ -838,10 +1262,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let clusters = clusters.clone();
             let obs_names = obs_names.clone();
             let global_grn = global_grn.clone();
+            let tf_priors = tf_priors.clone();
+            let cluster_to_cell_type = cluster_to_cell_type.clone();
             let hud = hud.clone();
             let pb = pb_opt.clone();
             let device = device.clone();
-            let adata_path = adata_path.to_string();
+            let adata_path = reproducible_adata_path.clone();
             let training_dir = training_dir.to_string();
 
             // scalar params
@@ -984,6 +1410,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             use_lr_modulators,
                             use_tfl_modulators,
                             global_grn.clone(),
+                            tf_priors.clone(),
+                            Some(cluster_to_cell_type.clone()),
                             layer_w.clone(),
                         )
                         .map(Box::new)
@@ -1454,7 +1882,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         let _ = fs::remove_file(&pth);
                     }
                     return Self::fit_all_genes(
-                        adata_path,
+                        &reproducible_adata_path,
                         radius,
                         spatial_dim,
                         contact_distance,
@@ -1485,6 +1913,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         model_export,
                         hud,
                         network_data_dir,
+                        tf_priors_feather,
                         device,
                     );
                 }
@@ -1615,6 +2044,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             let mut est =
                 ClusteredGCNNWR::new(params, self.spatial_dim, cnn.spatial_feature_radius);
             est.group_reg_vec = self.group_reg_vec.clone();
+            est.regulator_masks_by_cluster = self.regulator_masks_by_cluster.clone();
             self.estimator = Some(est);
         }
 
@@ -1698,26 +2128,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         let slice = [SelectInfoElem::full(), SelectInfoElem::Index(gene_indices)];
 
-        if self.layer != "X" && !self.layer.is_empty() {
-            if let Some(layer_elem) = self.adata.layers().get(&self.layer) {
-                let data: Array2<f64> = layer_elem
-                    .slice(slice)?
-                    .ok_or_else(|| anyhow::anyhow!("Failed to slice layer {}", self.layer))?;
-                return Ok(data);
-            }
-        }
-
-        let x_elem = self.adata.x();
-        if x_elem.is_none() {
-            return Err(anyhow::anyhow!(
-                "X is empty and layer {} not found",
-                self.layer
-            ));
-        }
-        let data: Array2<f64> = x_elem
-            .slice(slice)?
-            .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?;
-        Ok(data)
+        read_expression_matrix_dense_f64(&self.adata, &self.layer, &slice)
     }
 
     pub fn get_gene_expression(&self, gene: &str) -> anyhow::Result<Array1<f64>> {
