@@ -13,8 +13,13 @@ N_CLUSTERS = 13
 N_WARMUP = 1
 N_ITERS = 5
 
-csv_files = sorted(glob.glob(f"{BETAS_DIR}/*_betadata.csv"))
-print(f"Found {len(csv_files)} betadata CSVs\n")
+def load_betadata_table(path):
+    df = pd.read_feather(path)
+    return df.set_index(df.columns[0])
+
+
+beta_paths = sorted(glob.glob(f"{BETAS_DIR}/*_betadata.feather"))
+print(f"Found {len(beta_paths)} betadata feather files\n")
 
 for n_cells in N_CELLS_LIST:
     obs_names = [f"cell_{i}" for i in range(n_cells)]
@@ -24,9 +29,9 @@ for n_cells in N_CELLS_LIST:
     all_genes_set = set()
     lig_genes_set = set()
 
-    for path in csv_files:
-        gene_name = os.path.basename(path).replace("_betadata.csv", "")
-        df = pd.read_csv(path, index_col=0)
+    for path in beta_paths:
+        gene_name = os.path.basename(path).replace("_betadata.feather", "")
+        df = load_betadata_table(path)
         new_cols = {c: c if c == "beta0" else f"beta_{c}" for c in df.columns}
         df = df.rename(columns=new_cols)
 

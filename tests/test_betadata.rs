@@ -1,5 +1,5 @@
 use ndarray::{Array2, array};
-use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
+use space_trav_lr_rust::betadata::{write_betadata_feather, BetaFrame, Betabase, GeneMatrix};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -148,18 +148,34 @@ fn test_splash_with_scale_and_cap() {
 }
 
 #[test]
-fn test_csv_roundtrip() {
-    let dir = std::env::temp_dir().join("betadata_test_csv_v3");
+fn test_feather_roundtrip_seed_only() {
+    let dir = std::env::temp_dir().join("betadata_test_feather_seed");
     std::fs::create_dir_all(&dir).unwrap();
-    let csv_path = dir.join("target1_betadata.csv");
+    let path = dir.join("target1_betadata.feather");
 
-    let csv_content = "Cluster,beta0,A,B,C$D,C#A\n\
-                       0,1.0,0.5,-0.3,0.2,0.1\n\
-                       1,2.0,0.8,0.1,-0.1,0.4";
+    let ids = vec!["0".to_string(), "1".to_string()];
+    let cols = vec![
+        "beta0".into(),
+        "A".into(),
+        "B".into(),
+        "C$D".into(),
+        "C#A".into(),
+    ];
+    let mut mat = Array2::zeros((2, 5));
+    mat[[0, 0]] = 1.0;
+    mat[[0, 1]] = 0.5;
+    mat[[0, 2]] = -0.3;
+    mat[[0, 3]] = 0.2;
+    mat[[0, 4]] = 0.1;
+    mat[[1, 0]] = 2.0;
+    mat[[1, 1]] = 0.8;
+    mat[[1, 2]] = 0.1;
+    mat[[1, 3]] = -0.1;
+    mat[[1, 4]] = 0.4;
 
-    std::fs::write(&csv_path, csv_content).unwrap();
+    write_betadata_feather(path.to_str().unwrap(), "Cluster", &ids, &cols, &mat).unwrap();
 
-    let bf = BetaFrame::from_csv(csv_path.to_str().unwrap()).unwrap();
+    let bf = BetaFrame::from_feather(path.to_str().unwrap()).unwrap();
     assert_eq!(bf.gene_name, "target1");
     assert_eq!(bf.n_beta_rows, 2);
     assert_eq!(bf.tfs, vec!["A", "B"]);
@@ -171,6 +187,48 @@ fn test_csv_roundtrip() {
     let a = result.col("beta_A").unwrap();
     assert!((a[0] - 0.7).abs() < 1e-10);
     assert!((a[1] - 1.0).abs() < 1e-10);
+
+    let bf2 = BetaFrame::from_path(path.to_str().unwrap()).unwrap();
+    assert_eq!(bf2.gene_name, "target1");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_betabase_from_directory_cnn_cellid() {
+    let dir = std::env::temp_dir().join("betadata_test_dir_cnn_feather");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let ids = vec!["c0".into(), "c1".into()];
+    let cols_g1 = vec!["beta0".into(), "X".into()];
+    let m1 = array![[1.0f64, 0.5], [2.0, 0.25]];
+    write_betadata_feather(
+        dir.join("G1_betadata.feather").to_str().unwrap(),
+        "CellID",
+        &ids,
+        &cols_g1,
+        &m1,
+    )
+    .unwrap();
+    let cols_g2 = vec!["beta0".into(), "Y".into()];
+    let m2 = array![[0.0f64, 1.0], [0.0, 2.0]];
+    write_betadata_feather(
+        dir.join("G2_betadata.feather").to_str().unwrap(),
+        "CellID",
+        &ids,
+        &cols_g2,
+        &m2,
+    )
+    .unwrap();
+
+    let obs = vec!["c0".into(), "c1".into()];
+    let clusters = [99usize, 99];
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None).unwrap();
+
+    assert_eq!(bb.data.len(), 2);
+    let f1 = &bb.data["G1"];
+    assert_eq!(f1.n_cells, 2);
+    assert_eq!(*f1.cell_to_beta_row, vec![0, 1]);
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -209,19 +267,31 @@ fn test_betaframe_tf_only() {
 
 #[test]
 fn test_betabase_from_directory() {
-    let dir = std::env::temp_dir().join("betadata_test_dir_v3");
+    let dir = std::env::temp_dir().join("betadata_test_dir_feather");
     std::fs::create_dir_all(&dir).unwrap();
 
-    std::fs::write(
-        dir.join("gene1_betadata.csv"),
-        "Cluster,beta0,TF1,TF2\n0,1.0,0.5,0.3\n1,2.0,0.1,0.2",
+    let g1_cols = vec!["beta0".into(), "TF1".into(), "TF2".into()];
+    let g1_mat = array![[1.0f64, 0.5, 0.3], [2.0, 0.1, 0.2]];
+    write_betadata_feather(
+        dir.join("gene1_betadata.feather").to_str().unwrap(),
+        "Cluster",
+        &["0".into(), "1".into()],
+        &g1_cols,
+        &g1_mat,
     )
     .unwrap();
-    std::fs::write(
-        dir.join("gene2_betadata.csv"),
-        "Cluster,beta0,TF1,L1$R1\n0,0.5,0.1,0.4\n1,0.6,0.2,0.3",
+
+    let g2_cols = vec!["beta0".into(), "TF1".into(), "L1$R1".into()];
+    let g2_mat = array![[0.5f64, 0.1, 0.4], [0.6, 0.2, 0.3]];
+    write_betadata_feather(
+        dir.join("gene2_betadata.feather").to_str().unwrap(),
+        "Cluster",
+        &["0".into(), "1".into()],
+        &g2_cols,
+        &g2_mat,
     )
     .unwrap();
+
     std::fs::write(dir.join("other.csv"), "x,y\n1,2").unwrap();
 
     let obs: Vec<String> = vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()];
@@ -244,39 +314,58 @@ fn test_betabase_from_directory() {
 }
 
 #[test]
-fn test_csv_with_beta_prefix() {
-    let dir = std::env::temp_dir().join("betadata_test_prefix_v3");
+fn test_feather_cnn_cellid_columns() {
+    let dir = std::env::temp_dir().join("betadata_test_feather_cnn");
     std::fs::create_dir_all(&dir).unwrap();
-    let csv_path = dir.join("target2_betadata.csv");
+    let path = dir.join("target2_betadata.feather");
 
-    let csv_content = "CellID,beta0,beta_A,beta_B,beta_C$D\n\
-                       cell0,1.0,0.5,-0.3,0.2\n\
-                       cell1,2.0,0.8,0.1,-0.1";
+    let ids = vec!["cell0".into(), "cell1".into()];
+    let cols = vec![
+        "beta0".into(),
+        "beta_A".into(),
+        "beta_B".into(),
+        "beta_C$D".into(),
+    ];
+    let mat = array![[1.0f64, 0.5, -0.3, 0.2], [2.0, 0.8, 0.1, -0.1]];
+    write_betadata_feather(path.to_str().unwrap(), "CellID", &ids, &cols, &mat).unwrap();
 
-    std::fs::write(&csv_path, csv_content).unwrap();
-
-    let bf = BetaFrame::from_csv(csv_path.to_str().unwrap()).unwrap();
+    let bf = BetaFrame::from_feather(path.to_str().unwrap()).unwrap();
     assert_eq!(bf.gene_name, "target2");
     assert_eq!(bf.tfs, vec!["A", "B"]);
     assert_eq!(bf.ligands, vec!["C"]);
     assert_eq!(bf.receptors, vec!["D"]);
+
+    let obs: Vec<String> = vec!["cell0".into(), "cell1".into()];
+    let clusters = [0usize, 0];
+    let mapping = BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &clusters);
+    assert_eq!(mapping, vec![0, 1]);
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn test_mapping_shared_via_arc() {
-    let dir = std::env::temp_dir().join("betadata_test_arc_v2");
+    let dir = std::env::temp_dir().join("betadata_test_arc_feather");
     std::fs::create_dir_all(&dir).unwrap();
 
-    std::fs::write(
-        dir.join("g1_betadata.csv"),
-        "Cluster,beta0,TF1\n0,1.0,0.5\n1,2.0,0.1",
+    let c = vec!["beta0".into(), "TF1".into()];
+    let m1 = array![[1.0f64, 0.5], [2.0, 0.1]];
+    write_betadata_feather(
+        dir.join("g1_betadata.feather").to_str().unwrap(),
+        "Cluster",
+        &["0".into(), "1".into()],
+        &c,
+        &m1,
     )
     .unwrap();
-    std::fs::write(
-        dir.join("g2_betadata.csv"),
-        "Cluster,beta0,TF2\n0,0.5,0.3\n1,0.6,0.2",
+    let c2 = vec!["beta0".into(), "TF2".into()];
+    let m2 = array![[0.5f64, 0.3], [0.6, 0.2]];
+    write_betadata_feather(
+        dir.join("g2_betadata.feather").to_str().unwrap(),
+        "Cluster",
+        &["0".into(), "1".into()],
+        &c2,
+        &m2,
     )
     .unwrap();
 

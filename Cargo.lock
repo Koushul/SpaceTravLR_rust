@@ -4448,6 +4448,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fast-float2",
+ "flate2",
  "fs4",
  "futures",
  "glob",
@@ -4477,6 +4478,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -6052,6 +6054,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm 0.28.1",
+ "flate2",
  "glob",
  "indicatif",
  "ndarray 0.16.1",

@@ -6,11 +6,15 @@ use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
 };
-use space_trav_lr_rust::config::{expand_user_path, CnnTrainingMode, SpaceshipConfig};
+use space_trav_lr_rust::config::{
+    default_output_dir_for_adata_path, expand_user_path, CnnTrainingMode, SpaceshipConfig,
+};
 use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_hud::TrainingHudState;
+#[cfg(feature = "tui")]
+use space_trav_lr_rust::training_demo::run_demo_training;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard};
 use std::path::{Path, PathBuf};
@@ -51,7 +55,7 @@ struct RunSummaryCli {
     #[arg(
         long,
         value_name = "DIR",
-        help = "Training output directory (default: execution.output_dir)"
+        help = "Training output directory (default: cwd/{adata_stem}_YYYY-MM-DD when unset in config)"
     )]
     output_dir: Option<PathBuf>,
     #[arg(
@@ -78,8 +82,8 @@ struct RunSummaryCli {
     manifest: Option<PathBuf>,
     #[arg(
         long,
-        default_value = "*_betadata.csv",
-        help = "glob for counting betadata CSVs in the output directory"
+        default_value = "*_betadata.feather",
+        help = "glob for counting betadata Feather files in the output directory"
     )]
     betadata_pattern: String,
 }
@@ -133,7 +137,11 @@ struct Cli {
     )]
     genes: Option<String>,
 
-    #[arg(long, value_name = "DIR", help = "Output directory for *_betadata.csv")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Output for *_betadata.feather (default: cwd/{adata_stem}_YYYY-MM-DD when unset in config)"
+    )]
     output_dir: Option<PathBuf>,
 
     #[arg(long, value_name = "F", help = "L1 regularization (lasso)")]
@@ -156,6 +164,12 @@ struct Cli {
         help = "Line-oriented logs on stdout (no full-screen dashboard when built with the `tui` feature)"
     )]
     plain: bool,
+
+    #[arg(
+        long,
+        help = "Simulated training dashboard only: fake workers, gene progress, and R² stats — no AnnData I/O, no exports, no GPU (omit --plain)"
+    )]
+    demo: bool,
 }
 
 fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
@@ -314,22 +328,16 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
             )
         })?;
 
-    let output_dir = rs
-        .output_dir
-        .clone()
-        .or_else(|| {
-            let d = expand_user_path(cfg.execution.output_dir.trim());
-            if d.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(d))
-            }
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No output directory: pass --output-dir or set execution.output_dir in config."
-            )
-        })?;
+    let output_dir = if let Some(p) = rs.output_dir.clone() {
+        p
+    } else {
+        let d = expand_user_path(cfg.execution.output_dir.trim());
+        if !d.is_empty() {
+            PathBuf::from(d)
+        } else {
+            PathBuf::from(default_output_dir_for_adata_path(&adata_path)?)
+        }
+    };
 
     if !Path::new(&adata_path).exists() {
         anyhow::bail!("AnnData not found at {}.", adata_path.display());
@@ -359,11 +367,82 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "tui")]
+fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
+    if cli.plain {
+        anyhow::bail!("--demo is for the full-screen dashboard; omit --plain.");
+    }
+
+    let mut cfg = match &cli.config {
+        Some(path) => SpaceshipConfig::from_file(path)?,
+        None => SpaceshipConfig::load(),
+    };
+    apply_cli_to_config(cli, &mut cfg);
+
+    let gene_filter = parse_gene_filter(cli);
+    let demo_total = cli.max_genes.unwrap_or(24).max(1).min(512);
+
+    let config_path_ref = cli.config.as_deref();
+    let run_summary = RunConfigSummary::build(
+        config_path_ref,
+        "demo",
+        "Demo mode — simulated genes/workers only; no AnnData load, no betadata export, no training backend.",
+        &cfg,
+        Some(demo_total),
+        gene_filter.as_deref(),
+    );
+
+    let full_cnn = cfg.full_cnn();
+    let epochs = cfg.training.epochs;
+    let n_parallel = cfg.execution.n_parallel;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let hud = Arc::new(Mutex::new(TrainingHudState::new(
+        "(demo) simulated_visium.h5ad".to_string(),
+        "(demo — no disk writes)".to_string(),
+        run_summary,
+        full_cnn,
+        epochs,
+        n_parallel,
+        cancel.clone(),
+    )));
+
+    println!("SpaceTravLR --demo: opening dashboard (Shift+Q to exit immediately).");
+
+    let hud_worker = hud.clone();
+    let filter_for_demo = gene_filter.clone();
+    let handle = thread::spawn(move || run_demo_training(hud_worker, demo_total, filter_for_demo));
+
+    match run_training_dashboard(hud.clone())? {
+        TrainingDashboardExit::ForceQuit => {
+            eprintln!("Aborted (Shift+Q).");
+            std::process::exit(130);
+        }
+        TrainingDashboardExit::Completed => {}
+    }
+
+    match handle.join() {
+        Ok(r) => r?,
+        Err(_) => anyhow::bail!("demo thread panicked"),
+    }
+
+    println!("Demo finished.");
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     if let Some(Commands::RunSummary(rs)) = &cli.command {
         return run_run_summary(&cli, rs);
+    }
+
+    if cli.demo {
+        #[cfg(not(feature = "tui"))]
+        anyhow::bail!(
+            "This binary was built without the `tui` feature; rebuild with default features to use --demo."
+        );
+        #[cfg(feature = "tui")]
+        return run_demo_mode(&cli);
     }
 
     let mut cfg = match &cli.config {
@@ -420,6 +499,10 @@ fn main() -> anyhow::Result<()> {
 
     if !Path::new(&path).exists() {
         anyhow::bail!("Dataset not found at {}.", path);
+    }
+
+    if cfg.execution.output_dir.trim().is_empty() {
+        cfg.execution.output_dir = default_output_dir_for_adata_path(Path::new(&path))?;
     }
 
     let mode_label = match cfg.resolved_cnn_mode() {

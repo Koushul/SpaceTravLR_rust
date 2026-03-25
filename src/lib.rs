@@ -12,11 +12,14 @@ pub mod spatial_estimator;
 pub mod training_hud;
 pub mod training_log;
 #[cfg(feature = "tui")]
+pub mod training_demo;
+#[cfg(feature = "tui")]
 pub mod training_tui;
-pub use betadata::{BetaFrame, Betabase, GeneMatrix};
+pub use betadata::{write_betadata_feather, BetaFrame, Betabase, GeneMatrix};
 pub use cnn_gating::CnnGateDecision;
 pub use config::{
-    expand_user_path, CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, SpaceshipConfig,
+    default_output_dir_for_adata_path, expand_user_path, CnnConfig, CnnTrainingMode,
+    HybridCnnGatingConfig, SpaceshipConfig,
 };
 pub use estimator::{ClusterTrainingSummary, ClusteredGCNNWR};
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};

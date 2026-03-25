@@ -268,7 +268,7 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         kv_tr("data.layer", layer),
         kv_tr("data.cluster_annot", cluster_key),
         kv_tr("spatial coords", &spatial_training),
-        kv_tr("betadata files (*_betadata.csv)", &n_beta.to_string()),
+        kv_tr("betadata files (*_betadata.feather)", &n_beta.to_string()),
     ];
 
     let adata_rows = vec![

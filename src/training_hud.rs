@@ -119,6 +119,7 @@ pub struct TrainingHudState {
     pub active_genes: HashMap<String, String>,
     pub n_cells: usize,
     pub n_clusters: usize,
+    pub cell_type_counts: Vec<(String, usize)>,
     pub started: Instant,
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
@@ -155,6 +156,7 @@ impl TrainingHudState {
             active_genes: HashMap::new(),
             n_cells: 0,
             n_clusters: 0,
+            cell_type_counts: Vec::new(),
             started: Instant::now(),
             finished: None,
             cancel_requested,
@@ -232,11 +234,11 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
     }
     if g.genes_failed == 0 && g.genes_orphan == 0 && g.genes_skipped >= g.total_genes {
         eprintln!(
-            "\nNote: no new *_betadata.csv files were written — every gene was skipped (outputs already exist or another process holds a .lock)."
+            "\nNote: no new *_betadata.feather files were written — every gene was skipped (outputs already exist or another process holds a .lock)."
         );
         return;
     }
-    eprintln!("\n=== No betadata CSVs were written this run ===");
+        eprintln!("\n=== No betadata Feather files were written this run ===");
     eprintln!("Genes queued: {}", g.total_genes);
     eprintln!(
         "  skipped (existing CSV / lock): {}",

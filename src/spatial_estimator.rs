@@ -1,3 +1,4 @@
+use crate::betadata::write_betadata_feather;
 use crate::cnn_gating::{
     build_neighbors, decide_cnn_for_gene, load_gene_set_file, predict_lasso_y, CnnGateDecision,
 };
@@ -659,7 +660,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let result = (|| -> anyhow::Result<()> {
         use anndata_hdf5::H5;
         use std::fs;
-        use std::io::Write;
         use std::thread;
 
         let training_dir = output_dir;
@@ -691,6 +691,27 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let total_genes = target_genes.len();
 
         let obs_df = validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
+
+        let mut cell_type_counts: Vec<(String, usize)> = Vec::new();
+        if let Ok(cell_col) = obs_df.column("cell_type") {
+            // If `obs.cell_type` exists, summarize counts for the TUI.
+            if let Ok(cell_series) = cell_col
+                .as_materialized_series()
+                .cast(&polars::prelude::DataType::String)
+            {
+                let mut map: HashMap<String, usize> = HashMap::new();
+                for v in cell_series.iter() {
+                    // `cell_series.iter()` yields `AnyValue`, where missing values become `Null`.
+                    let key = v.to_string();
+                    if key != "null" {
+                        *map.entry(key).or_insert(0) += 1;
+                    }
+                }
+                let mut v: Vec<(String, usize)> = map.into_iter().collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1));
+                cell_type_counts = v;
+            }
+        }
         let clusters_ser = obs_df.column(cluster_annot)?;
         let clusters: Arc<Array1<usize>> = Arc::new(
             clusters_ser
@@ -712,6 +733,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 g.total_genes = total_genes;
                 g.n_cells = setup_adata.n_obs();
                 g.n_clusters = num_clusters;
+                g.cell_type_counts = cell_type_counts;
             }
         }
 
@@ -885,12 +907,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         };
                         let Some(gene) = gene else { break };
 
-                        let csv_path = format!("{}/{}_betadata.csv", training_dir, gene);
+                        let feather_path = format!("{}/{}_betadata.feather", training_dir, gene);
                         let orphan_path = format!("{}/{}.orphan", training_dir, gene);
                         let lock_path = format!("{}/{}.lock", training_dir, gene);
 
                         // Skip already-done
-                        if std::path::Path::new(&csv_path).exists()
+                        if std::path::Path::new(&feather_path).exists()
                             || std::path::Path::new(&orphan_path).exists()
                         {
                             if let Some(ref h) = hud {
@@ -1150,7 +1172,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     }
                                 }
                                 let betadata_path =
-                                    format!("{}/{}_betadata.csv", training_dir, gene);
+                                    format!("{}/{}_betadata.feather", training_dir, gene);
                                 let col_names: Vec<String> = std::iter::once("beta0".to_string())
                                     .chain(
                                         estimator
@@ -1197,24 +1219,29 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 gene
                                             ),
                                         );
-                                    } else if let Ok(mut f) = fs::File::create(&betadata_path) {
-                                        let mut header = "CellID".to_string();
-                                        for &j in &keep {
-                                            header.push_str(&format!(",{}", col_names[j]));
-                                        }
-                                        let _ = writeln!(f, "{}", header);
-
-                                        for (i, cell_id) in obs_names.iter().enumerate() {
-                                            let mut row = format!("{}", cell_id);
-                                            for &j in &keep {
-                                                row.push_str(&format!(
-                                                    ",{}",
-                                                    finite_or_zero_f64(all_betas[[i, j]])
-                                                ));
+                                    } else {
+                                        let n_rows = obs_names.len();
+                                        let n_keep = keep.len();
+                                        let mut mat = Array2::<f64>::zeros((n_rows, n_keep));
+                                        for (new_j, &j) in keep.iter().enumerate() {
+                                            for i in 0..n_rows {
+                                                mat[[i, new_j]] =
+                                                    finite_or_zero_f64(all_betas[[i, j]]);
                                             }
-                                            let _ = writeln!(f, "{}", row);
                                         }
-                                        wrote = true;
+                                        let data_cols: Vec<String> =
+                                            keep.iter().map(|&j| col_names[j].clone()).collect();
+                                        if write_betadata_feather(
+                                            &betadata_path,
+                                            "CellID",
+                                            obs_names.as_ref(),
+                                            &data_cols,
+                                            &mat,
+                                        )
+                                        .is_ok()
+                                        {
+                                            wrote = true;
+                                        }
                                     }
                                 } else {
                                     let mut cluster_ids: Vec<usize> =
@@ -1266,22 +1293,32 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 gene
                                             ),
                                         );
-                                    } else if let Ok(mut f) = fs::File::create(&betadata_path) {
-                                        let mut header = "Cluster".to_string();
-                                        for &j in &keep {
-                                            header.push_str(&format!(",{}", col_names[j]));
-                                        }
-                                        let _ = writeln!(f, "{}", header);
-
-                                        for (row_vals, &c_id) in rows.iter().zip(cluster_ids.iter())
-                                        {
-                                            let mut row = format!("{}", c_id);
-                                            for &j in &keep {
-                                                row.push_str(&format!(",{}", row_vals[j]));
+                                    } else {
+                                        let n_rows = rows.len();
+                                        let n_keep = keep.len();
+                                        let mut mat = Array2::<f64>::zeros((n_rows, n_keep));
+                                        for (i, row_vals) in rows.iter().enumerate() {
+                                            for (new_j, &j) in keep.iter().enumerate() {
+                                                mat[[i, new_j]] = row_vals[j];
                                             }
-                                            let _ = writeln!(f, "{}", row);
                                         }
-                                        wrote = true;
+                                        let ids: Vec<String> = cluster_ids
+                                            .iter()
+                                            .map(|c| c.to_string())
+                                            .collect();
+                                        let data_cols: Vec<String> =
+                                            keep.iter().map(|&j| col_names[j].clone()).collect();
+                                        if write_betadata_feather(
+                                            &betadata_path,
+                                            "Cluster",
+                                            &ids,
+                                            &data_cols,
+                                            &mat,
+                                        )
+                                        .is_ok()
+                                        {
+                                            wrote = true;
+                                        }
                                     }
                                 }
                             }
@@ -1413,7 +1450,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         }
                     }
                     for g in &picked {
-                        let pth = format!("{training_dir}/{g}_betadata.csv");
+                        let pth = format!("{training_dir}/{g}_betadata.feather");
                         let _ = fs::remove_file(&pth);
                     }
                     return Self::fit_all_genes(

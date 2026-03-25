@@ -48,15 +48,21 @@ print(f"Loaded inputs: {n_cells} cells, {n_genes} genes, target={target}->{gene_
 
 # ── Load BetaFrames ──────────────────────────────────────────────────────────
 
-csv_files = sorted(glob.glob(f"{BETAS_DIR}/*_betadata.csv"))
+
+def load_betadata_table(path):
+    df = pd.read_feather(path)
+    return df.set_index(df.columns[0])
+
+
+beta_paths = sorted(glob.glob(f"{BETAS_DIR}/*_betadata.feather"))
 obs_names = [f"cell_{i}" for i in range(n_cells)]
 n_clusters = 13
 clusters = [i % n_clusters for i in range(n_cells)]
 
 betaframes = {}
-for path in csv_files:
-    gene_name = os.path.basename(path).replace("_betadata.csv", "")
-    df = pd.read_csv(path, index_col=0)
+for path in beta_paths:
+    gene_name = os.path.basename(path).replace("_betadata.feather", "")
+    df = load_betadata_table(path)
     new_cols = {c: c if c == "beta0" else f"beta_{c}" for c in df.columns}
     df = df.rename(columns=new_cols)
 
@@ -287,9 +293,9 @@ for n_cells_bench in [200, 500, 1000, 2000, 5000, 10000]:
 
     # Rebuild betaframes for this size
     bfs = {}
-    for path in csv_files:
-        gn = os.path.basename(path).replace("_betadata.csv", "")
-        df_raw = pd.read_csv(path, index_col=0)
+    for path in beta_paths:
+        gn = os.path.basename(path).replace("_betadata.feather", "")
+        df_raw = load_betadata_table(path)
         new_cols = {c: c if c == "beta0" else f"beta_{c}" for c in df_raw.columns}
         df_raw = df_raw.rename(columns=new_cols)
         expanded = pd.DataFrame(index=obs, columns=df_raw.columns, dtype=float)

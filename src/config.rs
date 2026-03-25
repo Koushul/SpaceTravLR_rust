@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -214,7 +215,7 @@ pub struct PerturbationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelExportConfig {
-    /// Export trained CNN weights for genes that run per-cell CNN refinement.
+    /// When true, export trained CNN weights for genes that run per-cell CNN refinement (default off).
     pub save_cnn_weights: bool,
     /// Write .npz with deflate compression (recommended).
     pub compressed_npz: bool,
@@ -235,9 +236,9 @@ impl Default for DataConfig {
 impl Default for SpatialConfig {
     fn default() -> Self {
         Self {
-            radius: 0.1,
+            radius: 200.0,
             spatial_dim: 32,
-            contact_distance: 0.05,
+            contact_distance: 50.0,
         }
     }
 }
@@ -246,7 +247,7 @@ impl Default for GrnConfig {
     fn default() -> Self {
         Self {
             network_data_dir: None,
-            tf_ligand_cutoff: 0.5,
+            tf_ligand_cutoff: 0.2,
             max_lr_pairs: None,
             top_lr_pairs_by_mean_expression: None,
             use_tf_modulators: true,
@@ -297,7 +298,7 @@ impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
             n_parallel: 1,
-            output_dir: "/tmp/training".into(),
+            output_dir: String::new(),
         }
     }
 }
@@ -356,6 +357,35 @@ pub fn expand_user_path(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+/// Default training output directory: current working directory + `{adata_stem}_{YYYY-MM-DD}`.
+/// `adata_stem` is the `.h5ad` file stem; `/` and `\\` in the stem are replaced with `_`.
+pub fn default_output_dir_for_adata_path(adata_path: impl AsRef<Path>) -> anyhow::Result<String> {
+    let adata_path = adata_path.as_ref();
+    let stem = adata_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim();
+    let stem = if stem.is_empty() {
+        "spacetravlr_run"
+    } else {
+        stem
+    };
+    let stem: String = stem
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            c => c,
+        })
+        .collect();
+
+    let date = chrono::Local::now().format("%Y-%m-%d");
+    let dir_name = format!("{}_{}", stem, date);
+    let cwd =
+        std::env::current_dir().context("default output_dir: could not read current directory")?;
+    Ok(cwd.join(dir_name).to_string_lossy().to_string())
 }
 
 impl SpaceshipConfig {

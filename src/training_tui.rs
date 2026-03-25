@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+use wgpu::{Backends, Instance};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 const BG: Color = Color::Rgb(40, 40, 40); // gruvbox dark0
@@ -38,8 +39,10 @@ const C_WROTE: Color = Color::Rgb(142, 192, 124); // success
 const C_FAIL: Color = Color::Rgb(204, 36, 29); // provided red
 const C_SKIP: Color = Color::Rgb(146, 131, 116); // muted
 const C_TOPR2: Color = Color::Rgb(69, 133, 136); // aqua
-const C_BOTR2: Color = Color::Rgb(204, 36, 29); // red
+const C_BOTR2: Color = MUTED;
 const PERF_BORD: Color = Color::Rgb(215, 153, 33); // yellow
+
+const HARDWARE_POLL_INTERVAL: Duration = Duration::from_secs(3 * 60);
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
 // Compact ASCII rocket — every line is exactly 14 display columns.
@@ -255,20 +258,78 @@ fn truncate_label(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn compute_hardware_summary(notice: &str, max_chars: usize) -> String {
-    let raw = if let Some((_, rest)) = notice.split_once(':') {
-        rest.trim()
-    } else {
-        notice.trim()
+#[cfg(not(target_arch = "wasm32"))]
+fn probe_wgpu_adapter_names() -> Vec<String> {
+    let instance = Instance::default();
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut out = Vec::new();
+    for adapter in instance.enumerate_adapters(Backends::all()) {
+        let name = adapter.get_info().name;
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+#[cfg(target_arch = "wasm32")]
+fn probe_wgpu_adapter_names() -> Vec<String> {
+    Vec::new()
+}
+
+fn cpu_brand_label(sys: &System) -> String {
+    let b = sys
+        .cpus()
+        .first()
+        .map(|c| c.brand().trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown");
+    b.to_string()
+}
+
+fn logical_core_count(sys: &System) -> usize {
+    let n = sys.cpus().len();
+    if n > 0 {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map(|x| x.get())
+        .unwrap_or(1)
+}
+
+fn build_machine_hardware_line(
+    sys: &System,
+    gpu_names: &[String],
+    train_backend: &str,
+    max_chars: usize,
+) -> String {
+    let logical = logical_core_count(sys);
+    let physical = sys.physical_core_count();
+    let cpu = cpu_brand_label(sys);
+
+    let cores = match physical {
+        Some(p) if p > 0 => format!("{logical} logical / {p} physical cores"),
+        _ => format!("{logical} logical cores"),
     };
-    truncate_label(raw, max_chars)
+
+    let gpu_part = if gpu_names.is_empty() {
+        "0 GPUs (wgpu)".to_string()
+    } else {
+        let joined = gpu_names.join("; ");
+        format!("{} GPU(s): {}", gpu_names.len(), joined)
+    };
+
+    let s = format!(
+        "{cores}  ·  CPU: {cpu}  ·  {gpu_part}  ·  train: {train_backend}"
+    );
+    truncate_label(&s, max_chars)
 }
 
 fn fmt_r2_fixed(r: f64) -> String {
     if r.is_finite() {
-        format!("{:>7.3}", r)
+        format!("{:>6.2}", r)
     } else {
-        format!("{:>7}", "—")
+        format!("{:>6}", "—")
     }
 }
 
@@ -434,7 +495,7 @@ pub fn run_dataset_paths_prompt(default_output_dir: &str) -> anyhow::Result<Opti
                             Style::default().fg(MUTED),
                         )),
                         Line::from(Span::styled(
-                            "Directory for *_betadata.csv (created if missing).",
+                            "Directory for *_betadata.feather (created if missing).",
                             Style::default().fg(VALUE),
                         )),
                         Line::from(Span::styled(
@@ -545,6 +606,13 @@ pub fn run_dataset_paths_prompt(default_output_dir: &str) -> anyhow::Result<Opti
                     }
                     adata_input = expanded;
                     err_line = None;
+                    if output_input.trim().is_empty() {
+                        if let Ok(s) = crate::config::default_output_dir_for_adata_path(
+                            Path::new(&adata_input),
+                        ) {
+                            output_input = s;
+                        }
+                    }
                     step = 1;
                     continue;
                 }
@@ -609,6 +677,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
     );
     let mut last_sys = Instant::now();
     let mut last_dir_scan = Instant::now();
+    let mut last_gpu_probe = Instant::now();
+    let mut cached_gpu_names = probe_wgpu_adapter_names();
     let t0 = Instant::now();
 
     let mut dir_bytes: u64 = 0;
@@ -635,7 +705,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
     ));
 
     loop {
-        if last_sys.elapsed() > Duration::from_millis(350) {
+        if last_sys.elapsed() > HARDWARE_POLL_INTERVAL {
             sys.refresh_cpu_all();
             sys.refresh_memory();
             last_sys = Instant::now();
@@ -643,6 +713,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         if last_dir_scan.elapsed() > Duration::from_secs(2) {
             (dir_bytes, dir_files) = scan_dir(&output_dir);
             last_dir_scan = Instant::now();
+        }
+        if last_gpu_probe.elapsed() > HARDWARE_POLL_INTERVAL {
+            cached_gpu_names = probe_wgpu_adapter_names();
+            last_gpu_probe = Instant::now();
         }
         if event::poll(Duration::from_millis(40))? {
             if let Event::Key(key) = event::read()? {
@@ -688,9 +762,9 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(1),
+                    Constraint::Length(2),
                     Constraint::Min(20),
-                    Constraint::Length(5),
+                    Constraint::Length(3),
                     Constraint::Length(1),
                 ])
                 .split(inner);
@@ -707,36 +781,46 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 "Running"
             };
             let status_c = if st.should_cancel() { C_FAIL } else { VALUE };
-            let hw = compute_hardware_summary(&st.run_config.compute_notice, 44);
+            let hw_w = vchunks[0].width.saturating_sub(2) as usize;
+            let hw_line = build_machine_hardware_line(
+                &sys,
+                &cached_gpu_names,
+                st.run_config.compute_backend.as_str(),
+                hw_w.max(12),
+            );
 
             f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        " ✿ ",
-                        Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "SpaceTravLR",
-                        Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  ·  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        format!("@{}", username),
-                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  ·  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        format_t(elapsed),
-                        Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  ·  ", Style::default().fg(MUTED)),
-                    Span::styled(mode, Style::default().fg(SKY)),
-                    Span::styled("  ·  ", Style::default().fg(MUTED)),
-                    Span::styled(status_txt, Style::default().fg(status_c)),
-                    Span::styled("  ·  ", Style::default().fg(MUTED)),
-                    Span::styled(hw, Style::default().fg(MUTED)),
-                    Span::styled(" ✿", Style::default().fg(GRAPE)),
-                ])),
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            " ✿ ",
+                            Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "SpaceTravLR",
+                            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled(
+                            format!("@{}", username),
+                            Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled(
+                            format_t(elapsed),
+                            Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled(mode, Style::default().fg(SKY)),
+                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled(status_txt, Style::default().fg(status_c)),
+                        Span::styled(" ✿", Style::default().fg(GRAPE)),
+                    ]),
+                    Line::from(Span::styled(
+                        hw_line,
+                        Style::default().fg(MUTED),
+                    )),
+                ]),
                 vchunks[0],
             );
 
@@ -757,7 +841,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             let work_row = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(10), Constraint::Min(40)])
+                .constraints([Constraint::Min(10), Constraint::Min(32), Constraint::Min(16)])
                 .split(left[1]);
 
             let sep = || Span::styled("  ·  ", Style::default().fg(MUTED));
@@ -786,7 +870,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("SPATIAL  "),
                         val(
                             format!(
-                                "r={:.4}  dim={}  contact={:.4}",
+                                "r={:.1}  dim={}  contact={:.1}",
                                 rc.spatial_radius, rc.spatial_dim, rc.contact_distance
                             ),
                             VALUE,
@@ -796,7 +880,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("LASSO  "),
                         val(
                             format!(
-                                "l1={:.4}  group={:.4}  n_iter={}  tol={:.1e}",
+                                "l1={:.3}  group={:.3}  n_iter={}  tol={:.0e}",
                                 rc.l1_reg, rc.group_reg, rc.n_iter, rc.tol
                             ),
                             GRAPE,
@@ -806,7 +890,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("TRAIN  "),
                         val(
                             format!(
-                                "lr={:.4}  score≥{:.3}  epochs={}/gene",
+                                "lr={:.3}  score≥{:.2}  epochs={}/gene",
                                 rc.learning_rate, rc.score_threshold, rc.epochs_per_gene
                             ),
                             SKY,
@@ -985,6 +1069,62 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 work_row[1],
             );
 
+            // ── Cell types ────────────────────────────────────────────────
+            let cell_panel_w = work_row[2].width.saturating_sub(2) as usize;
+            let cell_panel_h = work_row[2].height.saturating_sub(2) as usize;
+            let cell_panel_rows = cell_panel_h.max(1);
+
+            let mut cell_counts = st.cell_type_counts.clone();
+            cell_counts.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let label_w = cell_panel_w.saturating_sub(10).max(3);
+            let count_w = cell_panel_w.saturating_sub(label_w).max(1);
+
+            let mut cell_lines: Vec<Line<'static>> = Vec::new();
+            if cell_counts.is_empty() {
+                cell_lines.push(Line::from(Span::styled(
+                    "  ·  obs.cell_type not found  ·",
+                    Style::default().fg(MUTED),
+                )));
+            } else {
+                for (ct, count) in cell_counts.iter().take(cell_panel_rows) {
+                    let ct_disp = truncate_label(ct, label_w);
+                    let left = format!("{:<lw$}", ct_disp, lw = label_w);
+                    let right = format!("{:>cw$}", count, cw = count_w);
+                    cell_lines.push(Line::from(vec![
+                        Span::styled(
+                            left,
+                            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            right,
+                            Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+                if cell_counts.len() > cell_panel_rows {
+                    cell_lines.push(Line::from(Span::styled(
+                        format!("… +{} more", cell_counts.len() - cell_panel_rows),
+                        Style::default().fg(MUTED),
+                    )));
+                }
+            }
+
+            f.render_widget(
+                Paragraph::new(cell_lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(TEL_BORD))
+                            .title(Span::styled(
+                                " Cell Types ",
+                                Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                            )),
+                    )
+                    .style(bg),
+                work_row[2],
+            );
+
             // ── Rocket ────────────────────────────────────────────────────────
             f.render_widget(
                 Paragraph::new(rocket_lines(frame))
@@ -998,7 +1138,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 hchunks[1],
             );
 
-            // ── Gauge ─────────────────────────────────────────────────────────
+            // ── Gene progress ─────────────────────────────────────────────────
             let total = st.total_genes.max(1) as u64;
             let pos = st.genes_rounds.min(st.total_genes) as u64;
             let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
@@ -1019,6 +1159,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             .bg(GAUGE_EMPTY)
                             .add_modifier(Modifier::BOLD),
                     )
+                    .use_unicode(true)
                     .ratio(ratio)
                     .label(Span::styled(
                         format!(
@@ -1043,7 +1184,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 ))
             } else {
                 Line::from(Span::styled(
-                    " q: graceful stop   Shift+Q: exit immediately ",
+                    " q: graceful exit   shift+q: french leave ",
                     Style::default().fg(MUTED),
                 ))
             };

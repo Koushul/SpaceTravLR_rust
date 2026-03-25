@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use polars::prelude::*;
 use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
 
@@ -82,66 +84,50 @@ pub struct BetaFrame {
     pub modulator_gene_indices: Option<Vec<usize>>,
 }
 
+/// Write betadata as Feather-compatible Arrow IPC (LZ4). `id_col` is `Cluster` (seed-only) or `CellID` (per-cell CNN).
+pub fn write_betadata_feather(
+    path: &str,
+    id_col: &str,
+    ids: &[String],
+    data_columns: &[String],
+    data: &Array2<f64>,
+) -> Result<()> {
+    anyhow::ensure!(
+        ids.len() == data.nrows(),
+        "id count {} != data rows {}",
+        ids.len(),
+        data.nrows()
+    );
+    anyhow::ensure!(
+        data_columns.len() == data.ncols(),
+        "data_columns len {} != data ncols {}",
+        data_columns.len(),
+        data.ncols()
+    );
+
+    let mut columns: Vec<Column> = Vec::with_capacity(1 + data_columns.len());
+    columns.push(Series::new(id_col.into(), ids.to_vec()).into());
+    for (j, name) in data_columns.iter().enumerate() {
+        let col: Vec<f64> = data.column(j).iter().copied().collect();
+        columns.push(Series::new(name.as_str().into(), col).into());
+    }
+    let mut df = DataFrame::new(columns)?;
+    let f = File::create(path).with_context(|| format!("create {}", path))?;
+    let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
+    w.finish(&mut df).with_context(|| format!("write IPC {}", path))?;
+    Ok(())
+}
+
 impl BetaFrame {
     pub fn from_path(path: &str) -> Result<Self> {
-        if path.ends_with(".parquet") {
-            Self::from_parquet(path)
-        } else {
-            Self::from_csv(path)
-        }
+        Self::from_feather(path)
     }
 
-    pub fn from_csv(path: &str) -> Result<Self> {
-        let content =
-            std::fs::read_to_string(path).with_context(|| format!("Failed to read: {}", path))?;
-        let mut lines = content.lines();
-
-        let header = lines
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Empty CSV file: {}", path))?;
-        let col_names: Vec<String> = header.split(',').map(|s| s.trim().to_string()).collect();
-
-        let mut row_labels = Vec::new();
-        let mut data_rows: Vec<Vec<f64>> = Vec::new();
-
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = trimmed.split(',').collect();
-            row_labels.push(parts[0].trim().to_string());
-            let values: Vec<f64> = parts[1..]
-                .iter()
-                .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
-                .collect();
-            data_rows.push(values);
-        }
-
-        let n_rows = row_labels.len();
-        let n_data_cols = col_names.len() - 1;
-        let mut raw = Array2::zeros((n_rows, n_data_cols));
-        for (i, row) in data_rows.iter().enumerate() {
-            for (j, &val) in row.iter().enumerate() {
-                if j < n_data_cols {
-                    raw[[i, j]] = val;
-                }
-            }
-        }
-
-        let data_col_names: Vec<String> = col_names[1..].to_vec();
-        let gene_name = Self::extract_gene_name(path);
-        Self::from_raw(gene_name, row_labels, data_col_names, raw)
-    }
-
-    pub fn from_parquet(path: &str) -> Result<Self> {
-        use polars::prelude::*;
-
-        let df = LazyFrame::scan_parquet(
-            polars_utils::plpath::PlPath::from_string(path.to_string()),
-            ScanArgsParquet::default(),
-        )?
-        .collect()?;
+    pub fn from_feather(path: &str) -> Result<Self> {
+        let f = File::open(path).with_context(|| format!("open {}", path))?;
+        let df = IpcReader::new(f)
+            .finish()
+            .with_context(|| format!("read IPC {}", path))?;
 
         let all_col_names: Vec<String> = df
             .get_columns()
@@ -576,7 +562,22 @@ pub struct Betabase {
 }
 
 impl Betabase {
-    /// Load all `*_betadata.{csv,parquet}` files from `dir` in parallel,
+    pub fn apply_modulator_gene_indices(&mut self, gene2index: &HashMap<String, usize>) {
+        for frame in self.data.values_mut() {
+            frame.modulator_gene_indices = Some(
+                frame
+                    .modulator_genes
+                    .iter()
+                    .map(|g| {
+                        let plain = g.strip_prefix("beta_").unwrap_or(g);
+                        *gene2index.get(plain).unwrap_or(&0)
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    /// Load all `*_betadata.feather` files from `dir` in parallel (rayon),
     /// then expand every frame to cell level using the given obs_names + clusters.
     pub fn from_directory(
         dir: &str,
@@ -592,7 +593,7 @@ impl Betabase {
             .filter_map(|entry| {
                 let p = entry.path();
                 let name = p.file_name()?.to_str()?;
-                if name.ends_with("_betadata.csv") || name.ends_with("_betadata.parquet") {
+                if name.ends_with("_betadata.feather") {
                     Some(p.to_string_lossy().to_string())
                 } else {
                     None

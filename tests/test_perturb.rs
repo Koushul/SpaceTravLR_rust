@@ -389,12 +389,10 @@ fn build_perturb_inputs(
     let obs_names: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
 
-    // First pass: load betas to discover gene names
-    let bb_temp = Betabase::from_directory(betas_dir, &obs_names, &clusters, None).unwrap();
+    let mut bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None).unwrap();
 
-    // Collect all genes (trained + modulators)
     let mut all_genes_set: HashSet<String> = HashSet::new();
-    for (gene_name, bf) in &bb_temp.data {
+    for (gene_name, bf) in &bb.data {
         all_genes_set.insert(gene_name.clone());
         all_genes_set.extend(bf.tfs.iter().cloned());
         all_genes_set.extend(bf.ligands.iter().cloned());
@@ -411,8 +409,7 @@ fn build_perturb_inputs(
         .map(|(i, g)| (g.clone(), i))
         .collect();
 
-    // Reload with gene2index so modulator_gene_indices are set
-    let bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, Some(&gene2index)).unwrap();
+    bb.apply_modulator_gene_indices(&gene2index);
 
     let n_genes = gene_names.len();
 

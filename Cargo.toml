@@ -34,6 +34,10 @@ name = "space_trav_lr_rust"
 path = "src/main.rs"
 required-features = ["dev-main"]
 
+[[bin]]
+name = "bench_tabular_io"
+path = "src/bin/bench_tabular_io.rs"
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }
@@ -52,6 +56,9 @@ polars = { version = "0.51", default-features = false, features = [
     "lazy",
     "ndarray",
     "parquet",
+    "csv",
+    "ipc",
+    "decompress",
     "strings",
     "temporal",
     "fmt",
@@ -70,4 +77,5 @@ build_html = "2.7"
 serde_json = "1"
 chrono = "0.4"
 glob = "0.3"
+flate2 = "1"
 
