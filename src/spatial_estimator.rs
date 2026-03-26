@@ -1568,60 +1568,24 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             }
                         }
 
-                        let fit_ok = match &hud {
-                            Some(_) => {
-                                let base_phase = phase_str.clone();
-                                let mut lasso_progress_cb =
-                                    |done, total| {
-                                        if let Some(ref h) = hud {
-                                            if let Ok(mut g) = h.lock() {
-                                                g.set_gene_status(
-                                                    &gene,
-                                                    format!("{}  {}/{}", base_phase, done, total),
-                                                );
-                                            }
-                                        }
-                                    };
-                                estimator
-                                    .fit_with_cache(
-                                        &xy,
-                                        &clusters,
-                                        num_clusters,
-                                        epochs,
-                                        learning_rate,
-                                        score_threshold,
-                                        l1_reg,
-                                        group_reg,
-                                        n_iter,
-                                        tol,
-                                        "lasso",
-                                        &cnn_w,
-                                        &device,
-                                        Some(cached_spatial.as_ref()),
-                                        Some(&mut lasso_progress_cb),
-                                    )
-                                    .is_ok()
-                            }
-                            None => estimator
-                                .fit_with_cache(
-                                    &xy,
-                                    &clusters,
-                                    num_clusters,
-                                    epochs,
-                                    learning_rate,
-                                    score_threshold,
-                                    l1_reg,
-                                    group_reg,
-                                    n_iter,
-                                    tol,
-                                    "lasso",
-                                    &cnn_w,
-                                    &device,
-                                    Some(cached_spatial.as_ref()),
-                                    None,
-                                )
-                                .is_ok(),
-                        };
+                        let fit_ok = estimator
+                            .fit_with_cache(
+                                &xy,
+                                &clusters,
+                                num_clusters,
+                                epochs,
+                                learning_rate,
+                                score_threshold,
+                                l1_reg,
+                                group_reg,
+                                n_iter,
+                                tol,
+                                "lasso",
+                                &cnn_w,
+                                &device,
+                                Some(cached_spatial.as_ref()),
+                            )
+                            .is_ok();
 
                         let mut export_per_cell = matches!(cnn_mode_w, CnnTrainingMode::Full)
                             || hybrid_pass2;
@@ -2188,7 +2152,6 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         cnn: &CnnConfig,
         device: &AB::Device,
         cached_spatial: Option<&CachedSpatialData>,
-        lasso_progress: Option<&mut dyn FnMut(usize, usize)>,
     ) -> anyhow::Result<()> {
         let (x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
 
@@ -2232,7 +2195,6 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 self.seed_only,
                 cnn,
                 cached_spatial,
-                lasso_progress,
             );
         }
         Ok(())
@@ -2285,7 +2247,6 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             estimator_type,
             &cnn,
             device,
-            None,
             None,
         )
     }
