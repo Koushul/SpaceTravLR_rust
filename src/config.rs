@@ -284,9 +284,9 @@ impl Default for CnnConfig {
 impl Default for LassoConfig {
     fn default() -> Self {
         Self {
-            l1_reg: 1e-4,
-            group_reg: 1e-4,
-            n_iter: 100,
+            l1_reg: 1e-5,
+            group_reg: 1e-5,
+            n_iter: 500,
             tol: 1e-4,
         }
     }
