@@ -91,6 +91,8 @@ hybrid_cnn_permissiveness = 1
 n_parallel  = 9
 # Directory for *_betadata.feather. Leave empty to use cwd/{adata_stem}_YYYY-MM-DD (local date).
 # output_dir = "/path/to/custom_run"
+# Write spacetravlr_minimal_repro.h5ad (slow / large I/O on big datasets). Default false; or pass --write-minimal-repro-h5ad.
+# write_minimal_repro_h5ad = true
 
 [perturbation]
 # Multiplier applied to all betas in splash()

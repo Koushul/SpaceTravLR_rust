@@ -71,36 +71,27 @@ pub fn predict_lasso_y(
     yhat
 }
 
-/// All-pairs distances per cell — roughly **O(n² log n)**. Only used for hybrid Moran gating.
+/// kNN via KD-tree then symmetrized. O(n log n) build + O(n k log n) query.
 fn symmetrized_knn_indices(xy: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
     let n = xy.nrows();
     if n == 0 {
         return Vec::new();
     }
     let k_eff = k.min(n.saturating_sub(1).max(1));
-    let mut directed: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let x0 = xy.column(0);
-    let x1 = xy.column(1);
-    for i in 0..n {
-        let mut dists: Vec<(f64, usize)> = Vec::with_capacity(n);
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let dx = x0[i] - x0[j];
-            let dy = x1[i] - x1[j];
-            dists.push((dx * dx + dy * dy, j));
-        }
-        dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        for &( _, j) in dists.iter().take(k_eff) {
-            directed[i].push(j);
-        }
-    }
+
+    let points: Vec<[f64; 2]> = (0..n).map(|i| [xy[[i, 0]], xy[[i, 1]]]).collect();
+    let tree = kiddo::ImmutableKdTree::<f64, 2>::new_from_slice(&points);
+
+    let k_query = std::num::NonZero::new(k_eff + 1).unwrap();
     let mut adj: Vec<HashSet<usize>> = (0..n).map(|_| HashSet::new()).collect();
     for i in 0..n {
-        for &j in &directed[i] {
-            adj[i].insert(j);
-            adj[j].insert(i);
+        let neighbors = tree.nearest_n::<kiddo::SquaredEuclidean>(&points[i], k_query);
+        for nb in &neighbors {
+            let j = nb.item as usize;
+            if j != i {
+                adj[i].insert(j);
+                adj[j].insert(i);
+            }
         }
     }
     adj.into_iter().map(|s| s.into_iter().collect()).collect()

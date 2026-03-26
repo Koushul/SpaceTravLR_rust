@@ -732,6 +732,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         st.cancel_requested.store(true, Ordering::Relaxed);
                     }
                 }
+                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('v') {
+                    if let Ok(mut st) = hud.lock() {
+                        st.show_pipeline_timing = !st.show_pipeline_timing;
+                    }
+                }
             }
         }
 
@@ -830,19 +835,81 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .constraints([Constraint::Min(1), Constraint::Length(ROCKET_PANEL_W)])
                 .split(vchunks[1]);
 
-            let left = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(10), Constraint::Min(4)])
-                .split(hchunks[0]);
+            let left = if st.show_pipeline_timing {
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(10),
+                        Constraint::Length(8),
+                        Constraint::Min(4),
+                    ])
+                    .split(hchunks[0])
+            } else {
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(10), Constraint::Min(4)])
+                    .split(hchunks[0])
+            };
             let top_panels = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(left[0]);
 
+            if st.show_pipeline_timing {
+                let act_w = left[1].width.saturating_sub(2) as usize;
+                let mut act_lines: Vec<Line> = Vec::new();
+
+                let eta = st
+                    .eta_secs()
+                    .map(|s| format!("{:.0}s", s))
+                    .unwrap_or_else(|| "—".into());
+                let gpm = if elapsed > 1.0 {
+                    format!("{:.2}/min", (st.genes_rounds as f64) * 60.0 / elapsed)
+                } else {
+                    "—".into()
+                };
+                act_lines.push(Line::from(vec![
+                    Span::styled("ETA ", Style::default().fg(LABEL)),
+                    Span::styled(eta, Style::default().fg(VALUE)),
+                    Span::styled("  ·  ", Style::default().fg(MUTED)),
+                    Span::styled("RATE ", Style::default().fg(LABEL)),
+                    Span::styled(gpm, Style::default().fg(SKY)),
+                ]));
+
+                for entry in st.activity_log.iter() {
+                    let truncated = truncate_label(entry, act_w.max(12));
+                    act_lines.push(Line::from(Span::styled(
+                        truncated,
+                        Style::default().fg(LILAC),
+                    )));
+                }
+                if act_lines.len() <= 1 {
+                    act_lines.push(Line::from(Span::styled(
+                        "  ·  waiting for pipeline…",
+                        Style::default().fg(MUTED),
+                    )));
+                }
+                f.render_widget(
+                    Paragraph::new(act_lines)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(TEL_BORD))
+                                .title(Span::styled(
+                                    " Pipeline & timing (v) ",
+                                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                                )),
+                        )
+                        .style(bg),
+                    left[1],
+                );
+            }
+
+            let work_area = if st.show_pipeline_timing { left[2] } else { left[1] };
             let work_row = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(10), Constraint::Min(32), Constraint::Min(16)])
-                .split(left[1]);
+                .split(work_area);
 
             let sep = || Span::styled("  ·  ", Style::default().fg(MUTED));
             let lbl = |s: &'static str| Span::styled(s, Style::default().fg(LABEL));
@@ -935,16 +1002,6 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             } else {
                 st.output_dir.clone()
             };
-            let eta = st
-                .eta_secs()
-                .map(|s| format!("{:.0}s", s))
-                .unwrap_or_else(|| "—".into());
-            let gpm = if elapsed > 1.0 {
-                format!("{:.2}/min", (st.genes_rounds as f64) * 60.0 / elapsed)
-            } else {
-                "—".into()
-            };
-
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from(vec![lbl("SRC  "), val(path_s, MUTED)]),
@@ -971,12 +1028,6 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Line::from(vec![
                         lbl("EPOCH  "),
                         val(format!("{}/gene", st.epochs_per_gene), LILAC),
-                        sep(),
-                        lbl("ETA  "),
-                        val(eta, VALUE),
-                        sep(),
-                        lbl("RATE  "),
-                        val(gpm, SKY),
                     ]),
                     Line::from(vec![
                         lbl("CPU  "),

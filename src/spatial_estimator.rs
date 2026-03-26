@@ -3,9 +3,12 @@ use crate::cnn_gating::{
     build_neighbors, decide_cnn_for_gene, load_gene_set_file, predict_lasso_y, CnnGateDecision,
 };
 use crate::config::{CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig};
-use crate::estimator::{ClusteredGCNNWR, finite_or_zero_f64};
+use crate::estimator::{CachedSpatialData, ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
-use crate::training_hud::{TrainingHud, log_line, print_training_outcome_banner};
+use crate::ligand::calculate_weighted_ligands;
+use crate::training_hud::{
+    TrainingHud, log_line, pipeline_step_begin, pipeline_step_end, print_training_outcome_banner,
+};
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
@@ -1034,6 +1037,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         hud: Option<TrainingHud>,
         network_data_dir: Option<&str>,
         tf_priors_feather: Option<&str>,
+        write_minimal_repro_h5ad: bool,
         device: &AB::Device,
     ) -> anyhow::Result<()>
     where
@@ -1051,7 +1055,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         fs::create_dir_all(format!("{training_dir}/log"))?;
 
         // ── Setup: build gene list and pre-cache shared metadata ──────────────
+        let t_open = pipeline_step_begin(&hud, "open AnnData (HDF5)");
         let setup_adata = Arc::new(AnnData::<H5>::open(H5::open(adata_path)?)?);
+        pipeline_step_end(&hud, "open AnnData (HDF5)", t_open);
         let all_var_names = setup_adata.var_names().into_vec();
 
         let mut target_genes = all_var_names.clone();
@@ -1074,8 +1080,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let obs_names = Arc::new(setup_adata.obs_names().into_vec());
         let total_genes = target_genes.len();
 
+        let t_val = pipeline_step_begin(
+            &hud,
+            "validate expression layer & read obs (full matrix check)",
+        );
         let obs_df = validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
+        pipeline_step_end(
+            &hud,
+            "validate expression layer & read obs (full matrix check)",
+            t_val,
+        );
 
+        let t_cl = pipeline_step_begin(&hud, "build cluster labels & cell-type map");
         let mut cell_type_counts: Vec<(String, usize)> = Vec::new();
         if let Ok(cell_col) = obs_df.column("cell_type") {
             // If `obs.cell_type` exists, summarize counts for the TUI.
@@ -1113,6 +1129,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             .unwrap_or(1);
         let cluster_to_cell_type =
             Arc::new(build_cluster_to_cell_type_map(&obs_df, cluster_annot)?);
+        pipeline_step_end(&hud, "build cluster labels & cell-type map", t_cl);
         if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
             log_line(
                 &hud,
@@ -1129,49 +1146,87 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
         }
 
+        let t_grn = pipeline_step_begin(&hud, "load GRN (network parquet / priors)");
         let species = crate::network::infer_species(&all_var_names);
         let global_grn = Arc::new(crate::network::GeneNetwork::new(
             species,
             &all_var_names,
             network_data_dir,
         )?);
+        pipeline_step_end(&hud, "load GRN (network parquet / priors)", t_grn);
+
         let tf_priors = if let Some(path) = tf_priors_feather {
+            let t_tf = pipeline_step_begin(&hud, "load TF priors (feather)");
             let loaded = crate::network::TfPriors::from_feather(path, &all_var_names)?;
-            let msg = format!("Loaded TF priors from {}", path);
-            log_line(&hud, msg);
+            pipeline_step_end(&hud, "load TF priors (feather)", t_tf);
+            log_line(&hud, format!("Loaded TF priors from {}", path));
             Some(Arc::new(loaded))
         } else {
             None
         };
 
-        let msg = "Pre-caching metadata and coordinates...";
-        log_line(&hud, msg.to_string());
-
+        let t_xy = pipeline_step_begin(&hud, "load spatial coordinates (obsm)");
         let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
-        if cluster_annot != "cell_type_int" {
-            anyhow::bail!(
-                "Minimal reproducibility export keeps only obs.cell_type and obs.cell_type_int; set [data].cluster_annot = \"cell_type_int\"."
+        pipeline_step_end(&hud, "load spatial coordinates (obsm)", t_xy);
+
+        let repro_label = if write_minimal_repro_h5ad {
+            "write spacetravlr_minimal_repro.h5ad"
+        } else {
+            "skip repro .h5ad (workers use input file)"
+        };
+        let t_repro = pipeline_step_begin(&hud, repro_label);
+        let worker_adata_path: String = if write_minimal_repro_h5ad {
+            if cluster_annot != "cell_type_int" {
+                anyhow::bail!(
+                    "Minimal reproducibility export keeps only obs.cell_type and obs.cell_type_int; set [data].cluster_annot = \"cell_type_int\"."
+                );
+            }
+            let out = export_minimal_repro_adata_with_cache(
+                setup_adata.as_ref(),
+                training_dir,
+                layer,
+                cluster_annot,
+                xy.as_ref(),
+                clusters.as_ref(),
+                num_clusters,
+                spatial_dim,
+                cnn.spatial_feature_radius,
+            )?;
+            verify_minimal_repro_adata_loadable(&out, layer, cluster_annot)?;
+            log_line(
+                &hud,
+                format!(
+                    "Wrote minimal reproducibility AnnData with sparse X/layers and cached spatial tensors: {}",
+                    out
+                ),
             );
-        }
-        let reproducible_adata_path = export_minimal_repro_adata_with_cache(
-            setup_adata.as_ref(),
-            training_dir,
-            layer,
-            cluster_annot,
-            xy.as_ref(),
-            clusters.as_ref(),
-            num_clusters,
-            spatial_dim,
-            cnn.spatial_feature_radius,
-        )?;
-        verify_minimal_repro_adata_loadable(&reproducible_adata_path, layer, cluster_annot)?;
-        log_line(
-            &hud,
-            format!(
-                "Wrote minimal reproducibility AnnData with sparse X/layers and cached spatial tensors: {}",
-                reproducible_adata_path
+            out
+        } else {
+            log_line(
+                &hud,
+                "Skipping spacetravlr_minimal_repro.h5ad (execution.write_minimal_repro_h5ad = false); using input AnnData for training.".to_string(),
+            );
+            adata_path.to_string()
+        };
+        pipeline_step_end(&hud, repro_label, t_repro);
+
+        let t_sp = pipeline_step_begin(&hud, "precompute shared spatial feature tensors");
+        let cached_spatial = Arc::new(CachedSpatialData {
+            spatial_features: crate::estimator::create_spatial_features(
+                xy.as_ref(),
+                clusters.as_ref(),
+                num_clusters,
+                cnn.spatial_feature_radius,
             ),
-        );
+            spatial_maps: crate::estimator::xyc2spatial_fast(
+                xy.as_ref(),
+                clusters.as_ref(),
+                num_clusters,
+                spatial_dim,
+                spatial_dim,
+            ),
+        });
+        pipeline_step_end(&hud, "precompute shared spatial feature tensors", t_sp);
 
         let compute_mean_for_hybrid = matches!(cnn_training_mode, CnnTrainingMode::Hybrid)
             && !hybrid_pass2_full_cnn
@@ -1179,15 +1234,17 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         let gene_mean_arc: Option<Arc<HashMap<String, f64>>> =
             if top_lr_pairs_by_mean_expression.is_some() || compute_mean_for_hybrid {
-                let msg = format!(
-                    "Computing per-gene mean expression (layer: {})...",
-                    layer
+                let t_m = pipeline_step_begin(
+                    &hud,
+                    "per-gene mean expression (full matrix pass)",
                 );
-                log_line(&hud, msg.clone());
-                Some(Arc::new(compute_gene_mean_expression(
-                    setup_adata.as_ref(),
-                    layer,
-                )?))
+                let gm = compute_gene_mean_expression(setup_adata.as_ref(), layer)?;
+                pipeline_step_end(
+                    &hud,
+                    "per-gene mean expression (full matrix pass)",
+                    t_m,
+                );
+                Some(Arc::new(gm))
             } else {
                 None
             };
@@ -1197,14 +1254,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let n_cells = xy.nrows();
                 let k = hybrid_gating.moran_k_neighbors.max(1);
                 let mut msg = format!(
-                    "Building kNN graph for Moran's I ({} cells, k={})…",
+                    "Moran kNN graph ({} cells, k={}; KD-tree build + queries)",
                     n_cells, k
                 );
                 if n_cells > 8_000 {
-                    msg.push_str(" (this step is O(n²) per cell; very large n can take a long time)");
+                    msg.push_str(" — can take a while at very large n");
                 }
-                log_line(&hud, msg.clone());
-                Arc::new(build_neighbors(xy.as_ref(), k))
+                let t_nb = pipeline_step_begin(&hud, &msg);
+                let nb = build_neighbors(xy.as_ref(), k);
+                pipeline_step_end(&hud, &msg, t_nb);
+                Arc::new(nb)
             } else {
                 Arc::new(Vec::new())
             };
@@ -1256,6 +1315,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let n_workers = n_parallel.max(1);
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
 
+        log_line(
+            &hud,
+            format!(
+                "Spawning {} worker threads for {} genes (each opens HDF5 once)…",
+                n_workers, total_genes
+            ),
+        );
+        let t_workers = pipeline_step_begin(&hud, "per-gene training (workers running)");
         for _worker in 0..n_workers {
             let work = work.clone();
             let xy = xy.clone();
@@ -1267,8 +1334,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let hud = hud.clone();
             let pb = pb_opt.clone();
             let device = device.clone();
-            let adata_path = reproducible_adata_path.clone();
+            let adata_path = worker_adata_path.clone();
             let training_dir = training_dir.to_string();
+            let cached_spatial = cached_spatial.clone();
 
             // scalar params
             let (radius, spatial_dim, contact_distance, tf_ligand_cutoff) =
@@ -1388,6 +1456,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             }
                         }
                         let _guard = LockGuard(lock_path);
+                        let gene_start = std::time::Instant::now();
 
                         // Register as active
                         if let Some(ref h) = hud {
@@ -1495,6 +1564,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 "lasso",
                                 &cnn_w,
                                 &device,
+                                Some(cached_spatial.as_ref()),
                             )
                             .is_ok();
 
@@ -1507,7 +1577,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 && !hybrid_pass2
                                 && n_mods > 0;
                             if hybrid_gate {
-                                match estimator.build_x_modulators_and_target_y() {
+                                match estimator.build_x_modulators_and_target_y(&xy) {
                                     Ok((x_mat, y_vec)) => {
                                         let decision_opt = estimator.estimator.as_ref().map(|inn| {
                                             let summaries_snapshot =
@@ -1566,6 +1636,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                         epochs,
                                                         learning_rate,
                                                         &cnn_w,
+                                                        Some(cached_spatial.as_ref()),
                                                     );
                                                 }
                                                 export_per_cell = true;
@@ -1618,6 +1689,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         &clusters,
                                         num_clusters,
                                         &device,
+                                        Some(cached_spatial.as_ref()),
                                     );
 
                                     let keep: Vec<usize> = (0..all_betas.ncols())
@@ -1828,6 +1900,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         // Deregister from active, bump counter
                         if let Some(ref h) = hud {
                             if let Ok(mut g) = h.lock() {
+                                if g.show_pipeline_timing {
+                                    g.record_gene_time(&gene, gene_start.elapsed().as_secs_f64());
+                                }
                                 g.remove_gene(&gene);
                                 g.genes_rounds += 1;
                             }
@@ -1845,6 +1920,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         for h in handles {
             let _ = h.join();
         }
+        pipeline_step_end(&hud, "per-gene training (workers running)", t_workers);
 
         if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
             if let Some(k) = hybrid_gating.hybrid_cnn_top_k {
@@ -1882,7 +1958,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         let _ = fs::remove_file(&pth);
                     }
                     return Self::fit_all_genes(
-                        &reproducible_adata_path,
+                        &worker_adata_path,
                         radius,
                         spatial_dim,
                         contact_distance,
@@ -1914,6 +1990,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         hud,
                         network_data_dir,
                         tf_priors_feather,
+                        false,
                         device,
                     );
                 }
@@ -1939,7 +2016,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
-    pub fn build_x_modulators_and_target_y(&self) -> anyhow::Result<(Array2<f64>, Array1<f64>)> {
+    pub fn build_x_modulators_and_target_y(&self, xy: &Array2<f64>) -> anyhow::Result<(Array2<f64>, Array1<f64>)> {
         let target_expr = self.get_gene_expression(&self.target_gene)?;
 
         let mut all_unique_genes: HashSet<String> = HashSet::new();
@@ -1967,6 +2044,43 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             gene_to_idx.insert(g.clone(), i);
         }
 
+        // Collect unique ligand genes from LR and TFL pairs for received-ligand computation
+        let mut unique_lig_genes: Vec<String> = Vec::new();
+        let mut lig_seen: HashSet<String> = HashSet::new();
+        for pair in &self.lr_pairs {
+            let parts: Vec<&str> = pair.split('$').collect();
+            if parts.len() == 2 {
+                let lig = parts[0].to_string();
+                if lig_seen.insert(lig.clone()) {
+                    unique_lig_genes.push(lig);
+                }
+            }
+        }
+        for pair in &self.tfl_pairs {
+            let parts: Vec<&str> = pair.split('#').collect();
+            if parts.len() == 2 {
+                let lig = parts[0].to_string();
+                if lig_seen.insert(lig.clone()) {
+                    unique_lig_genes.push(lig);
+                }
+            }
+        }
+
+        // Compute spatially-weighted received ligands via Gaussian kernel
+        let mut received_map: HashMap<String, Array1<f64>> = HashMap::new();
+        if !unique_lig_genes.is_empty() {
+            let n = xy.nrows();
+            let mut lig_expr = Array2::<f64>::zeros((n, unique_lig_genes.len()));
+            for (k, lig) in unique_lig_genes.iter().enumerate() {
+                let idx = gene_to_idx[lig];
+                lig_expr.column_mut(k).assign(&expr_matrix.column(idx));
+            }
+            let received = calculate_weighted_ligands(xy, &lig_expr, self.radius, 1.0);
+            for (k, lig) in unique_lig_genes.iter().enumerate() {
+                received_map.insert(lig.clone(), received.column(k).to_owned());
+            }
+        }
+
         let n_obs = self.adata.n_obs();
         let total_modulators = self.regulators.len() + self.lr_pairs.len() + self.tfl_pairs.len();
         let mut x_modulators = Array2::<f64>::zeros((n_obs, total_modulators));
@@ -1980,9 +2094,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         for (i, pair) in self.lr_pairs.iter().enumerate() {
             let parts: Vec<&str> = pair.split('$').collect::<Vec<_>>();
             if parts.len() == 2 {
-                let l_idx = gene_to_idx[&parts[0].to_string()];
+                let lig_name = parts[0].to_string();
                 let r_idx = gene_to_idx[&parts[1].to_string()];
-                let mut interaction = expr_matrix.column(l_idx).to_owned();
+                let mut interaction = received_map[&lig_name].clone();
                 interaction *= &expr_matrix.column(r_idx);
                 x_modulators.column_mut(offset_lr + i).assign(&interaction);
             }
@@ -1992,9 +2106,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         for (i, pair) in self.tfl_pairs.iter().enumerate() {
             let parts: Vec<&str> = pair.split('#').collect::<Vec<_>>();
             if parts.len() == 2 {
-                let l_idx = gene_to_idx[&parts[0].to_string()];
+                let lig_name = parts[0].to_string();
                 let tf_idx = gene_to_idx[&parts[1].to_string()];
-                let mut interaction = expr_matrix.column(l_idx).to_owned();
+                let mut interaction = received_map[&lig_name].clone();
                 interaction *= &expr_matrix.column(tf_idx);
                 x_modulators.column_mut(offset_tfl + i).assign(&interaction);
             }
@@ -2018,8 +2132,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         _estimator_type: &str,
         cnn: &CnnConfig,
         device: &AB::Device,
+        cached_spatial: Option<&CachedSpatialData>,
     ) -> anyhow::Result<()> {
-        let (x_modulators, target_expr) = self.build_x_modulators_and_target_y()?;
+        let (x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
 
         if self.estimator.is_none() {
             let mut groups = Vec::new();
@@ -2060,6 +2175,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 learning_rate,
                 self.seed_only,
                 cnn,
+                cached_spatial,
             );
         }
         Ok(())
@@ -2112,6 +2228,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             estimator_type,
             &cnn,
             device,
+            None,
         )
     }
 

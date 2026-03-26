@@ -107,6 +107,7 @@ pub(crate) struct FitAllGenesParams<'a> {
     pub hud: Option<TrainingHud>,
     pub network_data_dir: Option<String>,
     pub tf_priors_feather: Option<String>,
+    pub write_minimal_repro_h5ad: bool,
 }
 
 pub(crate) fn fit_all_genes_dispatch(
@@ -148,6 +149,7 @@ pub(crate) fn fit_all_genes_dispatch(
                 p.hud.clone(),
                 p.network_data_dir.as_deref(),
                 p.tf_priors_feather.as_deref(),
+                p.write_minimal_repro_h5ad,
                 device,
             )
         }
@@ -187,6 +189,7 @@ pub(crate) fn fit_all_genes_dispatch(
             p.hud.clone(),
             p.network_data_dir.as_deref(),
             p.tf_priors_feather.as_deref(),
+            p.write_minimal_repro_h5ad,
             device,
         ),
     }

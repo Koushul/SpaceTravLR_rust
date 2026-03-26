@@ -11,6 +11,12 @@ use ndarray::{Array1, Array2, Array4, Axis};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+/// Precomputed spatial data shared across all per-gene training runs.
+pub struct CachedSpatialData {
+    pub spatial_features: Array2<f64>,
+    pub spatial_maps: Array4<f32>,
+}
+
 #[inline]
 pub(crate) fn finite_or_zero_f64(x: f64) -> f64 {
     if x.is_finite() { x } else { 0.0 }
@@ -90,20 +96,23 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         learning_rate: f64,
         seed_only: bool,
         cnn: &CnnConfig,
+        cached_spatial: Option<&CachedSpatialData>,
     ) {
         let n_samples = x.nrows();
         let unique_clusters: Vec<usize> = (0..num_clusters).collect();
-        let r_sf = self.spatial_feature_radius;
 
-        let spatial_features =
-            crate::estimator::create_spatial_features(xy, clusters, num_clusters, r_sf);
-        let spatial_maps = crate::estimator::xyc2spatial_fast(
-            xy,
-            clusters,
-            num_clusters,
-            self.spatial_dim,
-            self.spatial_dim,
-        );
+        let owned_sf;
+        let owned_sm;
+        let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
+            (&c.spatial_features, &c.spatial_maps)
+        } else {
+            let r_sf = self.spatial_feature_radius;
+            owned_sf = create_spatial_features(xy, clusters, num_clusters, r_sf);
+            owned_sm = xyc2spatial_fast(
+                xy, clusters, num_clusters, self.spatial_dim, self.spatial_dim,
+            );
+            (&owned_sf, &owned_sm)
+        };
 
         self.cluster_training_summaries.clear();
         let mut training_summaries: Vec<ClusterTrainingSummary> = Vec::new();
@@ -302,17 +311,21 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         epochs: usize,
         learning_rate: f64,
         cnn: &CnnConfig,
+        cached_spatial: Option<&CachedSpatialData>,
     ) {
         let n_samples = x.nrows();
-        let spatial_features =
-            crate::estimator::create_spatial_features(xy, clusters, num_clusters, self.spatial_feature_radius);
-        let spatial_maps = crate::estimator::xyc2spatial_fast(
-            xy,
-            clusters,
-            num_clusters,
-            self.spatial_dim,
-            self.spatial_dim,
-        );
+
+        let owned_sf;
+        let owned_sm;
+        let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
+            (&c.spatial_features, &c.spatial_maps)
+        } else {
+            owned_sf = create_spatial_features(xy, clusters, num_clusters, self.spatial_feature_radius);
+            owned_sm = xyc2spatial_fast(
+                xy, clusters, num_clusters, self.spatial_dim, self.spatial_dim,
+            );
+            (&owned_sf, &owned_sm)
+        };
 
         let mut summaries_by_cluster: HashMap<usize, ClusterTrainingSummary> = self
             .cluster_training_summaries
@@ -430,22 +443,24 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         clusters: &Array1<usize>,
         num_clusters: usize,
         device: &B::Device,
+        cached_spatial: Option<&CachedSpatialData>,
     ) -> Array2<f64> {
         let n_samples = xy.nrows();
         let n_modulators = x.ncols();
-        let spatial_features = crate::estimator::create_spatial_features(
-            xy,
-            clusters,
-            num_clusters,
-            self.spatial_feature_radius,
-        );
-        let spatial_maps = crate::estimator::xyc2spatial_fast(
-            xy,
-            clusters,
-            num_clusters,
-            self.spatial_dim,
-            self.spatial_dim,
-        );
+
+        let owned_sf;
+        let owned_sm;
+        let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
+            (&c.spatial_features, &c.spatial_maps)
+        } else {
+            owned_sf = create_spatial_features(
+                xy, clusters, num_clusters, self.spatial_feature_radius,
+            );
+            owned_sm = xyc2spatial_fast(
+                xy, clusters, num_clusters, self.spatial_dim, self.spatial_dim,
+            );
+            (&owned_sf, &owned_sm)
+        };
 
         let mut all_betas = Array2::<f64>::zeros((n_samples, n_modulators + 1));
 
@@ -576,6 +591,23 @@ pub fn create_spatial_features(
     let mut result = Array2::zeros((n, num_clusters));
     let r2 = radius * radius;
 
+    let mut points = Vec::with_capacity(n);
+    let mut valid_indices = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = xy[[i, 0]];
+        let y = xy[[i, 1]];
+        if x.is_finite() && y.is_finite() {
+            valid_indices.push(i);
+            points.push([x, y]);
+        }
+    }
+
+    if points.is_empty() {
+        return result;
+    }
+
+    let tree = kiddo::ImmutableKdTree::<f64, 2>::new_from_slice(&points);
+
     result
         .axis_iter_mut(Axis(0))
         .into_par_iter()
@@ -586,19 +618,12 @@ pub fn create_spatial_features(
             if !xi.is_finite() || !yi.is_finite() {
                 return;
             }
-            for j in 0..n {
-                let xj = xy[[j, 0]];
-                let yj = xy[[j, 1]];
-                if !xj.is_finite() || !yj.is_finite() {
-                    continue;
-                }
-                let dx = xi - xj;
-                let dy = yi - yj;
-                if dx * dx + dy * dy <= r2 {
-                    let c = clusters[j];
-                    if c < num_clusters {
-                        row[c] += 1.0;
-                    }
+            let neighbors = tree.within::<kiddo::SquaredEuclidean>(&[xi, yi], r2);
+            for nb in &neighbors {
+                let j = valid_indices[nb.item as usize];
+                let c = clusters[j];
+                if c < num_clusters {
+                    row[c] += 1.0;
                 }
             }
         });

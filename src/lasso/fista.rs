@@ -1,8 +1,8 @@
 //! FISTA optimiser with backtracking line-search and adaptive restart.
 //!
-//! This is a faithful port of `_fista.py` (Beck & Teboulle 2009) augmented
-//! with the gradient-based adaptive restart scheme from O'Donoghue & Candès
-//! (2012).
+//! Standard FISTA (Beck & Teboulle 2009) with step size 1/L and L/2
+//! backtracking, augmented with the gradient-based adaptive restart scheme
+//! from O'Donoghue & Candès (2012).
 //!
 //! # Algorithm
 //! 1. Gradient step on the smooth part.
@@ -67,7 +67,8 @@ fn flat_dot(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
 
 /// Returns `true` if the Lipschitz constant should be doubled.
 ///
-/// Condition: f(new_x) > f(y) + ⟨∇f(y), new_x − y⟩ + L/2.5 · ‖new_x − y‖²
+/// Condition (Beck & Teboulle 2009, eq. 2.5):
+///   f(new_x) > f(y) + ⟨∇f(y), new_x − y⟩ + L/2 · ‖new_x − y‖²
 fn continue_backtracking(
     problem: &impl FistaProblem,
     new_x: &Array2<f64>,
@@ -79,7 +80,7 @@ fn continue_backtracking(
     let grad_y = problem.smooth_grad(y);
 
     let update = Array2::from_shape_fn(new_x.raw_dim(), |(r, c)| new_x[[r, c]] - y[[r, c]]);
-    let update_dist = sq_frob_diff(new_x, y) * lipschitz / 2.5;
+    let update_dist = sq_frob_diff(new_x, y) * lipschitz / 2.0;
     let lin_imp = flat_dot(&grad_y, &update);
 
     f_new > (f_y + update_dist + lin_imp)
@@ -98,9 +99,9 @@ fn update_step(
     lipschitz: f64,
 ) -> (Array2<f64>, Array2<f64>, f64) {
     let grad = problem.smooth_grad(y);
-    // Gradient step: y − (1/(2L)) · ∇f(y)
+    // Standard gradient step (Beck & Teboulle 2009): y − (1/L) · ∇f(y)
     let step = Array2::from_shape_fn(y.raw_dim(), |(r, c)| {
-        y[[r, c]] - 0.5 * grad[[r, c]] / lipschitz
+        y[[r, c]] - grad[[r, c]] / lipschitz
     });
     let new_x = problem.prox(&step, lipschitz);
     let new_t = next_momentum(t);
@@ -348,8 +349,9 @@ mod tests {
 
     #[test]
     fn fista_shifted_l1_known_solution() {
-        // Fixed point with this FISTA's 0.5/L gradient step:
-        // w = prox(w - 0.5*(w-3)/L, L) = max(0.5w + 1.5 - 0.1/L, 0) → w = 2.8 at L=1
+        // Standard FISTA with 1/L gradient step:
+        // w* = prox_{λ/L}(w - (w-3)/L) at fixed point = sign(w*)(|w*| - λ/L)
+        // For target=3, λ=0.1, L=1: w* = 3 - 0.1 = 2.9
         let problem = ShiftedL1 {
             target: 3.0,
             lambda: 0.1,
@@ -357,19 +359,23 @@ mod tests {
         let w0 = array![[0.0]];
         let result = minimise(&problem, w0, 1.0, 1000, 1e-12, None::<fn(&IterInfo)>);
         assert!(result.converged);
-        assert_abs_diff_eq!(result.coef[[0, 0]], 2.8, epsilon = 1e-3);
+        assert_abs_diff_eq!(result.coef[[0, 0]], 2.9, epsilon = 1e-3);
     }
 
     #[test]
     fn fista_callback_receives_decreasing_norm_change() {
         let mut norms = Vec::new();
-        let w0 = array![[10.0], [-8.0]];
+        let problem = LinearSystemProblem {
+            a: array![[2.0, 1.0], [1.0, 3.0]],
+            b: array![[5.0], [7.0]],
+        };
+        let w0 = Array2::zeros((2, 1));
         let _ = minimise(
-            &QuadraticProblem,
+            &problem,
             w0,
-            1.0,
+            10.0,
             100,
-            1e-12,
+            1e-15,
             Some(|info: &IterInfo| {
                 norms.push(info.norm_change);
             }),
@@ -381,8 +387,12 @@ mod tests {
 
     #[test]
     fn fista_does_not_converge_with_few_iterations() {
-        let w0 = array![[100.0], [-100.0]];
-        let result = minimise(&QuadraticProblem, w0, 1.0, 2, 1e-15, None::<fn(&IterInfo)>);
+        let problem = LinearSystemProblem {
+            a: array![[10.0, 0.0], [0.0, 0.1]],
+            b: array![[50.0], [0.5]],
+        };
+        let w0 = Array2::zeros((2, 1));
+        let result = minimise(&problem, w0, 0.001, 2, 1e-15, None::<fn(&IterInfo)>);
         assert!(!result.converged);
     }
 

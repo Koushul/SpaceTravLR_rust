@@ -269,10 +269,27 @@ impl BetaFrame {
         }
 
         // Fall back to obs_name matching (CNN: row_labels are cell IDs)
-        obs_names
+        let mut n_missing = 0usize;
+        let mapping: Vec<usize> = obs_names
             .iter()
-            .map(|name| row_map.get(name.as_str()).copied().unwrap_or(0))
-            .collect()
+            .map(|name| match row_map.get(name.as_str()).copied() {
+                Some(idx) => idx,
+                None => {
+                    n_missing += 1;
+                    0
+                }
+            })
+            .collect();
+        if n_missing > 0 {
+            eprintln!(
+                "Warning: {}/{} cell IDs not found in beta row_labels; \
+                 defaulting to row 0. Check that obs_names match between \
+                 betadata and the input AnnData.",
+                n_missing,
+                obs_names.len()
+            );
+        }
+        mapping
     }
 
     fn extract_gene_name(path: &str) -> String {

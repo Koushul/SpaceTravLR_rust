@@ -1,6 +1,6 @@
 mod compute_backend;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use serde_json::Value;
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
@@ -114,6 +114,13 @@ struct Cli {
     h5ad: Option<PathBuf>,
 
     #[arg(
+        long = "tf-prior",
+        value_name = "PATH",
+        help = "Optional TF priors Feather (source,target,cell_type); overrides grn.tf_priors_feather"
+    )]
+    tf_priors_feather: Option<PathBuf>,
+
+    #[arg(
         long,
         value_name = "MODE",
         value_enum,
@@ -126,6 +133,13 @@ struct Cli {
 
     #[arg(long, value_name = "N", help = "Parallel gene workers")]
     parallel: Option<usize>,
+
+    #[arg(
+        long = "max-lr-pairs",
+        value_name = "N",
+        help = "Cap LR pairs from the database (database order); overrides grn.max_lr_pairs"
+    )]
+    max_lr_pairs: Option<usize>,
 
     #[arg(long, value_name = "N", help = "Train at most N genes (var order)")]
     max_genes: Option<usize>,
@@ -170,6 +184,13 @@ struct Cli {
         help = "Simulated training dashboard only: fake workers, gene progress, and R² stats — no AnnData I/O, no exports, no GPU (omit --plain)"
     )]
     demo: bool,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Write spacetravlr_minimal_repro.h5ad under output_dir (slow for large AnnData); overrides [execution].write_minimal_repro_h5ad"
+    )]
+    write_minimal_repro_h5ad: bool,
 }
 
 fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
@@ -178,6 +199,9 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     }
     if let Some(v) = cli.parallel {
         cfg.execution.n_parallel = v.max(1);
+    }
+    if let Some(v) = cli.max_lr_pairs {
+        cfg.grn.max_lr_pairs = Some(v.max(1));
     }
     if let Some(p) = &cli.output_dir {
         cfg.execution.output_dir = p.display().to_string();
@@ -200,9 +224,15 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     if let Some(p) = &cli.h5ad {
         cfg.data.adata_path = p.display().to_string();
     }
+    if let Some(p) = &cli.tf_priors_feather {
+        cfg.grn.tf_priors_feather = Some(p.display().to_string());
+    }
     if let Some(ref m) = cli.training_mode {
         cfg.training.mode = Some(m.clone().into());
         cfg.training.seed_only = !matches!(cfg.training.mode, Some(CnnTrainingMode::Full));
+    }
+    if cli.write_minimal_repro_h5ad {
+        cfg.execution.write_minimal_repro_h5ad = true;
     }
 }
 
@@ -302,6 +332,14 @@ fn print_plain_preamble(
         grn_modulator_label(cfg)
     );
     println!("Genes:       {}", summary.gene_selection);
+    println!(
+        "Minimal repro: {}",
+        if cfg.execution.write_minimal_repro_h5ad {
+            "on (spacetravlr_minimal_repro.h5ad)"
+        } else {
+            "off"
+        }
+    );
     println!("{}", "—".repeat(60));
 }
 
@@ -572,6 +610,7 @@ fn main() -> anyhow::Result<()> {
             hud: None,
             network_data_dir: network_data_dir.clone(),
             tf_priors_feather: tf_priors_feather.clone(),
+            write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
         };
         fit_all_genes_dispatch(&params, &compute)?;
         println!("Finished.");
@@ -631,6 +670,7 @@ fn main() -> anyhow::Result<()> {
                 hud: Some(hud_worker),
                 network_data_dir: network_data_dir_thread,
                 tf_priors_feather: tf_priors_feather.clone(),
+                write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
             };
             fit_all_genes_dispatch(&params, &compute_thread)
         });

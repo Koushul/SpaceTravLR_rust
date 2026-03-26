@@ -1,6 +1,6 @@
 use crate::config::{CnnTrainingMode, SpaceshipConfig};
 use crate::estimator::ClusterTrainingSummary;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -126,6 +126,9 @@ pub struct TrainingHudState {
     /// Mean LASSO R² per completed gene (for TUI best / worst list only).
     pub gene_r2_mean: Vec<(String, f64)>,
     pub perf_stats_generation: u64,
+    pub activity_log: VecDeque<String>,
+    pub show_pipeline_timing: bool,
+    pub gene_train_times: VecDeque<(String, f64)>,
 }
 
 impl TrainingHudState {
@@ -162,7 +165,27 @@ impl TrainingHudState {
             cancel_requested,
             gene_r2_mean: Vec::new(),
             perf_stats_generation: 0,
+            activity_log: VecDeque::new(),
+            show_pipeline_timing: false,
+            gene_train_times: VecDeque::new(),
         }
+    }
+
+    pub fn push_activity(&mut self, line: String) {
+        const MAX: usize = 16;
+        while self.activity_log.len() >= MAX {
+            self.activity_log.pop_front();
+        }
+        self.activity_log.push_back(line);
+    }
+
+    pub fn record_gene_time(&mut self, gene: &str, secs: f64) {
+        const MAX: usize = 64;
+        while self.gene_train_times.len() >= MAX {
+            self.gene_train_times.pop_front();
+        }
+        self.gene_train_times.push_back((gene.to_string(), secs));
+        self.push_activity(format!("[gene] {} done ({:.1}s)", gene, secs));
     }
 
     pub fn record_training_metrics(&mut self, gene: &str, summaries: &[ClusterTrainingSummary]) {
@@ -238,7 +261,7 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
         );
         return;
     }
-        eprintln!("\n=== No betadata Feather files were written this run ===");
+    eprintln!("\n=== No betadata Feather files were written this run ===");
     eprintln!("Genes queued: {}", g.total_genes);
     eprintln!(
         "  skipped (existing CSV / lock): {}",
@@ -258,8 +281,45 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
 }
 
 pub fn log_line(hud: &Option<TrainingHud>, msg: String) {
-    if hud.is_none() {
-        println!("{}", msg);
+    match hud {
+        None => println!("{}", msg),
+        Some(h) => {
+            if let Ok(mut g) = h.lock() {
+                if g.show_pipeline_timing {
+                    g.push_activity(msg);
+                }
+            }
+        }
     }
-    // In TUI mode the event log panel is not shown; messages go to stdout only in plain mode.
+}
+
+pub fn pipeline_step_begin(hud: &Option<TrainingHud>, label: &str) -> Instant {
+    match hud {
+        None => println!("[pipeline] … {}", label),
+        Some(h) => {
+            if let Ok(mut g) = h.lock() {
+                if g.show_pipeline_timing {
+                    g.push_activity(format!("[pipeline] … {}", label));
+                }
+            }
+        }
+    }
+    Instant::now()
+}
+
+pub fn pipeline_step_end(hud: &Option<TrainingHud>, label: &str, started: Instant) {
+    match hud {
+        None => println!("[pipeline] done {} ({:.1}s)", label, started.elapsed().as_secs_f64()),
+        Some(h) => {
+            if let Ok(mut g) = h.lock() {
+                if g.show_pipeline_timing {
+                    g.push_activity(format!(
+                        "[pipeline] done {} ({:.1}s)",
+                        label,
+                        started.elapsed().as_secs_f64()
+                    ));
+                }
+            }
+        }
+    }
 }

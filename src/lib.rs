@@ -21,7 +21,7 @@ pub use config::{
     default_output_dir_for_adata_path, expand_user_path, CnnConfig, CnnTrainingMode,
     HybridCnnGatingConfig, SpaceshipConfig,
 };
-pub use estimator::{ClusterTrainingSummary, ClusteredGCNNWR};
+pub use estimator::{CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR};
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use spatial_estimator::SpatialCellularProgramsEstimator;
 pub use training_hud::RunConfigSummary;

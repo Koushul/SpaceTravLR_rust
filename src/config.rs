@@ -200,6 +200,8 @@ pub struct CnnConfig {
 pub struct ExecutionConfig {
     pub n_parallel: usize,
     pub output_dir: String,
+    /// When true, write `spacetravlr_minimal_repro.h5ad` under the output directory (large I/O on big datasets).
+    pub write_minimal_repro_h5ad: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +305,7 @@ impl Default for ExecutionConfig {
         Self {
             n_parallel: 1,
             output_dir: String::new(),
+            write_minimal_repro_h5ad: false,
         }
     }
 }
