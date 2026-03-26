@@ -400,6 +400,15 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    let config_source_run: Option<PathBuf> = rs
+        .config
+        .as_ref()
+        .or(cli.config.as_ref())
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+        .or_else(|| SpaceshipConfig::discover_default_path());
+
+    cfg.write_run_repro_toml(&output_dir)?;
+
     let path = write_run_summary_html(RunSummaryParams {
         adata_path: &adata_path,
         output_dir: &output_dir,
@@ -409,6 +418,7 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
         run_id: rs.run_id.as_deref(),
         manifest: manifest.as_ref(),
         betadata_pattern: rs.betadata_pattern.as_str(),
+        config_source_path: config_source_run.as_deref(),
     })?;
     println!("{}", path.display());
     Ok(())
@@ -499,6 +509,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     apply_cli_to_config(&cli, &mut cfg);
+
+    let config_source_path: Option<PathBuf> = cli
+        .config
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+        .or_else(|| SpaceshipConfig::discover_default_path());
 
     let max_genes = cli.max_genes;
     let gene_filter = parse_gene_filter(&cli);
@@ -644,6 +660,8 @@ fn main() -> anyhow::Result<()> {
                     network_data_dir: network_data_dir.clone(),
                     tf_priors_feather: tf_priors_feather.clone(),
                     write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                    spaceship_config: &cfg,
+                    config_source_path: config_source_path.clone(),
                 };
                 fit_all_genes_dispatch(&params, &compute)?;
             }
@@ -683,6 +701,8 @@ fn main() -> anyhow::Result<()> {
                 network_data_dir: network_data_dir.clone(),
                 tf_priors_feather: tf_priors_feather.clone(),
                 write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                spaceship_config: &cfg,
+                config_source_path: config_source_path.clone(),
             };
             fit_all_genes_dispatch(&params, &compute)?;
         }
@@ -709,6 +729,7 @@ fn main() -> anyhow::Result<()> {
         let compute_thread = compute.clone();
         let network_data_dir_thread = network_data_dir.clone();
         let condition_column_thread = condition_column.clone();
+        let config_source_for_training = config_source_path.clone();
 
         let handle = thread::spawn(move || {
             if let Some(condition_col) = condition_column_thread {
@@ -763,6 +784,8 @@ fn main() -> anyhow::Result<()> {
                         network_data_dir: network_data_dir_thread.clone(),
                         tf_priors_feather: tf_priors_feather.clone(),
                         write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                        spaceship_config: &cfg,
+                        config_source_path: config_source_for_training.clone(),
                     };
                     fit_all_genes_dispatch(&params, &compute_thread)?;
                 }
@@ -803,6 +826,8 @@ fn main() -> anyhow::Result<()> {
                     network_data_dir: network_data_dir_thread,
                     tf_priors_feather: tf_priors_feather.clone(),
                     write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                    spaceship_config: &cfg,
+                    config_source_path: config_source_for_training,
                 };
                 fit_all_genes_dispatch(&params, &compute_thread)
             }

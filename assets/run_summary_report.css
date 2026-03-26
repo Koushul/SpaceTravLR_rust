@@ -57,7 +57,7 @@ header::before {
 }
 .section-label::after { content:''; flex:1; height:1px; background:var(--border); }
 .stat-grid {
-  display:grid; grid-template-columns:repeat(3,1fr);
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr));
   gap:1px; background:var(--border); border:1px solid var(--border);
 }
 .stat-cell { background:var(--cream); padding:24px 26px; }
@@ -113,3 +113,93 @@ footer {
   font-size:13px; font-weight:500; color:var(--dim);
   display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
 }
+.gene-metrics-outer {
+  max-width:1260px; margin:0 auto; padding:0 44px 48px;
+  display:grid; gap:16px;
+}
+.gene-metrics-blurb {
+  font-size:14px; color:var(--muted); max-width:72ch;
+}
+.gene-metrics-blurb code { font-family:'IBM Plex Mono',monospace; font-size:12px; }
+.gene-filter {
+  max-width:320px; padding:10px 12px; font-size:14px; font-family:inherit;
+  border:1px solid var(--border); border-radius:3px; background:var(--paper); color:var(--ink);
+}
+.gene-filter:focus { outline:2px solid var(--sky); outline-offset:1px; }
+#gene-metrics-count { font-size:13px; color:var(--muted); }
+.gene-table-wrap { overflow-x:auto; border:1px solid var(--border); background:var(--cream); }
+.gene-empty { padding:20px 22px; font-size:14px; color:var(--muted); }
+.gene-metrics-table { width:100%; border-collapse:collapse; font-size:13px; }
+.gene-metrics-table thead th {
+  text-align:left; padding:10px 8px; background:var(--paper);
+  border-bottom:2px solid var(--border); font-weight:600; color:var(--muted);
+  white-space:nowrap; cursor:default; user-select:none;
+}
+.gene-metrics-table thead th.sortable { cursor:pointer; color:var(--rust); }
+.gene-metrics-table thead th.sortable:hover { color:var(--ink); }
+.gene-metrics-table thead th.num, .gene-metrics-table td.num { text-align:right; font-variant-numeric:tabular-nums; }
+.gene-metrics-table tbody td { padding:8px; border-bottom:1px solid var(--border); vertical-align:middle; }
+.gene-metrics-table tbody tr.gene-row { cursor:pointer; }
+.gene-metrics-table tbody tr.gene-row:hover { background:rgba(42,90,124,0.06); }
+.gene-metrics-table tbody tr.gene-row-open { background:rgba(42,90,124,0.1); }
+.gene-metrics-table .exp-hint { color:var(--dim); font-size:12px; white-space:nowrap; }
+.gene-exp-row td { padding:0 !important; border-bottom:1px solid var(--border); background:var(--paper); }
+.gene-detail-inner { padding:16px 20px 20px; }
+.gene-detail-meta { font-size:13px; color:var(--muted); margin-bottom:12px; }
+.gene-gate-dl {
+  display:grid; grid-template-columns:max-content 1fr; gap:4px 16px;
+  font-size:13px; margin-bottom:14px; max-width:900px;
+}
+.gene-gate-dl dt { color:var(--muted); font-weight:600; }
+.gene-gate-dl dd { font-family:'IBM Plex Mono',monospace; font-size:12px; margin:0; word-break:break-all; }
+.gene-detail-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+.gene-detail-table th, .gene-detail-table td { padding:6px 8px; border:1px solid var(--border); text-align:right; }
+.gene-detail-table th:first-child, .gene-detail-table td:first-child { text-align:left; }
+.gene-detail-table thead th { background:var(--cream); color:var(--muted); font-weight:600; }
+.config-repro-outer {
+  max-width:1260px; margin:0 auto; padding:0 44px 40px;
+  display:grid; gap:18px;
+}
+.config-repro-intro {
+  font-size:14px; color:var(--muted); line-height:1.65; max-width:85ch;
+}
+.config-repro-intro code { font-family:'IBM Plex Mono',monospace; font-size:12px; }
+.config-toolbar {
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px;
+}
+a.cfg-dl {
+  display:inline-flex; align-items:center; gap:6px;
+  padding:8px 16px; font-size:13px; font-weight:600;
+  background:var(--moss); color:#fff; text-decoration:none; border-radius:3px;
+  border:1px solid rgba(0,0,0,0.12);
+}
+a.cfg-dl:hover { filter:brightness(1.06); }
+a.cfg-dl-sec {
+  background:var(--sky);
+}
+details.config-panel {
+  border:1px solid var(--border); border-radius:4px; background:var(--cream);
+  overflow:hidden;
+}
+details.config-panel + details.config-panel { margin-top:4px; }
+summary.cfg-summary {
+  padding:12px 16px; font-size:13px; font-weight:700; letter-spacing:0.06em;
+  text-transform:uppercase; color:var(--rust); cursor:pointer;
+  list-style:none; user-select:none;
+  background:linear-gradient(180deg, var(--paper) 0%, var(--cream) 100%);
+  border-bottom:1px solid var(--border);
+}
+summary.cfg-summary::-webkit-details-marker { display:none; }
+summary.cfg-summary::after { content:' ▸'; color:var(--dim); font-weight:400; }
+details.config-panel[open] summary.cfg-summary::after { content:' ▾'; }
+.toml-pre {
+  margin:0; padding:16px 18px 20px; overflow-x:auto;
+  background:#1a1814; color:#e8e4dc; font-family:'IBM Plex Mono',monospace;
+  font-size:12px; line-height:1.5; border-top:1px solid var(--border);
+}
+.toml-pre code { font-family:inherit; white-space:pre; color:inherit; }
+.config-same-note {
+  font-size:14px; color:var(--muted); padding:12px 16px; margin:0;
+  background:var(--cream); border:1px solid var(--border); border-radius:4px;
+}
+.config-same-note code { font-family:'IBM Plex Mono',monospace; font-size:12px; }

@@ -2,7 +2,10 @@ use crate::betadata::write_betadata_feather;
 use crate::cnn_gating::{
     build_neighbors, decide_cnn_for_gene, load_gene_set_file, predict_lasso_y, CnnGateDecision,
 };
-use crate::config::{CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig};
+use crate::config::{
+    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,
+};
+use crate::run_summary_html::{RunSummaryParams, write_run_summary_html};
 use crate::estimator::{CachedSpatialData, ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
 use crate::ligand::calculate_weighted_ligands;
@@ -20,7 +23,7 @@ use polars::prelude::DataFrame;
 use ndarray_npy::NpzWriter;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 fn compute_gene_mean_expression<AnB: Backend>(
@@ -1088,6 +1091,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         network_data_dir: Option<&str>,
         tf_priors_feather: Option<&str>,
         write_minimal_repro_h5ad: bool,
+        spaceship_config: &SpaceshipConfig,
+        config_source_path: Option<PathBuf>,
         device: &AB::Device,
     ) -> anyhow::Result<()>
     where
@@ -1457,6 +1462,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         }
                     };
 
+                    let n_samples = xy.nrows();
+                    let n_lasso_total = (0..num_clusters)
+                        .filter(|&c_id| (0..n_samples).any(|i| clusters[i] == c_id))
+                        .count();
+
                     loop {
                         // Cancel check
                         if hud
@@ -1536,6 +1546,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         if let Some(ref h) = hud {
                             if let Ok(mut g) = h.lock() {
                                 g.set_gene_status(&gene, "estimator | ? mods");
+                                if n_lasso_total > 0 {
+                                    g.set_gene_lasso_cluster_progress(&gene, 0, n_lasso_total);
+                                }
                             }
                         }
 
@@ -2083,10 +2096,41 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         network_data_dir,
                         tf_priors_feather,
                         false,
+                        spaceship_config,
+                        config_source_path.clone(),
                         device,
                     );
                 }
             }
+        }
+
+        match spaceship_config.write_run_repro_toml(Path::new(training_dir)) {
+            Ok(p) => log_line(
+                &hud,
+                format!("Wrote run repro {}", p.display()),
+            ),
+            Err(e) => log_line(
+                &hud,
+                format!("Run repro TOML not written: {}", e),
+            ),
+        }
+
+        match write_run_summary_html(RunSummaryParams {
+            adata_path: Path::new(&worker_adata_path),
+            output_dir: Path::new(training_dir),
+            cfg: spaceship_config,
+            cluster_key: None,
+            layer_override: None,
+            run_id: None,
+            manifest: None,
+            betadata_pattern: "*_betadata.feather",
+            config_source_path: config_source_path.as_deref(),
+        }) {
+            Ok(p) => log_line(
+                &hud,
+                format!("Wrote run summary {}", p.display()),
+            ),
+            Err(e) => log_line(&hud, format!("Run summary HTML failed: {}", e)),
         }
 
         print_training_outcome_banner(&hud);

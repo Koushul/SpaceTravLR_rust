@@ -1,4 +1,6 @@
-use crate::config::{CnnTrainingMode, SpaceshipConfig};
+use crate::condition_split::CONDITION_RUNS_SUBDIR;
+use crate::config::{CnnTrainingMode, SpaceshipConfig, RUN_REPRO_TOML_FILENAME};
+use crate::training_log::{scan_gene_training_logs, GeneTrainingRollup};
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::Context;
@@ -13,7 +15,97 @@ use std::path::{Path, PathBuf};
 const RUN_SUMMARY_CSS: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/run_summary_report.css"));
 
+const RUN_SUMMARY_GENES_JS: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/run_summary_genes.js"));
+
+const RUN_CONFIG_ON_DISK_FILENAME: &str = "spacetravlr_config_on_disk.toml";
+
 const GOOGLE_FONTS_STYLESHEET: &str = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Serif:ital,wght@0,300;0,400;0,600;0,700;1,300&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
+
+fn normalize_toml_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n").trim_end().to_string()
+}
+
+fn build_config_repro_html(
+    effective_toml: &str,
+    on_disk: Option<(String, Option<String>, bool)>,
+) -> String {
+    let mut out = String::from(r#"<div class="config-repro-outer">"#);
+    out.push_str(r#"<div class="section-label">Configuration (reproducibility)</div>"#);
+    out.push_str(r#"<p class="config-repro-intro">"#);
+    out.push_str(
+        r#"The panel below is loaded from <code>spacetravlr_run_repro.toml</code> in this output directory (written for each run; full <code>SpaceshipConfig</code> as executed, including CLI overrides). "#,
+    );
+    match &on_disk {
+        Some((path, Some(_), false)) => {
+            out.push_str(&format!(
+                r#"The <strong>on-disk</strong> block is the file read from <code>{}</code> when it differs."#,
+                escape_html(path)
+            ));
+        }
+        Some((path, None, _)) => {
+            out.push_str(&format!(
+                r#"Recorded config path <code>{}</code> could not be read from disk."#,
+                escape_html(path)
+            ));
+        }
+        Some((_, Some(_), true)) => {
+            out.push_str(
+                "The primary spaceship config file on disk matches <code>spacetravlr_run_repro.toml</code>.",
+            );
+        }
+        None => {
+            out.push_str(
+                "No spaceship config path was recorded (e.g. library use); <code>spacetravlr_run_repro.toml</code> still lists all parameters.",
+            );
+        }
+    }
+    out.push_str("</p>");
+
+    out.push_str(r#"<div class="config-toolbar">"#);
+    out.push_str(&format!(
+        r#"<a class="cfg-dl" href="{0}" download="{0}">Download run repro TOML</a>"#,
+        RUN_REPRO_TOML_FILENAME
+    ));
+    if let Some((_, Some(_), false)) = &on_disk {
+        out.push_str(&format!(
+            r#" <a class="cfg-dl cfg-dl-sec" href="{0}" download="{0}">Download on-disk copy</a>"#,
+            RUN_CONFIG_ON_DISK_FILENAME
+        ));
+    }
+    out.push_str("</div>");
+
+    out.push_str(
+        r#"<details class="config-panel" open><summary class="cfg-summary">Run repro TOML (<code>spacetravlr_run_repro.toml</code>)</summary>"#,
+    );
+    out.push_str(r#"<pre class="toml-pre"><code>"#);
+    out.push_str(&escape_html(effective_toml));
+    out.push_str("</code></pre></details>");
+
+    if let Some((path, content, same)) = on_disk {
+        match (content, same) {
+            (Some(raw), false) => {
+                out.push_str(r#"<details class="config-panel"><summary class="cfg-summary">"#);
+                out.push_str(&escape_html(&path));
+                out.push_str(" (on disk, before merge)</summary>");
+                out.push_str(r#"<pre class="toml-pre"><code>"#);
+                out.push_str(&escape_html(&raw));
+                out.push_str("</code></pre></details>");
+            }
+            (Some(_), true) => {
+                out.push_str(r#"<p class="config-same-note">"#);
+                out.push_str(&format!(
+                    r#"On-disk file <code>{}</code> matches <code>spacetravlr_run_repro.toml</code> (no separate copy).</p>"#,
+                    escape_html(&path)
+                ));
+            }
+            (None, _) => {}
+        }
+    }
+
+    out.push_str("</div>");
+    out
+}
 
 fn fmt_usize(n: usize) -> String {
     let s = n.to_string();
@@ -105,6 +197,27 @@ fn cnn_mode_label(mode: CnnTrainingMode) -> &'static str {
     }
 }
 
+fn collect_gene_rollups(output_dir: &Path) -> anyhow::Result<Vec<GeneTrainingRollup>> {
+    let mut rollups = scan_gene_training_logs(&output_dir.join("log"))?;
+    let cond_root = output_dir.join(CONDITION_RUNS_SUBDIR);
+    if cond_root.is_dir() {
+        for e in std::fs::read_dir(&cond_root)? {
+            let e = e?;
+            if !e.file_type()?.is_dir() {
+                continue;
+            }
+            let label = e.file_name().to_string_lossy().into_owned();
+            let mut sub = scan_gene_training_logs(&e.path().join("log"))?;
+            for g in &mut sub {
+                g.gene = format!("{label}::{}", g.gene);
+            }
+            rollups.append(&mut sub);
+        }
+    }
+    rollups.sort_by(|a, b| a.gene.to_lowercase().cmp(&b.gene.to_lowercase()));
+    Ok(rollups)
+}
+
 fn manifest_training_mode(manifest: &Value) -> Option<String> {
     manifest.get("training_mode").map(|v| {
         if let Some(s) = v.as_str() {
@@ -181,6 +294,8 @@ pub struct RunSummaryParams<'a> {
     pub run_id: Option<&'a str>,
     pub manifest: Option<&'a Value>,
     pub betadata_pattern: &'a str,
+    /// Primary `spaceship_config.toml` path when known (for on-disk vs effective comparison).
+    pub config_source_path: Option<&'a Path>,
 }
 
 pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf> {
@@ -193,9 +308,13 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         run_id,
         manifest,
         betadata_pattern,
+        config_source_path,
     } = p;
 
     std::fs::create_dir_all(output_dir)?;
+
+    let gene_rollups = collect_gene_rollups(output_dir).unwrap_or_default();
+    let n_genes_logged = gene_rollups.len();
 
     let cluster_key = cluster_key.unwrap_or(cfg.data.cluster_annot.as_str());
     let layer = layer_override.unwrap_or(cfg.data.layer.as_str());
@@ -275,6 +394,40 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
     let adata_path_disp = adata_path.display().to_string();
     let output_dir_disp = output_dir.display().to_string();
 
+    let repro_path = output_dir.join(RUN_REPRO_TOML_FILENAME);
+    let effective_toml = match std::fs::read_to_string(&repro_path) {
+        Ok(s) => s,
+        Err(_) => {
+            cfg.write_run_repro_toml(output_dir)?;
+            std::fs::read_to_string(&repro_path).with_context(|| {
+                format!("read {} after write", repro_path.display())
+            })?
+        }
+    };
+
+    let on_disk_info: Option<(String, Option<String>, bool)> =
+        if let Some(p) = config_source_path {
+            let disp = p.display().to_string();
+            match std::fs::read_to_string(p) {
+                Ok(raw) => {
+                    let same = normalize_toml_newlines(&raw)
+                        == normalize_toml_newlines(&effective_toml);
+                    let on_disk_path = output_dir.join(RUN_CONFIG_ON_DISK_FILENAME);
+                    if same {
+                        let _ = std::fs::remove_file(&on_disk_path);
+                    } else {
+                        std::fs::write(&on_disk_path, raw.as_str())?;
+                    }
+                    Some((disp, Some(raw), same))
+                }
+                Err(_) => Some((disp, None, false)),
+            }
+        } else {
+            None
+        };
+
+    let config_repro_html = build_config_repro_html(&effective_toml, on_disk_info);
+
     let training_rows = vec![
         kv_tr("training.mode / manifest", &mode_str),
         kv_tr("training.epochs", &epochs),
@@ -283,6 +436,7 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         kv_tr("data.cluster_annot", cluster_key),
         kv_tr("spatial coords", &spatial_training),
         kv_tr("betadata files (*_betadata.feather)", &n_beta.to_string()),
+        kv_tr("genes w/ training logs (log/)", &n_genes_logged.to_string()),
     ];
 
     let adata_rows = vec![
@@ -397,6 +551,20 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
                 HtmlElement::new(HtmlTag::Span).with_child(report_pb.into()),
             )
             .into(),
+        )
+        .with_child(
+            path_bar_item(
+                "Config",
+                HtmlElement::new(HtmlTag::Span).with_child(
+                    format!(
+                        r#"<span class="pb-dir">{}/</span>{}"#,
+                        escape_html(&output_dir_disp),
+                        escape_html(RUN_REPRO_TOML_FILENAME)
+                    )
+                    .into(),
+                ),
+            )
+            .into(),
         );
 
     let note_html = format!(
@@ -442,6 +610,15 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
                                 &n_beta.to_string(),
                                 &format!("matching {}", escape_html(betadata_pattern)),
                                 Some("sky"),
+                            )
+                            .into(),
+                        )
+                        .with_child(
+                            stat_cell(
+                                "Logged genes",
+                                &fmt_usize(n_genes_logged),
+                                "parsed from log/*.log",
+                                None,
                             )
                             .into(),
                         )
@@ -552,9 +729,25 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
     page.add_style(RUN_SUMMARY_CSS);
     page.add_html(body);
 
+    let genes_json = serde_json::to_string(&gene_rollups)?;
+    let genes_json_safe = genes_json.replace("</script>", "<\\/script>");
+    let gene_section = format!(
+        r#"<div class="gene-metrics-outer" id="gene-metrics-root"><div class="section-label">Per-gene training metrics</div><p class="gene-metrics-blurb">Values are parsed from <code>log/&lt;gene&gt;.log</code> (same tab-separated format the trainer writes). Use the filter box, click column headers to sort, and click a gene row to expand per-cluster LASSO R², convergence, and CNN epoch counts.</p><input type="search" class="gene-filter" id="gene-filter-input" placeholder="Filter genes…" autocomplete="off" /><p id="gene-metrics-count"></p><div class="gene-table-wrap" id="gene-table-wrap"></div></div>"#
+    );
+
     let html = page
         .to_html_string()
-        .replacen("<html>", r#"<html lang="en">"#, 1);
+        .replacen("<html>", r#"<html lang="en">"#, 1)
+        .replacen(
+            "<footer",
+            &format!("{config_repro_html}{gene_section}<footer"),
+            1,
+        );
+
+    let scripts = format!(
+        r#"<script type="application/json" id="spacetravlr-gene-metrics">{genes_json_safe}</script><script>{RUN_SUMMARY_GENES_JS}</script></body>"#
+    );
+    let html = html.replacen("</body>", &scripts, 1);
 
     let html_path = output_dir.join("spacetravlr_run_summary.html");
     std::fs::write(&html_path, html)?;

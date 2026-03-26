@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SpaceTravLR · Run Summary (example)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Serif:ital,wght@0,300;0,400;0,600;0,700;1,300&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+:root {
+  --ink:    #1a1510;
+  --paper:  #f5f0e8;
+  --cream:  #ede8dc;
+  --border: #c8bfa8;
+  --rust:   #9c4a1a;
+  --moss:   #3d6b4f;
+  --sky:    #2a5a7c;
+  --amber:  #c07d1a;
+  --muted:  #6b6156;
+  --dim:    #9a9080;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+header {
+  background: var(--ink); color: var(--paper);
+  padding: 44px 56px 36px; position: relative; overflow: hidden;
+}
+header::before {
+  content: ''; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg, transparent, transparent 60px,
+    rgba(255,255,255,0.03) 60px, rgba(255,255,255,0.03) 61px);
+  pointer-events: none;
+}
+.header-top { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; flex-wrap:wrap; }
+.logo-block h1 {
+  font-family:'IBM Plex Serif',serif; font-size:3.4rem; font-weight:700;
+  letter-spacing:-0.02em; line-height:1; color:#fff;
+}
+.logo-block h1 span { color: var(--amber); }
+.logo-block .subtitle {
+  margin-top:10px; font-size:13px; color:var(--dim);
+  letter-spacing:0.1em; text-transform:uppercase; font-weight:500;
+}
+.run-meta { text-align:right; font-size:14px; color:var(--dim); line-height:2; }
+.run-meta strong { color:#d4cfc8; font-weight:600; }
+.status-badge {
+  display:inline-flex; align-items:center; gap:7px;
+  background:rgba(61,107,79,0.25); border:1px solid rgba(61,107,79,0.5);
+  color:#7ecf9a; padding:5px 14px; border-radius:3px;
+  font-size:12px; font-weight:600; letter-spacing:0.1em;
+  text-transform:uppercase; margin-top:12px;
+}
+.container { max-width:1260px; margin:0 auto; padding:48px 44px; display:grid; gap:40px; }
+.section-label {
+  font-size:11px; font-weight:700; letter-spacing:0.18em; text-transform:uppercase;
+  color:var(--rust); margin-bottom:16px;
+  display:flex; align-items:center; gap:10px;
+}
+.section-label::after { content:''; flex:1; height:1px; background:var(--border); }
+.stat-grid {
+  display:grid; grid-template-columns:repeat(3,1fr);
+  gap:1px; background:var(--border); border:1px solid var(--border);
+}
+.stat-cell { background:var(--cream); padding:24px 26px; }
+.stat-cell .label {
+  font-size:11px; font-weight:600; letter-spacing:0.1em; text-transform:uppercase;
+  color:var(--muted); margin-bottom:8px;
+}
+.stat-cell .value {
+  font-size:2rem; font-weight:700; font-family:'IBM Plex Serif',serif;
+  color:var(--ink); line-height:1;
+}
+.stat-cell .sub   { font-size:13px; color:var(--muted); margin-top:6px; }
+.stat-cell.hi  .value { color:var(--rust); }
+.stat-cell.good .value { color:var(--moss); }
+.stat-cell.sky  .value { color:var(--sky);  }
+.path-bar {
+  background: #161210; border-bottom: 1px solid #252017;
+  padding: 0 56px;
+}
+.path-bar-item {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid #1f1b14;
+}
+.path-bar-item:last-child { border-bottom: none; }
+.pb-label {
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase;
+  color: #3e3628; white-space: nowrap; padding-top: 1px;
+}
+.pb-path  { font-family:'IBM Plex Mono',monospace; font-size: 12px; color: #72c48e; word-break: break-all; }
+.pb-path .pb-dir { color: #4d7d96; }
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:32px; }
+@media(max-width:760px) { .two-col { grid-template-columns:1fr; } }
+.kv-table { width:100%; border-collapse:collapse; }
+.kv-table tr { border-bottom:1px solid var(--border); }
+.kv-table tr:last-child { border-bottom:none; }
+.kv-table td { padding:10px 6px; vertical-align:top; }
+.kv-table .k { width:52%; color:var(--muted); font-size:14px; padding-right:14px; }
+.kv-table .v { color:var(--ink); font-size:14px; font-weight:600; }
+.card { background:var(--cream); border:1px solid var(--border); padding:30px 34px; }
+.card-title {
+  font-family:'IBM Plex Serif',serif; font-size:1.25rem; font-weight:700;
+  color:var(--ink); margin-bottom:20px;
+}
+.note-panel {
+  background:var(--cream); border:1px solid var(--border); padding:20px 22px;
+  font-size:14px; color:var(--muted);
+}
+footer {
+  border-top:1px solid var(--border); padding:20px 44px;
+  font-size:13px; font-weight:500; color:var(--dim);
+  display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+}
+  </style>
+</head>
+<body>
+<div>
+  <header>
+    <div class="header-top">
+      <div class="logo-block">
+        <h1>Space<span>TravLR</span></h1>
+        <div class="subtitle">Spatially Perturbing Transcription Factors, Ligands &amp; Receptors · Run Report</div>
+        <div class="status-badge">Completed Successfully</div>
+      </div>
+      <div class="run-meta">
+        <div><strong>Run ID</strong>&nbsp;&nbsp;kidney_spatial_demo</div>
+        <div><strong>AnnData</strong>&nbsp;&nbsp;/data/kidney_visium/processed.h5ad</div>
+        <div><strong>Started</strong>&nbsp;&nbsp;2026-03-25 14:22:01 UTC</div>
+        <div><strong>Finished</strong>&nbsp;&nbsp;2026-03-26 09:15:33 UTC</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="path-bar">
+    <div class="path-bar-item">
+      <span class="pb-label">AnnData</span>
+      <span class="pb-path">/data/kidney_visium/processed.h5ad</span>
+    </div>
+    <div class="path-bar-item">
+      <span class="pb-label">Beta outputs</span>
+      <span class="pb-path"><span class="pb-dir">/outputs/kidney_run/</span>*_betadata.feather</span>
+    </div>
+    <div class="path-bar-item">
+      <span class="pb-label">Report</span>
+      <span class="pb-path"><span class="pb-dir">/outputs/kidney_run/</span>spacetravlr_run_summary.html</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <div>
+      <div class="section-label">Overview</div>
+      <div class="stat-grid">
+        <div class="stat-cell">
+          <div class="label">Cells (obs)</div>
+          <div class="value">12,847</div>
+          <div class="sub">in report AnnData</div>
+        </div>
+        <div class="stat-cell good">
+          <div class="label">Genes (vars)</div>
+          <div class="value">18,632</div>
+          <div class="sub">expression matrix</div>
+        </div>
+        <div class="stat-cell sky">
+          <div class="label">Betadata files</div>
+          <div class="value">412</div>
+          <div class="sub">matching *_betadata.feather</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="note-panel">
+      Spatial / UMAP figures are not generated here; use scanpy or your notebook on the same <code>.h5ad</code> if needed.
+      Clusters in the table use <strong>leiden</strong>; spatial key detected: <strong>spatial</strong>.
+    </p>
+
+    <div class="two-col">
+      <div>
+        <div class="section-label">AnnData</div>
+        <div class="card">
+          <div class="card-title">⬡ summary</div>
+          <table class="kv-table">
+            <tr><td class="k">Shape (obs × vars)</td><td class="v">12,847 × 18,632</td></tr>
+            <tr><td class="k">Cluster key (obs)</td><td class="v">leiden</td></tr>
+            <tr><td class="k">Unique clusters</td><td class="v">24</td></tr>
+            <tr><td class="k">Spatial obsm key</td><td class="v">spatial</td></tr>
+            <tr><td class="k">UMAP present</td><td class="v">yes (obsm['X_umap'])</td></tr>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Training (config / manifest)</div>
+        <div class="card">
+          <div class="card-title">⚙ run</div>
+          <table class="kv-table">
+            <tr><td class="k">training.mode / manifest</td><td class="v">hybrid</td></tr>
+            <tr><td class="k">training.epochs</td><td class="v">80</td></tr>
+            <tr><td class="k">execution.n_parallel</td><td class="v">8</td></tr>
+            <tr><td class="k">data.layer</td><td class="v">counts</td></tr>
+            <tr><td class="k">data.cluster_annot</td><td class="v">leiden</td></tr>
+            <tr><td class="k">spatial coords</td><td class="v">adata.obsm['spatial']</td></tr>
+            <tr><td class="k">betadata files (*_betadata.feather)</td><td class="v">412</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span>SpaceTravLR · Rust training report</span>
+    <span>Generated 2026-03-26 12:00:00 UTC · kidney_spatial_demo</span>
+  </footer>
+</div>
+</body>
+</html>

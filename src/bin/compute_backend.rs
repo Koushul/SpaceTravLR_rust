@@ -3,7 +3,7 @@ use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
 use burn_autodiff::Autodiff;
 use space_trav_lr_rust::config::{
-    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig,
+    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,
 };
 use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
 use space_trav_lr_rust::training_hud::TrainingHud;
@@ -109,6 +109,8 @@ pub(crate) struct FitAllGenesParams<'a> {
     pub network_data_dir: Option<String>,
     pub tf_priors_feather: Option<String>,
     pub write_minimal_repro_h5ad: bool,
+    pub spaceship_config: &'a SpaceshipConfig,
+    pub config_source_path: Option<std::path::PathBuf>,
 }
 
 pub(crate) fn fit_all_genes_dispatch(
@@ -152,6 +154,8 @@ pub(crate) fn fit_all_genes_dispatch(
                 p.network_data_dir.as_deref(),
                 p.tf_priors_feather.as_deref(),
                 p.write_minimal_repro_h5ad,
+                p.spaceship_config,
+                p.config_source_path.clone(),
                 device,
             )
         }
@@ -193,6 +197,8 @@ pub(crate) fn fit_all_genes_dispatch(
             p.network_data_dir.as_deref(),
             p.tf_priors_feather.as_deref(),
             p.write_minimal_repro_h5ad,
+            p.spaceship_config,
+            p.config_source_path.clone(),
             device,
         ),
     }

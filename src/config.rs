@@ -1,6 +1,9 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Canonical per-run TOML in the training output directory (full `SpaceshipConfig` as executed).
+pub const RUN_REPRO_TOML_FILENAME: &str = "spacetravlr_run_repro.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpaceshipConfig {
@@ -402,6 +405,29 @@ impl SpaceshipConfig {
         let contents = std::fs::read_to_string(path.as_ref())?;
         let config: SpaceshipConfig = toml::from_str(&contents)?;
         Ok(config)
+    }
+
+    pub fn to_toml_pretty(&self) -> anyhow::Result<String> {
+        toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("serialize config to TOML: {e}"))
+    }
+
+    pub fn write_run_repro_toml(&self, output_dir: &Path) -> anyhow::Result<PathBuf> {
+        std::fs::create_dir_all(output_dir)?;
+        let text = self.to_toml_pretty()?;
+        let path = output_dir.join(RUN_REPRO_TOML_FILENAME);
+        std::fs::write(&path, text.as_str())?;
+        let _ = std::fs::remove_file(output_dir.join("spacetravlr_run_config.toml"));
+        Ok(path)
+    }
+
+    pub fn discover_default_path() -> Option<PathBuf> {
+        for name in &["spaceship_config.toml", "SpaceshipConfig.toml"] {
+            let p = Path::new(name);
+            if p.is_file() {
+                return Some(p.to_path_buf());
+            }
+        }
+        None
     }
 
     pub fn load() -> Self {
