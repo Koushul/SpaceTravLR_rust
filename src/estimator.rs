@@ -603,6 +603,11 @@ pub fn create_spatial_features(
     let n = xy.nrows();
     let mut result = Array2::zeros((n, num_clusters));
     let r2 = radius * radius;
+    let r2 = if r2 > 0.0 && r2.is_finite() {
+        r2.next_up()
+    } else {
+        r2
+    };
 
     let mut points = Vec::with_capacity(n);
     let mut valid_indices = Vec::with_capacity(n);
