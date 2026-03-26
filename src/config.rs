@@ -30,6 +30,7 @@ pub struct DataConfig {
     pub adata_path: String,
     pub layer: String,
     pub cluster_annot: String,
+    pub condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +235,7 @@ impl Default for DataConfig {
             adata_path: String::new(),
             layer: "imputed_count".into(),
             cluster_annot: "cell_type_int".into(),
+            condition: None,
         }
     }
 }

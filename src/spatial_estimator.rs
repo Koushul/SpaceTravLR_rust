@@ -26,14 +26,19 @@ use std::sync::{Arc, Mutex};
 fn compute_gene_mean_expression<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
+    obs_row_subset: Option<&[usize]>,
 ) -> anyhow::Result<HashMap<String, f64>> {
     let var_names = adata.var_names().into_vec();
-    let n_obs = adata.n_obs();
+    let row_sel = match obs_row_subset {
+        Some(rows) => SelectInfoElem::Index(rows.to_vec()),
+        None => SelectInfoElem::full(),
+    };
+    let slice = [row_sel, SelectInfoElem::full()];
+    let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
+    let n_obs = data.nrows();
     if n_obs == 0 {
         return Ok(HashMap::new());
     }
-    let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
-    let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
     let inv_n = 1.0 / n_obs as f64;
     let mut out = HashMap::with_capacity(var_names.len());
     for (j, name) in var_names.iter().enumerate() {
@@ -882,6 +887,8 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub seed_only: bool,
     pub estimator: Option<ClusteredGCNNWR<AB>>,
     pub group_reg_vec: Option<Vec<f64>>,
+    /// When set, only these obs rows are read from the backing AnnData (read-only; no disk writes).
+    pub obs_row_subset: Option<Arc<[usize]>>,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -902,6 +909,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         tf_priors: Option<Arc<crate::network::TfPriors>>,
         cluster_to_cell_type: Option<Arc<HashMap<usize, String>>>,
         layer: String,
+        obs_row_subset: Option<Arc<[usize]>>,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
         let cluster_annot = "cell_type_int".to_string();
@@ -1000,6 +1008,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             seed_only: false,
             estimator: None,
             group_reg_vec: None,
+            obs_row_subset,
         })
     }
 
@@ -1036,14 +1045,17 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             None,
             "imputed_count".to_string(),
+            None,
         )
     }
 }
+
 
 impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5> {
     #[allow(clippy::too_many_arguments)]
     pub fn fit_all_genes(
         adata_path: &str,
+        obs_row_subset: Option<Arc<[usize]>>,
         radius: f64,
         spatial_dim: usize,
         contact_distance: f64,
@@ -1096,6 +1108,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let t_open = pipeline_step_begin(&hud, "open AnnData (HDF5)");
         let setup_adata = Arc::new(AnnData::<H5>::open(H5::open(adata_path)?)?);
         pipeline_step_end(&hud, "open AnnData (HDF5)", t_open);
+        if let Some(rows) = obs_row_subset.as_ref() {
+            log_line(
+                &hud,
+                format!(
+                    "Condition subset: {} / {} cells (read-only; .h5ad file untouched)",
+                    rows.len(),
+                    setup_adata.n_obs()
+                ),
+            );
+        }
         let all_var_names = setup_adata.var_names().into_vec();
 
         let mut target_genes = all_var_names.clone();
@@ -1115,19 +1137,30 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
         }
 
-        let obs_names = Arc::new(setup_adata.obs_names().into_vec());
         let total_genes = target_genes.len();
 
         let t_val = pipeline_step_begin(
             &hud,
             "validate expression layer & read obs (full matrix check)",
         );
-        let obs_df = validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
+        let obs_df_full = validate_training_inputs(setup_adata.as_ref(), cluster_annot, layer, total_genes)?;
         pipeline_step_end(
             &hud,
             "validate expression layer & read obs (full matrix check)",
             t_val,
         );
+
+        let (obs_names, obs_df) = if let Some(rows) = obs_row_subset.as_ref() {
+            let full_names = setup_adata.obs_names().into_vec();
+            let filtered_names: Vec<String> = rows.iter().map(|&i| full_names[i].clone()).collect();
+            use polars::prelude::NamedFrom;
+            let idx_vec: Vec<u32> = rows.iter().map(|&i| i as u32).collect();
+            let idx_ca = polars::prelude::IdxCa::new("".into(), &idx_vec);
+            let filtered_df = obs_df_full.take(&idx_ca)?;
+            (Arc::new(filtered_names), filtered_df)
+        } else {
+            (Arc::new(setup_adata.obs_names().into_vec()), obs_df_full)
+        };
 
         let t_cl = pipeline_step_begin(&hud, "build cluster labels & cell-type map");
         let cell_type_counts = cell_type_label_counts_from_obs(&obs_df);
@@ -1159,7 +1192,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         if let Some(ref h) = hud {
             if let Ok(mut g) = h.lock() {
                 g.total_genes = total_genes;
-                g.n_cells = setup_adata.n_obs();
+                g.n_cells = obs_names.len();
                 g.n_clusters = num_clusters;
                 g.cell_type_counts = cell_type_counts;
             }
@@ -1185,9 +1218,20 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         };
 
         let t_xy = pipeline_step_begin(&hud, "load spatial coordinates (obsm)");
-        let xy: Arc<Array2<f64>> = Arc::new(load_spatial_coords_f64(setup_adata.as_ref())?);
+        let xy_full = load_spatial_coords_f64(setup_adata.as_ref())?;
+        let xy: Arc<Array2<f64>> = Arc::new(if let Some(rows) = obs_row_subset.as_ref() {
+            xy_full.select(ndarray::Axis(0), rows)
+        } else {
+            xy_full
+        });
         pipeline_step_end(&hud, "load spatial coordinates (obsm)", t_xy);
 
+        if write_minimal_repro_h5ad && obs_row_subset.is_some() {
+            anyhow::bail!(
+                "--condition splits are not compatible with write_minimal_repro_h5ad; \
+                 set execution.write_minimal_repro_h5ad = false in your config."
+            );
+        }
         let repro_label = if write_minimal_repro_h5ad {
             "write spacetravlr_minimal_repro.h5ad"
         } else {
@@ -1229,6 +1273,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         };
         pipeline_step_end(&hud, repro_label, t_repro);
 
+        let obs_row_subset_for_workers = if write_minimal_repro_h5ad {
+            None
+        } else {
+            obs_row_subset.clone()
+        };
+
         let t_sp = pipeline_step_begin(&hud, "precompute shared spatial feature tensors");
         let cached_spatial = Arc::new(CachedSpatialData {
             spatial_features: crate::estimator::create_spatial_features(
@@ -1257,7 +1307,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     &hud,
                     "per-gene mean expression (full matrix pass)",
                 );
-                let gm = compute_gene_mean_expression(setup_adata.as_ref(), layer)?;
+                let gm = compute_gene_mean_expression(
+                    setup_adata.as_ref(),
+                    layer,
+                    obs_row_subset.as_deref(),
+                )?;
                 pipeline_step_end(
                     &hud,
                     "per-gene mean expression (full matrix pass)",
@@ -1356,6 +1410,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let adata_path = worker_adata_path.clone();
             let training_dir = training_dir.to_string();
             let cached_spatial = cached_spatial.clone();
+            let obs_subset = obs_row_subset_for_workers.clone();
 
             // scalar params
             let (radius, spatial_dim, contact_distance, tf_ligand_cutoff) =
@@ -1501,6 +1556,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             tf_priors.clone(),
                             Some(cluster_to_cell_type.clone()),
                             layer_w.clone(),
+                            obs_subset.clone(),
                         )
                         .map(Box::new)
                         {
@@ -1568,6 +1624,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             }
                         }
 
+                        let mut on_lasso_progress = |done: usize, total: usize| {
+                            if let Some(hh) = hud.as_ref() {
+                                if let Ok(mut g) = hh.lock() {
+                                    g.set_gene_lasso_cluster_progress(&gene, done, total);
+                                }
+                            }
+                        };
                         let fit_ok = estimator
                             .fit_with_cache(
                                 &xy,
@@ -1584,8 +1647,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 &cnn_w,
                                 &device,
                                 Some(cached_spatial.as_ref()),
+                                &mut on_lasso_progress,
                             )
                             .is_ok();
+                        if !fit_ok {
+                            if let Some(hh) = hud.as_ref() {
+                                if let Ok(mut g) = hh.lock() {
+                                    g.clear_gene_lasso_cluster_progress(&gene);
+                                }
+                            }
+                        }
 
                         let mut export_per_cell = matches!(cnn_mode_w, CnnTrainingMode::Full)
                             || hybrid_pass2;
@@ -1683,6 +1754,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             if let Some(est_inner) = &estimator.estimator {
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
+                                        g.clear_gene_lasso_cluster_progress(&gene);
                                         g.set_gene_status(
                                             &gene,
                                             format!("export | {} mods", n_mods),
@@ -1978,6 +2050,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     }
                     return Self::fit_all_genes(
                         &worker_adata_path,
+                        obs_row_subset.clone(),
                         radius,
                         spatial_dim,
                         contact_distance,
@@ -2100,7 +2173,10 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             }
         }
 
-        let n_obs = self.adata.n_obs();
+        let n_obs = match &self.obs_row_subset {
+            Some(rows) => rows.len(),
+            None => self.adata.n_obs(),
+        };
         let total_modulators = self.regulators.len() + self.lr_pairs.len() + self.tfl_pairs.len();
         let mut x_modulators = Array2::<f64>::zeros((n_obs, total_modulators));
 
@@ -2136,7 +2212,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         Ok((x_modulators, target_expr))
     }
 
-    pub fn fit_with_cache(
+    pub fn fit_with_cache<F: FnMut(usize, usize)>(
         &mut self,
         xy: &Array2<f64>,
         clusters: &Array1<usize>,
@@ -2152,6 +2228,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         cnn: &CnnConfig,
         device: &AB::Device,
         cached_spatial: Option<&CachedSpatialData>,
+        lasso_progress: F,
     ) -> anyhow::Result<()> {
         let (x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
 
@@ -2195,6 +2272,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 self.seed_only,
                 cnn,
                 cached_spatial,
+                lasso_progress,
             );
         }
         Ok(())
@@ -2248,6 +2326,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             &cnn,
             device,
             None,
+            |_, _| {},
         )
     }
 
@@ -2262,7 +2341,11 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             gene_indices.push(idx);
         }
 
-        let slice = [SelectInfoElem::full(), SelectInfoElem::Index(gene_indices)];
+        let row_sel = match &self.obs_row_subset {
+            Some(indices) => SelectInfoElem::Index(indices.to_vec()),
+            None => SelectInfoElem::full(),
+        };
+        let slice = [row_sel, SelectInfoElem::Index(gene_indices)];
 
         read_expression_matrix_dense_f64(&self.adata, &self.layer, &slice)
     }

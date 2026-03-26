@@ -11,6 +11,8 @@
 layer           = "imputed_count"
 # obs column holding integer cluster labels
 cluster_annot   = "cell_type_int"
+# Optional: split training by this obs column (e.g. treatment, batch).
+# condition      = "batch"
 
 [spatial]
 # Radius for spatial neighbor detection

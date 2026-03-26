@@ -3,7 +3,7 @@ use crate::training_hud::TrainingHud;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEMO_LATENCY_SCALE: u64 = 25;
 
@@ -124,6 +124,7 @@ fn demo_worker(
         let Some((idx, gene)) = job else {
             break;
         };
+        let job_start = Instant::now();
 
         {
             let st = hud.lock().unwrap_or_else(|e| e.into_inner());
@@ -136,6 +137,7 @@ fn demo_worker(
         if matches!(outcome, DemoOutcome::Skip) {
             thread::sleep(demo_delay_ms(50));
             if let Ok(mut g) = hud.lock() {
+                g.record_gene_time(&gene, job_start.elapsed().as_secs_f64());
                 g.genes_skipped = g.genes_skipped.saturating_add(1);
                 g.genes_rounds = g.genes_rounds.saturating_add(1);
             }
@@ -154,14 +156,28 @@ fn demo_worker(
         }
 
         let n_mods = 12 + (gene_hash(&gene) % 140) as usize;
+        let lasso_base_ms = 180 + (gene_hash(&gene) % 160) as u64;
+        let n_ct = hud.lock().map(|g| g.n_clusters.max(1)).unwrap_or(8);
         {
             let mut g = hud.lock().unwrap_or_else(|e| e.into_inner());
             g.set_gene_status(&gene, format!("lasso | {n_mods} mods"));
+            g.set_gene_lasso_cluster_progress(&gene, 0, n_ct);
         }
-        thread::sleep(demo_delay_ms(180 + (gene_hash(&gene) % 160) as u64));
+        let per_step_ms = (lasso_base_ms / n_ct as u64).max(5);
+        for d in 1..=n_ct {
+            thread::sleep(demo_delay_ms(per_step_ms));
+            if hud.lock().map(|g| g.should_cancel()).unwrap_or(true) {
+                let _ = hud.lock().map(|mut g| g.remove_gene(&gene));
+                return;
+            }
+            if let Ok(mut g) = hud.lock() {
+                g.set_gene_lasso_cluster_progress(&gene, d, n_ct);
+            }
+        }
 
         if matches!(outcome, DemoOutcome::Orphan) {
             if let Ok(mut g) = hud.lock() {
+                g.record_gene_time(&gene, job_start.elapsed().as_secs_f64());
                 g.genes_orphan = g.genes_orphan.saturating_add(1);
                 g.remove_gene(&gene);
                 g.genes_rounds = g.genes_rounds.saturating_add(1);
@@ -172,6 +188,7 @@ fn demo_worker(
         if matches!(outcome, DemoOutcome::Fail) {
             thread::sleep(demo_delay_ms(55));
             if let Ok(mut g) = hud.lock() {
+                g.record_gene_time(&gene, job_start.elapsed().as_secs_f64());
                 g.genes_failed = g.genes_failed.saturating_add(1);
                 g.remove_gene(&gene);
                 g.genes_rounds = g.genes_rounds.saturating_add(1);
@@ -217,6 +234,7 @@ fn demo_worker(
             .unwrap_or(8);
         let summaries = fake_summaries(&gene, n_clusters, run_full_cnn);
         if let Ok(mut g) = hud.lock() {
+            g.record_gene_time(&gene, job_start.elapsed().as_secs_f64());
             g.genes_done = g.genes_done.saturating_add(1);
             g.genes_rounds = g.genes_rounds.saturating_add(1);
             g.record_gene_export_mode(run_full_cnn);
@@ -266,6 +284,8 @@ pub fn run_demo_training(
         g.genes_exported_seed_only = 0;
         g.genes_exported_cnn = 0;
         g.active_genes.clear();
+        g.gene_lasso_cluster_progress.clear();
+        g.gene_train_times.clear();
         g.gene_r2_mean.clear();
         g.perf_stats_generation = 0;
         g.finished = None;

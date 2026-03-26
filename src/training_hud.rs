@@ -28,6 +28,7 @@ pub struct RunConfigSummary {
     pub epochs_per_gene: usize,
     pub gene_selection: String,
     pub cnn_training_mode: String,
+    pub condition_split: String,
 }
 
 impl RunConfigSummary {
@@ -38,6 +39,7 @@ impl RunConfigSummary {
         cfg: &SpaceshipConfig,
         max_genes: Option<usize>,
         gene_filter: Option<&[String]>,
+        condition_split: Option<&str>,
     ) -> Self {
         let config_source = config_path
             .map(|p| p.display().to_string())
@@ -96,6 +98,7 @@ impl RunConfigSummary {
             epochs_per_gene: cfg.training.epochs,
             gene_selection,
             cnn_training_mode,
+            condition_split: condition_split.unwrap_or("—").to_string(),
         }
     }
 }
@@ -117,6 +120,8 @@ pub struct TrainingHudState {
     pub genes_orphan: usize,
     pub genes_rounds: usize,
     pub active_genes: HashMap<String, String>,
+    /// Per-gene LASSO progress: clusters (cell types) completed / total, for TUI only.
+    pub gene_lasso_cluster_progress: HashMap<String, (usize, usize)>,
     pub n_cells: usize,
     pub n_clusters: usize,
     pub cell_type_counts: Vec<(String, usize)>,
@@ -129,6 +134,10 @@ pub struct TrainingHudState {
     pub activity_log: VecDeque<String>,
     pub show_pipeline_timing: bool,
     pub gene_train_times: VecDeque<(String, f64)>,
+    /// Human-readable obs value for the subset currently training (`--condition` mode).
+    pub current_condition_value: Option<String>,
+    /// `(1-based index, total splits)` for the active subset.
+    pub condition_split_progress: Option<(usize, usize)>,
 }
 
 impl TrainingHudState {
@@ -157,6 +166,7 @@ impl TrainingHudState {
             genes_orphan: 0,
             genes_rounds: 0,
             active_genes: HashMap::new(),
+            gene_lasso_cluster_progress: HashMap::new(),
             n_cells: 0,
             n_clusters: 0,
             cell_type_counts: Vec::new(),
@@ -168,6 +178,8 @@ impl TrainingHudState {
             activity_log: VecDeque::new(),
             show_pipeline_timing: false,
             gene_train_times: VecDeque::new(),
+            current_condition_value: None,
+            condition_split_progress: None,
         }
     }
 
@@ -177,6 +189,44 @@ impl TrainingHudState {
             self.activity_log.pop_front();
         }
         self.activity_log.push_back(line);
+    }
+
+    pub fn reset_for_new_split(
+        &mut self,
+        dataset_path: String,
+        output_dir: String,
+        condition_split: Option<(String, usize, usize)>,
+    ) {
+        self.dataset_path = dataset_path;
+        self.output_dir = output_dir;
+        match condition_split {
+            Some((label, idx, total)) => {
+                self.current_condition_value = Some(label);
+                self.condition_split_progress = Some((idx, total));
+            }
+            None => {
+                self.current_condition_value = None;
+                self.condition_split_progress = None;
+            }
+        }
+        self.genes_exported_seed_only = 0;
+        self.genes_exported_cnn = 0;
+        self.total_genes = 0;
+        self.genes_done = 0;
+        self.genes_skipped = 0;
+        self.genes_failed = 0;
+        self.genes_orphan = 0;
+        self.genes_rounds = 0;
+        self.active_genes.clear();
+        self.gene_lasso_cluster_progress.clear();
+        self.n_cells = 0;
+        self.n_clusters = 0;
+        self.cell_type_counts.clear();
+        self.started = Instant::now();
+        self.finished = None;
+        self.gene_r2_mean.clear();
+        self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
+        self.gene_train_times.clear();
     }
 
     pub fn record_gene_time(&mut self, gene: &str, secs: f64) {
@@ -210,8 +260,28 @@ impl TrainingHudState {
             .insert(gene.to_string(), status.to_string());
     }
 
+    pub fn set_gene_lasso_cluster_progress(&mut self, gene: &str, done: usize, total: usize) {
+        if total == 0 {
+            self.gene_lasso_cluster_progress.remove(gene);
+            return;
+        }
+        match self.gene_lasso_cluster_progress.get_mut(gene) {
+            Some(v) if v.0 == done && v.1 == total => {}
+            Some(v) => *v = (done, total),
+            None => {
+                self.gene_lasso_cluster_progress
+                    .insert(gene.to_string(), (done, total));
+            }
+        }
+    }
+
+    pub fn clear_gene_lasso_cluster_progress(&mut self, gene: &str) {
+        self.gene_lasso_cluster_progress.remove(gene);
+    }
+
     pub fn remove_gene(&mut self, gene: &str) {
         self.active_genes.remove(gene);
+        self.gene_lasso_cluster_progress.remove(gene);
     }
 
     pub fn should_cancel(&self) -> bool {
@@ -222,16 +292,42 @@ impl TrainingHudState {
         self.started.elapsed().as_secs_f64()
     }
 
+    pub fn mean_completed_gene_secs(&self) -> Option<f64> {
+        let n = self.gene_train_times.len();
+        if n == 0 {
+            return None;
+        }
+        let sum: f64 = self.gene_train_times.iter().map(|(_, t)| *t).sum();
+        let m = sum / n as f64;
+        if m.is_finite() && m > 0.0 {
+            Some(m)
+        } else {
+            None
+        }
+    }
+
     pub fn eta_secs(&self) -> Option<f64> {
         if self.total_genes == 0 {
             return None;
         }
         let remaining = self.total_genes.saturating_sub(self.genes_rounds);
-        let rate = (self.genes_rounds as f64) / self.elapsed_secs().max(0.001);
-        if rate <= f64::EPSILON || remaining == 0 {
-            return None;
+        if remaining == 0 {
+            return Some(0.0);
         }
-        Some(remaining as f64 / rate)
+        if let Some(avg) = self.mean_completed_gene_secs() {
+            let eta = avg * remaining as f64;
+            if eta.is_finite() && eta >= 0.0 {
+                return Some(eta);
+            }
+        }
+        let elapsed = self.elapsed_secs().max(0.001);
+        if self.genes_rounds > 0 {
+            let rate = self.genes_rounds as f64 / elapsed;
+            if rate > f64::EPSILON {
+                return Some(remaining as f64 / rate);
+            }
+        }
+        None
     }
 }
 

@@ -9,6 +9,7 @@ use compute_backend::{
 use space_trav_lr_rust::config::{
     default_output_dir_for_adata_path, expand_user_path, CnnTrainingMode, SpaceshipConfig,
 };
+use space_trav_lr_rust::condition_split::prepare_condition_splits;
 use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
@@ -18,10 +19,11 @@ use space_trav_lr_rust::training_demo::run_demo_training;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(feature = "tui")]
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "tui")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 #[cfg(feature = "tui")]
 use std::thread;
 
@@ -157,6 +159,13 @@ struct Cli {
         help = "Output for *_betadata.feather (default: cwd/{adata_stem}_YYYY-MM-DD when unset in config)"
     )]
     output_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "OBS_COLUMN",
+        help = "Optional obs column to split training by condition (one run per distinct value; *_betadata.feather under <output_dir>/conditions/<group>/, see condition_label.txt)"
+    )]
+    condition: Option<String>,
 
     #[arg(long, value_name = "F", help = "L1 regularization (lasso)")]
     l1_reg: Option<f64>,
@@ -428,6 +437,7 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         &cfg,
         Some(demo_total),
         gene_filter.as_deref(),
+        None,
     );
 
     let full_cnn = cfg.full_cnn();
@@ -492,6 +502,12 @@ fn main() -> anyhow::Result<()> {
 
     let max_genes = cli.max_genes;
     let gene_filter = parse_gene_filter(&cli);
+    let condition_column = cli
+        .condition
+        .clone()
+        .or_else(|| cfg.data.condition.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
     let compute = select_compute_backend();
@@ -572,73 +588,69 @@ fn main() -> anyhow::Result<()> {
         &cfg,
         max_genes,
         gene_filter.as_deref(),
+        condition_column.as_deref(),
     );
 
     if !use_dashboard {
         print_compute_notice(&compute);
         print_plain_preamble(&run_summary, &cfg, &path, &output_dir, mode_label, n_parallel);
-        let params = FitAllGenesParams {
-            path: &path,
-            radius: cfg.spatial.radius,
-            spatial_dim: cfg.spatial.spatial_dim,
-            contact_distance: cfg.spatial.contact_distance,
-            tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
-            max_lr_pairs: cfg.grn.max_lr_pairs,
-            top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
-            use_tf_modulators: cfg.grn.use_tf_modulators,
-            use_lr_modulators: cfg.grn.use_lr_modulators,
-            use_tfl_modulators: cfg.grn.use_tfl_modulators,
-            layer: &cfg.data.layer,
-            cluster_annot: &cfg.data.cluster_annot,
-            cnn: &cfg.cnn,
-            epochs,
-            learning_rate: cfg.training.learning_rate,
-            score_threshold: cfg.training.score_threshold,
-            l1_reg: cfg.lasso.l1_reg,
-            group_reg: cfg.lasso.group_reg,
-            n_iter: cfg.lasso.n_iter,
-            tol: cfg.lasso.tol,
-            cnn_training_mode: cfg.resolved_cnn_mode(),
-            hybrid_pass2_full_cnn: false,
-            hybrid_gating: &cfg.training.hybrid,
-            min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
-            gene_filter: gene_filter.clone(),
-            max_genes,
-            n_parallel,
-            output_dir: &output_dir,
-            model_export: &cfg.model_export,
-            hud: None,
-            network_data_dir: network_data_dir.clone(),
-            tf_priors_feather: tf_priors_feather.clone(),
-            write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
-        };
-        fit_all_genes_dispatch(&params, &compute)?;
-        println!("Finished.");
-        return Ok(());
-    }
-
-    #[cfg(feature = "tui")]
-    {
-        print_compute_notice(&compute);
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        let hud = Arc::new(Mutex::new(TrainingHudState::new(
-            path.clone(),
-            output_dir.clone(),
-            run_summary,
-            full_cnn,
-            epochs,
-            n_parallel,
-            cancel.clone(),
-        )));
-
-        let hud_worker = hud.clone();
-        let compute_thread = compute.clone();
-        let network_data_dir_thread = network_data_dir.clone();
-
-        let handle = thread::spawn(move || {
+        if let Some(condition_col) = condition_column.as_deref() {
+            let splits = prepare_condition_splits(&path, &output_dir, condition_col)?;
+            println!(
+                "Condition split: obs.{:?} -> {} groups (betadata under {}/conditions/<group>/)",
+                condition_col,
+                splits.len(),
+                output_dir.trim_end_matches('/')
+            );
+            for split in splits {
+                let split_output_dir = split.output_dir.display().to_string();
+                let obs_subset = Arc::from(split.obs_indices.into_boxed_slice());
+                println!(
+                    "Running split '{}' ({} cells) -> {}",
+                    split.label, split.n_obs, split_output_dir
+                );
+                let params = FitAllGenesParams {
+                    path: &path,
+                    obs_row_subset: Some(obs_subset),
+                    radius: cfg.spatial.radius,
+                    spatial_dim: cfg.spatial.spatial_dim,
+                    contact_distance: cfg.spatial.contact_distance,
+                    tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
+                    max_lr_pairs: cfg.grn.max_lr_pairs,
+                    top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                    use_tf_modulators: cfg.grn.use_tf_modulators,
+                    use_lr_modulators: cfg.grn.use_lr_modulators,
+                    use_tfl_modulators: cfg.grn.use_tfl_modulators,
+                    layer: &cfg.data.layer,
+                    cluster_annot: &cfg.data.cluster_annot,
+                    cnn: &cfg.cnn,
+                    epochs,
+                    learning_rate: cfg.training.learning_rate,
+                    score_threshold: cfg.training.score_threshold,
+                    l1_reg: cfg.lasso.l1_reg,
+                    group_reg: cfg.lasso.group_reg,
+                    n_iter: cfg.lasso.n_iter,
+                    tol: cfg.lasso.tol,
+                    cnn_training_mode: cfg.resolved_cnn_mode(),
+                    hybrid_pass2_full_cnn: false,
+                    hybrid_gating: &cfg.training.hybrid,
+                    min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
+                    gene_filter: gene_filter.clone(),
+                    max_genes,
+                    n_parallel,
+                    output_dir: &split_output_dir,
+                    model_export: &cfg.model_export,
+                    hud: None,
+                    network_data_dir: network_data_dir.clone(),
+                    tf_priors_feather: tf_priors_feather.clone(),
+                    write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                };
+                fit_all_genes_dispatch(&params, &compute)?;
+            }
+        } else {
             let params = FitAllGenesParams {
                 path: &path,
+                obs_row_subset: None,
                 radius: cfg.spatial.radius,
                 spatial_dim: cfg.spatial.spatial_dim,
                 contact_distance: cfg.spatial.contact_distance,
@@ -662,17 +674,138 @@ fn main() -> anyhow::Result<()> {
                 hybrid_pass2_full_cnn: false,
                 hybrid_gating: &cfg.training.hybrid,
                 min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
-                gene_filter,
+                gene_filter: gene_filter.clone(),
                 max_genes,
                 n_parallel,
                 output_dir: &output_dir,
                 model_export: &cfg.model_export,
-                hud: Some(hud_worker),
-                network_data_dir: network_data_dir_thread,
+                hud: None,
+                network_data_dir: network_data_dir.clone(),
                 tf_priors_feather: tf_priors_feather.clone(),
                 write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
             };
-            fit_all_genes_dispatch(&params, &compute_thread)
+            fit_all_genes_dispatch(&params, &compute)?;
+        }
+        println!("Finished.");
+        return Ok(());
+    }
+
+    #[cfg(feature = "tui")]
+    {
+        print_compute_notice(&compute);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let hud = Arc::new(Mutex::new(TrainingHudState::new(
+            path.clone(),
+            output_dir.clone(),
+            run_summary,
+            full_cnn,
+            epochs,
+            n_parallel,
+            cancel.clone(),
+        )));
+
+        let hud_worker = hud.clone();
+        let compute_thread = compute.clone();
+        let network_data_dir_thread = network_data_dir.clone();
+        let condition_column_thread = condition_column.clone();
+
+        let handle = thread::spawn(move || {
+            if let Some(condition_col) = condition_column_thread {
+                let splits = prepare_condition_splits(&path, &output_dir, &condition_col)?;
+                let n_splits = splits.len();
+                for (si, split) in splits.into_iter().enumerate() {
+                    let split_output_dir = split.output_dir.display().to_string();
+                    let obs_subset = Arc::from(split.obs_indices.into_boxed_slice());
+                    if let Ok(mut state) = hud_worker.lock() {
+                        state.reset_for_new_split(
+                            path.clone(),
+                            split_output_dir.clone(),
+                            Some((split.label.clone(), si + 1, n_splits)),
+                        );
+                        state.push_activity(format!(
+                            "[condition] {} ({} cells) -> {}",
+                            split.label, split.n_obs, split_output_dir
+                        ));
+                    }
+                    let params = FitAllGenesParams {
+                        path: &path,
+                        obs_row_subset: Some(obs_subset),
+                        radius: cfg.spatial.radius,
+                        spatial_dim: cfg.spatial.spatial_dim,
+                        contact_distance: cfg.spatial.contact_distance,
+                        tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
+                        max_lr_pairs: cfg.grn.max_lr_pairs,
+                        top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                        use_tf_modulators: cfg.grn.use_tf_modulators,
+                        use_lr_modulators: cfg.grn.use_lr_modulators,
+                        use_tfl_modulators: cfg.grn.use_tfl_modulators,
+                        layer: &cfg.data.layer,
+                        cluster_annot: &cfg.data.cluster_annot,
+                        cnn: &cfg.cnn,
+                        epochs,
+                        learning_rate: cfg.training.learning_rate,
+                        score_threshold: cfg.training.score_threshold,
+                        l1_reg: cfg.lasso.l1_reg,
+                        group_reg: cfg.lasso.group_reg,
+                        n_iter: cfg.lasso.n_iter,
+                        tol: cfg.lasso.tol,
+                        cnn_training_mode: cfg.resolved_cnn_mode(),
+                        hybrid_pass2_full_cnn: false,
+                        hybrid_gating: &cfg.training.hybrid,
+                        min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
+                        gene_filter: gene_filter.clone(),
+                        max_genes,
+                        n_parallel,
+                        output_dir: &split_output_dir,
+                        model_export: &cfg.model_export,
+                        hud: Some(hud_worker.clone()),
+                        network_data_dir: network_data_dir_thread.clone(),
+                        tf_priors_feather: tf_priors_feather.clone(),
+                        write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                    };
+                    fit_all_genes_dispatch(&params, &compute_thread)?;
+                }
+                Ok(())
+            } else {
+                let params = FitAllGenesParams {
+                    path: &path,
+                    obs_row_subset: None,
+                    radius: cfg.spatial.radius,
+                    spatial_dim: cfg.spatial.spatial_dim,
+                    contact_distance: cfg.spatial.contact_distance,
+                    tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
+                    max_lr_pairs: cfg.grn.max_lr_pairs,
+                    top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                    use_tf_modulators: cfg.grn.use_tf_modulators,
+                    use_lr_modulators: cfg.grn.use_lr_modulators,
+                    use_tfl_modulators: cfg.grn.use_tfl_modulators,
+                    layer: &cfg.data.layer,
+                    cluster_annot: &cfg.data.cluster_annot,
+                    cnn: &cfg.cnn,
+                    epochs,
+                    learning_rate: cfg.training.learning_rate,
+                    score_threshold: cfg.training.score_threshold,
+                    l1_reg: cfg.lasso.l1_reg,
+                    group_reg: cfg.lasso.group_reg,
+                    n_iter: cfg.lasso.n_iter,
+                    tol: cfg.lasso.tol,
+                    cnn_training_mode: cfg.resolved_cnn_mode(),
+                    hybrid_pass2_full_cnn: false,
+                    hybrid_gating: &cfg.training.hybrid,
+                    min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
+                    gene_filter,
+                    max_genes,
+                    n_parallel,
+                    output_dir: &output_dir,
+                    model_export: &cfg.model_export,
+                    hud: Some(hud_worker),
+                    network_data_dir: network_data_dir_thread,
+                    tf_priors_feather: tf_priors_feather.clone(),
+                    write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
+                };
+                fit_all_genes_dispatch(&params, &compute_thread)
+            }
         });
 
         match run_training_dashboard(hud.clone())? {

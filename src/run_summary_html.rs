@@ -27,9 +27,8 @@ fn fmt_usize(n: usize) -> String {
     out.chars().rev().collect()
 }
 
-fn count_betadata_files(output_dir: &Path, pattern: &str) -> anyhow::Result<usize> {
-    let pat = Pattern::new(pattern).with_context(|| format!("invalid glob: {pattern}"))?;
-    let rd = match std::fs::read_dir(output_dir) {
+fn count_betadata_files_in_dir(dir: &Path, pat: &Pattern) -> anyhow::Result<usize> {
+    let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return Ok(0),
     };
@@ -42,6 +41,21 @@ fn count_betadata_files(output_dir: &Path, pattern: &str) -> anyhow::Result<usiz
         if let Some(name) = e.file_name().to_str() {
             if pat.matches(name) {
                 n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+fn count_betadata_files(output_dir: &Path, pattern: &str) -> anyhow::Result<usize> {
+    let pat = Pattern::new(pattern).with_context(|| format!("invalid glob: {pattern}"))?;
+    let mut n = count_betadata_files_in_dir(output_dir, &pat)?;
+    let cond_root = output_dir.join(crate::condition_split::CONDITION_RUNS_SUBDIR);
+    if cond_root.is_dir() {
+        for e in std::fs::read_dir(&cond_root)? {
+            let e = e?;
+            if e.file_type()?.is_dir() {
+                n += count_betadata_files_in_dir(&e.path(), &pat)?;
             }
         }
     }

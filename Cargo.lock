@@ -6160,6 +6160,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "toml",
+ "unicode-width 0.2.0",
  "wgpu",
 ]
 

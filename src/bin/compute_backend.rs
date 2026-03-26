@@ -76,6 +76,7 @@ pub(crate) fn compute_hardware_details(choice: &ComputeChoice) -> String {
 
 pub(crate) struct FitAllGenesParams<'a> {
     pub path: &'a str,
+    pub obs_row_subset: Option<std::sync::Arc<[usize]>>,
     pub radius: f64,
     pub spatial_dim: usize,
     pub contact_distance: f64,
@@ -118,6 +119,7 @@ pub(crate) fn fit_all_genes_dispatch(
         ComputeChoice::Wgpu(device) => {
             SpatialCellularProgramsEstimator::<Autodiff<Wgpu>, anndata_hdf5::H5>::fit_all_genes(
                 p.path,
+                p.obs_row_subset.clone(),
                 p.radius,
                 p.spatial_dim,
                 p.contact_distance,
@@ -158,6 +160,7 @@ pub(crate) fn fit_all_genes_dispatch(
             anndata_hdf5::H5,
         >::fit_all_genes(
             p.path,
+            p.obs_row_subset.clone(),
             p.radius,
             p.spatial_dim,
             p.contact_distance,

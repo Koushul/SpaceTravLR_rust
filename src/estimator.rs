@@ -84,7 +84,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         }
     }
 
-    pub fn fit(
+    pub fn fit<F: FnMut(usize, usize)>(
         &mut self,
         x: &Array2<f64>,
         y: &Array1<f64>,
@@ -97,9 +97,13 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         seed_only: bool,
         cnn: &CnnConfig,
         cached_spatial: Option<&CachedSpatialData>,
+        mut lasso_progress: F,
     ) {
         let n_samples = x.nrows();
-        let unique_clusters: Vec<usize> = (0..num_clusters).collect();
+        let to_fit: Vec<usize> = (0..num_clusters)
+            .filter(|&c_id| (0..n_samples).any(|i| clusters[i] == c_id))
+            .collect();
+        let n_celltypes = to_fit.len();
 
         let owned_sf;
         let owned_sm;
@@ -117,10 +121,14 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         self.cluster_training_summaries.clear();
         let mut training_summaries: Vec<ClusterTrainingSummary> = Vec::new();
 
-        let fitted_results: Vec<(usize, CellularNicheNetwork<B>, f64, Array2<f64>, f64)> =
-            unique_clusters
-                .into_iter()
-                .filter_map(|c_id| {
+        lasso_progress(0, n_celltypes);
+        let mut fitted_results: Vec<(usize, CellularNicheNetwork<B>, f64, Array2<f64>, f64)> =
+            Vec::new();
+        let mut done_lasso = 0usize;
+
+        for &c_id in &to_fit {
+            let fitted_one: Option<(usize, CellularNicheNetwork<B>, f64, Array2<f64>, f64)> =
+                (|| {
                     let indices: Vec<usize> =
                         (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
                     if indices.is_empty() {
@@ -287,8 +295,13 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     });
 
                     Some((c_id, model, r2, lasso_coef, intercept))
-                })
-                .collect();
+                })();
+            if let Some(t) = fitted_one {
+                fitted_results.push(t);
+            }
+            done_lasso += 1;
+            lasso_progress(done_lasso, n_celltypes);
+        }
 
         self.cluster_training_summaries = training_summaries;
 

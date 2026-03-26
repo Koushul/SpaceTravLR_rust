@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use wgpu::{Backends, Instance};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -158,19 +159,56 @@ fn brighten(c: Color, amt: u8) -> Color {
     }
 }
 
-// ── Workers: multi-column ─────────────────────────────────────────────────────
-const GENE_PAD: usize = 16;
-const STAT_PAD: usize = 26;
-const ENTRY_W: usize = 2 + GENE_PAD + 5 + STAT_PAD;
+// ── Workers: multi-column (display-width–fixed cells so │ stays aligned) ─────
+const GENE_DISP: usize = 16;
+const STAT_DISP: usize = 38;
 
-fn workers_in_columns(active: &[(&String, &String)], content_w: usize) -> Vec<ListItem<'static>> {
+fn pad_or_trunc_display(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let w = s.width();
+    if w <= width {
+        let pad = width - w;
+        return format!("{}{}", s, " ".repeat(pad));
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    let el = '…';
+    let el_w = el.width().unwrap_or(1);
+    let budget = width.saturating_sub(el_w);
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push(el);
+    let rem = width.saturating_sub(out.width());
+    if rem > 0 {
+        out.push_str(&" ".repeat(rem));
+    }
+    out
+}
+
+fn workers_in_columns(
+    active: &[(&String, &String)],
+    content_w: usize,
+    lasso_ct: &std::collections::HashMap<String, (usize, usize)>,
+) -> Vec<ListItem<'static>> {
     if active.is_empty() {
         return vec![ListItem::new(Line::from(Span::styled(
             "  ·  idle  ·",
             Style::default().fg(MUTED),
         )))];
     }
-    let n_cols = ((content_w + 3) / (ENTRY_W + 3)).max(1);
+    let prefix_w = "✿ ".width();
+    let mid_w = "  ·  ".width();
+    let sep_w = " │ ".width();
+    let entry_w = prefix_w + GENE_DISP + mid_w + STAT_DISP;
+    let n_cols = ((content_w + sep_w) / (entry_w + sep_w)).max(1);
     active
         .chunks(n_cols)
         .map(|chunk| {
@@ -190,14 +228,24 @@ fn workers_in_columns(active: &[(&String, &String)], content_w: usize) -> Vec<Li
                 } else {
                     LILAC
                 };
+                let status_line: String =
+                    if let Some(&(done, total)) = lasso_ct.get(gene.as_str()) {
+                        if total > 0 {
+                            format!("{} · {}/{}", status, done, total)
+                        } else {
+                            (*status).clone()
+                        }
+                    } else {
+                        (*status).clone()
+                    };
                 spans.push(Span::styled("✿ ", Style::default().fg(LABEL)));
                 spans.push(Span::styled(
-                    format!("{:<w$}", gene, w = GENE_PAD),
+                    pad_or_trunc_display(gene.as_str(), GENE_DISP),
                     Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled("  ·  ", Style::default().fg(MUTED)));
                 spans.push(Span::styled(
-                    format!("{:<w$}", status, w = STAT_PAD),
+                    pad_or_trunc_display(&status_line, STAT_DISP),
                     Style::default().fg(pc),
                 ));
             }
@@ -243,6 +291,33 @@ fn format_t(secs: f64) -> String {
         format!("T+{}m{:02}s", s / 60, s % 60)
     } else {
         format!("T+{}s", s)
+    }
+}
+
+fn format_duration_human(secs: f64) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return "—".to_string();
+    }
+    let s = secs.round().max(1.0) as u64;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        let m = s / 60;
+        let r = s % 60;
+        if r == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {r}s")
+        }
+    } else {
+        let h = s / 3600;
+        let rem = s % 3600;
+        let m = rem / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
     }
 }
 
@@ -704,6 +779,19 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         ))],
     ));
 
+    const ETA_RATE_REFRESH: Duration = Duration::from_secs(3);
+    let eta_rate_cache: RefCell<(Instant, usize, usize, usize, String, String)> = RefCell::new((
+        Instant::now() - Duration::from_secs(3600),
+        0usize,
+        0usize,
+        0usize,
+        "—".to_string(),
+        "—".to_string(),
+    ));
+
+    let mut prev_genes_rounds_heartbeat = 0usize;
+    let mut heart_beat_until: Option<Instant> = None;
+
     loop {
         if last_sys.elapsed() > HARDWARE_POLL_INTERVAL {
             sys.refresh_cpu_all();
@@ -742,6 +830,18 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
         let done = hud.lock().map(|g| g.finished.is_some()).unwrap_or(true);
         let frame = (t0.elapsed().as_millis() / 200) as usize;
+
+        let now_heartbeat = Instant::now();
+        if let Ok(st) = hud.lock() {
+            let rounds = st.genes_rounds;
+            if rounds > prev_genes_rounds_heartbeat {
+                heart_beat_until = Some(now_heartbeat + Duration::from_millis(220));
+                prev_genes_rounds_heartbeat = rounds;
+            } else if rounds < prev_genes_rounds_heartbeat {
+                prev_genes_rounds_heartbeat = rounds;
+            }
+        }
+        let heart_peak = heart_beat_until.is_some_and(|deadline| now_heartbeat < deadline);
 
         terminal.draw(|f| {
             let area = f.area();
@@ -859,21 +959,39 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let act_w = left[1].width.saturating_sub(2) as usize;
                 let mut act_lines: Vec<Line> = Vec::new();
 
-                let eta = st
-                    .eta_secs()
-                    .map(|s| format!("{:.0}s", s))
-                    .unwrap_or_else(|| "—".into());
-                let gpm = if elapsed > 1.0 {
-                    format!("{:.2}/min", (st.genes_rounds as f64) * 60.0 / elapsed)
-                } else {
-                    "—".into()
-                };
+                let now_er = Instant::now();
+                let mut erc = eta_rate_cache.borrow_mut();
+                let n_times = st.gene_train_times.len();
+                let rounds = st.genes_rounds;
+                let total_g = st.total_genes;
+                let refresh = now_er.duration_since(erc.0) >= ETA_RATE_REFRESH
+                    || n_times != erc.1
+                    || rounds != erc.2
+                    || total_g != erc.3;
+                if refresh {
+                    erc.4 = match st.eta_secs() {
+                        Some(s) if s <= 0.0 => "0s".to_string(),
+                        Some(s) => format_duration_human(s),
+                        None => "—".to_string(),
+                    };
+                    erc.5 = match st.mean_completed_gene_secs() {
+                        Some(avg) => format!("{:.1}s/gene", avg),
+                        None => "—".to_string(),
+                    };
+                    erc.0 = now_er;
+                    erc.1 = n_times;
+                    erc.2 = rounds;
+                    erc.3 = total_g;
+                }
+                let eta = erc.4.clone();
+                let rate = erc.5.clone();
+
                 act_lines.push(Line::from(vec![
                     Span::styled("ETA ", Style::default().fg(LABEL)),
                     Span::styled(eta, Style::default().fg(VALUE)),
                     Span::styled("  ·  ", Style::default().fg(MUTED)),
                     Span::styled("RATE ", Style::default().fg(LABEL)),
-                    Span::styled(gpm, Style::default().fg(SKY)),
+                    Span::styled(rate, Style::default().fg(SKY)),
                 ]));
 
                 for entry in st.activity_log.iter() {
@@ -978,6 +1096,24 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("TRAIN_MODE  "),
                         val(rc.cnn_training_mode.clone(), SKY),
                     ]),
+                    Line::from(vec![
+                        lbl("CONDITION  "),
+                        val(
+                            if rc.condition_split == "—" {
+                                "—  ·  single run".to_string()
+                            } else {
+                                format!(
+                                    "obs.{}  ·  multi-run (--condition)",
+                                    rc.condition_split
+                                )
+                            },
+                            if rc.condition_split == "—" {
+                                MUTED
+                            } else {
+                                LILAC
+                            },
+                        ),
+                    ]),
                 ])
                 .block(
                     Block::default()
@@ -1002,57 +1138,71 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             } else {
                 st.output_dir.clone()
             };
+            let mut mission_lines = vec![Line::from(vec![lbl("SRC  "), val(path_s, MUTED)])];
+            if rc.condition_split != "—" {
+                let active = match (
+                    st.current_condition_value.as_deref(),
+                    st.condition_split_progress,
+                ) {
+                    (Some(v), Some((i, n))) => format!("{v}  ·  {i}/{n}"),
+                    (Some(v), None) => v.to_string(),
+                    (None, Some((i, n))) => format!("…  ·  {i}/{n}"),
+                    (None, None) => "preparing splits…".to_string(),
+                };
+                mission_lines.push(Line::from(vec![
+                    lbl("ACTIVE  "),
+                    val(active, LILAC),
+                ]));
+            }
+            mission_lines.push(Line::from(vec![
+                lbl("GRID  "),
+                val(
+                    format!("{} cells  ·  {} clusters", st.n_cells, st.n_clusters),
+                    VALUE,
+                ),
+                sep(),
+                lbl("WORKERS  "),
+                val(format!("{}", st.n_parallel), GRAPE),
+            ]));
+            mission_lines.push(Line::from(vec![
+                lbl("EXPORT  "),
+                val(
+                    format!(
+                        "seed-only {}  ·  CNN {}",
+                        st.genes_exported_seed_only, st.genes_exported_cnn
+                    ),
+                    VALUE,
+                ),
+            ]));
+            mission_lines.push(Line::from(vec![
+                lbl("EPOCH  "),
+                val(format!("{}/gene", st.epochs_per_gene), LILAC),
+            ]));
+            mission_lines.push(Line::from(vec![
+                lbl("CPU  "),
+                val(format!("{cpu_pct:5.1}%"), SKY),
+                sep(),
+                lbl("MEM  "),
+                val(format!("{mem_pct:5.1}%"), SKY),
+                sep(),
+                lbl("RAM  "),
+                val(
+                    format!("{}/{} MiB", used_mem / 1024 / 1024, total_mem / 1024 / 1024),
+                    MUTED,
+                ),
+            ]));
+            mission_lines.push(Line::from(vec![
+                lbl("OUT  "),
+                val(dir_s, MUTED),
+                sep(),
+                lbl("SIZE  "),
+                val(format_bytes(dir_bytes), VALUE),
+                sep(),
+                lbl("FILES  "),
+                val(format!("{}", dir_files), LILAC),
+            ]));
             f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(vec![lbl("SRC  "), val(path_s, MUTED)]),
-                    Line::from(vec![
-                        lbl("GRID  "),
-                        val(
-                            format!("{} cells  ·  {} clusters", st.n_cells, st.n_clusters),
-                            VALUE,
-                        ),
-                        sep(),
-                        lbl("WORKERS  "),
-                        val(format!("{}", st.n_parallel), GRAPE),
-                    ]),
-                    Line::from(vec![
-                        lbl("EXPORT  "),
-                        val(
-                            format!(
-                                "seed-only {}  ·  CNN {}",
-                                st.genes_exported_seed_only, st.genes_exported_cnn
-                            ),
-                            VALUE,
-                        ),
-                    ]),
-                    Line::from(vec![
-                        lbl("EPOCH  "),
-                        val(format!("{}/gene", st.epochs_per_gene), LILAC),
-                    ]),
-                    Line::from(vec![
-                        lbl("CPU  "),
-                        val(format!("{cpu_pct:5.1}%"), SKY),
-                        sep(),
-                        lbl("MEM  "),
-                        val(format!("{mem_pct:5.1}%"), SKY),
-                        sep(),
-                        lbl("RAM  "),
-                        val(
-                            format!("{}/{} MiB", used_mem / 1024 / 1024, total_mem / 1024 / 1024),
-                            MUTED,
-                        ),
-                    ]),
-                    Line::from(vec![
-                        lbl("OUT  "),
-                        val(dir_s, MUTED),
-                        sep(),
-                        lbl("SIZE  "),
-                        val(format_bytes(dir_bytes), VALUE),
-                        sep(),
-                        lbl("FILES  "),
-                        val(format!("{}", dir_files), LILAC),
-                    ]),
-                ])
+                Paragraph::new(mission_lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -1071,20 +1221,38 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             active.sort_by_key(|(g, _)| g.as_str());
             let cw = (work_row[0].width as usize).saturating_sub(2);
 
+            let (heart_glyph, heart_style) = if heart_peak {
+                (
+                    "♥",
+                    Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("♡", Style::default().fg(MUTED))
+            };
+            let rest_style = Style::default().fg(GRAPE).add_modifier(Modifier::BOLD);
+
             f.render_widget(
-                List::new(workers_in_columns(&active, cw))
+                List::new(workers_in_columns(
+                    &active,
+                    cw,
+                    &st.gene_lasso_cluster_progress,
+                ))
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(WORK_BORD))
-                            .title(Span::styled(
-                                format!(
-                                    " ✦ ACTIVE WORKERS ({}/{}) ",
-                                    st.active_genes.len(),
-                                    st.n_parallel
+                            .title(Line::from(vec![
+                                Span::styled(" ", rest_style),
+                                Span::styled(heart_glyph, heart_style),
+                                Span::styled(
+                                    format!(
+                                        " ACTIVE WORKERS ({}/{}) ",
+                                        st.active_genes.len(),
+                                        st.n_parallel
+                                    ),
+                                    rest_style,
                                 ),
-                                Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
-                            )),
+                            ])),
                     )
                     .style(bg),
                 work_row[0],
