@@ -1132,9 +1132,14 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let count_w = cell_panel_w.saturating_sub(label_w).max(1);
 
             let mut cell_lines: Vec<Line<'static>> = Vec::new();
-            if cell_counts.is_empty() {
+            if st.n_cells == 0 {
                 cell_lines.push(Line::from(Span::styled(
-                    "  ·  obs.cell_type not found  ·",
+                    "  ·  loading obs…  ·",
+                    Style::default().fg(MUTED),
+                )));
+            } else if cell_counts.is_empty() {
+                cell_lines.push(Line::from(Span::styled(
+                    "  ·  no cell-type label column  ·",
                     Style::default().fg(MUTED),
                 )));
             } else {

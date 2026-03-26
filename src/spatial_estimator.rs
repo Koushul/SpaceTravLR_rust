@@ -207,11 +207,51 @@ fn validate_training_inputs<AnB: Backend>(
     Ok(obs)
 }
 
+fn resolve_obs_cell_type_label_column(obs_df: &DataFrame) -> Option<String> {
+    let names = obs_df.get_column_names();
+    const PREFERRED: &[&str] = &["cell_type", "cell_types", "celltype", "major_cell_type"];
+    for p in PREFERRED {
+        if let Some(n) = names.iter().find(|n| n.to_string().as_str() == *p) {
+            return Some(n.to_string());
+        }
+    }
+    for n in names {
+        let s = n.to_string();
+        if s.eq_ignore_ascii_case("cell_type") {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn cell_type_label_counts_from_obs(obs_df: &DataFrame) -> Vec<(String, usize)> {
+    let Some(ct_name) = resolve_obs_cell_type_label_column(obs_df) else {
+        return Vec::new();
+    };
+    let Ok(cell_col) = obs_df.column(&ct_name) else {
+        return Vec::new();
+    };
+    let series = cell_col.as_materialized_series();
+    let mut map: HashMap<String, usize> = HashMap::new();
+    for v in series.iter() {
+        let key = v.to_string();
+        if key != "null" && !key.trim().is_empty() {
+            *map.entry(key).or_insert(0) += 1;
+        }
+    }
+    let mut v: Vec<(String, usize)> = map.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+
 fn build_cluster_to_cell_type_map(
     obs_df: &DataFrame,
     cluster_annot: &str,
 ) -> anyhow::Result<HashMap<usize, String>> {
-    let cell_col = match obs_df.column("cell_type") {
+    let Some(ct_name) = resolve_obs_cell_type_label_column(obs_df) else {
+        return Ok(HashMap::new());
+    };
+    let cell_col = match obs_df.column(&ct_name) {
         Ok(c) => c,
         Err(_) => return Ok(HashMap::new()),
     };
@@ -219,9 +259,7 @@ fn build_cluster_to_cell_type_map(
         .column(cluster_annot)?
         .as_materialized_series()
         .cast(&polars::prelude::DataType::Float64)?;
-    let cell_ser = cell_col
-        .as_materialized_series()
-        .cast(&polars::prelude::DataType::String)?;
+    let cell_ser = cell_col.as_materialized_series();
 
     let mut counts: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     for (c, ct) in clusters_ser.iter().zip(cell_ser.iter()) {
@@ -1092,26 +1130,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         );
 
         let t_cl = pipeline_step_begin(&hud, "build cluster labels & cell-type map");
-        let mut cell_type_counts: Vec<(String, usize)> = Vec::new();
-        if let Ok(cell_col) = obs_df.column("cell_type") {
-            // If `obs.cell_type` exists, summarize counts for the TUI.
-            if let Ok(cell_series) = cell_col
-                .as_materialized_series()
-                .cast(&polars::prelude::DataType::String)
-            {
-                let mut map: HashMap<String, usize> = HashMap::new();
-                for v in cell_series.iter() {
-                    // `cell_series.iter()` yields `AnyValue`, where missing values become `Null`.
-                    let key = v.to_string();
-                    if key != "null" {
-                        *map.entry(key).or_insert(0) += 1;
-                    }
-                }
-                let mut v: Vec<(String, usize)> = map.into_iter().collect();
-                v.sort_by(|a, b| b.1.cmp(&a.1));
-                cell_type_counts = v;
-            }
-        }
+        let cell_type_counts = cell_type_label_counts_from_obs(&obs_df);
         let clusters_ser = obs_df.column(cluster_annot)?;
         let clusters: Arc<Array1<usize>> = Arc::new(
             clusters_ser
@@ -1133,7 +1152,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
             log_line(
                 &hud,
-                "TF priors provided, but obs.cell_type was not found; using target-level TF priors without per-cell_type masking.".to_string(),
+                "TF priors provided, but no cell-type label column (cell_type / cell_types / celltype); using target-level TF priors without per-cell_type masking.".to_string(),
             );
         }
 
