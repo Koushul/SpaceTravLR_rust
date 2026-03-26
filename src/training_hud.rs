@@ -306,6 +306,30 @@ impl TrainingHudState {
         }
     }
 
+    pub fn parallel_rate_genes_per_sec(&self) -> Option<f64> {
+        let elapsed = self.elapsed_secs().max(0.001);
+        if self.genes_rounds > 0 {
+            let observed = self.genes_rounds as f64 / elapsed;
+            if observed.is_finite() && observed > f64::EPSILON {
+                return Some(observed);
+            }
+        }
+        if let Some(single_gene_secs) = self.mean_completed_gene_secs() {
+            let workers = self.n_parallel.max(1) as f64;
+            let estimated = workers / single_gene_secs;
+            if estimated.is_finite() && estimated > f64::EPSILON {
+                return Some(estimated);
+            }
+        }
+        None
+    }
+
+    pub fn parallel_wall_secs_per_gene(&self) -> Option<f64> {
+        self.parallel_rate_genes_per_sec()
+            .map(|rate| 1.0 / rate)
+            .filter(|secs| secs.is_finite() && *secs > 0.0)
+    }
+
     pub fn eta_secs(&self) -> Option<f64> {
         if self.total_genes == 0 {
             return None;
@@ -314,17 +338,10 @@ impl TrainingHudState {
         if remaining == 0 {
             return Some(0.0);
         }
-        if let Some(avg) = self.mean_completed_gene_secs() {
-            let eta = avg * remaining as f64;
+        if let Some(rate) = self.parallel_rate_genes_per_sec() {
+            let eta = remaining as f64 / rate;
             if eta.is_finite() && eta >= 0.0 {
                 return Some(eta);
-            }
-        }
-        let elapsed = self.elapsed_secs().max(0.001);
-        if self.genes_rounds > 0 {
-            let rate = self.genes_rounds as f64 / elapsed;
-            if rate > f64::EPSILON {
-                return Some(remaining as f64 / rate);
             }
         }
         None

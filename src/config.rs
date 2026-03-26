@@ -299,7 +299,7 @@ impl Default for TrainingConfig {
             mode: Some(CnnTrainingMode::Seed),
             epochs: 10,
             learning_rate: 1e-3,
-            score_threshold: 0.0,
+            score_threshold: 0.2,
             hybrid: HybridCnnGatingConfig::default(),
         }
     }

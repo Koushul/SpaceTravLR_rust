@@ -974,7 +974,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         Some(s) => format_duration_human(s),
                         None => "—".to_string(),
                     };
-                    erc.5 = match st.mean_completed_gene_secs() {
+                    erc.5 = match st.parallel_wall_secs_per_gene() {
                         Some(avg) => format!("{:.1}s/gene", avg),
                         None => "—".to_string(),
                     };
