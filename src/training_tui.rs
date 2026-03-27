@@ -540,17 +540,13 @@ pub fn run_dataset_paths_prompt(default_output_dir: &str) -> anyhow::Result<Opti
                     " AnnData (.h5ad) ",
                     vec![
                         Line::from(Span::styled(
-                            "No dataset path in config or CLI.",
+                            "Make sure `cell_type` is in .obs and `spatial` is in .obsm",
                             Style::default().fg(MUTED),
                         )),
                         Line::from(Span::styled(
-                            "Path to spatial .h5ad, then Enter.",
+                            "Enter path to .h5ad. Press shift+q to quit",
                             Style::default().fg(VALUE),
-                        )),
-                        Line::from(Span::styled(
-                            "Esc / Shift+Q exit · ~/ expanded",
-                            Style::default().fg(MUTED),
-                        )),
+                        ))
                     ],
                 )
             } else {
@@ -574,7 +570,7 @@ pub fn run_dataset_paths_prompt(default_output_dir: &str) -> anyhow::Result<Opti
                             Style::default().fg(VALUE),
                         )),
                         Line::from(Span::styled(
-                            "Esc / Shift+Q exit · Enter confirm",
+                            "Press shift+q to quit · Enter confirm",
                             Style::default().fg(MUTED),
                         )),
                     ],
