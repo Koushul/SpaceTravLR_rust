@@ -608,6 +608,10 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
     npz.add_array("meta_spatial_dim", &Array1::from_vec(vec![est.spatial_dim as u32]))?;
     npz.add_array("meta_n_clusters", &Array1::from_vec(vec![n_clusters_meta]))?;
     npz.add_array("meta_n_modulators", &Array1::from_vec(vec![n_mods_meta]))?;
+    npz.add_array(
+        "meta_cnn_output_activation",
+        &Array1::from_vec(vec![m0.output_activation as u32]),
+    )?;
 
     for c in cluster_ids {
         let m = est
@@ -930,6 +934,7 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub estimator: Option<ClusteredGCNNWR<AB>>,
     pub group_reg_vec: Option<Vec<f64>>,
     pub ligand_grid_factor: Option<f64>,
+    pub weighted_ligand_scale_factor: f64,
     /// When set, only these obs rows are read from the backing AnnData (read-only; no disk writes).
     pub obs_row_subset: Option<Arc<[usize]>>,
 }
@@ -953,6 +958,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         cluster_to_cell_type: Option<Arc<HashMap<usize, String>>>,
         layer: String,
         ligand_grid_factor: Option<f64>,
+        weighted_ligand_scale_factor: f64,
         obs_row_subset: Option<Arc<[usize]>>,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
@@ -1053,6 +1059,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             estimator: None,
             group_reg_vec: None,
             ligand_grid_factor,
+            weighted_ligand_scale_factor,
             obs_row_subset,
         })
     }
@@ -1091,6 +1098,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             "imputed_count".to_string(),
             None,
+            1.0,
             None,
         )
     }
@@ -1442,6 +1450,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let layer_for_workers = layer.to_string();
         let cnn_for_workers = cnn.clone();
         let ligand_grid_factor = spaceship_config.perturbation.ligand_grid_factor;
+        let weighted_ligand_scale_factor = spaceship_config.spatial.weighted_ligand_scale_factor;
 
         drop(setup_adata); // release; workers open their own handles
 
@@ -1495,6 +1504,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let max_lr_pairs = max_lr_pairs;
             let top_lr_pairs_by_mean_expression = top_lr_pairs_by_mean_expression;
             let ligand_grid_factor = ligand_grid_factor;
+            let weighted_ligand_scale_factor = weighted_ligand_scale_factor;
             let use_tf_modulators = use_tf_modulators;
             let use_lr_modulators = use_lr_modulators;
             let use_tfl_modulators = use_tfl_modulators;
@@ -1667,6 +1677,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             Some(cluster_to_cell_type.clone()),
                             layer_w.clone(),
                             ligand_grid_factor,
+                            weighted_ligand_scale_factor,
                             obs_subset.clone(),
                         )
                         .map(Box::new)
@@ -2350,9 +2361,20 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             });
             let received = match grid_factor {
                 Some(gf) if gf.is_finite() && gf > 0.0 => {
-                    calculate_weighted_ligands_grid(xy, &lig_expr, self.radius, 1.0, gf)
+                    calculate_weighted_ligands_grid(
+                        xy,
+                        &lig_expr,
+                        self.radius,
+                        self.weighted_ligand_scale_factor,
+                        gf,
+                    )
                 }
-                _ => calculate_weighted_ligands(xy, &lig_expr, self.radius, 1.0),
+                _ => calculate_weighted_ligands(
+                    xy,
+                    &lig_expr,
+                    self.radius,
+                    self.weighted_ligand_scale_factor,
+                ),
             };
             for (k, lig) in unique_lig_genes.iter().enumerate() {
                 received_map.insert(lig.clone(), received.column(k).to_owned());

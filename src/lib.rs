@@ -20,8 +20,8 @@ pub mod training_tui;
 pub use betadata::{write_betadata_feather, BetaFrame, Betabase, GeneMatrix};
 pub use cnn_gating::CnnGateDecision;
 pub use config::{
-    default_output_dir_for_adata_path, expand_user_path, CnnConfig, CnnTrainingMode,
-    HybridCnnGatingConfig, SpaceshipConfig, RUN_REPRO_TOML_FILENAME,
+    default_output_dir_for_adata_path, expand_user_path, CnnConfig, CnnOutputActivation,
+    CnnTrainingMode, HybridCnnGatingConfig, SpaceshipConfig, RUN_REPRO_TOML_FILENAME,
 };
 pub use estimator::{CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR};
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};

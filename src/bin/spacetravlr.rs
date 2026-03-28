@@ -7,8 +7,8 @@ use compute_backend::{
     select_compute_backend,
 };
 use space_trav_lr_rust::config::{
-    default_output_dir_for_adata_path, expand_user_path, CnnTrainingMode, SpaceshipConfig,
-    RUN_REPRO_TOML_FILENAME,
+    default_output_dir_for_adata_path, expand_user_path, CnnOutputActivation, CnnTrainingMode,
+    SpaceshipConfig, RUN_REPRO_TOML_FILENAME,
 };
 use space_trav_lr_rust::condition_split::prepare_condition_splits;
 use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
@@ -41,6 +41,25 @@ impl From<TrainingModeArg> for CnnTrainingMode {
             TrainingModeArg::Full => CnnTrainingMode::Full,
             TrainingModeArg::Seed => CnnTrainingMode::Seed,
             TrainingModeArg::Hybrid => CnnTrainingMode::Hybrid,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum CnnOutputActivationArg {
+    Identity,
+    Sigmoid,
+    Tanh,
+    SigmoidX2,
+}
+
+impl From<CnnOutputActivationArg> for CnnOutputActivation {
+    fn from(value: CnnOutputActivationArg) -> Self {
+        match value {
+            CnnOutputActivationArg::Identity => CnnOutputActivation::Identity,
+            CnnOutputActivationArg::Sigmoid => CnnOutputActivation::Sigmoid,
+            CnnOutputActivationArg::Tanh => CnnOutputActivation::Tanh,
+            CnnOutputActivationArg::SigmoidX2 => CnnOutputActivation::SigmoidX2,
         }
     }
 }
@@ -177,6 +196,14 @@ struct Cli {
     #[arg(long, value_name = "F", help = "Adam learning rate (CNN phase)")]
     lr: Option<f64>,
 
+    #[arg(
+        long = "cnn-output-activation",
+        value_enum,
+        value_name = "MODE",
+        help = "After final CNN head linear, before anchor scaling: identity | sigmoid | tanh | sigmoid-x2 — 2·sigmoid, range (0,2) (default: sigmoid-x2)"
+    )]
+    cnn_output_activation: Option<CnnOutputActivationArg>,
+
     #[arg(long, value_name = "N", help = "Max FISTA iterations")]
     n_iter: Option<usize>,
 
@@ -215,6 +242,13 @@ struct Cli {
         help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). Overrides local spaceship_config.toml for training hyperparameters. Use --parallel to set this machine's worker count."
     )]
     join_output_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "weighted-ligand-scale-factor",
+        value_name = "F",
+        help = "Scales Gaussian weights in received-ligand aggregation; overrides [spatial].weighted_ligand_scale_factor"
+    )]
+    weighted_ligand_scale_factor: Option<f64>,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
@@ -257,11 +291,17 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     if let Some(v) = cli.lr {
         cfg.training.learning_rate = v;
     }
+    if let Some(a) = cli.cnn_output_activation {
+        cfg.cnn.output_activation = a.into();
+    }
     if let Some(v) = cli.n_iter {
         cfg.lasso.n_iter = v;
     }
     if let Some(v) = cli.tol {
         cfg.lasso.tol = v;
+    }
+    if let Some(v) = cli.weighted_ligand_scale_factor {
+        cfg.spatial.weighted_ligand_scale_factor = v;
     }
     if let Some(p) = &cli.h5ad {
         cfg.data.adata_path = p.display().to_string();
@@ -309,6 +349,8 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             || cli.max_lr_pairs.is_some()
             || cli.training_mode.is_some()
             || cli.output_dir.is_some()
+            || cli.cnn_output_activation.is_some()
+            || cli.weighted_ligand_scale_factor.is_some()
         {
             eprintln!("Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML).");
         }
@@ -393,7 +435,10 @@ fn print_plain_preamble(
         "SpaceTravLR  |  {}  |  {} workers  |  {} epochs/gene",
         mode, n_parallel, summary.epochs_per_gene
     );
-    println!("Compute:     {}", summary.compute_backend);
+    println!(
+        "Compute:     {} — {}",
+        summary.compute_backend, summary.compute_device_detail
+    );
     println!("Config:      {}", summary.config_source);
     println!("Dataset:     {}", dataset);
     println!("Output:      {}", output_dir);
@@ -402,8 +447,11 @@ fn print_plain_preamble(
         summary.layer, summary.cluster_annot
     );
     println!(
-        "Spatial:     r={}  dim={}  contact={}",
-        summary.spatial_radius, summary.spatial_dim, summary.contact_distance
+        "Spatial:     r={}  dim={}  contact={}  weighted_ligand_scale={}",
+        summary.spatial_radius,
+        summary.spatial_dim,
+        summary.contact_distance,
+        summary.weighted_ligand_scale_factor
     );
     println!(
         "Lasso:       l1={:.3e}  group={:.3e}  n_iter={}  tol={:.1e}",
@@ -523,6 +571,7 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     let run_summary = RunConfigSummary::build(
         config_path_ref,
         "demo",
+        "— (demo; no accelerator)",
         "Demo mode — simulated genes/workers only; no AnnData load, no betadata export, no training backend.",
         &cfg,
         Some(demo_total),
@@ -695,6 +744,7 @@ fn main() -> anyhow::Result<()> {
     let run_summary = RunConfigSummary::build(
         config_path_ref,
         compute.label(),
+        &compute_hardware_details(&compute),
         &compute_notice_text(&compute),
         &cfg,
         max_genes,

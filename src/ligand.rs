@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 /// Compute the amount of ligand received by each cell.
 ///
-/// Corresponds to `compute_radius_weights_fast` in Python.
+/// Corresponds to `compute_radius_weights_fast` / `_weighted_mean` in Python: per cell,
+/// `(1/N) Σ_j scale_factor·exp(-d²/2r²)·ligand_j`. `scale_factor` scales the result linearly.
 /// Optimized for $O(N \times L)$ memory by avoiding full $N \times N$ matrix storage.
 pub fn calculate_weighted_ligands(
     xy: &Array2<f64>,
@@ -18,6 +19,10 @@ pub fn calculate_weighted_ligands(
     let inv_2r2 = -1.0 / (2.0 * radius * radius);
 
     let mut result = Array2::zeros((n_cells, n_ligands));
+    if n_cells == 0 {
+        return result;
+    }
+    let n_inv = 1.0 / n_cells as f64;
 
     result
         .axis_iter_mut(Axis(0))
@@ -26,24 +31,20 @@ pub fn calculate_weighted_ligands(
         .for_each(|(i, mut row)| {
             let xi = xy[[i, 0]];
             let yi = xy[[i, 1]];
-            let mut w_sum = 0.0_f64;
 
             for j in 0..n_cells {
                 let dx = xi - xy[[j, 0]];
                 let dy = yi - xy[[j, 1]];
                 let d2 = dx * dx + dy * dy;
                 let w = scale_factor * (d2 * inv_2r2).exp();
-                w_sum += w;
 
                 for k in 0..n_ligands {
                     row[k] += w * lig_values[[j, k]];
                 }
             }
 
-            if w_sum > 0.0 {
-                for k in 0..n_ligands {
-                    row[k] /= w_sum;
-                }
+            for k in 0..n_ligands {
+                row[k] *= n_inv;
             }
         });
 
@@ -57,6 +58,9 @@ pub fn calculate_weighted_ligands(
 /// ligands at each anchor in O(A × N), then bilinearly interpolates to each cell
 /// in O(N). Total: O(A × N × L) where A ≪ N for dense spatial data.
 ///
+/// Anchor values use the same `(1/N) Σ w·ligand` rule as the exact implementation,
+/// then values are interpolated to cell positions.
+///
 /// The error is O(h²/r²) where h = grid spacing, so `grid_factor = 0.5` gives
 /// ~3% relative error — well within the modeling uncertainty of the Gaussian
 /// kernel itself.
@@ -69,6 +73,9 @@ pub fn calculate_weighted_ligands_grid(
 ) -> Array2<f64> {
     let n_cells = xy.nrows();
     let n_ligands = lig_values.ncols();
+    if n_cells == 0 {
+        return Array2::zeros((0, n_ligands));
+    }
     let grid_spacing = radius * grid_factor;
     let inv_2r2 = -1.0 / (2.0 * radius * radius);
 
@@ -109,13 +116,12 @@ pub fn calculate_weighted_ligands_grid(
     let lig_flat = lig_values.as_slice().unwrap();
 
     let mut anchor_vals = vec![0.0f64; n_anchors * n_ligands];
-    let mut anchor_wsums = vec![0.0f64; n_anchors];
+    let n_inv = 1.0 / n_cells as f64;
 
     anchor_vals
         .par_chunks_mut(n_ligands)
-        .zip(anchor_wsums.par_iter_mut())
         .enumerate()
-        .for_each(|(a, (row, w_sum))| {
+        .for_each(|(a, row)| {
             let gx = a % nx;
             let gy = a / nx;
             let ax = x_min + gx as f64 * grid_spacing;
@@ -126,7 +132,6 @@ pub fn calculate_weighted_ligands_grid(
                 let dy = ay - xy[[j, 1]];
                 let d2 = dx * dx + dy * dy;
                 let w = scale_factor * (d2 * inv_2r2).exp();
-                *w_sum += w;
                 let base = j * n_ligands;
                 for k in 0..n_ligands {
                     unsafe {
@@ -134,10 +139,8 @@ pub fn calculate_weighted_ligands_grid(
                     }
                 }
             }
-            if *w_sum > 0.0 {
-                for k in 0..n_ligands {
-                    row[k] /= *w_sum;
-                }
+            for k in 0..n_ligands {
+                row[k] *= n_inv;
             }
         });
 
@@ -265,13 +268,12 @@ mod tests {
 
     #[test]
     fn single_cell_self_contribution() {
-        // One cell at (0,0) with ligand value 1.0.
-        // d=0 → exp(0) = 1.0, so weight = scale_factor * 1.0
-        // result = scale_factor * 1.0 / 1 (n_cells)
         let xy = array![[0.0, 0.0]];
         let lig = array![[1.0]];
         let result = calculate_weighted_ligands(&xy, &lig, 1.0, 1.0);
         assert_abs_diff_eq!(result[[0, 0]], 1.0, epsilon = 1e-10);
+        let r2 = calculate_weighted_ligands(&xy, &lig, 1.0, 2.5);
+        assert_abs_diff_eq!(r2[[0, 0]], 2.5, epsilon = 1e-10);
     }
 
     #[test]
@@ -285,28 +287,30 @@ mod tests {
 
     #[test]
     fn gaussian_decay_with_distance() {
-        // Cell 0 at origin, cell 1 at (d, 0). Cell 1 has ligand 1.0, cell 0 has 0.
-        // Cell 0 receives: w1*1.0 / (w0 + w1) where w_j = exp(-d²/(2r²)), w0 = exp(0) = 1
         let d = 2.0;
         let r = 1.0;
+        let n = 2.0_f64;
+        let scale = 1.0_f64;
         let xy = array![[0.0, 0.0], [d, 0.0]];
         let lig = array![[0.0], [1.0]];
-        let result = calculate_weighted_ligands(&xy, &lig, r, 1.0);
+        let result = calculate_weighted_ligands(&xy, &lig, r, scale);
 
         let w1 = (-(d * d) / (2.0 * r * r)).exp();
-        let expected = w1 / (1.0 + w1);
+        let expected = scale * w1 / n;
         assert_abs_diff_eq!(result[[0, 0]], expected, epsilon = 1e-10);
     }
 
     #[test]
-    fn scale_factor_invariance() {
-        // With weight-sum normalization, scale_factor cancels (weighted average)
-        let xy = array![[0.0, 0.0], [1.0, 0.0]];
-        let lig = array![[1.0], [1.0]];
-        let r1 = calculate_weighted_ligands(&xy, &lig, 1.0, 1.0);
-        let r2 = calculate_weighted_ligands(&xy, &lig, 1.0, 3.0);
-        for i in 0..2 {
-            assert_abs_diff_eq!(r2[[i, 0]], r1[[i, 0]], epsilon = 1e-10);
+    fn scale_factor_scales_output_linearly() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [2.0, 1.0]];
+        let lig = array![[1.0], [2.0], [4.0]];
+        let r = 1.7_f64;
+        let base = calculate_weighted_ligands(&xy, &lig, r, 1.0);
+        let doubled = calculate_weighted_ligands(&xy, &lig, r, 2.0);
+        let pi = calculate_weighted_ligands(&xy, &lig, r, std::f64::consts::PI);
+        for i in 0..3 {
+            assert_abs_diff_eq!(doubled[[i, 0]], 2.0 * base[[i, 0]], epsilon = 1e-9);
+            assert_abs_diff_eq!(pi[[i, 0]], std::f64::consts::PI * base[[i, 0]], epsilon = 1e-9);
         }
     }
 
@@ -324,13 +328,11 @@ mod tests {
 
     #[test]
     fn small_radius_self_dominant() {
-        // Very small radius → only self-contribution matters (exp(-d²/2r²) → 0 for d > 0)
-        // With weight-sum normalization: result ≈ self_lig * w_self / w_self = self_lig
         let xy = array![[0.0, 0.0], [100.0, 0.0]];
         let lig = array![[5.0], [10.0]];
         let result = calculate_weighted_ligands(&xy, &lig, 0.001, 1.0);
-        assert_abs_diff_eq!(result[[0, 0]], 5.0, epsilon = 1e-3);
-        assert_abs_diff_eq!(result[[1, 0]], 10.0, epsilon = 1e-3);
+        assert_abs_diff_eq!(result[[0, 0]], 2.5, epsilon = 1e-3);
+        assert_abs_diff_eq!(result[[1, 0]], 5.0, epsilon = 1e-3);
     }
 
     #[test]
@@ -374,15 +376,13 @@ mod tests {
 
     #[test]
     fn gaussian_formula_verification() {
-        // Cell 0 at origin (lig=0), cell 1 at (d,0) (lig=1)
-        // result[0] = w1 / (w0 + w1) where w0 = exp(0)=1, w1 = exp(-d²/(2r²))
         let d = 1.5_f64;
         let r = 2.0_f64;
         let xy = array![[0.0, 0.0], [d, 0.0]];
         let lig = array![[0.0], [1.0]];
         let result = calculate_weighted_ligands(&xy, &lig, r, 1.0);
         let w1 = (-d * d / (2.0 * r * r)).exp();
-        assert_abs_diff_eq!(result[[0, 0]], w1 / (1.0 + w1), epsilon = 1e-12);
+        assert_abs_diff_eq!(result[[0, 0]], w1 / 2.0, epsilon = 1e-12);
     }
 
     #[test]
@@ -509,8 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn grid_approx_scale_factor_invariance() {
-        // With weight-sum normalization, scale_factor cancels
+    fn grid_approx_scale_factor_scales_linearly() {
         let (xy, lig) = make_random_cells(80, 300.0);
         let r = 80.0;
 
@@ -518,7 +517,7 @@ mod tests {
         let r3 = calculate_weighted_ligands_grid(&xy, &lig, r, 3.0, 0.5);
 
         for (a, b) in r1.iter().zip(r3.iter()) {
-            assert_abs_diff_eq!(b, a, epsilon = 1e-10);
+            assert_abs_diff_eq!(*b, 3.0 * *a, epsilon = 1e-8);
         }
     }
 

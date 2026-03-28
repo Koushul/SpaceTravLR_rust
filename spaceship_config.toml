@@ -21,6 +21,8 @@ radius           = 200
 spatial_dim      = 32
 # Distance threshold for contact-based signaling
 contact_distance = 50
+# Linear scale on Gaussian weights in received-ligand aggregation
+weighted_ligand_scale_factor = 1.0
 
 [grn]
 # Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
@@ -50,6 +52,8 @@ adam_epsilon = 1e-5
 # grad_clip_norm = 1.0
 # Radius passed to create_spatial_features for CNN inputs (coordinate units)
 spatial_feature_radius = 200.0
+# After final head linear, before lasso-anchor scaling: identity | sigmoid | tanh | sigmoidx2 (2·sigmoid, (0,2))
+output_activation = "sigmoidx2"
 
 [lasso]
 # Element-wise L1 penalty

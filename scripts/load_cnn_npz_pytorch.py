@@ -18,11 +18,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+_ACT_IDENTITY = 0
+_ACT_SIGMOID = 1
+_ACT_TANH = 2
+_ACT_SIGMOID_X2 = 3
+
 
 class CellularNicheNetworkTorch(nn.Module):
-    def __init__(self, n_modulators: int, n_clusters: int) -> None:
+    def __init__(
+        self, n_modulators: int, n_clusters: int, output_activation: int = _ACT_SIGMOID
+    ) -> None:
         super().__init__()
         dim = n_modulators + 1
+        self.output_activation = int(output_activation)
 
         self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1, bias=True)
         self.bn1 = nn.BatchNorm2d(16, eps=1e-5, momentum=0.1)
@@ -59,7 +67,14 @@ class CellularNicheNetworkTorch(nn.Module):
         out = x + s
         out = F.prelu(self.head_l1(out), torch.tensor(0.1, device=spatial_maps.device))
         out = self.head_l2(out)
-        betas = torch.sigmoid(out)
+        if self.output_activation == _ACT_IDENTITY:
+            betas = out
+        elif self.output_activation == _ACT_TANH:
+            betas = torch.tanh(out)
+        elif self.output_activation == _ACT_SIGMOID_X2:
+            betas = torch.sigmoid(out) * 2.0
+        else:
+            betas = torch.sigmoid(out)
         return betas * self.anchors.unsqueeze(0)
 
     def forward(
@@ -81,13 +96,18 @@ def load_cluster_model(npz_path: str, cluster_id: int) -> CellularNicheNetworkTo
     data = np.load(npz_path, allow_pickle=False)
     p = f"c{cluster_id:04d}_"
 
+    if "meta_cnn_output_activation" in data.files:
+        out_act = int(np.asarray(data["meta_cnn_output_activation"]).reshape(-1)[0])
+    else:
+        out_act = _ACT_SIGMOID
+
     anchors = _t(data, p + "anchors")
     n_modulators = int(anchors.numel() - 1)
 
     spatial_l1_w = _t(data, p + "spatial_l1_weight")
     n_clusters = int(spatial_l1_w.shape[0])
 
-    model = CellularNicheNetworkTorch(n_modulators=n_modulators, n_clusters=n_clusters)
+    model = CellularNicheNetworkTorch(n_modulators, n_clusters, out_act)
 
     with torch.no_grad():
         model.conv1.weight.copy_(_t(data, p + "conv1_weight"))

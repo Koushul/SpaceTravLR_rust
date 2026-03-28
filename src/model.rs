@@ -1,3 +1,4 @@
+use crate::config::CnnOutputActivation;
 use burn::module::Module;
 use burn::nn::{
     BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d,
@@ -5,12 +6,31 @@ use burn::nn::{
 };
 use burn::tensor::{Tensor, backend::Backend};
 
+pub(crate) fn cnn_output_activation_tag(a: CnnOutputActivation) -> u8 {
+    match a {
+        CnnOutputActivation::Identity => 0,
+        CnnOutputActivation::Sigmoid => 1,
+        CnnOutputActivation::Tanh => 2,
+        CnnOutputActivation::SigmoidX2 => 3,
+    }
+}
+
+pub(crate) fn apply_cnn_output_activation<B: Backend>(tag: u8, out: Tensor<B, 2>) -> Tensor<B, 2> {
+    match tag {
+        0 => out,
+        2 => burn::tensor::activation::tanh(out),
+        3 => burn::tensor::activation::sigmoid(out) * 2.0,
+        _ => burn::tensor::activation::sigmoid(out),
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct CellularNicheNetwork<B: Backend> {
     pub(crate) conv_layers: VisionEncoder<B>,
     pub(crate) spatial_features_mlp: SpatialMLP<B>,
     pub(crate) mlp: HeadMLP<B>,
     pub anchors: Tensor<B, 1>,
+    pub(crate) output_activation: u8,
 }
 
 #[derive(Module, Debug)]
@@ -47,6 +67,7 @@ impl CellularNicheNetworkConfig {
         &self,
         device: &B::Device,
         anchors: Tensor<B, 1>,
+        output_activation: CnnOutputActivation,
     ) -> CellularNicheNetwork<B> {
         let dim = self.n_modulators + 1;
 
@@ -75,6 +96,7 @@ impl CellularNicheNetworkConfig {
                 l2: LinearConfig::new(64, dim).init(device),
             },
             anchors,
+            output_activation: cnn_output_activation_tag(output_activation),
         }
     }
 }
@@ -83,7 +105,7 @@ impl<B: Backend> CellularNicheNetwork<B> {
     /// `spatial_maps` must be `[batch, 1, H, W]` — one inverse-distance map for the cluster being
     /// trained (see `spatial_maps_for_cluster_cnn` in `estimator.rs`). Neighbor-count context for
     /// all clusters stays in `spatial_features` `[batch, n_clusters]`. Lasso intercept + coefficients
-    /// seed `anchors`; the CNN outputs sigmoid logits scaled by those anchors (same as Python).
+    /// seed `anchors`; the CNN applies `output_activation` to the last linear output, then scales by anchors.
     pub fn get_betas(
         &self,
         spatial_maps: Tensor<B, 4>,
@@ -125,7 +147,7 @@ impl<B: Backend> CellularNicheNetwork<B> {
         let out = self.mlp.l1.forward(out);
         let out = burn::tensor::activation::prelu(out, Tensor::zeros([1], device) + 0.1);
         let out = self.mlp.l2.forward(out);
-        let betas = burn::tensor::activation::sigmoid(out);
+        let betas = apply_cnn_output_activation(self.output_activation, out);
 
         betas.mul(self.anchors.clone().unsqueeze_dim(0))
     }
@@ -147,5 +169,87 @@ impl<B: Backend> CellularNicheNetwork<B> {
 
         let y_interaction = (beta_rest * inputs_x).sum_dim(1).reshape([batch]);
         beta0.add(y_interaction)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::NdArray;
+
+    type TestBackend = NdArray<f32, i32>;
+
+    #[test]
+    fn get_betas_each_output_activation_is_finite_and_shaped() {
+        let device = Default::default();
+        let anchors = Tensor::<TestBackend, 1>::from_floats([0.5, 1.0, -0.25], &device);
+        let cfg = CellularNicheNetworkConfig {
+            n_modulators: 2,
+            n_clusters: 2,
+        };
+        let batch = 2usize;
+        let h = 32usize;
+        let sm = Tensor::<TestBackend, 4>::zeros([batch, 1, h, h], &device);
+        let sf = Tensor::<TestBackend, 2>::zeros([batch, 2], &device);
+
+        for act in [
+            CnnOutputActivation::Identity,
+            CnnOutputActivation::Sigmoid,
+            CnnOutputActivation::Tanh,
+            CnnOutputActivation::SigmoidX2,
+        ] {
+            let net = cfg.init::<TestBackend>(&device, anchors.clone(), act);
+            let betas = net.get_betas(sm.clone(), sf.clone());
+            assert_eq!(betas.dims(), [batch, 3]);
+            let sl = betas.into_data().as_slice::<f32>().unwrap().to_vec();
+            assert!(
+                sl.iter().all(|x| x.is_finite()),
+                "activation {:?} produced non-finite",
+                act
+            );
+        }
+    }
+
+    #[test]
+    fn sigmoid_activation_matches_tag_default_path() {
+        let device = Default::default();
+        let t = Tensor::<TestBackend, 2>::from_floats([[0.0, 1.0], [-1.0, 2.0]], &device);
+        let s = apply_cnn_output_activation(1, t.clone());
+        let e = burn::tensor::activation::sigmoid(t);
+        let a: Vec<f32> = s.into_data().as_slice::<f32>().unwrap().to_vec();
+        let b: Vec<f32> = e.into_data().as_slice::<f32>().unwrap().to_vec();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sigmoid_x2_is_twice_sigmoid() {
+        let device = Default::default();
+        let t = Tensor::<TestBackend, 2>::from_floats([[0.0, 1.0], [-1.0, 2.0]], &device);
+        let s = apply_cnn_output_activation(3, t.clone());
+        let e = burn::tensor::activation::sigmoid(t) * 2.0;
+        let a: Vec<f32> = s.into_data().as_slice::<f32>().unwrap().to_vec();
+        let b: Vec<f32> = e.into_data().as_slice::<f32>().unwrap().to_vec();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn identity_tag_is_passthrough() {
+        let device = Default::default();
+        let t = Tensor::<TestBackend, 2>::from_floats([[0.0, 1.0], [-1.0, 2.0]], &device);
+        let s = apply_cnn_output_activation(0, t.clone());
+        let a: Vec<f32> = s.into_data().as_slice::<f32>().unwrap().to_vec();
+        let b: Vec<f32> = t.into_data().as_slice::<f32>().unwrap().to_vec();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn tanh_tag_matches_burn_tanh() {
+        let device = Default::default();
+        let t = Tensor::<TestBackend, 2>::from_floats([[0.0, 1.0], [-1.0, 2.0]], &device);
+        let s = apply_cnn_output_activation(2, t.clone());
+        let e = burn::tensor::activation::tanh(t);
+        let a: Vec<f32> = s.into_data().as_slice::<f32>().unwrap().to_vec();
+        let b: Vec<f32> = e.into_data().as_slice::<f32>().unwrap().to_vec();
+        assert_eq!(a, b);
     }
 }

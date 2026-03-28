@@ -10,14 +10,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::{self, stdout, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use wgpu::{Backends, Instance};
-
 // ── Palette ───────────────────────────────────────────────────────────────────
 const BG: Color = Color::Rgb(40, 40, 40); // gruvbox dark0
 const OUTER_BORD: Color = Color::Rgb(60, 56, 54); // provided neutral
@@ -49,10 +48,9 @@ const PERF_R2_LEADERBOARD_LEN: usize = 10;
 const HARDWARE_POLL_INTERVAL: Duration = Duration::from_secs(3 * 60);
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
-// Compact ASCII rocket — every line is exactly 14 display columns.
-// Panel = 14 content + 2 border = 16 terminal columns.
+// Compact ASCII rocket — art is ~14 display columns, centered in the panel.
 
-const ROCKET_PANEL_W: u16 = 16;
+const ROCKET_PANEL_W: u16 = 20;
 const WINDOW_IDX: usize = 2;
 
 const BODY: [(&str, Color); 8] = [
@@ -91,7 +89,36 @@ const STARFIELD: [&str; 8] = [
     "     ✦    ·   ",
 ];
 
-fn rocket_lines(frame: usize) -> Vec<Line<'static>> {
+const ROCKET_BODY_FIRE_LINES: usize = 8 + 2;
+const ROCKET_HEADER_LINES: usize = 2;
+const ROCKET_MIN_TOP_MARGIN: usize = 1;
+const ROCKET_MIN_BOTTOM_MARGIN: usize = 1;
+const ROCKET_MIN_STARS: usize = 3;
+
+fn rocket_line_centered(spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
+    let w: usize = spans.iter().map(Span::width).sum();
+    let left = inner_w.saturating_sub(w) / 2;
+    let mut v = Vec::with_capacity(spans.len() + 1);
+    v.push(Span::raw(" ".repeat(left)));
+    v.extend(spans);
+    Line::from(v)
+}
+
+fn rocket_vertical_pad(gene_ratio: f64, inner_h: usize) -> usize {
+    let ratio = gene_ratio.clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - ratio).powi(2);
+    let core = ROCKET_BODY_FIRE_LINES + ROCKET_MIN_TOP_MARGIN + ROCKET_MIN_BOTTOM_MARGIN + ROCKET_MIN_STARS;
+    let max_top_extra = inner_h.saturating_sub(core);
+    ROCKET_MIN_TOP_MARGIN + ((1.0 - eased) * max_top_extra as f64).round() as usize
+}
+
+fn rocket_lines(
+    frame: usize,
+    gene_ratio: f64,
+    gene_pct: u32,
+    inner_w: usize,
+    inner_h: usize,
+) -> Vec<Line<'static>> {
     let f = frame % 4;
     let shimmer = (frame / 3) % BODY.len();
     let win_c = if frame % 8 < 4 {
@@ -100,20 +127,52 @@ fn rocket_lines(frame: usize) -> Vec<Line<'static>> {
         Color::Rgb(180, 150, 230)
     };
 
-    let mut lines = Vec::with_capacity(32);
-    lines.push(Line::from(Span::raw("              ")));
-    lines.push(Line::from(Span::raw("              ")));
+    let canvas_h = inner_h.saturating_sub(ROCKET_HEADER_LINES);
+    let canvas_h = canvas_h.max(ROCKET_BODY_FIRE_LINES + ROCKET_MIN_TOP_MARGIN + ROCKET_MIN_BOTTOM_MARGIN);
+
+    let top_pad = rocket_vertical_pad(gene_ratio, canvas_h).min(
+        canvas_h.saturating_sub(ROCKET_BODY_FIRE_LINES + ROCKET_MIN_BOTTOM_MARGIN),
+    );
+    let stars_h = canvas_h
+        .saturating_sub(ROCKET_BODY_FIRE_LINES + top_pad + ROCKET_MIN_BOTTOM_MARGIN)
+        .max(ROCKET_MIN_STARS);
+
+    let mut lines = Vec::with_capacity(
+        ROCKET_HEADER_LINES + top_pad + ROCKET_BODY_FIRE_LINES + stars_h + 2,
+    );
+
+    lines.push(rocket_line_centered(
+        vec![Span::styled(
+            "Status",
+            Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+        )],
+        inner_w,
+    ));
+    lines.push(rocket_line_centered(
+        vec![Span::styled(
+            format!("{gene_pct}%"),
+            Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+        )],
+        inner_w,
+    ));
+
+    for _ in 0..top_pad {
+        lines.push(Line::from(Span::raw(" ".repeat(inner_w))));
+    }
 
     for (i, (text, base)) in BODY.iter().enumerate() {
         if i == WINDOW_IDX {
-            lines.push(Line::from(vec![
-                Span::styled("    / ", Style::default().fg(*base)),
-                Span::styled(
-                    "◆◆",
-                    Style::default().fg(win_c).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" \\    ", Style::default().fg(*base)),
-            ]));
+            lines.push(rocket_line_centered(
+                vec![
+                    Span::styled("    / ", Style::default().fg(*base)),
+                    Span::styled(
+                        "◆◆",
+                        Style::default().fg(win_c).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" \\    ", Style::default().fg(*base)),
+                ],
+                inner_w,
+            ));
         } else {
             let c = if i == shimmer {
                 brighten(*base, 35)
@@ -124,27 +183,33 @@ fn rocket_lines(frame: usize) -> Vec<Line<'static>> {
             if i == shimmer {
                 s = s.add_modifier(Modifier::BOLD);
             }
-            lines.push(Line::from(Span::styled(*text, s)));
+            lines.push(rocket_line_centered(vec![Span::styled(*text, s)], inner_w));
         }
     }
 
     for (ri, text) in FIRE[f].iter().enumerate() {
         let (r, g, b) = FIRE_RGB[f][ri];
-        lines.push(Line::from(Span::styled(
-            *text,
-            Style::default()
-                .fg(Color::Rgb(r, g, b))
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(rocket_line_centered(
+            vec![Span::styled(
+                *text,
+                Style::default()
+                    .fg(Color::Rgb(r, g, b))
+                    .add_modifier(Modifier::BOLD),
+            )],
+            inner_w,
+        ));
     }
 
-    for row in 0..20 {
+    for row in 0..stars_h {
         let idx = (row + frame / 4) % STARFIELD.len();
         let v = 75 + ((row * 13 + frame * 3) % 55) as u8;
-        lines.push(Line::from(Span::styled(
-            STARFIELD[idx],
-            Style::default().fg(Color::Rgb(v, v.saturating_sub(10), v.saturating_add(25))),
-        )));
+        lines.push(rocket_line_centered(
+            vec![Span::styled(
+                STARFIELD[idx],
+                Style::default().fg(Color::Rgb(v, v.saturating_sub(10), v.saturating_add(25))),
+            )],
+            inner_w,
+        ));
     }
 
     lines
@@ -270,20 +335,37 @@ fn format_bytes(b: u64) -> String {
     }
 }
 
-fn scan_dir(dir: &str) -> (u64, usize) {
+fn scan_output_metrics(dir: &str, active_local_genes: &HashSet<String>) -> (u64, usize, usize, usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return (0, 0);
+        return (0, 0, 0, 0);
     };
-    let (mut bytes, mut count) = (0u64, 0usize);
+    let mut bytes = 0u64;
+    let mut n_files = 0usize;
+    let mut disk_done = 0usize;
+    let mut external_locks = 0usize;
     for e in entries.flatten() {
-        if let Ok(m) = e.metadata() {
-            if m.is_file() {
-                bytes += m.len();
-                count += 1;
+        let Ok(m) = e.metadata() else {
+            continue;
+        };
+        if !m.is_file() {
+            continue;
+        }
+        bytes += m.len();
+        n_files += 1;
+        let name = e.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".feather") || name.ends_with(".orphan") {
+            disk_done += 1;
+        } else if name.ends_with(".lock") {
+            let stem = name.strip_suffix(".lock").unwrap_or(name);
+            if !active_local_genes.contains(stem) {
+                external_locks += 1;
             }
         }
     }
-    (bytes, count)
+    (bytes, n_files, disk_done, external_locks)
 }
 
 fn format_t(secs: f64) -> String {
@@ -336,25 +418,6 @@ fn truncate_label(s: &str, max_chars: usize) -> String {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn probe_wgpu_adapter_names() -> Vec<String> {
-    let instance = Instance::default();
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut out = Vec::new();
-    for adapter in instance.enumerate_adapters(Backends::all()) {
-        let name = adapter.get_info().name;
-        if seen.insert(name.clone()) {
-            out.push(name);
-        }
-    }
-    out
-}
-
-#[cfg(target_arch = "wasm32")]
-fn probe_wgpu_adapter_names() -> Vec<String> {
-    Vec::new()
-}
-
 fn cpu_brand_label(sys: &System) -> String {
     let b = sys
         .cpus()
@@ -377,8 +440,8 @@ fn logical_core_count(sys: &System) -> usize {
 
 fn build_machine_hardware_line(
     sys: &System,
-    gpu_names: &[String],
     train_backend: &str,
+    train_device_detail: &str,
     max_chars: usize,
 ) -> String {
     let logical = logical_core_count(sys);
@@ -390,15 +453,8 @@ fn build_machine_hardware_line(
         _ => format!("{logical} logical cores"),
     };
 
-    let gpu_part = if gpu_names.is_empty() {
-        "0 GPUs (wgpu)".to_string()
-    } else {
-        let joined = gpu_names.join("; ");
-        format!("{} GPU(s): {}", gpu_names.len(), joined)
-    };
-
     let s = format!(
-        "{cores}  ·  CPU: {cpu}  ·  {gpu_part}  ·  train: {train_backend}"
+        "{cores}  ·  CPU: {cpu}  ·  train {train_backend}: {train_device_detail}"
     );
     truncate_label(&s, max_chars)
 }
@@ -768,17 +824,18 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
     );
     let mut last_sys = Instant::now();
     let mut last_dir_scan = Instant::now();
-    let mut last_gpu_probe = Instant::now();
-    let mut cached_gpu_names = probe_wgpu_adapter_names();
     let t0 = Instant::now();
 
     let mut dir_bytes: u64 = 0;
     let mut dir_files: usize = 0;
+    let mut disk_genes_done: usize = 0;
+    let mut external_workers: usize = 0;
 
-    let output_dir = hud
-        .lock()
-        .map(|st| st.output_dir.clone())
-        .unwrap_or_default();
+    if let Ok(st) = hud.lock() {
+        let active: HashSet<String> = st.active_genes.keys().cloned().collect();
+        (dir_bytes, dir_files, disk_genes_done, external_workers) =
+            scan_output_metrics(&st.output_dir, &active);
+    }
 
     let mut dashboard_exit = TrainingDashboardExit::Completed;
     let username = std::env::var("USER")
@@ -815,12 +872,12 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             last_sys = Instant::now();
         }
         if last_dir_scan.elapsed() > Duration::from_secs(2) {
-            (dir_bytes, dir_files) = scan_dir(&output_dir);
+            if let Ok(st) = hud.lock() {
+                let active: HashSet<String> = st.active_genes.keys().cloned().collect();
+                (dir_bytes, dir_files, disk_genes_done, external_workers) =
+                    scan_output_metrics(&st.output_dir, &active);
+            }
             last_dir_scan = Instant::now();
-        }
-        if last_gpu_probe.elapsed() > HARDWARE_POLL_INTERVAL {
-            cached_gpu_names = probe_wgpu_adapter_names();
-            last_gpu_probe = Instant::now();
         }
         if event::poll(Duration::from_millis(40))? {
             if let Event::Key(key) = event::read()? {
@@ -900,8 +957,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let hw_w = vchunks[0].width.saturating_sub(2) as usize;
             let hw_line = build_machine_hardware_line(
                 &sys,
-                &cached_gpu_names,
                 st.run_config.compute_backend.as_str(),
+                st.run_config.compute_device_detail.as_str(),
                 hw_w.max(12),
             );
 
@@ -1018,8 +1075,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("SPATIAL  "),
                         val(
                             format!(
-                                "r={:.1}  dim={}  contact={:.1}",
-                                rc.spatial_radius, rc.spatial_dim, rc.contact_distance
+                                "r={:.1}  dim={}  contact={:.1}  wl_scale={:.3}",
+                                rc.spatial_radius,
+                                rc.spatial_dim,
+                                rc.contact_distance,
+                                rc.weighted_ligand_scale_factor
                             ),
                             VALUE,
                         ),
@@ -1137,7 +1197,13 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 ),
                 sep(),
                 lbl("WORKERS  "),
-                val(format!("{}", st.n_parallel), GRAPE),
+                val(
+                    format!(
+                        "local {}  ·  external {}",
+                        st.n_parallel, external_workers
+                    ),
+                    GRAPE,
+                ),
             ]));
             mission_lines.push(Line::from(vec![
                 lbl("EXPORT  "),
@@ -1327,23 +1393,46 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 work_row[2],
             );
 
+            let total = st.total_genes.max(1) as u64;
+            let pos = if Path::new(&st.output_dir).is_dir() {
+                disk_genes_done.min(st.total_genes)
+            } else {
+                st.genes_rounds.min(st.total_genes)
+            } as u64;
+            let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
+            let gene_pct = (ratio * 100.0).round().clamp(0.0, 100.0) as u32;
+
+            let rocket_panel = hchunks[1];
+            let rocket_inner_w = rocket_panel.width.saturating_sub(2) as usize;
+            let rocket_min_h = (ROCKET_HEADER_LINES
+                + ROCKET_BODY_FIRE_LINES
+                + ROCKET_MIN_TOP_MARGIN
+                + ROCKET_MIN_BOTTOM_MARGIN
+                + ROCKET_MIN_STARS) as u16;
+            let rocket_inner_h = rocket_panel
+                .height
+                .saturating_sub(2)
+                .max(rocket_min_h) as usize;
+
             // ── Rocket ────────────────────────────────────────────────────────
             f.render_widget(
-                Paragraph::new(rocket_lines(frame))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(ROCKET_BORD))
-                            .title(Span::styled(" Status ", Style::default().fg(GRAPE))),
-                    )
-                    .style(bg),
-                hchunks[1],
+                Paragraph::new(rocket_lines(
+                    frame,
+                    ratio,
+                    gene_pct,
+                    rocket_inner_w,
+                    rocket_inner_h,
+                ))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(ROCKET_BORD)),
+                )
+                .style(bg),
+                rocket_panel,
             );
 
             // ── Gene progress ─────────────────────────────────────────────────
-            let total = st.total_genes.max(1) as u64;
-            let pos = st.genes_rounds.min(st.total_genes) as u64;
-            let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
             f.render_widget(
                 Gauge::default()
                     .block(
@@ -1365,13 +1454,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     .ratio(ratio)
                     .label(Span::styled(
                         format!(
-                            "{}/{}  ·  ok {}  skip {}  fail {}  orphan {}",
-                            pos,
-                            total,
-                            st.genes_done,
-                            st.genes_skipped,
-                            st.genes_failed,
-                            st.genes_orphan
+                            "{}/{}  ·  ok {}  fail {}  orphan {}",
+                            pos, total, st.genes_done, st.genes_failed, st.genes_orphan
                         ),
                         Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
                     )),

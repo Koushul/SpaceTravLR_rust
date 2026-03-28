@@ -153,6 +153,7 @@ fn compute_initial_wl(
     ligand_names: &[String],
     xy: &Array2<f64>,
     lr_radii: &HashMap<String, f64>,
+    weighted_ligand_scale: f64,
     min_expression: f64,
     grid_factor: Option<f64>,
 ) -> GeneMatrix {
@@ -212,9 +213,9 @@ fn compute_initial_wl(
         }
         let weighted = match grid_factor {
             Some(gf) if gf.is_finite() && gf > 0.0 => {
-                calculate_weighted_ligands_grid(xy, &sub, radius, 1.0, gf)
+                calculate_weighted_ligands_grid(xy, &sub, radius, weighted_ligand_scale, gf)
             }
-            _ => calculate_weighted_ligands(xy, &sub, radius, 1.0),
+            _ => calculate_weighted_ligands(xy, &sub, radius, weighted_ligand_scale),
         };
         for (k, &j) in group.iter().enumerate() {
             result.column_mut(j).assign(&weighted.column(k));
@@ -269,6 +270,7 @@ impl PerturbRuntime {
 
         let min_expression = 1e-9;
         let grid = cfg.perturbation.ligand_grid_factor;
+        let wl_scale = cfg.spatial.weighted_ligand_scale_factor;
         let lr_ligands: Vec<String> = bb.ligands_set.iter().cloned().collect();
         let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
         let rw_ligands_init = compute_initial_wl(
@@ -277,6 +279,7 @@ impl PerturbRuntime {
             &lr_ligands,
             &xy,
             &lr_radii,
+            wl_scale,
             min_expression,
             grid,
         );
@@ -286,13 +289,14 @@ impl PerturbRuntime {
             &tfl_ligands,
             &xy,
             &lr_radii,
+            wl_scale,
             min_expression,
             grid,
         );
 
         let perturb_cfg = PerturbConfig {
             n_propagation: cfg.perturbation.n_propagation,
-            scale_factor: 1.0,
+            scale_factor: wl_scale,
             beta_scale_factor: cfg.perturbation.beta_scale_factor,
             beta_cap: cfg.perturbation.beta_cap,
             min_expression,

@@ -94,7 +94,7 @@ pub(crate) fn compute_hardware_details(choice: &ComputeChoice) -> String {
                     info.name, info.device_type, info.backend
                 )
             } else {
-                "WGPU adapter (details unavailable)".to_string()
+                "adapter details unavailable".to_string()
             }
         }
         ComputeChoice::NdArray(_) => {

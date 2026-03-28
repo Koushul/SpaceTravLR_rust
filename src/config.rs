@@ -42,6 +42,9 @@ pub struct SpatialConfig {
     pub radius: f64,
     pub spatial_dim: usize,
     pub contact_distance: f64,
+    /// Multiplier on Gaussian kernel weights in received-ligand aggregation (`calculate_weighted_ligands`).
+    #[serde(default = "default_one_f64")]
+    pub weighted_ligand_scale_factor: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +125,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_one_f64() -> f64 {
+    1.0
+}
+
 impl Default for HybridCnnGatingConfig {
     fn default() -> Self {
         Self {
@@ -188,6 +195,17 @@ pub struct TrainingConfig {
     pub hybrid: HybridCnnGatingConfig,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CnnOutputActivation {
+    Identity,
+    Sigmoid,
+    Tanh,
+    /// `2 * sigmoid(x)`, output in (0, 2) before anchor scaling (plain sigmoid is (0, 1)).
+    #[default]
+    SigmoidX2,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CnnConfig {
@@ -197,6 +215,8 @@ pub struct CnnConfig {
     pub weight_decay: Option<f64>,
     pub grad_clip_norm: Option<f64>,
     pub spatial_feature_radius: f64,
+    /// Applied after the final head linear (`mlp.l2`), before multiplying by lasso anchors.
+    pub output_activation: CnnOutputActivation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +271,7 @@ impl Default for SpatialConfig {
             radius: 200.0,
             spatial_dim: 32,
             contact_distance: 50.0,
+            weighted_ligand_scale_factor: 1.0,
         }
     }
 }
@@ -279,6 +300,7 @@ impl Default for CnnConfig {
             weight_decay: None,
             grad_clip_norm: None,
             spatial_feature_radius: 100.0,
+            output_activation: CnnOutputActivation::default(),
         }
     }
 }

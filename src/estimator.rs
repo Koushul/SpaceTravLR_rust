@@ -222,7 +222,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         n_modulators: lasso_coef.nrows(),
                         n_clusters: num_clusters,
                     };
-                    let mut model = config.init::<B>(device, anchors_tensor);
+                    let mut model = config.init::<B>(device, anchors_tensor, cnn.output_activation);
 
                     if seed_only {
                         training_summaries.push(ClusterTrainingSummary {

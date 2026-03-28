@@ -1,2 +1,7 @@
 /target
 .venv-bench/
+.cache/
+.claude/
+.DS_Store
+scripts/
+benchmarks/
