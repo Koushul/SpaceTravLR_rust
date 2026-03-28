@@ -25,11 +25,51 @@ use ndarray_npy::NpzWriter;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 const LARGE_DATASET_GRID_AUTO_CELLS: usize = 15_000;
 const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
+
+/// Remove `*.lock` files in `dir` whose modification time is at least `stale_secs` old.
+/// Returns how many files were deleted. No-op if `stale_secs == 0` or `dir` is not a directory.
+pub(crate) fn remove_stale_lock_files_in_dir(dir: &Path, stale_secs: u64) -> usize {
+    if stale_secs == 0 || !dir.is_dir() {
+        return 0;
+    }
+    let now = SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for e in entries.flatten() {
+        let Ok(meta) = e.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let name = e.file_name();
+        let Some(n) = name.to_str() else {
+            continue;
+        };
+        if !n.ends_with(".lock") {
+            continue;
+        }
+        let path = e.path();
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age.as_secs() >= stale_secs && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
 
 fn compute_gene_mean_expression<AnB: Backend>(
     adata: &AnnData<AnB>,
@@ -1474,6 +1514,44 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
         let stale_lock_secs = spaceship_config.execution.stale_lock_secs;
 
+        let janitor_stop = Arc::new(AtomicBool::new(false));
+        let janitor_handle = if stale_lock_secs > 0 {
+            let training_dir_j = training_dir.to_string();
+            let hud_j = hud.clone();
+            let stop = janitor_stop.clone();
+            let secs = stale_lock_secs;
+            Some(thread::spawn(move || {
+                const TICK: Duration = Duration::from_secs(1);
+                const SWEEP_INTERVAL_SECS: u64 = 600;
+                let mut acc = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    thread::sleep(TICK);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Some(ref hh) = hud_j {
+                        if hh.lock().map(|g| g.should_cancel()).unwrap_or(true) {
+                            break;
+                        }
+                    }
+                    acc += 1;
+                    if acc < SWEEP_INTERVAL_SECS {
+                        continue;
+                    }
+                    acc = 0;
+                    let n = remove_stale_lock_files_in_dir(Path::new(&training_dir_j), secs);
+                    if n > 0 {
+                        log_line(
+                            &hud_j,
+                            format!(">> periodic sweep: removed {n} stale .lock file(s)"),
+                        );
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         log_line(
             &hud,
             format!(
@@ -2154,6 +2232,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         }
 
         for h in handles {
+            let _ = h.join();
+        }
+        janitor_stop.store(true, Ordering::Relaxed);
+        if let Some(h) = janitor_handle {
             let _ = h.join();
         }
         pipeline_step_end(&hud, "per-gene training (workers running)", t_workers);

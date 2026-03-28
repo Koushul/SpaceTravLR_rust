@@ -226,7 +226,8 @@ pub struct ExecutionConfig {
     pub output_dir: String,
     /// When true, write `spacetravlr_minimal_repro.h5ad` under the output directory (large I/O on big datasets).
     pub write_minimal_repro_h5ad: bool,
-    /// If > 0, remove a gene `*.lock` file older than this many seconds before claiming the gene (crash recovery on shared storage).
+    /// If > 0, remove a gene `*.lock` file older than this many seconds before claiming the gene,
+    /// and run a background sweep about every 10 minutes over the output directory (crash recovery on shared storage).
     pub stale_lock_secs: u64,
 }
 
