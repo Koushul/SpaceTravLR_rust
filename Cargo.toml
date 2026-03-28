@@ -23,11 +23,16 @@ codegen-units = 1
 [features]
 default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:unicode-width"]
+libtorch = ["burn/tch", "dep:tch"]
 dev-main = []
 
 [[bin]]
 name = "spacetravlr"
 path = "src/bin/spacetravlr.rs"
+
+[[bin]]
+name = "spacetravlr-perturb"
+path = "src/bin/spacetravlr_perturb.rs"
 
 [[bin]]
 name = "space_trav_lr_rust"
@@ -36,6 +41,7 @@ required-features = ["dev-main"]
 
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
+tch = { version = "0.15", optional = true }
 burn-autodiff = { version = "0.16.1" }
 pollster = "0.4"
 wgpu = "23.0"

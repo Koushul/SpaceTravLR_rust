@@ -4,6 +4,7 @@ use crate::cnn_gating::{
 };
 use crate::config::{
     CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,
+    RUN_REPRO_TOML_FILENAME,
 };
 use crate::run_summary_html::{RunSummaryParams, write_run_summary_html};
 use crate::estimator::{CachedSpatialData, ClusteredGCNNWR, finite_or_zero_f64};
@@ -25,6 +26,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 const LARGE_DATASET_GRID_AUTO_CELLS: usize = 15_000;
 const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
@@ -560,15 +562,11 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
     if est.models.is_empty() || !model_export.save_cnn_weights {
         return Ok(None);
     }
-    let model_dir = format!("{}/saved_models", training_dir);
-    std::fs::create_dir_all(&model_dir)?;
-    let out_path = format!("{}/{}_cnn_weights.npz", model_dir, sanitize_filename(gene));
-    let f = File::create(&out_path)?;
-    let mut npz = if model_export.compressed_npz {
-        NpzWriter::new_compressed(f)
-    } else {
-        NpzWriter::new(f)
-    };
+    let sub = model_export.output_subdir.trim().trim_matches('/');
+    if sub.is_empty() {
+        anyhow::bail!("model_export.output_subdir is empty");
+    }
+    let model_dir = Path::new(training_dir).join(sub);
 
     let mut cluster_ids: Vec<usize> = est
         .models
@@ -584,7 +582,32 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
     if cluster_ids.is_empty() {
         return Ok(None);
     }
+
+    std::fs::create_dir_all(&model_dir)?;
+    let out_pb = model_dir.join(format!("{}_cnn_weights.npz", sanitize_filename(gene)));
+    let out_str = out_pb
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 path {:?}", out_pb))?;
+    let f = File::create(out_str)?;
+    let mut npz = if model_export.compressed_npz {
+        NpzWriter::new_compressed(f)
+    } else {
+        NpzWriter::new(f)
+    };
     npz.add_array("cluster_ids", &Array1::from_vec(cluster_ids.iter().map(|&x| x as u32).collect()))?;
+
+    let first_c = *cluster_ids.first().unwrap();
+    let m0 = est
+        .models
+        .get(&first_c)
+        .ok_or_else(|| anyhow::anyhow!("missing model for cluster {}", first_c))?;
+    let sc1 = m0.spatial_features_mlp.l1.weight.shape().dims::<2>();
+    let n_clusters_meta = sc1[1] as u32;
+    let hl2 = m0.mlp.l2.weight.shape().dims::<2>();
+    let n_mods_meta = hl2[0].saturating_sub(1) as u32;
+    npz.add_array("meta_spatial_dim", &Array1::from_vec(vec![est.spatial_dim as u32]))?;
+    npz.add_array("meta_n_clusters", &Array1::from_vec(vec![n_clusters_meta]))?;
+    npz.add_array("meta_n_modulators", &Array1::from_vec(vec![n_mods_meta]))?;
 
     for c in cluster_ids {
         let m = est
@@ -880,7 +903,7 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
     }
 
     npz.finish()?;
-    Ok(Some(out_path))
+    Ok(Some(out_str.to_string()))
 }
 
 pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
@@ -1113,6 +1136,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         write_minimal_repro_h5ad: bool,
         spaceship_config: &SpaceshipConfig,
         config_source_path: Option<PathBuf>,
+        join_training: bool,
         device: &AB::Device,
     ) -> anyhow::Result<()>
     where
@@ -1128,6 +1152,32 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         let training_dir = output_dir;
         fs::create_dir_all(training_dir)?;
         fs::create_dir_all(format!("{training_dir}/log"))?;
+
+        let repro_path = Path::new(training_dir).join(RUN_REPRO_TOML_FILENAME);
+        match spaceship_config.write_run_repro_toml_if_missing(Path::new(training_dir)) {
+            Ok(Some(p)) => log_line(
+                &hud,
+                format!(
+                    "Wrote {} (shared run config for additional trainers: use --join-output-dir on other hosts)",
+                    p.display()
+                ),
+            ),
+            Ok(None) => {
+                if join_training {
+                    log_line(
+                        &hud,
+                        format!(
+                            "Join mode: using existing run config {}",
+                            repro_path.display()
+                        ),
+                    );
+                }
+            }
+            Err(e) => log_line(
+                &hud,
+                format!("Could not write run repro TOML (early): {}", e),
+            ),
+        }
 
         // ── Setup: build gene list and pre-cache shared metadata ──────────────
         let t_open = pipeline_step_begin(&hud, "open AnnData (HDF5)");
@@ -1413,6 +1463,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
         let n_workers = n_parallel.max(1);
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
+        let stale_lock_secs = spaceship_config.execution.stale_lock_secs;
 
         log_line(
             &hud,
@@ -1470,6 +1521,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let model_export_w = model_export.clone();
             let collect_top_k = hybrid_collect_top_k;
             let num_clusters = num_clusters;
+            let stale_lock_secs_w = stale_lock_secs;
 
             let handle = thread::Builder::new()
                 .stack_size(8 * 1024 * 1024)
@@ -1532,7 +1584,30 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             continue;
                         }
 
-                        // Try to claim this gene via a lock file
+                        if stale_lock_secs_w > 0 {
+                            let lp = Path::new(&lock_path);
+                            if lp.is_file() {
+                                if let Ok(meta) = fs::metadata(lp) {
+                                    if let Ok(modified) = meta.modified() {
+                                        if let Ok(age) = SystemTime::now().duration_since(modified) {
+                                            if age.as_secs() >= stale_lock_secs_w {
+                                                let _ = fs::remove_file(lp);
+                                                log_line(
+                                                    &hud,
+                                                    format!(
+                                                        ">> removed stale lock {} ({:.0}s old)",
+                                                        gene,
+                                                        age.as_secs_f64()
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Try to claim this gene via a lock file (exclusive with other hosts/processes on shared storage)
                         if fs::OpenOptions::new()
                             .write(true)
                             .create_new(true)
@@ -2052,9 +2127,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         // Deregister from active, bump counter
                         if let Some(ref h) = hud {
                             if let Ok(mut g) = h.lock() {
-                                if g.show_pipeline_timing {
-                                    g.record_gene_time(&gene, gene_start.elapsed().as_secs_f64());
-                                }
+                                g.record_gene_time(&gene, gene_start.elapsed().as_secs_f64());
                                 g.remove_gene(&gene);
                                 g.genes_rounds += 1;
                             }
@@ -2146,21 +2219,30 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         false,
                         spaceship_config,
                         config_source_path.clone(),
+                        join_training,
                         device,
                     );
                 }
             }
         }
 
-        match spaceship_config.write_run_repro_toml(Path::new(training_dir)) {
-            Ok(p) => log_line(
+        if join_training {
+            log_line(
                 &hud,
-                format!("Wrote run repro {}", p.display()),
-            ),
-            Err(e) => log_line(
-                &hud,
-                format!("Run repro TOML not written: {}", e),
-            ),
+                "Join mode: did not overwrite spacetravlr_run_repro.toml (canonical copy from leader run)"
+                    .to_string(),
+            );
+        } else {
+            match spaceship_config.write_run_repro_toml(Path::new(training_dir)) {
+                Ok(p) => log_line(
+                    &hud,
+                    format!("Wrote run repro {}", p.display()),
+                ),
+                Err(e) => log_line(
+                    &hud,
+                    format!("Run repro TOML not written: {}", e),
+                ),
+            }
         }
 
         match write_run_summary_html(RunSummaryParams {

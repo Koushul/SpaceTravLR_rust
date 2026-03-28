@@ -8,6 +8,7 @@ use compute_backend::{
 };
 use space_trav_lr_rust::config::{
     default_output_dir_for_adata_path, expand_user_path, CnnTrainingMode, SpaceshipConfig,
+    RUN_REPRO_TOML_FILENAME,
 };
 use space_trav_lr_rust::condition_split::prepare_condition_splits;
 use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
@@ -95,7 +96,7 @@ struct RunSummaryCli {
     name = "spacetravlr",
     version,
     about = "SpaceTravLR — spatial GRN training from single-cell spatial AnnData (.h5ad).",
-    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training."
+    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training. For multiple machines on one shared output directory, start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -200,6 +201,38 @@ struct Cli {
         help = "Write spacetravlr_minimal_repro.h5ad under output_dir (slow for large AnnData); overrides [execution].write_minimal_repro_h5ad"
     )]
     write_minimal_repro_h5ad: bool,
+
+    #[arg(
+        long = "save-cnn-weights",
+        action = ArgAction::SetTrue,
+        help = "Export trained CNN weights as .npz under output_dir / [model_export].output_subdir (default CNN_weights); sets [model_export].save_cnn_weights"
+    )]
+    save_cnn_weights: bool,
+
+    #[arg(
+        long = "join-output-dir",
+        value_name = "DIR",
+        help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). Overrides local spaceship_config.toml for training hyperparameters. Use --parallel to set this machine's worker count."
+    )]
+    join_output_dir: Option<PathBuf>,
+}
+
+fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
+    if let Some(v) = cli.parallel {
+        cfg.execution.n_parallel = v.max(1);
+    }
+    if cli.save_cnn_weights {
+        cfg.model_export.save_cnn_weights = true;
+    }
+    if cli.write_minimal_repro_h5ad {
+        cfg.execution.write_minimal_repro_h5ad = true;
+    }
+    if let Some(p) = &cli.h5ad {
+        cfg.data.adata_path = expand_user_path(p.to_string_lossy().as_ref());
+    }
+    if let Some(p) = &cli.tf_priors_feather {
+        cfg.grn.tf_priors_feather = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    }
 }
 
 fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
@@ -243,6 +276,51 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     if cli.write_minimal_repro_h5ad {
         cfg.execution.write_minimal_repro_h5ad = true;
     }
+    if cli.save_cnn_weights {
+        cfg.model_export.save_cnn_weights = true;
+    }
+}
+
+fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
+    if let Some(j) = cli.join_output_dir.as_ref() {
+        let jexp = expand_user_path(j.to_string_lossy().as_ref());
+        let repro = Path::new(&jexp).join(RUN_REPRO_TOML_FILENAME);
+        if !repro.is_file() {
+            anyhow::bail!(
+                "--join-output-dir: missing run config {} (start a leader run on this directory first, or copy the TOML from the primary host)",
+                repro.display()
+            );
+        }
+        let mut cfg = SpaceshipConfig::from_file(&repro)?;
+        cfg.execution.output_dir = jexp;
+        apply_cli_join_overrides(cli, &mut cfg);
+        if cli.config.is_some() {
+            eprintln!("Note: --join-output-dir ignores --config for training settings (using repro TOML).");
+        }
+        if cli.max_genes.is_some() || cli.genes.is_some() {
+            eprintln!("Note: --join-output-dir ignores --max-genes and --genes (gene list comes from the shared run).");
+        }
+        if cli.epochs.is_some()
+            || cli.lr.is_some()
+            || cli.l1_reg.is_some()
+            || cli.group_reg.is_some()
+            || cli.n_iter.is_some()
+            || cli.tol.is_some()
+            || cli.max_lr_pairs.is_some()
+            || cli.training_mode.is_some()
+            || cli.output_dir.is_some()
+        {
+            eprintln!("Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML).");
+        }
+        Ok((cfg, true))
+    } else {
+        let mut cfg = match &cli.config {
+            Some(path) => SpaceshipConfig::from_file(path)?,
+            None => SpaceshipConfig::load(),
+        };
+        apply_cli_to_config(cli, &mut cfg);
+        Ok((cfg, false))
+    }
 }
 
 fn parse_gene_filter(cli: &Cli) -> Option<Vec<String>> {
@@ -259,6 +337,8 @@ fn parse_gene_filter(cli: &Cli) -> Option<Vec<String>> {
 fn compute_notice_text(compute: &ComputeChoice) -> String {
     let details = compute_hardware_details(compute);
     match compute {
+        #[cfg(feature = "libtorch")]
+        ComputeChoice::LibTorch(_) => format!("Using LibTorch compute backend: {}", details),
         ComputeChoice::Wgpu(_) => format!("Using WGPU compute backend: {}", details),
         ComputeChoice::NdArray(_) => {
             let forced = std::env::var("SPACETRAVLR_FORCE_CPU")
@@ -271,7 +351,7 @@ fn compute_notice_text(compute: &ComputeChoice) -> String {
                 )
             } else {
                 format!(
-                    "No WGPU adapter found; using CPU (NdArray) backend: {}",
+                    "No GPU backend available; using CPU (NdArray) backend: {}",
                     details
                 )
             }
@@ -326,11 +406,11 @@ fn print_plain_preamble(
         summary.spatial_radius, summary.spatial_dim, summary.contact_distance
     );
     println!(
-        "Lasso:       l1={}  group={}  n_iter={}  tol={:.1e}",
+        "Lasso:       l1={:.3e}  group={:.3e}  n_iter={}  tol={:.1e}",
         summary.l1_reg, summary.group_reg, summary.n_iter, summary.tol
     );
     println!(
-        "Training:    mode={}  lr={}  score≥{}",
+        "Training:    mode={}  lr={:.3e}  score≥{}",
         summary.cnn_training_mode, summary.learning_rate, summary.score_threshold
     );
     println!(
@@ -503,27 +583,42 @@ fn main() -> anyhow::Result<()> {
         return run_demo_mode(&cli);
     }
 
-    let mut cfg = match &cli.config {
-        Some(path) => SpaceshipConfig::from_file(path)?,
-        None => SpaceshipConfig::load(),
+    let (mut cfg, join_training) = load_config_for_main(&cli)?;
+
+    let config_source_path: Option<PathBuf> = if join_training {
+        Some(
+            PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()))
+                .join(RUN_REPRO_TOML_FILENAME),
+        )
+    } else {
+        cli.config
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+            .or_else(|| SpaceshipConfig::discover_default_path())
     };
 
-    apply_cli_to_config(&cli, &mut cfg);
-
-    let config_source_path: Option<PathBuf> = cli
-        .config
-        .as_ref()
-        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
-        .or_else(|| SpaceshipConfig::discover_default_path());
-
-    let max_genes = cli.max_genes;
-    let gene_filter = parse_gene_filter(&cli);
+    let max_genes = if join_training {
+        None
+    } else {
+        cli.max_genes
+    };
+    let gene_filter = if join_training {
+        None
+    } else {
+        parse_gene_filter(&cli)
+    };
     let condition_column = cli
         .condition
         .clone()
         .or_else(|| cfg.data.condition.clone())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+
+    if join_training && condition_column.is_some() {
+        anyhow::bail!(
+            "--join-output-dir is not supported with --condition / [data].condition (use a single output directory per split)."
+        );
+    }
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
     let compute = select_compute_backend();
@@ -610,6 +705,12 @@ fn main() -> anyhow::Result<()> {
     if !use_dashboard {
         print_compute_notice(&compute);
         print_plain_preamble(&run_summary, &cfg, &path, &output_dir, mode_label, n_parallel);
+        if join_training {
+            println!(
+                "Join mode: shared directory {}; unfinished genes claimed via .lock; existing *_betadata.feather skipped",
+                output_dir
+            );
+        }
         if let Some(condition_col) = condition_column.as_deref() {
             let splits = prepare_condition_splits(&path, &output_dir, condition_col)?;
             println!(
@@ -662,6 +763,7 @@ fn main() -> anyhow::Result<()> {
                     write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
                     spaceship_config: &cfg,
                     config_source_path: config_source_path.clone(),
+                    join_training,
                 };
                 fit_all_genes_dispatch(&params, &compute)?;
             }
@@ -703,6 +805,7 @@ fn main() -> anyhow::Result<()> {
                 write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
                 spaceship_config: &cfg,
                 config_source_path: config_source_path.clone(),
+                join_training,
             };
             fit_all_genes_dispatch(&params, &compute)?;
         }
@@ -744,10 +847,6 @@ fn main() -> anyhow::Result<()> {
                             split_output_dir.clone(),
                             Some((split.label.clone(), si + 1, n_splits)),
                         );
-                        state.push_activity(format!(
-                            "[condition] {} ({} cells) -> {}",
-                            split.label, split.n_obs, split_output_dir
-                        ));
                     }
                     let params = FitAllGenesParams {
                         path: &path,
@@ -786,6 +885,7 @@ fn main() -> anyhow::Result<()> {
                         write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
                         spaceship_config: &cfg,
                         config_source_path: config_source_for_training.clone(),
+                        join_training,
                     };
                     fit_all_genes_dispatch(&params, &compute_thread)?;
                 }
@@ -828,6 +928,7 @@ fn main() -> anyhow::Result<()> {
                     write_minimal_repro_h5ad: cfg.execution.write_minimal_repro_h5ad,
                     spaceship_config: &cfg,
                     config_source_path: config_source_for_training,
+                    join_training,
                 };
                 fit_all_genes_dispatch(&params, &compute_thread)
             }

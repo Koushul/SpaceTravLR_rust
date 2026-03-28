@@ -206,6 +206,8 @@ pub struct ExecutionConfig {
     pub output_dir: String,
     /// When true, write `spacetravlr_minimal_repro.h5ad` under the output directory (large I/O on big datasets).
     pub write_minimal_repro_h5ad: bool,
+    /// If > 0, remove a gene `*.lock` file older than this many seconds before claiming the gene (crash recovery on shared storage).
+    pub stale_lock_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,7 +230,7 @@ pub struct ModelExportConfig {
     pub save_cnn_weights: bool,
     /// Write .npz with deflate compression (recommended).
     pub compressed_npz: bool,
-    /// Subdirectory under [execution].output_dir for model artifacts.
+    /// Subdirectory under [execution].output_dir for CNN `.npz` exports (default `CNN_weights`).
     pub output_subdir: String,
 }
 
@@ -311,6 +313,7 @@ impl Default for ExecutionConfig {
             n_parallel: 1,
             output_dir: String::new(),
             write_minimal_repro_h5ad: false,
+            stale_lock_secs: 0,
         }
     }
 }
@@ -331,7 +334,7 @@ impl Default for ModelExportConfig {
         Self {
             save_cnn_weights: false,
             compressed_npz: true,
-            output_subdir: "saved_models".into(),
+            output_subdir: "CNN_weights".into(),
         }
     }
 }
@@ -418,6 +421,19 @@ impl SpaceshipConfig {
         std::fs::write(&path, text.as_str())?;
         let _ = std::fs::remove_file(output_dir.join("spacetravlr_run_config.toml"));
         Ok(path)
+    }
+
+    /// Write `spacetravlr_run_repro.toml` only if missing (first trainer on a shared output directory).
+    pub fn write_run_repro_toml_if_missing(&self, output_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+        std::fs::create_dir_all(output_dir)?;
+        let path = output_dir.join(RUN_REPRO_TOML_FILENAME);
+        if path.is_file() {
+            return Ok(None);
+        }
+        let text = self.to_toml_pretty()?;
+        std::fs::write(&path, text.as_str())?;
+        let _ = std::fs::remove_file(output_dir.join("spacetravlr_run_config.toml"));
+        Ok(Some(path))
     }
 
     pub fn discover_default_path() -> Option<PathBuf> {

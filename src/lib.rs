@@ -8,6 +8,7 @@ pub mod ligand;
 pub mod model;
 pub mod network;
 pub mod perturb;
+pub mod perturb_mode;
 pub mod run_summary_html;
 pub mod spatial_estimator;
 pub mod training_hud;

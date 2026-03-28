@@ -80,12 +80,21 @@ impl CellularNicheNetworkConfig {
 }
 
 impl<B: Backend> CellularNicheNetwork<B> {
+    /// `spatial_maps` must be `[batch, 1, H, W]` — one inverse-distance map for the cluster being
+    /// trained (see `spatial_maps_for_cluster_cnn` in `estimator.rs`). Neighbor-count context for
+    /// all clusters stays in `spatial_features` `[batch, n_clusters]`. Lasso intercept + coefficients
+    /// seed `anchors`; the CNN outputs sigmoid logits scaled by those anchors (same as Python).
     pub fn get_betas(
         &self,
         spatial_maps: Tensor<B, 4>,
         spatial_features: Tensor<B, 2>,
     ) -> Tensor<B, 2> {
-        let [batch, _c, _h, _w] = spatial_maps.dims();
+        let [batch, channels, _h, _w] = spatial_maps.dims();
+        debug_assert_eq!(
+            channels,
+            1,
+            "VisionEncoder conv1 expects 1 input channel (per-cluster niche map)"
+        );
         let device = &spatial_maps.device();
 
         let x = self.conv_layers.conv1.forward(spatial_maps);

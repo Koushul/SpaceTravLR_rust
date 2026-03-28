@@ -95,6 +95,8 @@ n_parallel  = 9
 # output_dir = "/path/to/custom_run"
 # Write spacetravlr_minimal_repro.h5ad (slow / large I/O on big datasets). Default false; or pass --write-minimal-repro-h5ad.
 # write_minimal_repro_h5ad = true
+# Multi-host training: if > 0, delete gene *.lock files older than this many seconds before claiming (crash recovery on NFS). Default 0 = never.
+# stale_lock_secs = 14400
 
 [perturbation]
 # Multiplier applied to all betas in splash()
@@ -115,5 +117,5 @@ ligand_grid_factor = 0.5
 save_cnn_weights = false
 # Use compressed .npz (numpy savez_compressed format).
 compressed_npz = true
-# Subdirectory under [execution].output_dir (currently fixed to "saved_models")
-output_subdir = "saved_models"
+# Subdirectory under [execution].output_dir for CNN .npz exports
+output_subdir = "CNN_weights"

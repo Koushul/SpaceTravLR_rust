@@ -1,6 +1,6 @@
 # SpaceTravLR (Rust 🦀️🚀️)
 
-Rust implementation of [SpaceTravLR](https://github.com/jishnulab/SpaceTravLR)
+Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
 
 ![SpaceTravLR training dashboard UI](data/example.png)
 
@@ -174,9 +174,6 @@ cargo run --release -- --plain \
 
 See `cargo run --release -- --help` (or `spacetravlr --help` after install). Options are defined with **clap**; config file path is `-c` / `--config`, dataset override is `--h5ad`.
 
-## UI Screenshot
-
-![SpaceTravLR training dashboard UI](data/example.png)
 
 ## Export CNN Weights (Compressed) + PyTorch Loading
 

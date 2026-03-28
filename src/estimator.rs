@@ -7,9 +7,23 @@ use burn::optim::{AdamConfig, Optimizer};
 use burn::prelude::*;
 use burn::tensor::ElementConversion;
 use burn::tensor::backend::AutodiffBackend;
-use ndarray::{Array1, Array2, Array4, Axis};
+use ndarray::{s, Array1, Array2, Array4, Axis};
 use rayon::prelude::*;
 use std::collections::HashMap;
+
+/// Vision path uses `Conv2d` with one input channel. Take only the map for the cluster being
+/// trained (`cluster_id`), matching Python `RotatedTensorDataset`:
+/// `sp_maps[idx, cluster : cluster + 1, :, :]`.
+fn spatial_maps_for_cluster_cnn(
+    spatial_maps: &Array4<f32>,
+    row_indices: &[usize],
+    cluster_id: usize,
+) -> Array4<f32> {
+    spatial_maps
+        .select(Axis(0), row_indices)
+        .slice(s![.., cluster_id..cluster_id + 1, .., ..])
+        .to_owned()
+}
 
 /// Precomputed spatial data shared across all per-gene training runs.
 pub struct CachedSpatialData {
@@ -246,11 +260,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         ),
                         device,
                     );
-                    let sm_c = spatial_maps.select(Axis(0), &indices);
+                    let sm_c = spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id);
                     let sm_tensor = Tensor::<B, 4>::from_data(
                         burn::tensor::TensorData::new(
                             sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
-                            [cluster_n, num_clusters, self.spatial_dim, self.spatial_dim],
+                            [cluster_n, 1, self.spatial_dim, self.spatial_dim],
                         ),
                         device,
                     );
@@ -401,11 +415,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 ),
                 device,
             );
-            let sm_c = spatial_maps.select(Axis(0), &indices);
+            let sm_c = spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id);
             let sm_tensor = Tensor::<B, 4>::from_data(
                 burn::tensor::TensorData::new(
                     sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
-                    [cluster_n, num_clusters, self.spatial_dim, self.spatial_dim],
+                    [cluster_n, 1, self.spatial_dim, self.spatial_dim],
                 ),
                 device,
             );
@@ -493,11 +507,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     ),
                     device,
                 );
-                let sm_c = spatial_maps.select(Axis(0), &indices);
+                let sm_c = spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id);
                 let sm_tensor = Tensor::<B, 4>::from_data(
                     burn::tensor::TensorData::new(
                         sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
-                        [cluster_n, num_clusters, self.spatial_dim, self.spatial_dim],
+                        [cluster_n, 1, self.spatial_dim, self.spatial_dim],
                     ),
                     device,
                 );
@@ -773,6 +787,20 @@ mod tests {
         let clusters = Array1::from_vec(vec![0, 1, 0]);
         let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8);
         assert_eq!(maps.shape(), &[3, 2, 8, 8]);
+    }
+
+    #[test]
+    fn spatial_maps_for_cluster_cnn_shape_matches_conv1() {
+        let xy = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]];
+        let clusters = Array1::from_vec(vec![0, 1, 0]);
+        let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8);
+        let sm = spatial_maps_for_cluster_cnn(&maps, &[0, 2], 0);
+        assert_eq!(sm.shape(), &[2, 1, 8, 8]);
+        assert_eq!(
+            sm,
+            maps.select(Axis(0), &[0, 2])
+                .slice(ndarray::s![.., 0..1, .., ..])
+        );
     }
 
     #[test]

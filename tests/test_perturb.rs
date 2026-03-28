@@ -1,7 +1,7 @@
 use ndarray::{Array2, array};
 use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
 use space_trav_lr_rust::ligand::calculate_weighted_ligands;
-use space_trav_lr_rust::perturb::{PerturbConfig, perturb};
+use space_trav_lr_rust::perturb::{PerturbConfig, PerturbTarget, perturb, perturb_with_targets};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -367,6 +367,196 @@ fn test_perturb_shape_preserved() {
 
     assert_eq!(result.simulated.shape(), gene_mtx.shape());
     assert_eq!(result.delta.shape(), gene_mtx.shape());
+}
+
+#[test]
+fn test_perturb_with_target_cell_subset() {
+    let n_cells = 12;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+
+    let config = PerturbConfig {
+        n_propagation: 1,
+        ..Default::default()
+    };
+    let target_cells = vec![0usize, 1usize, 2usize];
+    let result = perturb_with_targets(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[PerturbTarget {
+            gene: "A".to_string(),
+            desired_expr: 0.0,
+            cell_indices: Some(target_cells.clone()),
+        }],
+        &config,
+        &lr_radii,
+    );
+
+    for cell in target_cells {
+        assert_eq!(result.simulated[[cell, 0]], 0.0);
+    }
+    for cell in 3..n_cells {
+        assert!(result.simulated[[cell, 0]] > 0.0);
+    }
+}
+
+#[test]
+fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
+    let gene_names: Vec<String> = vec!["TF1", "LIG", "REC", "TARGET"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let gene2index: HashMap<String, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.clone(), i))
+        .collect();
+
+    let row_labels = vec!["0".to_string()];
+    let mut bf_target = BetaFrame::from_parts(
+        "TARGET".to_string(),
+        row_labels.clone(),
+        array![0.0],
+        array![[0.1]], // TF1 -> TARGET
+        vec!["TF1".to_string()],
+        array![[0.05]], // (LIG$REC) -> TARGET
+        vec!["LIG".to_string()],
+        vec!["REC".to_string()],
+        ndarray::Array2::zeros((1, 0)),
+        vec![],
+        vec![],
+    );
+
+    let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
+    let clusters = vec![0usize, 0usize];
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(
+        &row_labels,
+        &obs_names,
+        &clusters,
+    ));
+    bf_target.expand_to_cells(Arc::new(obs_names.clone()), mapping);
+    bf_target.modulator_gene_indices = Some(
+        bf_target
+            .modulator_genes
+            .iter()
+            .map(|g| {
+                let plain = g.strip_prefix("beta_").unwrap_or(g);
+                *gene2index.get(plain).unwrap()
+            })
+            .collect(),
+    );
+
+    let mut bb_data = HashMap::new();
+    bb_data.insert("TARGET".to_string(), bf_target);
+    let bb = Betabase {
+        data: bb_data,
+        ligands_set: ["LIG".to_string()].into_iter().collect(),
+        receptors_set: ["REC".to_string()].into_iter().collect(),
+        tfl_ligands_set: HashSet::new(),
+        tfs_set: ["TF1".to_string()].into_iter().collect(),
+    };
+
+    // cell_0 has strong ligand and TF; cell_1 receives ligand through space
+    let gene_mtx = array![
+        [1.0, 10.0, 1.0, 1.0], // cell_0
+        [1.0, 0.0, 1.0, 1.0],  // cell_1
+    ];
+    let xy = array![
+        [0.0, 0.0],
+        [1.0, 0.0],
+    ];
+
+    let lig_vals = gene_mtx.column(1).to_owned().insert_axis(ndarray::Axis(1));
+    let rw_data = calculate_weighted_ligands(&xy, &lig_vals, 1.0, 1.0);
+    let rw_ligands = GeneMatrix::new(rw_data, vec!["LIG".to_string()]);
+    let rw_tfligands = GeneMatrix::new(Array2::zeros((2, 0)), vec![]);
+
+    let mut lr_radii = HashMap::new();
+    lr_radii.insert("LIG".to_string(), 1.0);
+
+    let config = PerturbConfig {
+        n_propagation: 1,
+        ..Default::default()
+    };
+    let result = perturb_with_targets(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[
+            PerturbTarget {
+                gene: "TF1".to_string(),
+                desired_expr: 0.0,
+                cell_indices: Some(vec![0]),
+            },
+            PerturbTarget {
+                gene: "LIG".to_string(),
+                desired_expr: 0.0,
+                cell_indices: Some(vec![0]),
+            },
+        ],
+        &config,
+        &lr_radii,
+    );
+
+    let target_idx = *gene2index.get("TARGET").unwrap();
+    let tf_idx = *gene2index.get("TF1").unwrap();
+    let lig_idx = *gene2index.get("LIG").unwrap();
+
+    let target_before_c0 = gene_mtx[[0, target_idx]];
+    let target_before_c1 = gene_mtx[[1, target_idx]];
+    let target_after_c0 = result.simulated[[0, target_idx]];
+    let target_after_c1 = result.simulated[[1, target_idx]];
+    let delta_target_c0 = target_after_c0 - target_before_c0;
+    let delta_target_c1 = target_after_c1 - target_before_c1;
+
+    println!("Synthetic TF+LR perturbation summary:");
+    println!(
+        "  cell_0: TF1 {:.3} -> {:.3}, LIG {:.3} -> {:.3}, TARGET {:.6} -> {:.6} (delta {:.6})",
+        gene_mtx[[0, tf_idx]],
+        result.simulated[[0, tf_idx]],
+        gene_mtx[[0, lig_idx]],
+        result.simulated[[0, lig_idx]],
+        target_before_c0,
+        target_after_c0,
+        delta_target_c0
+    );
+    println!(
+        "  cell_1: TF1 {:.3} -> {:.3}, LIG {:.3} -> {:.3}, TARGET {:.6} -> {:.6} (delta {:.6})",
+        gene_mtx[[1, tf_idx]],
+        result.simulated[[1, tf_idx]],
+        gene_mtx[[1, lig_idx]],
+        result.simulated[[1, lig_idx]],
+        target_before_c1,
+        target_after_c1,
+        delta_target_c1
+    );
+
+    // Direct perturbations should apply only to cell_0.
+    assert_eq!(result.simulated[[0, tf_idx]], 0.0);
+    assert_eq!(result.simulated[[0, lig_idx]], 0.0);
+    assert!(result.simulated[[1, tf_idx]] > 0.0);
+    assert!(result.simulated[[1, lig_idx]] >= 0.0);
+
+    // TARGET should decrease in both cells:
+    // - cell_0: direct TF + local LR effects
+    // - cell_1: spatially propagated LR effect (no direct TF perturbation)
+    assert!(delta_target_c0 < 0.0, "cell_0 TARGET should decrease");
+    assert!(delta_target_c1 < 0.0, "cell_1 TARGET should decrease via spatial LR propagation");
+    assert!(
+        delta_target_c0 < delta_target_c1,
+        "cell_0 decrease should be stronger than cell_1 (direct TF+LR vs propagated LR only)"
+    );
+
+    // Magnitude sanity checks for this synthetic setup.
+    assert!((delta_target_c0 + 0.41).abs() < 0.15);
+    assert!((delta_target_c1 + 0.19).abs() < 0.15);
 }
 
 // ── Helpers for /tmp/betas-dependent tests ──────────────────────────────────

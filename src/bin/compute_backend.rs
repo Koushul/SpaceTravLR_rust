@@ -1,6 +1,10 @@
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
+#[cfg(feature = "libtorch")]
+use burn::backend::libtorch::LibTorchDevice;
+#[cfg(feature = "libtorch")]
+use burn::backend::LibTorch;
 use burn_autodiff::Autodiff;
 use space_trav_lr_rust::config::{
     CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,
@@ -10,6 +14,8 @@ use space_trav_lr_rust::training_hud::TrainingHud;
 
 #[derive(Clone, Debug)]
 pub(crate) enum ComputeChoice {
+    #[cfg(feature = "libtorch")]
+    LibTorch(LibTorchDevice),
     Wgpu(WgpuDevice),
     NdArray(NdArrayDevice),
 }
@@ -17,6 +23,8 @@ pub(crate) enum ComputeChoice {
 impl ComputeChoice {
     pub(crate) fn label(&self) -> &'static str {
         match self {
+            #[cfg(feature = "libtorch")]
+            ComputeChoice::LibTorch(_) => "LibTorch",
             ComputeChoice::Wgpu(_) => "WGPU",
             ComputeChoice::NdArray(_) => "CPU (NdArray)",
         }
@@ -30,6 +38,18 @@ pub(crate) fn select_compute_backend() -> ComputeChoice {
     {
         return ComputeChoice::NdArray(NdArrayDevice::Cpu);
     }
+
+    #[cfg(feature = "libtorch")]
+    {
+        if tch::Cuda::is_available() {
+            return ComputeChoice::LibTorch(LibTorchDevice::Cuda(0));
+        }
+        #[cfg(target_os = "macos")]
+        if tch::utils::has_mps() {
+            return ComputeChoice::LibTorch(LibTorchDevice::Mps);
+        }
+    }
+
     if preferred_wgpu_adapter_info().is_some() {
         ComputeChoice::Wgpu(WgpuDevice::default())
     } else {
@@ -53,6 +73,20 @@ fn preferred_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
 
 pub(crate) fn compute_hardware_details(choice: &ComputeChoice) -> String {
     match choice {
+        #[cfg(feature = "libtorch")]
+        ComputeChoice::LibTorch(device) => match device {
+            LibTorchDevice::Cuda(idx) => {
+                let n = tch::Cuda::device_count();
+                format!("CUDA GPU {} of {} (LibTorch)", idx, n)
+            }
+            LibTorchDevice::Mps => "Apple MPS GPU (LibTorch)".to_string(),
+            LibTorchDevice::Cpu => {
+                let arch = std::env::consts::ARCH;
+                let os = std::env::consts::OS;
+                format!("{} {} CPU (LibTorch)", os, arch)
+            }
+            other => format!("{:?} (LibTorch)", other),
+        },
         ComputeChoice::Wgpu(_) => {
             if let Some(info) = preferred_wgpu_adapter_info() {
                 format!(
@@ -111,6 +145,53 @@ pub(crate) struct FitAllGenesParams<'a> {
     pub write_minimal_repro_h5ad: bool,
     pub spaceship_config: &'a SpaceshipConfig,
     pub config_source_path: Option<std::path::PathBuf>,
+    /// Loaded from shared `spacetravlr_run_repro.toml` (`--join-output-dir`); skips overwriting that file at end.
+    pub join_training: bool,
+}
+
+macro_rules! dispatch_fit_all_genes {
+    ($backend:ty, $p:expr, $device:expr) => {
+        SpatialCellularProgramsEstimator::<Autodiff<$backend>, anndata_hdf5::H5>::fit_all_genes(
+            $p.path,
+            $p.obs_row_subset.clone(),
+            $p.radius,
+            $p.spatial_dim,
+            $p.contact_distance,
+            $p.tf_ligand_cutoff,
+            $p.max_lr_pairs,
+            $p.top_lr_pairs_by_mean_expression,
+            $p.use_tf_modulators,
+            $p.use_lr_modulators,
+            $p.use_tfl_modulators,
+            $p.layer,
+            $p.cluster_annot,
+            $p.cnn,
+            $p.epochs,
+            $p.learning_rate,
+            $p.score_threshold,
+            $p.l1_reg,
+            $p.group_reg,
+            $p.n_iter,
+            $p.tol,
+            $p.cnn_training_mode,
+            $p.hybrid_pass2_full_cnn,
+            $p.hybrid_gating,
+            $p.min_mean_lasso_r2_for_cnn,
+            $p.gene_filter.clone(),
+            $p.max_genes,
+            $p.n_parallel,
+            $p.output_dir,
+            $p.model_export,
+            $p.hud.clone(),
+            $p.network_data_dir.as_deref(),
+            $p.tf_priors_feather.as_deref(),
+            $p.write_minimal_repro_h5ad,
+            $p.spaceship_config,
+            $p.config_source_path.clone(),
+            $p.join_training,
+            $device,
+        )
+    };
 }
 
 pub(crate) fn fit_all_genes_dispatch(
@@ -118,88 +199,11 @@ pub(crate) fn fit_all_genes_dispatch(
     choice: &ComputeChoice,
 ) -> anyhow::Result<()> {
     match choice {
-        ComputeChoice::Wgpu(device) => {
-            SpatialCellularProgramsEstimator::<Autodiff<Wgpu>, anndata_hdf5::H5>::fit_all_genes(
-                p.path,
-                p.obs_row_subset.clone(),
-                p.radius,
-                p.spatial_dim,
-                p.contact_distance,
-                p.tf_ligand_cutoff,
-                p.max_lr_pairs,
-                p.top_lr_pairs_by_mean_expression,
-                p.use_tf_modulators,
-                p.use_lr_modulators,
-                p.use_tfl_modulators,
-                p.layer,
-                p.cluster_annot,
-                p.cnn,
-                p.epochs,
-                p.learning_rate,
-                p.score_threshold,
-                p.l1_reg,
-                p.group_reg,
-                p.n_iter,
-                p.tol,
-                p.cnn_training_mode,
-                p.hybrid_pass2_full_cnn,
-                p.hybrid_gating,
-                p.min_mean_lasso_r2_for_cnn,
-                p.gene_filter.clone(),
-                p.max_genes,
-                p.n_parallel,
-                p.output_dir,
-                p.model_export,
-                p.hud.clone(),
-                p.network_data_dir.as_deref(),
-                p.tf_priors_feather.as_deref(),
-                p.write_minimal_repro_h5ad,
-                p.spaceship_config,
-                p.config_source_path.clone(),
-                device,
-            )
+        #[cfg(feature = "libtorch")]
+        ComputeChoice::LibTorch(device) => dispatch_fit_all_genes!(LibTorch, p, device),
+        ComputeChoice::Wgpu(device) => dispatch_fit_all_genes!(Wgpu, p, device),
+        ComputeChoice::NdArray(device) => {
+            dispatch_fit_all_genes!(NdArray<f32, i32>, p, device)
         }
-        ComputeChoice::NdArray(device) => SpatialCellularProgramsEstimator::<
-            Autodiff<NdArray<f32, i32>>,
-            anndata_hdf5::H5,
-        >::fit_all_genes(
-            p.path,
-            p.obs_row_subset.clone(),
-            p.radius,
-            p.spatial_dim,
-            p.contact_distance,
-            p.tf_ligand_cutoff,
-            p.max_lr_pairs,
-            p.top_lr_pairs_by_mean_expression,
-            p.use_tf_modulators,
-            p.use_lr_modulators,
-            p.use_tfl_modulators,
-            p.layer,
-            p.cluster_annot,
-            p.cnn,
-            p.epochs,
-            p.learning_rate,
-            p.score_threshold,
-            p.l1_reg,
-            p.group_reg,
-            p.n_iter,
-            p.tol,
-            p.cnn_training_mode,
-            p.hybrid_pass2_full_cnn,
-            p.hybrid_gating,
-            p.min_mean_lasso_r2_for_cnn,
-            p.gene_filter.clone(),
-            p.max_genes,
-            p.n_parallel,
-            p.output_dir,
-            p.model_export,
-            p.hud.clone(),
-            p.network_data_dir.as_deref(),
-            p.tf_priors_feather.as_deref(),
-            p.write_minimal_repro_h5ad,
-            p.spaceship_config,
-            p.config_source_path.clone(),
-            device,
-        ),
     }
 }

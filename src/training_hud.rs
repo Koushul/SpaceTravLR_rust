@@ -131,8 +131,6 @@ pub struct TrainingHudState {
     /// Mean LASSO R² per completed gene (for TUI best / worst list only).
     pub gene_r2_mean: Vec<(String, f64)>,
     pub perf_stats_generation: u64,
-    pub activity_log: VecDeque<String>,
-    pub show_pipeline_timing: bool,
     pub gene_train_times: VecDeque<(String, f64)>,
     /// Human-readable obs value for the subset currently training (`--condition` mode).
     pub current_condition_value: Option<String>,
@@ -175,20 +173,10 @@ impl TrainingHudState {
             cancel_requested,
             gene_r2_mean: Vec::new(),
             perf_stats_generation: 0,
-            activity_log: VecDeque::new(),
-            show_pipeline_timing: false,
             gene_train_times: VecDeque::new(),
             current_condition_value: None,
             condition_split_progress: None,
         }
-    }
-
-    pub fn push_activity(&mut self, line: String) {
-        const MAX: usize = 16;
-        while self.activity_log.len() >= MAX {
-            self.activity_log.pop_front();
-        }
-        self.activity_log.push_back(line);
     }
 
     pub fn reset_for_new_split(
@@ -235,7 +223,6 @@ impl TrainingHudState {
             self.gene_train_times.pop_front();
         }
         self.gene_train_times.push_back((gene.to_string(), secs));
-        self.push_activity(format!("[gene] {} done ({:.1}s)", gene, secs));
     }
 
     pub fn record_training_metrics(&mut self, gene: &str, summaries: &[ClusterTrainingSummary]) {
@@ -394,45 +381,24 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
 }
 
 pub fn log_line(hud: &Option<TrainingHud>, msg: String) {
-    match hud {
-        None => println!("{}", msg),
-        Some(h) => {
-            if let Ok(mut g) = h.lock() {
-                if g.show_pipeline_timing {
-                    g.push_activity(msg);
-                }
-            }
-        }
+    if hud.is_none() {
+        println!("{}", msg);
     }
 }
 
 pub fn pipeline_step_begin(hud: &Option<TrainingHud>, label: &str) -> Instant {
-    match hud {
-        None => println!("[pipeline] … {}", label),
-        Some(h) => {
-            if let Ok(mut g) = h.lock() {
-                if g.show_pipeline_timing {
-                    g.push_activity(format!("[pipeline] … {}", label));
-                }
-            }
-        }
+    if hud.is_none() {
+        println!("[pipeline] … {}", label);
     }
     Instant::now()
 }
 
 pub fn pipeline_step_end(hud: &Option<TrainingHud>, label: &str, started: Instant) {
-    match hud {
-        None => println!("[pipeline] done {} ({:.1}s)", label, started.elapsed().as_secs_f64()),
-        Some(h) => {
-            if let Ok(mut g) = h.lock() {
-                if g.show_pipeline_timing {
-                    g.push_activity(format!(
-                        "[pipeline] done {} ({:.1}s)",
-                        label,
-                        started.elapsed().as_secs_f64()
-                    ));
-                }
-            }
-        }
+    if hud.is_none() {
+        println!(
+            "[pipeline] done {} ({:.1}s)",
+            label,
+            started.elapsed().as_secs_f64()
+        );
     }
 }

@@ -43,6 +43,9 @@ const C_TOPR2: Color = Color::Rgb(69, 133, 136); // aqua
 const C_BOTR2: Color = MUTED;
 const PERF_BORD: Color = Color::Rgb(215, 153, 33); // yellow
 
+/// Best / worst gene counts in the LASSO R² perf panel (paired columns).
+const PERF_R2_LEADERBOARD_LEN: usize = 10;
+
 const HARDWARE_POLL_INTERVAL: Duration = Duration::from_secs(3 * 60);
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
@@ -408,6 +411,14 @@ fn fmt_r2_fixed(r: f64) -> String {
     }
 }
 
+fn fmt_lasso_float(x: f64) -> String {
+    if x.is_finite() {
+        format!("{:.3e}", x)
+    } else {
+        "—".to_string()
+    }
+}
+
 fn perf_r2_columns(inner_w: usize) -> (usize, usize) {
     const MID: usize = 2;
     const R2_COL: usize = 7;
@@ -435,11 +446,20 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
 
     let mut v = st.gene_r2_mean.clone();
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let top5: Vec<(String, f64)> = v.iter().take(5).cloned().collect();
+    let top_n: Vec<(String, f64)> = v
+        .iter()
+        .take(PERF_R2_LEADERBOARD_LEN)
+        .cloned()
+        .collect();
     v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    let bot5: Vec<(String, f64)> = v.iter().take(5).cloned().collect();
+    let bot_n: Vec<(String, f64)> = v
+        .iter()
+        .take(PERF_R2_LEADERBOARD_LEN)
+        .cloned()
+        .collect();
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(8);
+    let mut lines: Vec<Line<'static>> =
+        Vec::with_capacity(2 + PERF_R2_LEADERBOARD_LEN.min(n_genes));
     lines.push(Line::from(vec![
         Span::styled(
             format!("{:<hw$}", "▲ best R²", hw = half),
@@ -452,7 +472,7 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
         ),
     ]));
     lines.push(rule_line(inner_w));
-    for ((g_hi, r_hi), (g_lo, r_lo)) in top5.into_iter().zip(bot5.into_iter()) {
+    for ((g_hi, r_hi), (g_lo, r_lo)) in top_n.into_iter().zip(bot_n.into_iter()) {
         let g_hi_s = truncate_label(&g_hi, gene_w);
         let g_lo_s = truncate_label(&g_lo, gene_w);
         lines.push(Line::from(vec![
@@ -816,11 +836,6 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         st.cancel_requested.store(true, Ordering::Relaxed);
                     }
                 }
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('v') {
-                    if let Ok(mut st) = hud.lock() {
-                        st.show_pipeline_timing = !st.show_pipeline_timing;
-                    }
-                }
             }
         }
 
@@ -931,31 +946,17 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .constraints([Constraint::Min(1), Constraint::Length(ROCKET_PANEL_W)])
                 .split(vchunks[1]);
 
-            let left = if st.show_pipeline_timing {
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(10),
-                        Constraint::Length(8),
-                        Constraint::Min(4),
-                    ])
-                    .split(hchunks[0])
-            } else {
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(10), Constraint::Min(4)])
-                    .split(hchunks[0])
-            };
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(12), Constraint::Min(4)])
+                .split(hchunks[0]);
             let top_panels = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(left[0]);
 
-            if st.show_pipeline_timing {
-                let act_w = left[1].width.saturating_sub(2) as usize;
-                let mut act_lines: Vec<Line> = Vec::new();
-
-                let now_er = Instant::now();
+            let now_er = Instant::now();
+            {
                 let mut erc = eta_rate_cache.borrow_mut();
                 let n_times = st.gene_train_times.len();
                 let rounds = st.genes_rounds;
@@ -979,50 +980,16 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     erc.2 = rounds;
                     erc.3 = total_g;
                 }
-                let eta = erc.4.clone();
-                let rate = erc.5.clone();
-
-                act_lines.push(Line::from(vec![
-                    Span::styled("ETA ", Style::default().fg(LABEL)),
-                    Span::styled(eta, Style::default().fg(VALUE)),
-                    Span::styled("  ·  ", Style::default().fg(MUTED)),
-                    Span::styled("RATE ", Style::default().fg(LABEL)),
-                    Span::styled(rate, Style::default().fg(SKY)),
-                ]));
-
-                for entry in st.activity_log.iter() {
-                    let truncated = truncate_label(entry, act_w.max(12));
-                    act_lines.push(Line::from(Span::styled(
-                        truncated,
-                        Style::default().fg(LILAC),
-                    )));
-                }
-                if act_lines.len() <= 1 {
-                    act_lines.push(Line::from(Span::styled(
-                        "  ·  waiting for pipeline…",
-                        Style::default().fg(MUTED),
-                    )));
-                }
-                f.render_widget(
-                    Paragraph::new(act_lines)
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(TEL_BORD))
-                                .title(Span::styled(
-                                    " Pipeline & timing (v) ",
-                                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
-                                )),
-                        )
-                        .style(bg),
-                    left[1],
-                );
             }
+            let (eta_s, rate_s) = {
+                let erc = eta_rate_cache.borrow();
+                (erc.4.clone(), erc.5.clone())
+            };
 
-            let work_area = if st.show_pipeline_timing { left[2] } else { left[1] };
+            let work_area = left[1];
             let work_row = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(10), Constraint::Min(32), Constraint::Min(16)])
+                .constraints([Constraint::Min(10), Constraint::Min(38), Constraint::Min(16)])
                 .split(work_area);
 
             let sep = || Span::styled("  ·  ", Style::default().fg(MUTED));
@@ -1061,8 +1028,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("LASSO  "),
                         val(
                             format!(
-                                "l1={:.3}  group={:.3}  n_iter={}  tol={:.0e}",
-                                rc.l1_reg, rc.group_reg, rc.n_iter, rc.tol
+                                "l1={}  group={}  n_iter={}  tol={:.1e}",
+                                fmt_lasso_float(rc.l1_reg),
+                                fmt_lasso_float(rc.group_reg),
+                                rc.n_iter,
+                                rc.tol
                             ),
                             GRAPE,
                         ),
@@ -1071,8 +1041,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("TRAIN  "),
                         val(
                             format!(
-                                "lr={:.3}  score≥{:.2}  epochs={}/gene",
-                                rc.learning_rate, rc.score_threshold, rc.epochs_per_gene
+                                "lr={}  score≥{:.2}  epochs={}/gene",
+                                fmt_lasso_float(rc.learning_rate),
+                                rc.score_threshold,
+                                rc.epochs_per_gene
                             ),
                             SKY,
                         ),
@@ -1135,6 +1107,13 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 st.output_dir.clone()
             };
             let mut mission_lines = vec![Line::from(vec![lbl("SRC  "), val(path_s, MUTED)])];
+            mission_lines.push(Line::from(vec![
+                lbl("ETA  "),
+                val(eta_s, VALUE),
+                sep(),
+                lbl("RATE  "),
+                val(rate_s, SKY),
+            ]));
             if rc.condition_split != "—" {
                 let active = match (
                     st.current_condition_value.as_deref(),
@@ -1276,7 +1255,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(PERF_BORD))
                             .title(Span::styled(
-                                " ✦ LASSO R² ",
+                                format!(
+                                    " ✦ LASSO R²  · {} best / {} worst ",
+                                    PERF_R2_LEADERBOARD_LEN, PERF_R2_LEADERBOARD_LEN
+                                ),
                                 Style::default().fg(SKY).add_modifier(Modifier::BOLD),
                             )),
                     )

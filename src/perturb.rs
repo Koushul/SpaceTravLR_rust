@@ -6,6 +6,12 @@ use rayon::prelude::*;
 use crate::betadata::{Betabase, GeneMatrix};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 
+pub struct PerturbTarget {
+    pub gene: String,
+    pub desired_expr: f64,
+    pub cell_indices: Option<Vec<usize>>,
+}
+
 pub struct PerturbConfig {
     pub n_propagation: usize,
     pub scale_factor: f64,
@@ -53,6 +59,38 @@ pub fn perturb(
     config: &PerturbConfig,
     lr_radii: &HashMap<String, f64>,
 ) -> PerturbResult {
+    let scoped_targets: Vec<PerturbTarget> = targets
+        .iter()
+        .map(|(gene, desired_expr)| PerturbTarget {
+            gene: gene.clone(),
+            desired_expr: *desired_expr,
+            cell_indices: None,
+        })
+        .collect();
+    perturb_with_targets(
+        bb,
+        gene_mtx,
+        gene_names,
+        xy,
+        rw_ligands_init,
+        rw_tfligands_init,
+        &scoped_targets,
+        config,
+        lr_radii,
+    )
+}
+
+pub fn perturb_with_targets(
+    bb: &Betabase,
+    gene_mtx: &Array2<f64>,
+    gene_names: &[String],
+    xy: &Array2<f64>,
+    rw_ligands_init: &GeneMatrix,
+    rw_tfligands_init: &GeneMatrix,
+    targets: &[PerturbTarget],
+    config: &PerturbConfig,
+    lr_radii: &HashMap<String, f64>,
+) -> PerturbResult {
     let n_cells = gene_mtx.nrows();
     let n_genes = gene_mtx.ncols();
     let gene_to_idx: HashMap<&str, usize> = gene_names
@@ -63,10 +101,18 @@ pub fn perturb(
 
     // delta_input: desired − original, nonzero only at target genes
     let mut delta_input = Array2::zeros((n_cells, n_genes));
-    for (target, desired_expr) in targets {
-        if let Some(&idx) = gene_to_idx.get(target.as_str()) {
-            for cell in 0..n_cells {
-                delta_input[[cell, idx]] = desired_expr - gene_mtx[[cell, idx]];
+    for target in targets {
+        if let Some(&idx) = gene_to_idx.get(target.gene.as_str()) {
+            if let Some(cell_indices) = target.cell_indices.as_ref() {
+                for &cell in cell_indices {
+                    if cell < n_cells {
+                        delta_input[[cell, idx]] = target.desired_expr - gene_mtx[[cell, idx]];
+                    }
+                }
+            } else {
+                for cell in 0..n_cells {
+                    delta_input[[cell, idx]] = target.desired_expr - gene_mtx[[cell, idx]];
+                }
             }
         }
     }
@@ -199,10 +245,18 @@ pub fn perturb(
     }
 
     let mut simulated = gene_mtx + &delta_simulated;
-    for (target, desired_expr) in targets {
-        if let Some(&idx) = gene_to_idx.get(target.as_str()) {
-            for cell in 0..n_cells {
-                simulated[[cell, idx]] = *desired_expr;
+    for target in targets {
+        if let Some(&idx) = gene_to_idx.get(target.gene.as_str()) {
+            if let Some(cell_indices) = target.cell_indices.as_ref() {
+                for &cell in cell_indices {
+                    if cell < n_cells {
+                        simulated[[cell, idx]] = target.desired_expr;
+                    }
+                }
+            } else {
+                for cell in 0..n_cells {
+                    simulated[[cell, idx]] = target.desired_expr;
+                }
             }
         }
     }
