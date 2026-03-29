@@ -1,23 +1,26 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use polars::datatypes::DataType;
 use polars::prelude::*;
+use serde::Serialize;
 use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
 
 /// Named matrix for gene expression or weighted ligand data.
 /// Wraps a dense 2D array with gene-name → column-index lookup.
 pub struct GeneMatrix {
-    pub data: Array2<f64>,
+    pub data: Array2<f32>,
     pub col_names: Vec<String>,
     col_map: HashMap<String, usize>,
 }
 
 impl GeneMatrix {
-    pub fn new(data: Array2<f64>, col_names: Vec<String>) -> Self {
+    pub fn new(data: Array2<f32>, col_names: Vec<String>) -> Self {
         let col_map = col_names
             .iter()
             .enumerate()
@@ -30,7 +33,7 @@ impl GeneMatrix {
         }
     }
 
-    pub fn col(&self, name: &str) -> Option<ArrayView1<'_, f64>> {
+    pub fn col(&self, name: &str) -> Option<ArrayView1<'_, f32>> {
         self.col_map.get(name).map(|&i| self.data.column(i))
     }
 
@@ -60,10 +63,10 @@ pub struct BetaFrame {
     /// Labels for the beta rows (cluster IDs or cell IDs from the file).
     pub row_labels: Vec<String>,
 
-    pub intercepts: Array1<f64>,
-    pub tf_betas: Array2<f64>,
-    pub lr_betas: Array2<f64>,
-    pub tfl_betas: Array2<f64>,
+    pub intercepts: Array1<f32>,
+    pub tf_betas: Array2<f32>,
+    pub lr_betas: Array2<f32>,
+    pub tfl_betas: Array2<f32>,
 
     /// Number of output cells (== obs_names.len() after expand_to_cells).
     pub n_cells: usize,
@@ -166,11 +169,11 @@ impl BetaFrame {
 
         let n_rows = row_labels.len();
         let n_cols = data_col_names.len();
-        let mut raw = Array2::zeros((n_rows, n_cols));
+        let mut raw = Array2::<f32>::zeros((n_rows, n_cols));
 
         for (j, col_name) in data_col_names.iter().enumerate() {
-            let casted = df.column(col_name)?.cast(&DataType::Float64)?;
-            let ca = casted.f64()?;
+            let casted = df.column(col_name)?.cast(&DataType::Float32)?;
+            let ca = casted.f32()?;
             for (i, val) in ca.into_iter().enumerate() {
                 raw[[i, j]] = val.unwrap_or(0.0);
             }
@@ -185,13 +188,13 @@ impl BetaFrame {
     pub fn from_parts(
         gene_name: String,
         row_labels: Vec<String>,
-        intercepts: Array1<f64>,
-        tf_betas: Array2<f64>,
+        intercepts: Array1<f32>,
+        tf_betas: Array2<f32>,
         tfs: Vec<String>,
-        lr_betas: Array2<f64>,
+        lr_betas: Array2<f32>,
         ligands: Vec<String>,
         receptors: Vec<String>,
-        tfl_betas: Array2<f64>,
+        tfl_betas: Array2<f32>,
         tfl_ligands: Vec<String>,
         tfl_regulators: Vec<String>,
     ) -> Self {
@@ -328,7 +331,7 @@ impl BetaFrame {
         gene_name: String,
         row_labels: Vec<String>,
         data_col_names: Vec<String>,
-        data: Array2<f64>,
+        data: Array2<f32>,
     ) -> Result<Self> {
         let n_rows = row_labels.len();
 
@@ -415,7 +418,7 @@ impl BetaFrame {
         })
     }
 
-    fn extract_cols(data: &Array2<f64>, indices: &[usize], n_rows: usize) -> Array2<f64> {
+    fn extract_cols(data: &Array2<f32>, indices: &[usize], n_rows: usize) -> Array2<f32> {
         if indices.is_empty() {
             return Array2::zeros((n_rows, 0));
         }
@@ -439,8 +442,8 @@ impl BetaFrame {
         rw_ligands: &GeneMatrix,
         rw_ligands_tfl: &GeneMatrix,
         gex_df: &GeneMatrix,
-        scale_factor: f64,
-        beta_cap: Option<f64>,
+        scale_factor: f32,
+        beta_cap: Option<f32>,
     ) -> GeneMatrix {
         let n = self.n_cells;
         let map = self.cell_to_beta_row.as_slice();
@@ -517,7 +520,7 @@ impl BetaFrame {
         let gex_nc = gex_df.data.ncols();
 
         // Row-by-row parallel processing: each cell's result row (~2KB) fits in L1
-        let mut result = vec![0.0f64; n * n_out];
+        let mut result = vec![0.0f32; n * n_out];
 
         result.par_chunks_mut(n_out).enumerate().for_each(|(i, r)| {
             let br = unsafe { *map.get_unchecked(i) };
@@ -541,7 +544,7 @@ impl BetaFrame {
                 let wl = unsafe { *rw_flat.get_unchecked(rw_base + lw.wl_col) };
                 let gex = unsafe { *gex_flat.get_unchecked(gex_base + lw.gex_col) };
 
-                if gex > 0.0 {
+                if gex > 0.0f32 {
                     unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * scale_factor };
                 }
                 unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex * scale_factor };
@@ -596,11 +599,15 @@ impl Betabase {
 
     /// Load all `*_betadata.feather` files from `dir` in parallel (rayon),
     /// then expand every frame to cell level using the given obs_names + clusters.
+    ///
+    /// `on_subprogress`: optional callback with sub-progress in **permille** (0–1000) for this
+    /// stage only (roughly 0–700 while reading feathers, 700–1000 while expanding to cells).
     pub fn from_directory(
         dir: &str,
         obs_names: &[String],
         clusters: &[usize],
         gene2index: Option<&HashMap<String, usize>>,
+        on_subprogress: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     ) -> Result<Self> {
         let dir_path = Path::new(dir);
         anyhow::ensure!(dir_path.exists(), "Directory {} does not exist", dir);
@@ -625,11 +632,19 @@ impl Betabase {
                 .progress_chars("#>-"),
         );
 
+        let total_n = paths.len().max(1) as u64;
+        let processed = Arc::new(AtomicU32::new(0));
+
         let mut frames: Vec<BetaFrame> = paths
             .par_iter()
             .filter_map(|path| {
                 let result = BetaFrame::from_path(path);
                 pb.inc(1);
+                let pn = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(f) = &on_subprogress {
+                    let sub = ((pn as u64 * 700u64) / total_n).min(700) as u32;
+                    f(sub);
+                }
                 match result {
                     Ok(frame) => Some(frame),
                     Err(e) => {
@@ -654,7 +669,12 @@ impl Betabase {
         let mut tfl_ligands_set = HashSet::new();
         let mut tfs_set = HashSet::new();
 
-        for mut frame in frames.drain(..) {
+        let n_expand = frames.len().max(1);
+        for (fi, mut frame) in frames.drain(..).enumerate() {
+            if let Some(f) = &on_subprogress {
+                let sub = (700u64 + ((fi as u64 + 1) * 300) / n_expand as u64).min(1000) as u32;
+                f(sub);
+            }
             ligands_set.extend(frame.ligands.iter().cloned());
             receptors_set.extend(frame.receptors.iter().cloned());
             tfl_ligands_set.extend(frame.tfl_ligands.iter().cloned());
@@ -700,4 +720,223 @@ impl Betabase {
             tfs_set,
         })
     }
+}
+
+fn betadata_feather_label_column_index(all_names: &[String]) -> Option<usize> {
+    all_names.iter().position(|c| {
+        c == "Cluster"
+            || c == "CellID"
+            || c.starts_with("__index")
+            || c == "cell_id"
+            || c == "index"
+            || c == "obs_names"
+    })
+}
+
+/// Detects how betadata rows map to cells: **`Cluster`** = seed-only lasso (one β row per cluster),
+/// **`CellID`** = spatial CNN export (per-cell β). Used by the spatial viewer to label the UI.
+pub fn betadata_feather_row_id_column(path: &str) -> Result<Option<String>> {
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    if all_names.iter().any(|n| n == "Cluster") {
+        return Ok(Some("Cluster".to_string()));
+    }
+    if all_names.iter().any(|n| n == "CellID") {
+        return Ok(Some("CellID".to_string()));
+    }
+    Ok(None)
+}
+
+/// Numeric data columns suitable for spatial coloring (excludes id / label column).
+pub fn betadata_feather_plottable_columns(path: &str) -> Result<Vec<String>> {
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let mut out = Vec::new();
+    for (i, name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx {
+            continue;
+        }
+        let col = df.column(name.as_str())?;
+        if col.cast(&DataType::Float64).is_ok() {
+            out.push(name.clone());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// One scalar per AnnData cell: feather row → cell via [`BetaFrame::compute_cell_mapping`].
+pub fn betadata_feather_per_cell_column(
+    path: &str,
+    column: &str,
+    obs_names: &[String],
+    clusters: &[usize],
+) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        obs_names.len() == clusters.len(),
+        "obs_names len {} != clusters len {}",
+        obs_names.len(),
+        clusters.len()
+    );
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        let label_casted = df.column(label_name.as_str())?.cast(&DataType::String)?;
+        label_casted
+            .str()?
+            .into_no_null_iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, clusters);
+    let series = df
+        .column(column)
+        .with_context(|| format!("column {:?}", column))?
+        .cast(&DataType::Float64)?;
+    let ca = series.f64()?;
+    let n_obs = obs_names.len();
+    let mut out = vec![0f32; n_obs];
+    for i in 0..n_obs {
+        let r = mapping[i];
+        let v = ca.get(r).unwrap_or(0.0);
+        out[i] = v as f32;
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Serialize)]
+pub struct TopBetaCoefficient {
+    pub column: String,
+    pub mean: f64,
+    pub mean_abs: f64,
+}
+
+fn is_intercept_column(name: &str) -> bool {
+    name == "beta0" || name == "beta_0"
+}
+
+/// Mean and mean |β| per coefficient column over the given **cell** indices (obs order),
+/// ranked by `mean_abs` descending. Skips intercept columns (`beta0` / `beta_0`).
+pub fn betadata_feather_top_coefficients_for_selection(
+    path: &str,
+    obs_names: &[String],
+    clusters: &[usize],
+    cell_indices: &[usize],
+    top_k: usize,
+) -> Result<Vec<TopBetaCoefficient>> {
+    anyhow::ensure!(
+        obs_names.len() == clusters.len(),
+        "obs_names len {} != clusters len {}",
+        obs_names.len(),
+        clusters.len()
+    );
+    if cell_indices.is_empty() || top_k == 0 {
+        return Ok(Vec::new());
+    }
+
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        let label_casted = df.column(label_name.as_str())?.cast(&DataType::String)?;
+        label_casted
+            .str()?
+            .into_no_null_iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, clusters);
+    let n_obs = obs_names.len();
+
+    let mut columns: Vec<String> = Vec::new();
+    for (i, name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx {
+            continue;
+        }
+        if is_intercept_column(name) {
+            continue;
+        }
+        let col = df.column(name.as_str())?;
+        if col.cast(&DataType::Float64).is_ok() {
+            columns.push(name.clone());
+        }
+    }
+
+    let mut scores: Vec<(String, f64, f64)> = Vec::with_capacity(columns.len());
+
+    for col_name in columns {
+        let series = df
+            .column(col_name.as_str())?
+            .cast(&DataType::Float64)?;
+        let ca = series.f64()?;
+        let mut sum = 0.0f64;
+        let mut sum_abs = 0.0f64;
+        let mut cnt = 0usize;
+        for &ci in cell_indices {
+            if ci >= n_obs {
+                continue;
+            }
+            let r = mapping[ci];
+            let v = ca.get(r).unwrap_or(0.0);
+            sum += v;
+            sum_abs += v.abs();
+            cnt += 1;
+        }
+        if cnt == 0 {
+            continue;
+        }
+        scores.push((col_name, sum / cnt as f64, sum_abs / cnt as f64));
+    }
+
+    scores.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    scores.truncate(top_k.min(scores.len()));
+
+    Ok(scores
+        .into_iter()
+        .map(|(column, mean, mean_abs)| TopBetaCoefficient {
+            column,
+            mean,
+            mean_abs,
+        })
+        .collect())
 }

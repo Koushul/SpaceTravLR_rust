@@ -25,6 +25,13 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:unicode-width"]
 libtorch = ["burn/tch", "dep:tch"]
 dev-main = []
+spatial-viewer = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
 
 [[bin]]
 name = "spacetravlr"
@@ -38,6 +45,11 @@ path = "src/bin/spacetravlr_perturb.rs"
 name = "space_trav_lr_rust"
 path = "src/main.rs"
 required-features = ["dev-main"]
+
+[[bin]]
+name = "spatial_viewer"
+path = "src/bin/spatial_viewer.rs"
+required-features = ["spatial-viewer"]
 
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
@@ -83,4 +95,24 @@ glob = "0.3"
 flate2 = "1"
 nalgebra-sparse = "0.11"
 kiddo = ">=5.2, <5.3"
+axum = { version = "0.8", optional = true, default-features = false, features = [
+    "json",
+    "query",
+    "macros",
+    "tokio",
+    "http1",
+] }
+tokio = { version = "1", optional = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+] }
+tower-http = { version = "0.6", optional = true, features = [
+    "fs",
+    "trace",
+    "compression-gzip",
+] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 

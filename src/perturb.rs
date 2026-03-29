@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use ndarray::{Array2, Zip};
 use rayon::prelude::*;
@@ -6,6 +8,7 @@ use rayon::prelude::*;
 use crate::betadata::{Betabase, GeneMatrix};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 
+#[derive(Clone)]
 pub struct PerturbTarget {
     pub gene: String,
     pub desired_expr: f64,
@@ -77,6 +80,7 @@ pub fn perturb(
         &scoped_targets,
         config,
         lr_radii,
+        None,
     )
 }
 
@@ -90,6 +94,7 @@ pub fn perturb_with_targets(
     targets: &[PerturbTarget],
     config: &PerturbConfig,
     lr_radii: &HashMap<String, f64>,
+    job_progress: Option<&Arc<AtomicU32>>,
 ) -> PerturbResult {
     let n_cells = gene_mtx.nrows();
     let n_genes = gene_mtx.ncols();
@@ -160,19 +165,33 @@ pub fn perturb_with_targets(
     let lr_ligands: Vec<String> = bb.ligands_set.iter().cloned().collect();
     let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
 
-    for iter in 0..config.n_propagation {
-        eprintln!("  perturb iteration {}/{}", iter + 1, config.n_propagation);
+    let n_prop = config.n_propagation.max(1);
+    if let Some(p) = job_progress {
+        p.store(40, Ordering::Relaxed);
+    }
 
-        // 1. Splash all trained genes
+    for iter in 0..config.n_propagation {
+        if job_progress.is_none() {
+            eprintln!("  perturb iteration {}/{}", iter + 1, config.n_propagation);
+        }
+        if let Some(p) = job_progress {
+            let v = ((iter + 1) as u32 * 860).saturating_div(n_prop as u32).min(860);
+            p.store(v.max(40), Ordering::Relaxed);
+        }
+
+        // 1. Splash all trained genes (expression → f32 for splash / betabase RAM)
         let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-        let gex_gm = GeneMatrix::new(gex_filtered, gene_names.to_vec());
+        let gex_gm = GeneMatrix::new(
+            gex_filtered.mapv(|v| v as f32),
+            gene_names.to_vec(),
+        );
         let splashed = splash_all(
             bb,
             &rw_lr_for_splash,
             rw_tfligands_init,
             &gex_gm,
-            config.beta_scale_factor,
-            config.beta_cap,
+            config.beta_scale_factor as f32,
+            config.beta_cap.map(|c| c as f32),
         );
 
         // 2. Update gene expression
@@ -205,7 +224,7 @@ pub fn perturb_with_targets(
         let delta_rw = &rw_max_1 - &rw_max_0;
 
         // rw_lr_for_splash becomes max-combined for next iteration (Python behavior)
-        rw_lr_for_splash = GeneMatrix::new(rw_max_1, gene_names.to_vec());
+        rw_lr_for_splash = GeneMatrix::new(rw_max_1.mapv(|v| v as f32), gene_names.to_vec());
 
         // 5. Delta in ligand expression
         let mut ligands_1 = Array2::zeros((n_cells, n_genes));
@@ -244,6 +263,10 @@ pub fn perturb_with_targets(
         }
     }
 
+    if let Some(p) = job_progress {
+        p.store(900, Ordering::Relaxed);
+    }
+
     let mut simulated = gene_mtx + &delta_simulated;
     for target in targets {
         if let Some(&idx) = gene_to_idx.get(target.gene.as_str()) {
@@ -279,14 +302,14 @@ fn scatter_max_to_full(
     for (j, name) in rw_lr.col_names.iter().enumerate() {
         if let Some(&gi) = gene_to_idx.get(name.as_str()) {
             for c in 0..n_cells {
-                result[[c, gi]] = rw_lr.data[[c, j]];
+                result[[c, gi]] = rw_lr.data[[c, j]] as f64;
             }
         }
     }
     for (j, name) in rw_tfl.col_names.iter().enumerate() {
         if let Some(&gi) = gene_to_idx.get(name.as_str()) {
             for c in 0..n_cells {
-                result[[c, gi]] = result[[c, gi]].max(rw_tfl.data[[c, j]]);
+                result[[c, gi]] = result[[c, gi]].max(rw_tfl.data[[c, j]] as f64);
             }
         }
     }
@@ -298,8 +321,8 @@ fn splash_all(
     rw_ligands: &GeneMatrix,
     rw_tfligands: &GeneMatrix,
     gex_df: &GeneMatrix,
-    beta_scale_factor: f64,
-    beta_cap: Option<f64>,
+    beta_scale_factor: f32,
+    beta_cap: Option<f32>,
 ) -> HashMap<String, GeneMatrix> {
     bb.data
         .iter()
@@ -329,7 +352,7 @@ fn perturb_all_cells(
 
     struct GeneWork<'a> {
         gene_col: usize,
-        splash_flat: &'a [f64],
+        splash_flat: &'a [f32],
         n_mods: usize,
         mod_indices: &'a [usize],
     }
@@ -360,10 +383,10 @@ fn perturb_all_cells(
             let delta_base = cell * n_genes;
             for w in &work {
                 let splash_base = cell * w.n_mods;
-                let mut sum = 0.0;
+                let mut sum = 0.0f64;
                 for k in 0..w.n_mods {
                     unsafe {
-                        sum += *w.splash_flat.get_unchecked(splash_base + k)
+                        sum += f64::from(*w.splash_flat.get_unchecked(splash_base + k))
                             * *delta_flat
                                 .get_unchecked(delta_base + *w.mod_indices.get_unchecked(k));
                     }
@@ -387,7 +410,7 @@ fn recompute_weighted_ligands(
 ) -> GeneMatrix {
     let n_cells = gene_mtx.nrows();
     if ligand_names.is_empty() {
-        return GeneMatrix::new(Array2::zeros((n_cells, 0)), Vec::new());
+        return GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new());
     }
 
     let mut seen = HashSet::new();
@@ -413,11 +436,11 @@ fn recompute_weighted_ligands(
     }
 
     if lig_names.is_empty() {
-        return GeneMatrix::new(Array2::zeros((n_cells, 0)), Vec::new());
+        return GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new());
     }
 
     let n_lig = lig_names.len();
-    let mut lig_data = Array2::zeros((n_cells, n_lig));
+    let mut lig_data = Array2::<f64>::zeros((n_cells, n_lig));
     for (j, col) in col_data.iter().enumerate() {
         for i in 0..n_cells {
             lig_data[[i, j]] = col[i];
@@ -432,11 +455,11 @@ fn recompute_weighted_ligands(
         }
     }
 
-    let mut result_data = Array2::zeros((n_cells, n_lig));
+    let mut result_data = Array2::<f32>::zeros((n_cells, n_lig));
 
     for (radius_bits, group_indices) in &radius_groups {
         let radius = f64::from_bits(*radius_bits);
-        let mut sub = Array2::zeros((n_cells, group_indices.len()));
+        let mut sub = Array2::<f64>::zeros((n_cells, group_indices.len()));
         for (k, &j) in group_indices.iter().enumerate() {
             sub.column_mut(k).assign(&lig_data.column(j));
         }
@@ -445,7 +468,10 @@ fn recompute_weighted_ligands(
             None => calculate_weighted_ligands(xy, &sub, radius, scale_factor),
         };
         for (k, &j) in group_indices.iter().enumerate() {
-            result_data.column_mut(j).assign(&weighted.column(k));
+            let col = weighted.column(k);
+            for i in 0..n_cells {
+                result_data[[i, j]] = col[i] as f32;
+            }
         }
     }
 

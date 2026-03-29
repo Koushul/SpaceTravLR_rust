@@ -223,7 +223,7 @@ fn test_betabase_from_directory_cnn_cellid() {
 
     let obs = vec!["c0".into(), "c1".into()];
     let clusters = [99usize, 99];
-    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None).unwrap();
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None, None).unwrap();
 
     assert_eq!(bb.data.len(), 2);
     let f1 = &bb.data["G1"];
@@ -297,7 +297,7 @@ fn test_betabase_from_directory() {
     let obs: Vec<String> = vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()];
     let clusters = vec![0, 0, 1, 1, 0];
 
-    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None).unwrap();
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None, None).unwrap();
 
     assert_eq!(bb.data.len(), 2);
     assert!(bb.data.contains_key("gene1"));
@@ -372,7 +372,7 @@ fn test_mapping_shared_via_arc() {
     let obs: Vec<String> = (0..1000).map(|i| format!("cell{}", i)).collect();
     let clusters: Vec<usize> = (0..1000).map(|i| i % 2).collect();
 
-    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None).unwrap();
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None, None).unwrap();
 
     let g1 = &bb.data["g1"];
     let g2 = &bb.data["g2"];
@@ -390,7 +390,7 @@ fn build_splash_inputs(
     let obs_names: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
 
-    let bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None).unwrap();
+    let bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None, None).unwrap();
 
     let mut all_genes: HashSet<String> = HashSet::new();
     let mut lig_set: HashSet<String> = HashSet::new();

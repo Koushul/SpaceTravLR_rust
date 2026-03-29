@@ -134,7 +134,7 @@ fn array_data_to_dense_f64(data: ArrayData) -> anyhow::Result<Array2<f64>> {
     }
 }
 
-fn read_expression_matrix_dense_f64<AnB: Backend>(
+pub(crate) fn read_expression_matrix_dense_f64<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
     slice: &[SelectInfoElem],
@@ -168,17 +168,27 @@ fn read_expression_matrix_dense_f64<AnB: Backend>(
     array_data_to_dense_f64(data)
 }
 
-fn load_spatial_coords_f64<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<Array2<f64>> {
+/// Read `obsm[key]` as a dense matrix in `f64`. HDF5 may store the same logical array as `f32` or
+/// `f64`; requesting the wrong Rust element type returns `Err` from anndata, so we try both.
+pub(crate) fn obsm_get_dense_matrix_f64<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    key: &str,
+) -> anyhow::Result<Option<Array2<f64>>> {
+    if let Ok(Some(arr)) = adata.obsm().get_item::<Array2<f32>>(key) {
+        return Ok(Some(arr.mapv(|v| v as f64)));
+    }
+    if let Ok(Some(arr)) = adata.obsm().get_item::<Array2<f64>>(key) {
+        return Ok(Some(arr));
+    }
+    Ok(None)
+}
+
+pub(crate) fn load_spatial_coords_f64<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<Array2<f64>> {
     const KEYS: [&str; 3] = ["spatial", "X_spatial", "spatial_loc"];
     for key in KEYS {
-        if let Some(arr) = adata.obsm().get_item::<Array2<f64>>(key)? {
+        if let Some(arr) = obsm_get_dense_matrix_f64(adata, key)? {
             if arr.nrows() > 0 && arr.ncols() >= 2 {
                 return Ok(arr);
-            }
-        }
-        if let Some(arr) = adata.obsm().get_item::<Array2<f32>>(key)? {
-            if arr.nrows() > 0 && arr.ncols() >= 2 {
-                return Ok(arr.mapv(|v| v as f64));
             }
         }
     }
@@ -341,12 +351,7 @@ fn build_cluster_to_cell_type_map(
 
 fn detect_spatial_obsm_key<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<String> {
     for key in ["spatial", "X_spatial", "spatial_loc"] {
-        if let Some(arr) = adata.obsm().get_item::<Array2<f64>>(key)? {
-            if arr.nrows() > 0 && arr.ncols() >= 2 {
-                return Ok(key.to_string());
-            }
-        }
-        if let Some(arr) = adata.obsm().get_item::<Array2<f32>>(key)? {
+        if let Some(arr) = obsm_get_dense_matrix_f64(adata, key)? {
             if arr.nrows() > 0 && arr.ncols() >= 2 {
                 return Ok(key.to_string());
             }
@@ -455,14 +460,12 @@ fn export_minimal_repro_adata_with_cache(
     dst.set_obs(obs_min)?;
 
     let spatial_key = detect_spatial_obsm_key(src)?;
-    let spatial_xy = if let Some(arr) = src.obsm().get_item::<Array2<f64>>(&spatial_key)? {
-        arr
-    } else {
-        src.obsm()
-            .get_item::<Array2<f32>>(&spatial_key)?
-            .ok_or_else(|| anyhow::anyhow!("spatial key {:?} not readable", spatial_key))?
-            .mapv(|v| v as f64)
-    };
+    let spatial_xy = obsm_get_dense_matrix_f64(src, &spatial_key)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "obsm[{:?}] not readable as dense f32/f64 matrix",
+            spatial_key
+        )
+    })?;
     dst.obsm().add(&spatial_key, spatial_xy)?;
 
     let x_data = if let Some(xe) = src.layers().get("imputed_count") {

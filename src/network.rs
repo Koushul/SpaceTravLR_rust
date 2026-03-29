@@ -1,6 +1,7 @@
 use crate::config::expand_user_path;
 use anyhow::{Context, Result};
 use polars::prelude::*;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -90,6 +91,7 @@ pub fn resolve_species_network_parquet(
     );
 }
 
+#[derive(Clone, Serialize)]
 pub struct Modulators {
     pub regulators: Vec<String>,
     pub ligands: Vec<String>,
@@ -496,6 +498,27 @@ impl GeneNetwork {
             receptors.truncate(k);
             lr_pairs.truncate(k);
         }
+    }
+
+    /// Curated `ligand$receptor` keys for `edge_type == "lr"` (as in betadata column stems).
+    pub fn all_lr_pair_keys(&self) -> Result<HashSet<String>> {
+        let lr_df = self
+            .network_df
+            .clone()
+            .lazy()
+            .filter(col("edge_type").cast(DataType::String).eq(lit("lr")))
+            .select([col("source"), col("target")])
+            .collect()?;
+        let mut out = HashSet::new();
+        let l_s = lr_df.column("source")?.cast(&DataType::String)?;
+        let r_s = lr_df.column("target")?.cast(&DataType::String)?;
+        let (Ok(l_col), Ok(r_col)) = (l_s.str(), r_s.str()) else {
+            return Ok(out);
+        };
+        for (l, r) in l_col.into_no_null_iter().zip(r_col.into_no_null_iter()) {
+            out.insert(format!("{}${}", l, r));
+        }
+        Ok(out)
     }
 }
 

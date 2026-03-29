@@ -1,6 +1,7 @@
 use crate::betadata::{write_betadata_feather, Betabase, GeneMatrix};
 use crate::config::{expand_user_path, SpaceshipConfig};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use crate::spatial_estimator::load_spatial_coords_f64;
 use crate::perturb::{perturb_with_targets, PerturbConfig, PerturbTarget};
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
@@ -13,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub struct PerturbRuntime {
     pub run_toml_path: PathBuf,
@@ -95,23 +98,6 @@ fn read_expression_matrix_dense_f64<AnB: Backend>(
     array_data_to_dense_f64(data)
 }
 
-fn load_spatial_coords_f64<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result<Array2<f64>> {
-    const KEYS: [&str; 3] = ["spatial", "X_spatial", "spatial_loc"];
-    for key in KEYS {
-        if let Some(arr) = adata.obsm().get_item::<Array2<f64>>(key)? {
-            if arr.nrows() > 0 && arr.ncols() >= 2 {
-                return Ok(arr);
-            }
-        }
-        if let Some(arr) = adata.obsm().get_item::<Array2<f32>>(key)? {
-            if arr.nrows() > 0 && arr.ncols() >= 2 {
-                return Ok(arr.mapv(|v| v as f64));
-            }
-        }
-    }
-    anyhow::bail!("No usable 2D spatial coordinates in obsm.");
-}
-
 fn read_clusters_as_usize<AnB: Backend>(
     adata: &AnnData<AnB>,
     cluster_annot: &str,
@@ -186,11 +172,11 @@ fn compute_initial_wl(
     }
 
     if lig_names.is_empty() {
-        return GeneMatrix::new(Array2::zeros((n_cells, 0)), Vec::new());
+        return GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new());
     }
 
     let n_lig = lig_names.len();
-    let mut lig_data = Array2::zeros((n_cells, n_lig));
+    let mut lig_data = Array2::<f64>::zeros((n_cells, n_lig));
     for (j, col) in lig_data_cols.iter().enumerate() {
         for i in 0..n_cells {
             lig_data[[i, j]] = col[i];
@@ -204,10 +190,10 @@ fn compute_initial_wl(
         }
     }
 
-    let mut result = Array2::zeros((n_cells, n_lig));
+    let mut result = Array2::<f32>::zeros((n_cells, n_lig));
     for (rbits, group) in &radius_groups {
         let radius = f64::from_bits(*rbits);
-        let mut sub = Array2::zeros((n_cells, group.len()));
+        let mut sub = Array2::<f64>::zeros((n_cells, group.len()));
         for (k, &j) in group.iter().enumerate() {
             sub.column_mut(k).assign(&lig_data.column(j));
         }
@@ -218,7 +204,10 @@ fn compute_initial_wl(
             _ => calculate_weighted_ligands(xy, &sub, radius, weighted_ligand_scale),
         };
         for (k, &j) in group.iter().enumerate() {
-            result.column_mut(j).assign(&weighted.column(k));
+            let col = weighted.column(k);
+            for i in 0..n_cells {
+                result[[i, j]] = col[i] as f32;
+            }
         }
     }
 
@@ -227,23 +216,52 @@ fn compute_initial_wl(
 
 impl PerturbRuntime {
     pub fn from_run_toml(run_toml: &Path) -> anyhow::Result<Self> {
+        Self::from_run_toml_with_progress(run_toml, None, None)
+    }
+
+    /// Same as [`from_run_toml`], but reports coarse load progress in **permille** (0–1000) and
+    /// optional status text for UIs (e.g. spatial viewer).
+    pub fn from_run_toml_with_progress(
+        run_toml: &Path,
+        progress_permille: Option<Arc<AtomicU32>>,
+        progress_message: Option<Arc<Mutex<String>>>,
+    ) -> anyhow::Result<Self> {
+        let set_p = |v: u32| {
+            if let Some(p) = &progress_permille {
+                p.store(v.min(1000), Ordering::Relaxed);
+            }
+        };
+        let set_msg = |s: &str| {
+            if let Some(m) = &progress_message {
+                if let Ok(mut g) = m.lock() {
+                    *g = s.to_string();
+                }
+            }
+        };
+
         let run_toml_path = run_toml.to_path_buf();
         let run_dir = run_toml
             .parent()
             .ok_or_else(|| anyhow::anyhow!("run TOML has no parent directory"))?
             .to_path_buf();
+        set_msg("Reading run configuration…");
+        set_p(20);
         let cfg = SpaceshipConfig::from_file(&run_toml_path)?;
 
         let adata_path = expand_user_path(cfg.resolve_adata_path().as_str());
         if adata_path.is_empty() {
             anyhow::bail!("data.adata_path is empty in run TOML");
         }
+        set_msg("Opening AnnData…");
+        set_p(40);
         let adata = AnnData::<H5>::open(H5::open(adata_path.as_str())?)?;
         let gene_names = adata.var_names().into_vec();
         let obs_names = adata.obs_names().into_vec();
         let clusters = read_clusters_as_usize(&adata, cfg.data.cluster_annot.as_str())?;
         let xy = load_spatial_coords_f64(&adata)?;
         let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
+        set_msg("Reading expression matrix…");
+        set_p(80);
         let gene_mtx = read_expression_matrix_dense_f64(&adata, cfg.data.layer.as_str(), &slice)?;
 
         let gene2index: HashMap<String, usize> = gene_names
@@ -255,13 +273,32 @@ impl PerturbRuntime {
         let betadata_dir = run_dir
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("run directory is not valid UTF-8"))?;
-        let bb = Betabase::from_directory(betadata_dir, &obs_names, &clusters, Some(&gene2index))
-            .with_context(|| {
-                format!(
-                    "Failed to load *_betadata.feather from run dir {}",
-                    run_dir.display()
-                )
-            })?;
+        set_msg("Loading betadata feathers…");
+        let p_perm = progress_permille.clone();
+        let on_betadata: Option<Arc<dyn Fn(u32) + Send + Sync>> =
+            if progress_permille.is_some() {
+                Some(Arc::new(move |sub: u32| {
+                    if let Some(g) = &p_perm {
+                        let v = 120u32.saturating_add(sub.saturating_mul(700) / 1000);
+                        g.store(v.min(820), Ordering::Relaxed);
+                    }
+                }))
+            } else {
+                None
+            };
+        let bb = Betabase::from_directory(
+            betadata_dir,
+            &obs_names,
+            &clusters,
+            Some(&gene2index),
+            on_betadata,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to load *_betadata.feather from run dir {}",
+                run_dir.display()
+            )
+        })?;
 
         let mut lr_radii: HashMap<String, f64> = HashMap::new();
         for lig in bb.ligands_set.iter().chain(bb.tfl_ligands_set.iter()) {
@@ -273,6 +310,8 @@ impl PerturbRuntime {
         let wl_scale = cfg.spatial.weighted_ligand_scale_factor;
         let lr_ligands: Vec<String> = bb.ligands_set.iter().cloned().collect();
         let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
+        set_msg("Weighted ligand precomputation (LR)…");
+        set_p(830);
         let rw_ligands_init = compute_initial_wl(
             &gene_mtx,
             &gene_names,
@@ -283,6 +322,8 @@ impl PerturbRuntime {
             min_expression,
             grid,
         );
+        set_msg("Weighted ligand precomputation (TFL)…");
+        set_p(910);
         let rw_tfligands_init = compute_initial_wl(
             &gene_mtx,
             &gene_names,
@@ -302,6 +343,9 @@ impl PerturbRuntime {
             min_expression,
             ligand_grid_factor: cfg.perturbation.ligand_grid_factor,
         };
+
+        set_msg("Perturbation runtime ready.");
+        set_p(1000);
 
         Ok(Self {
             run_toml_path,
@@ -396,6 +440,7 @@ pub fn execute_marked_perturbations(
                 &targets,
                 &runtime.perturb_cfg,
                 &runtime.lr_radii,
+                None,
             );
             let out_path = out_dir.join(format!("{}_perturb_expr.feather", gene));
             write_betadata_feather(

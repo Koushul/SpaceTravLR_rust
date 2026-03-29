@@ -155,11 +155,15 @@ fn count_betadata_files(output_dir: &Path, pattern: &str) -> anyhow::Result<usiz
 }
 
 fn obsm_has_spatial_coords<B: Backend>(adata: &AnnData<B>, key: &str) -> anyhow::Result<bool> {
-    if let Some(a) = adata.obsm().get_item::<Array2<f64>>(key)? {
-        return Ok(a.nrows() > 0 && a.ncols() >= 2);
+    if let Ok(Some(a)) = adata.obsm().get_item::<Array2<f32>>(key) {
+        if a.nrows() > 0 && a.ncols() >= 2 {
+            return Ok(true);
+        }
     }
-    if let Some(a) = adata.obsm().get_item::<Array2<f32>>(key)? {
-        return Ok(a.nrows() > 0 && a.ncols() >= 2);
+    if let Ok(Some(a)) = adata.obsm().get_item::<Array2<f64>>(key) {
+        if a.nrows() > 0 && a.ncols() >= 2 {
+            return Ok(true);
+        }
     }
     Ok(false)
 }

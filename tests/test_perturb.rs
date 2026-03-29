@@ -9,8 +9,9 @@ use std::sync::Arc;
 // ── Self-contained perturb tests (no /tmp/betas needed) ─────────────────────
 
 fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<String, usize>) {
-    // Gene universe: A (TF), B (ligand), C (receptor), D (target1), E (target2)
-    let gene_names: Vec<String> = vec!["A", "B", "C", "D", "E"]
+    // Gene universe: A (TF), B (ligand), C (receptor), D (target1), E (target2), Z (no edges —
+    // not a target row in Betabase, not a ligand/TF in the graph; negative control for KO tests).
+    let gene_names: Vec<String> = vec!["A", "B", "C", "D", "E", "Z"]
         .into_iter()
         .map(String::from)
         .collect();
@@ -128,8 +129,8 @@ fn make_synthetic_inputs(
     // Compute initial received ligands (B is the only ligand)
     let lig_vals = gene_mtx.column(1).to_owned().insert_axis(ndarray::Axis(1));
     let rw_data = calculate_weighted_ligands(&xy, &lig_vals, 50.0, 1.0);
-    let rw_ligands = GeneMatrix::new(rw_data, vec!["B".to_string()]);
-    let rw_tfligands = GeneMatrix::new(Array2::zeros((n_cells, 0)), vec![]);
+    let rw_ligands = GeneMatrix::new(rw_data.mapv(|v| v as f32), vec!["B".to_string()]);
+    let rw_tfligands = GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), vec![]);
 
     (
         bb,
@@ -181,6 +182,102 @@ fn test_perturb_knockout_propagates() {
         .map(|i| (result.simulated[[i, 4]] - gene_mtx[[i, 4]]).abs())
         .sum::<f64>();
     assert!(delta_e > 0.0, "E should change via cascade from A → D → E");
+}
+
+#[test]
+fn test_perturb_knockout_negative_control_unwired_gene_unchanged() {
+    let n_cells = 25;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+    let z_idx = gene_names.iter().position(|g| g == "Z").expect("Z in gene list");
+
+    let config = PerturbConfig {
+        n_propagation: 4,
+        ..Default::default()
+    };
+    let result = perturb(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 0.0)],
+        &config,
+        &lr_radii,
+    );
+
+    let max_abs_z = (0..n_cells)
+        .map(|i| result.delta[[i, z_idx]].abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        max_abs_z < 1e-9,
+        "Z has no trained target row and is not a ligand/TF in the graph; KO(A) must not move Z (max|Δ|={:.3e})",
+        max_abs_z
+    );
+
+    let delta_d: f64 = (0..n_cells)
+        .map(|i| result.delta[[i, 3]].abs())
+        .sum::<f64>();
+    let delta_e: f64 = (0..n_cells)
+        .map(|i| result.delta[[i, 4]].abs())
+        .sum::<f64>();
+    assert!(
+        delta_d > 0.05 * n_cells as f64,
+        "D should move materially when A is KO (connected TF); got sum|Δ|={}",
+        delta_d
+    );
+    assert!(
+        delta_e > 0.05 * n_cells as f64,
+        "E should move materially (A→D→E); got sum|Δ|={}",
+        delta_e
+    );
+}
+
+#[test]
+fn test_perturb_knockout_isolated_gene_only_self_changes() {
+    let n_cells = 20;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+    let z_idx = gene_names.iter().position(|g| g == "Z").expect("Z in gene list");
+    let n_genes = gene_names.len();
+
+    let config = PerturbConfig {
+        n_propagation: 4,
+        ..Default::default()
+    };
+    let result = perturb(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("Z".to_string(), 0.0)],
+        &config,
+        &lr_radii,
+    );
+
+    for g in 0..n_genes {
+        if g == z_idx {
+            continue;
+        }
+        let mx = (0..n_cells)
+            .map(|i| result.delta[[i, g]].abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            mx < 1e-9,
+            "KO(Z): gene {} must be unaffected (no model uses Z); max|Δ|={:.3e}",
+            gene_names[g],
+            mx
+        );
+    }
+    for i in 0..n_cells {
+        assert!(
+            (result.simulated[[i, z_idx]] - 0.0).abs() < 1e-9,
+            "Z should be knocked out in all cells"
+        );
+    }
 }
 
 #[test]
@@ -313,8 +410,8 @@ fn test_perturb_overexpression() {
 
     let lig_vals = gene_mtx.column(1).to_owned().insert_axis(ndarray::Axis(1));
     let rw_data = calculate_weighted_ligands(&xy, &lig_vals, 50.0, 1.0);
-    let rw_ligands = GeneMatrix::new(rw_data, vec!["B".to_string()]);
-    let rw_tfligands = GeneMatrix::new(Array2::zeros((n_cells, 0)), vec![]);
+    let rw_ligands = GeneMatrix::new(rw_data.mapv(|v| v as f32), vec!["B".to_string()]);
+    let rw_tfligands = GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), vec![]);
 
     // Overexpress A to 5.0
     let config = PerturbConfig {
@@ -394,6 +491,7 @@ fn test_perturb_with_target_cell_subset() {
         }],
         &config,
         &lr_radii,
+        None,
     );
 
     for cell in target_cells {
@@ -472,8 +570,8 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
 
     let lig_vals = gene_mtx.column(1).to_owned().insert_axis(ndarray::Axis(1));
     let rw_data = calculate_weighted_ligands(&xy, &lig_vals, 1.0, 1.0);
-    let rw_ligands = GeneMatrix::new(rw_data, vec!["LIG".to_string()]);
-    let rw_tfligands = GeneMatrix::new(Array2::zeros((2, 0)), vec![]);
+    let rw_ligands = GeneMatrix::new(rw_data.mapv(|v| v as f32), vec!["LIG".to_string()]);
+    let rw_tfligands = GeneMatrix::new(Array2::<f32>::zeros((2, 0)), vec![]);
 
     let mut lr_radii = HashMap::new();
     lr_radii.insert("LIG".to_string(), 1.0);
@@ -503,6 +601,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         ],
         &config,
         &lr_radii,
+        None,
     );
 
     let target_idx = *gene2index.get("TARGET").unwrap();
@@ -559,6 +658,262 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
     assert!((delta_target_c1 + 0.19).abs() < 0.15);
 }
 
+// ── UMAP transition vector shift tests ──────────────────────────────────────
+//
+// These verify that perturbation deltas fed into the transition UMAP pipeline
+// produce vectors with correct magnitude ordering and direction.
+
+#[test]
+fn test_transition_ko_vs_oe_opposite_direction() {
+    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+
+    let n_cells = 25;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+
+    let umap: Vec<[f64; 2]> = (0..n_cells)
+        .map(|i| [(i % 5) as f64, (i / 5) as f64])
+        .collect();
+
+    let params = TransitionUmapParams {
+        n_neighbors: 10,
+        temperature: 0.05,
+        remove_null: false,
+        unit_directions: false,
+        grid_scale: 1.0,
+        vector_scale: 1.0,
+        delta_rescale: 1.0,
+        magnitude_threshold: 0.0,
+        use_full_graph: true,
+        full_graph_max_cells: 100,
+    };
+
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
+
+    let ko_result = perturb(
+        &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
+        &[("A".to_string(), 0.0)], &config, &lr_radii,
+    );
+    let ko_grid = compute_umap_transition_grid(&gene_mtx, &ko_result.delta, &umap, &params);
+
+    // Overexpress A to 5.0 in a setup with room for increase
+    let gene_mtx_varied = Array2::from_shape_fn((n_cells, gene_names.len()), |(cell, gene)| {
+        0.5 + 0.1 * (cell % 5) as f64 + 0.05 * gene as f64
+    });
+    let lig_vals = gene_mtx_varied.column(1).to_owned().insert_axis(ndarray::Axis(1));
+    let rw_oe = space_trav_lr_rust::betadata::GeneMatrix::new(
+        space_trav_lr_rust::ligand::calculate_weighted_ligands(&xy, &lig_vals, 50.0, 1.0)
+            .mapv(|v| v as f32),
+        vec!["B".to_string()],
+    );
+    let oe_result = perturb(
+        &bb, &gene_mtx_varied, &gene_names, &xy, &rw_oe, &rw_tfligands,
+        &[("A".to_string(), 5.0)], &config, &lr_radii,
+    );
+    let oe_grid = compute_umap_transition_grid(&gene_mtx_varied, &oe_result.delta, &umap, &params);
+
+    // Compute mean vector direction for KO and OE
+    let mean_ko: [f64; 2] = {
+        let mut sx = 0.0;
+        let mut sy = 0.0;
+        for v in &ko_grid.cell_vectors {
+            sx += v[0];
+            sy += v[1];
+        }
+        [sx / n_cells as f64, sy / n_cells as f64]
+    };
+    let mean_oe: [f64; 2] = {
+        let mut sx = 0.0;
+        let mut sy = 0.0;
+        for v in &oe_grid.cell_vectors {
+            sx += v[0];
+            sy += v[1];
+        }
+        [sx / n_cells as f64, sy / n_cells as f64]
+    };
+
+    // KO and OE should produce vectors in roughly opposite directions.
+    // Dot product of mean vectors should be negative (or close to zero in degenerate cases).
+    let dot = mean_ko[0] * mean_oe[0] + mean_ko[1] * mean_oe[1];
+    let mag_ko = (mean_ko[0].powi(2) + mean_ko[1].powi(2)).sqrt();
+    let mag_oe = (mean_oe[0].powi(2) + mean_oe[1].powi(2)).sqrt();
+
+    if mag_ko > 1e-9 && mag_oe > 1e-9 {
+        let cos_angle = dot / (mag_ko * mag_oe);
+        assert!(
+            cos_angle < 0.5,
+            "KO and OE should produce roughly opposite mean vectors; cos_angle={:.3} (expected < 0.5)\n  mean_ko={:?}\n  mean_oe={:?}",
+            cos_angle, mean_ko, mean_oe,
+        );
+    }
+}
+
+#[test]
+fn test_transition_magnitude_monotonic_with_perturbation_strength() {
+    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+
+    let n_cells = 25;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+
+    let umap: Vec<[f64; 2]> = (0..n_cells)
+        .map(|i| [(i % 5) as f64, (i / 5) as f64])
+        .collect();
+
+    let params = TransitionUmapParams {
+        n_neighbors: 10,
+        temperature: 0.05,
+        remove_null: false,
+        unit_directions: false,
+        grid_scale: 1.0,
+        vector_scale: 1.0,
+        delta_rescale: 1.0,
+        magnitude_threshold: 0.0,
+        use_full_graph: true,
+        full_graph_max_cells: 100,
+    };
+
+    let perturb_levels = [0.0, 0.5, 0.9]; // baseline is 1.0 for all cells
+    let mut magnitudes: Vec<f64> = Vec::new();
+
+    for &level in &perturb_levels {
+        let config = PerturbConfig {
+            n_propagation: 2,
+            ..Default::default()
+        };
+        let result = perturb(
+            &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
+            &[("A".to_string(), level)], &config, &lr_radii,
+        );
+        let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);
+
+        let total_mag: f64 = grid
+            .cell_vectors
+            .iter()
+            .map(|v| (v[0].powi(2) + v[1].powi(2)).sqrt())
+            .sum();
+        magnitudes.push(total_mag);
+    }
+
+    // KO (level=0.0, delta=-1.0) should produce the strongest shift,
+    // halving (level=0.5, delta=-0.5) should produce intermediate,
+    // 10% reduction (level=0.9, delta=-0.1) the weakest.
+    assert!(
+        magnitudes[0] >= magnitudes[1],
+        "stronger perturbation (0.0 vs 0.5) should produce >= magnitude: {:.4} vs {:.4}",
+        magnitudes[0], magnitudes[1]
+    );
+    assert!(
+        magnitudes[1] >= magnitudes[2],
+        "stronger perturbation (0.5 vs 0.9) should produce >= magnitude: {:.4} vs {:.4}",
+        magnitudes[1], magnitudes[2]
+    );
+}
+
+#[test]
+fn test_transition_no_perturbation_no_vectors() {
+    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+
+    let n_cells = 16;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+
+    let umap: Vec<[f64; 2]> = (0..n_cells)
+        .map(|i| [(i % 4) as f64, (i / 4) as f64])
+        .collect();
+
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
+    let result = perturb(
+        &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
+        &[("A".to_string(), 1.0)], // no change (original = 1.0)
+        &config, &lr_radii,
+    );
+
+    let params = TransitionUmapParams {
+        n_neighbors: 8,
+        temperature: 0.05,
+        remove_null: true,
+        unit_directions: false,
+        grid_scale: 1.0,
+        vector_scale: 1.0,
+        delta_rescale: 1.0,
+        magnitude_threshold: 0.0,
+        use_full_graph: true,
+        full_graph_max_cells: 100,
+    };
+
+    let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);
+
+    let total_mag: f64 = grid
+        .cell_vectors
+        .iter()
+        .map(|v| (v[0].powi(2) + v[1].powi(2)).sqrt())
+        .sum();
+    assert!(
+        total_mag < 1e-6,
+        "no perturbation should yield (near-)zero transition vectors, got total_mag={:.6e}",
+        total_mag
+    );
+}
+
+#[test]
+fn test_transition_isolated_gene_no_field() {
+    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+
+    let n_cells = 16;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+
+    let umap: Vec<[f64; 2]> = (0..n_cells)
+        .map(|i| [(i % 4) as f64, (i / 4) as f64])
+        .collect();
+
+    let config = PerturbConfig {
+        n_propagation: 4,
+        ..Default::default()
+    };
+    let result = perturb(
+        &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
+        &[("Z".to_string(), 0.0)], // Z is unwired
+        &config, &lr_radii,
+    );
+
+    let params = TransitionUmapParams {
+        n_neighbors: 8,
+        temperature: 0.05,
+        remove_null: true,
+        unit_directions: false,
+        grid_scale: 1.0,
+        vector_scale: 1.0,
+        delta_rescale: 1.0,
+        magnitude_threshold: 0.0,
+        use_full_graph: true,
+        full_graph_max_cells: 100,
+    };
+
+    let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);
+
+    // Z is not connected to any gene model. KO(Z) produces deltas only in the Z
+    // column. Since those deltas are uniform across cells (all cells had same
+    // expression), transitions should be uniform and remove_null should zero them.
+    let max_cell_mag: f64 = grid
+        .cell_vectors
+        .iter()
+        .map(|v| (v[0].powi(2) + v[1].powi(2)).sqrt())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_cell_mag < 0.01,
+        "KO of isolated gene Z should produce negligible transition field, got max_mag={:.6e}",
+        max_cell_mag
+    );
+}
+
 // ── Helpers for /tmp/betas-dependent tests ──────────────────────────────────
 
 /// Build all inputs needed for perturb: betas, gene expression, coordinates,
@@ -579,7 +934,7 @@ fn build_perturb_inputs(
     let obs_names: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
 
-    let mut bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None).unwrap();
+    let mut bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None, None).unwrap();
 
     let mut all_genes_set: HashSet<String> = HashSet::new();
     for (gene_name, bf) in &bb.data {
@@ -680,11 +1035,11 @@ fn compute_initial_wl(
     }
 
     if lig_names.is_empty() {
-        return GeneMatrix::new(Array2::zeros((n_cells, 0)), Vec::new());
+        return GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new());
     }
 
     let n_lig = lig_names.len();
-    let mut lig_data = Array2::zeros((n_cells, n_lig));
+    let mut lig_data = Array2::<f64>::zeros((n_cells, n_lig));
     for (j, col) in lig_data_cols.iter().enumerate() {
         for i in 0..n_cells {
             lig_data[[i, j]] = col[i];
@@ -699,16 +1054,19 @@ fn compute_initial_wl(
         }
     }
 
-    let mut result = Array2::zeros((n_cells, n_lig));
+    let mut result = Array2::<f32>::zeros((n_cells, n_lig));
     for (rbits, group) in &radius_groups {
         let radius = f64::from_bits(*rbits);
-        let mut sub = Array2::zeros((n_cells, group.len()));
+        let mut sub = Array2::<f64>::zeros((n_cells, group.len()));
         for (k, &j) in group.iter().enumerate() {
             sub.column_mut(k).assign(&lig_data.column(j));
         }
         let weighted = calculate_weighted_ligands(xy, &sub, radius, scale_factor);
         for (k, &j) in group.iter().enumerate() {
-            result.column_mut(j).assign(&weighted.column(k));
+            let col = weighted.column(k);
+            for i in 0..n_cells {
+                result[[i, j]] = col[i] as f32;
+            }
         }
     }
 

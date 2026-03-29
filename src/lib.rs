@@ -11,13 +11,20 @@ pub mod perturb;
 pub mod perturb_mode;
 pub mod run_summary_html;
 pub mod spatial_estimator;
+#[cfg(feature = "spatial-viewer")]
+pub mod adata_query;
+#[cfg(feature = "spatial-viewer")]
+pub mod betadata_view;
+pub mod transition_umap;
 pub mod training_hud;
 pub mod training_log;
 #[cfg(feature = "tui")]
 pub mod training_demo;
 #[cfg(feature = "tui")]
 pub mod training_tui;
-pub use betadata::{write_betadata_feather, BetaFrame, Betabase, GeneMatrix};
+pub use betadata::{
+    write_betadata_feather, BetaFrame, Betabase, GeneMatrix, TopBetaCoefficient,
+};
 pub use cnn_gating::CnnGateDecision;
 pub use config::{
     default_output_dir_for_adata_path, expand_user_path, CnnConfig, CnnOutputActivation,

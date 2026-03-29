@@ -89,6 +89,44 @@ cargo run --release -- --help
 
 (`default-run` in `Cargo.toml` is `spacetravlr`, so you do not need `--bin` for that target.)
 
+### Spatial + betadata web viewer (optional)
+
+Interactive **deck.gl** UI for spatial coordinates from an `.h5ad` (`obsm["spatial"]`, then `X_spatial`, then `spatial_loc`) with coloring by **expression** (one gene from `X` or a layer), **betadata** (when a run TOML is supplied), or **cell type** when a standard `obs` cell-type column exists. Betadata is read from the **same directory as `spacetravlr_run_repro.toml`** (not a separate CLI path): **seed-only** models use a `Cluster` column (one β row per cluster; cells get values via `--cluster-annot`), while **spatial / full CNN** exports use `CellID` (per-cell β). `/api/meta` includes `betadata_row_id` (`Cluster` or `CellID`) when the first feather in that run directory can be probed.
+
+Build the frontend once, then run the server:
+
+```bash
+cd web/spatial_viewer && npm install && npm run build && cd ../..
+# Minimal: UI only — set .h5ad in the browser (serves `web/spatial_viewer/dist` by default)
+cargo run --features spatial-viewer --bin spatial_viewer
+# Or pass paths on the CLI:
+cargo run --features spatial-viewer --bin spatial_viewer -- \
+  --h5ad /path/to/data.h5ad \
+  --network-dir /path/to/data \
+  --bind 127.0.0.1 --port 8080
+```
+
+- **`--h5ad`**: optional; omit to open the app and load the file via **Dataset paths**.
+- **`--layer`**: expression layer name (default **`imputed_count`**; empty in the UI defaults the same).
+- **`--cluster-annot`**: obs column for cluster ids (default **`cell_type`**; empty in the UI defaults the same). Must exist in the `.h5ad` when you load.
+- **`--network-dir`**: optional directory containing `{mouse|human}_network.parquet` for the **cell–cell context** panel (defaults to the same resolution order as training if omitted).
+- **`--static-dir`**: directory for the built viewer (default **`web/spatial_viewer/dist`**, relative to the process working directory). Override if you built the frontend elsewhere.
+- **`--run-toml`**: optional path to `spacetravlr_run_repro.toml` from the **same** SpaceTravLR run as your data (parent directory must contain `*_betadata.feather` files). `data.adata_path` in that file must resolve to the same dataset as **`--h5ad`**, and `n_obs` must match. When valid, `/api/meta` sets `perturb_ready` and `betadata_dir` to that run directory; the UI shows **Betadata** and **Perturbation (KO)** as color sources: gene, target expression (often `0` for KO), and scope (**all cells**, **current selection**, **one annotation cell type**, or **one cluster id** from `--cluster-annot`). **`POST /api/perturb/preview`** accepts JSON `{ "gene", "desired_expr", "scope": { "type": "all" | "indices" | "cell_type" | "cluster", ... } }` and returns little-endian `f32` Δ for the perturbed gene (length `n_obs`). If the dataset has **UMAP** in `obsm`, **`POST /api/perturb/umap-field`** runs the same perturbation, then a Rust port of velocyto **colΔCor** / **colΔCorpartial** (KNN on UMAP) plus SpaceTravLR-style transition probabilities, UMAP projection, and grid smoothing; JSON includes `grid_x`, `grid_y`, `u`, `v` (flattened `nx×ny`) for quiver overlays in the viewer (up to **40k** cells per request). Optional: `include_cell_vectors`, `n_neighbors`, `temperature`, `remove_null`, `unit_directions`, `grid_scale`, `vector_scale`, `delta_rescale`, `magnitude_threshold`, `use_full_graph`, `full_graph_max_cells`.
+
+The viewer keeps a slim **chrome strip** (selection stats + a **color bar** with numeric ends when a continuous channel is loaded). **Hide controls** collapses the main toolbar; **Cell types** and **GRN / neighbor context** are collapsible `<details>` sections so the plot can use most of the window.
+
+**Dataset paths** (expand **Dataset paths** in the toolbar) let you point the running server at a different `.h5ad`, expression layer, cluster column, optional GRN directory, and optional `spacetravlr_run_repro.toml` (betadata is inferred from the TOML’s directory when set) without restarting. Paths are resolved on the **machine running `spatial_viewer`** (use absolute paths or `~` as on the CLI). **`POST /api/session/configure`** accepts JSON `{ "adata_path", "layer"?, "cluster_annot"?, "network_dir"?, "run_toml"? }`; omitted or blank **`layer`** defaults to **`imputed_count`**, blank **`cluster_annot`** to **`cell_type`**. Returns `{ "ok", "message", "meta" }` with the same shape as **`GET /api/meta`** (including **`dataset_ready`**). Do not expose this endpoint on untrusted networks without authentication, since it allows reading arbitrary paths the server can access.
+
+If `obsm['X_umap']` or `obsm['umap']` exists with the same `n_obs` and at least two columns, the UI shows a **Layout** control to switch the scatter plot between **Spatial** (the same key as training: `spatial` / `X_spatial` / `spatial_loc`) and **UMAP**. Neighbor discovery for the GRN interaction lens still uses **spatial** distances; only the plot coordinates change.
+
+If `n_vars` is above 50k, the UI uses prefix search (`/api/genes?prefix=`) instead of loading the full gene list.
+
+Betadata coloring uses **per-cluster** min/max (or symmetric range for the diverging map) so a single high cluster does not compress the rest of the tissue; clusters whose coefficients are all ~0 are shown in neutral gray. Cluster ids come from `GET /api/clusters` (same `obs` column as `--cluster-annot`).
+
+If `obs` contains a cell-type column (same name resolution as the spatial estimator: `cell_type`, `cell_types`, `celltype`, `major_cell_type`, or case-insensitive `cell_type`), `/api/meta` includes `cell_type_column` and `cell_type_categories`, and `GET /api/cell_type/codes` returns little-endian `u16` category indices per cell (`65535` = unknown). The UI can color by cell type, show types on hover, and dim or exclude types from selection via per-type checkboxes.
+
+The viewer loads the same **`{mouse|human}_network.parquet`** as training (via `--network-dir`, `SPACETRAVLR_DATA_DIR`, or the usual `data/` search). When loaded, `/api/meta` sets `network_loaded` and `network_species`. **`POST /api/network/cell-context`** (JSON: `cell_index`, `focus_gene`, optional `neighbor_k`, `neighbor_mode` (`"knn"` default or `"radius"`), `radius` when using radius mode, `tf_ligand_cutoff`, `expr_threshold`) returns GRN modulators for that target gene (TFs, ligands, LR pairs, NicheNet TF→ligand links), per-neighbor ligand–receptor support using the sender cell’s and neighbors’ expression, `support_score` (√(L·R)) on each edge, and optional `linked_tf` hints. The UI **Interaction lens** dims non-context cells, draws **strength-colored** segments to neighbors with supported L→R pairs, and lists neighbor-wise chains with expression bars. The interaction panel appears when a GRN is loaded (**kNN** or **radius** neighbor query). Remember **mean β** pools **per-cluster** rows in seed-only betadata vs **per-cell** for spatial CNN exports.
+
 ### Use as a Rust library
 
 In your crate’s `Cargo.toml`:
