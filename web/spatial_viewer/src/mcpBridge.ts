@@ -100,6 +100,7 @@ let splashNetworkSink:
   | null = null;
 
 function emitControl(args: Record<string, unknown>) {
+  if (args == null || typeof args !== "object") return;
   if (controlSink) controlSink(args);
   else pendingControl.push({ ...args });
 }

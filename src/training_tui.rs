@@ -478,10 +478,15 @@ fn fmt_lasso_float(x: f64) -> String {
 fn perf_r2_columns(inner_w: usize) -> (usize, usize) {
     const MID: usize = 2;
     const R2_COL: usize = 7;
+    const MOD_COL: usize = 5;
     let w = inner_w.max(MID + 2);
     let half = (w - MID) / 2;
-    let gene_w = half.saturating_sub(R2_COL);
+    let gene_w = half.saturating_sub(R2_COL + MOD_COL);
     (half, gene_w)
+}
+
+fn fmt_n_mod(n: usize) -> String {
+    format!("{:>5}", n)
 }
 
 fn rule_line(inner_w: usize) -> Line<'static> {
@@ -502,13 +507,13 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
 
     let mut v = st.gene_r2_mean.clone();
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let top_n: Vec<(String, f64)> = v
+    let top_n: Vec<(String, f64, usize)> = v
         .iter()
         .take(PERF_R2_LEADERBOARD_LEN)
         .cloned()
         .collect();
     v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    let bot_n: Vec<(String, f64)> = v
+    let bot_n: Vec<(String, f64, usize)> = v
         .iter()
         .take(PERF_R2_LEADERBOARD_LEN)
         .cloned()
@@ -528,13 +533,17 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
         ),
     ]));
     lines.push(rule_line(inner_w));
-    for ((g_hi, r_hi), (g_lo, r_lo)) in top_n.into_iter().zip(bot_n.into_iter()) {
+    for ((g_hi, r_hi, m_hi), (g_lo, r_lo, m_lo)) in top_n.into_iter().zip(bot_n.into_iter()) {
         let g_hi_s = truncate_label(&g_hi, gene_w);
         let g_lo_s = truncate_label(&g_lo, gene_w);
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<gw$}", g_hi_s, gw = gene_w),
                 Style::default().fg(TITLE),
+            ),
+            Span::styled(
+                fmt_n_mod(m_hi),
+                Style::default().fg(MUTED),
             ),
             Span::styled(
                 fmt_r2_fixed(r_hi),
@@ -544,6 +553,10 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
             Span::styled(
                 format!("{:<gw$}", g_lo_s, gw = gene_w),
                 Style::default().fg(TITLE),
+            ),
+            Span::styled(
+                fmt_n_mod(m_lo),
+                Style::default().fg(MUTED),
             ),
             Span::styled(
                 fmt_r2_fixed(r_lo),
@@ -1322,7 +1335,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             .border_style(Style::default().fg(PERF_BORD))
                             .title(Span::styled(
                                 format!(
-                                    " ✦ LASSO R²  · {} best / {} worst ",
+                                    " ✦ LASSO R²  · n_mod = #β  · {} best / {} worst ",
                                     PERF_R2_LEADERBOARD_LEN, PERF_R2_LEADERBOARD_LEN
                                 ),
                                 Style::default().fg(SKY).add_modifier(Modifier::BOLD),

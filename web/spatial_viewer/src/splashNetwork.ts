@@ -1,4 +1,5 @@
 import * as d3 from "d3";
+import { escapeHtml } from "./htmlEscape";
 
 export type SplashNetworkNode = {
   id: string;
@@ -489,11 +490,11 @@ export function renderSplashNetwork(
       const bm = d.beta_mean;
       const betaLine =
         bm != null && Number.isFinite(Number(bm))
-          ? `<br/>mean β (${tgt} model): ${Number(bm).toPrecision(4)}`
-          : `<br/><span style="color:#8b949e">no matching β column for <code>${src}</code> in <code>${tgt}</code> betadata</span>`;
+          ? `<br/>mean β (${escapeHtml(tgt)} model): ${Number(bm).toPrecision(4)}`
+          : `<br/><span style="color:#8b949e">no matching β column for <code>${escapeHtml(src)}</code> in <code>${escapeHtml(tgt)}</code> betadata</span>`;
       tip
         .html(
-          `<strong>${src} → ${tgt}</strong><br/>splash ∂: ${Number(d.weight).toPrecision(4)} · |∂|: ${Number(d.abs_weight).toPrecision(4)}${betaLine}`,
+          `<strong>${escapeHtml(src)} → ${escapeHtml(tgt)}</strong><br/>splash ∂: ${Number(d.weight).toPrecision(4)} · |∂|: ${Number(d.abs_weight).toPrecision(4)}${betaLine}`,
         )
         .style("opacity", 1);
     })
@@ -572,7 +573,7 @@ export function renderSplashNetwork(
       );
       tip
         .html(
-          `<strong>${d.id}</strong><br/>${ROLE_LABELS[d.role] ?? d.role}<br/>on path: ${d.on_path ? "yes" : "no"}`,
+          `<strong>${escapeHtml(d.id)}</strong><br/>${escapeHtml(ROLE_LABELS[d.role] ?? d.role)}<br/>on path: ${d.on_path ? "yes" : "no"}`,
         )
         .style("opacity", 1);
     })
@@ -591,7 +592,7 @@ export function renderSplashNetwork(
       tip.style("opacity", 0);
     });
 
-  const circles = nodeSel
+  nodeSel
     .append("circle")
     .attr("r", nodeRadius)
     .attr("fill", (d) => nodeFill(d))

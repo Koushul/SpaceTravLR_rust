@@ -307,7 +307,7 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
         cfg.data.adata_path = p.display().to_string();
     }
     if let Some(p) = &cli.tf_priors_feather {
-        cfg.grn.tf_priors_feather = Some(p.display().to_string());
+        cfg.grn.tf_priors_feather = Some(expand_user_path(p.to_string_lossy().as_ref()));
     }
     if let Some(ref m) = cli.training_mode {
         cfg.training.mode = Some(m.clone().into());
@@ -716,6 +716,7 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|s| expand_user_path(s.trim()))
         .filter(|s| !s.is_empty());
+    cfg.grn.tf_priors_feather = tf_priors_feather.clone();
 
     if !Path::new(&path).exists() {
         anyhow::bail!("Dataset not found at {}.", path);

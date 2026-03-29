@@ -535,6 +535,18 @@ mod resolve_training_output_dir_tests {
     use std::path::Path;
 
     #[test]
+    fn repro_toml_serializes_tf_priors_feather_when_some() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.grn.tf_priors_feather = Some("/data/priors.feather".into());
+        let s = cfg.to_toml_pretty().unwrap();
+        assert!(
+            s.contains("tf_priors_feather")
+                && s.contains("/data/priors.feather"),
+            "repro TOML should record grn.tf_priors_feather for join / viewer: {s}"
+        );
+    }
+
+    #[test]
     fn empty_output_dir_uses_toml_parent() {
         let mut cfg = SpaceshipConfig::default();
         cfg.execution.output_dir = String::new();

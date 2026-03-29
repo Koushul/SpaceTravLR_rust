@@ -134,7 +134,8 @@ pub struct TrainingHudState {
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
     /// Mean LASSO R² per completed gene (for TUI best / worst list only).
-    pub gene_r2_mean: Vec<(String, f64)>,
+    /// Third field: modulator count (`max` over clusters’ `n_modulators`, matches β feature columns).
+    pub gene_r2_mean: Vec<(String, f64, usize)>,
     pub perf_stats_generation: u64,
     pub gene_train_times: VecDeque<(String, f64)>,
     /// Human-readable obs value for the subset currently training (`--condition` mode).
@@ -235,7 +236,13 @@ impl TrainingHudState {
             return;
         }
         let mean: f64 = summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
-        self.gene_r2_mean.push((gene.to_string(), mean));
+        let n_modulators = summaries
+            .iter()
+            .map(|s| s.n_modulators)
+            .max()
+            .unwrap_or(0);
+        self.gene_r2_mean
+            .push((gene.to_string(), mean, n_modulators));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
     }
 

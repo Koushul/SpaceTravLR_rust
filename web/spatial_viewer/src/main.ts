@@ -29,6 +29,7 @@ import {
   type McpSignatureUmapRequest,
   type McpSplashNetworkRequest,
 } from "./mcpBridge";
+import { escapeHtml } from "./htmlEscape";
 import {
   renderSplashNetwork,
   type SplashForceParams,
@@ -1333,8 +1334,6 @@ async function main() {
     root.querySelector<HTMLButtonElement>("#pairLrClearBtn")!;
   const pairLrBusy = root.querySelector<HTMLSpanElement>("#pairLrBusy")!;
   const pairLrStatus = root.querySelector<HTMLParagraphElement>("#pairLrStatus")!;
-  const pairLrChartWrap =
-    root.querySelector<HTMLDivElement>("#pairLrChartWrap")!;
   const pairLrChartTitle =
     root.querySelector<HTMLDivElement>("#pairLrChartTitle")!;
   const pairLrBars = root.querySelector<HTMLDivElement>("#pairLrBars")!;
@@ -1514,14 +1513,6 @@ async function main() {
   const quiverStrideVal =
     root.querySelector<HTMLSpanElement>("#quiverStrideVal")!;
 
-  function escapeHtml(s: string): string {
-    return s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
   function lrSupportColor(
     support: number,
     maxS: number,
@@ -1596,7 +1587,10 @@ async function main() {
   }
 
   async function withMetaProgressPoll<T>(work: Promise<T>): Promise<T> {
+    let pollInFlight = false;
     const id = window.setInterval(() => {
+      if (pollInFlight) return;
+      pollInFlight = true;
       void (async () => {
         try {
           const mr = await fetch(apiUrl("/api/meta"));
@@ -1605,6 +1599,8 @@ async function main() {
           applyMetaProgressToUi(m);
         } catch {
           /* ignore */
+        } finally {
+          pollInFlight = false;
         }
       })();
     }, 150);
@@ -1664,6 +1660,9 @@ async function main() {
   let pairCellA: number | null = null;
   let pairCellB: number | null = null;
   const pairNeighborSet = new Set<number>();
+  let pairLrRadiusDebounce: ReturnType<typeof setTimeout> | null = null;
+  let cellSizeDebounce: ReturnType<typeof setTimeout> | null = null;
+  let quiverDisplayDebounce: ReturnType<typeof setTimeout> | null = null;
   let pairLrRows: PairLrRow[] = [];
   let interactionLineData: InteractionLineDatum[] = [];
   let quiverFieldCache: UmapFieldResponse | null = null;
@@ -1786,7 +1785,13 @@ async function main() {
   const updateStats = () => {
     if (n === 0) return;
     const mAll = globalMean(activeValues);
-    statsEl.innerHTML = `<div>Global mean: <strong>${mAll}</strong></div>`;
+    statsEl.replaceChildren();
+    const row = document.createElement("div");
+    row.append("Global mean: ");
+    const strong = document.createElement("strong");
+    strong.textContent = String(mAll);
+    row.append(strong);
+    statsEl.append(row);
     updateColorBar();
   };
 
@@ -2251,7 +2256,7 @@ async function main() {
           stroked: false,
           billboard: true,
           pickable: false,
-          parameters: { depthTest: false, depthWriteEnabled: false },
+          parameters: { depthWriteEnabled: false },
         }),
       );
     }
@@ -2288,7 +2293,7 @@ async function main() {
           radiusMaxPixels: px + 5,
           billboard: true,
           pickable: false,
-          parameters: { depthTest: false, depthWriteEnabled: false },
+          parameters: { depthWriteEnabled: false },
         }),
       );
     }
@@ -3315,7 +3320,12 @@ async function main() {
         const genes = (await br.json()) as string[];
         betaGene.innerHTML =
           '<option value="">— pick —</option>' +
-          genes.map((g) => `<option value="${g}">${g}</option>`).join("");
+          genes
+            .map(
+              (g) =>
+                `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`,
+            )
+            .join("");
       }
     } catch {
       /* optional */
@@ -3398,6 +3408,7 @@ async function main() {
 
   async function pollServerDatasetIfChanged() {
     if (datasetHotReloadLock) return;
+    if (document.visibilityState !== "visible") return;
     try {
       const mr = await fetch(apiUrl("/api/meta"));
       if (!mr.ok) return;
@@ -3500,9 +3511,13 @@ async function main() {
 
   pairLrRadius.addEventListener("input", () => {
     if (!pairLrToggle.checked || pairCellA === null) return;
-    recomputePairNeighborSetFromA();
-    pairLrStatus.textContent = `Cell A = #${pairCellA} (${pairNeighborSet.size} neighbors in radius).`;
-    rebuildLayer();
+    if (pairLrRadiusDebounce != null) clearTimeout(pairLrRadiusDebounce);
+    pairLrRadiusDebounce = setTimeout(() => {
+      pairLrRadiusDebounce = null;
+      recomputePairNeighborSetFromA();
+      pairLrStatus.textContent = `Cell A = #${pairCellA} (${pairNeighborSet.size} neighbors in radius).`;
+      rebuildLayer();
+    }, 80);
   });
 
   pairLrTopK.addEventListener("change", () => renderPairLrBarChart());
@@ -3584,7 +3599,9 @@ async function main() {
         );
         if (!r.ok) return;
         const list = (await r.json()) as string[];
-        geneHints.innerHTML = list.map((g) => `<option value="${g}">`).join("");
+        geneHints.innerHTML = list
+          .map((g) => `<option value="${escapeHtml(g)}">`)
+          .join("");
       } catch {
         /* ignore */
       }
@@ -3603,7 +3620,12 @@ async function main() {
       const cols = (await r.json()) as string[];
       betaCol.innerHTML =
         '<option value="">— pick —</option>' +
-        cols.map((c) => `<option value="${c}">${c}</option>`).join("");
+        cols
+          .map(
+            (c) =>
+              `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`,
+          )
+          .join("");
     } catch (e) {
       setStatus(`Columns: ${e}`, true);
     }
@@ -3880,7 +3902,7 @@ async function main() {
     setStatus("Computing splash network (all trained targets)…");
     splashNetMessage.classList.add("hidden");
     const pollAc = new AbortController();
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let pollTimer: number | null = null;
     const stopSplashProgressPoll = () => {
       if (pollTimer != null) {
         clearInterval(pollTimer);
@@ -4086,8 +4108,12 @@ async function main() {
   }
 
   window.setInterval(() => void pollServerDatasetIfChanged(), 2000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void pollServerDatasetIfChanged();
+  });
 
   attachMcpControlSink((args) => {
+    if (args == null || typeof args !== "object") return;
     if (typeof args.status_message === "string" && args.status_message.trim()) {
       setStatus(args.status_message.trim());
     }
@@ -4865,16 +4891,20 @@ async function main() {
 
   function onQuiverDisplayInput() {
     syncQuiverDisplayLabels();
-    let touched = false;
-    if (quiverFieldCache) {
-      rebuildQuiverFromCache();
-      touched = true;
-    }
-    if (sigQuiverFieldCache) {
-      rebuildSignatureQuiverFromCache();
-      touched = true;
-    }
-    if (touched) rebuildLayer();
+    if (quiverDisplayDebounce != null) clearTimeout(quiverDisplayDebounce);
+    quiverDisplayDebounce = setTimeout(() => {
+      quiverDisplayDebounce = null;
+      let touched = false;
+      if (quiverFieldCache) {
+        rebuildQuiverFromCache();
+        touched = true;
+      }
+      if (sigQuiverFieldCache) {
+        rebuildSignatureQuiverFromCache();
+        touched = true;
+      }
+      if (touched) rebuildLayer();
+    }, 48);
   }
 
   quiverVisScale.addEventListener("input", onQuiverDisplayInput);
@@ -4976,7 +5006,11 @@ async function main() {
 
   cellSizeInput.addEventListener("input", () => {
     cellSizeVal.textContent = cellSizeInput.value;
-    rebuildLayer();
+    if (cellSizeDebounce != null) clearTimeout(cellSizeDebounce);
+    cellSizeDebounce = setTimeout(() => {
+      cellSizeDebounce = null;
+      rebuildLayer();
+    }, 48);
   });
   cmapSel.addEventListener("change", () => {
     refreshVisualization();

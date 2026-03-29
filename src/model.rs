@@ -115,7 +115,7 @@ impl<B: Backend> CellularNicheNetwork<B> {
         debug_assert_eq!(
             channels,
             1,
-            "VisionEncoder conv1 expects 1 input channel (per-cluster niche map)"
+            "VisionEncoder conv1 expects per-cluster niche maps"
         );
         let device = &spatial_maps.device();
 
