@@ -1954,6 +1954,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         let mut wrote = false;
                         let mut orphan_zero_mod_betas = false;
                         let mut bad_r2_clusters: HashSet<usize> = HashSet::new();
+                        let mut n_betadata_beta_columns: Option<usize> = None;
                         if fit_ok {
                             if let Some(est_inner) = estimator.estimator.as_mut() {
                                 for s in &mut est_inner.cluster_training_summaries {
@@ -2015,6 +2016,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 .any(|&v| finite_or_zero_f64(v) != 0.0)
                                         })
                                         .collect();
+                                    n_betadata_beta_columns =
+                                        Some(keep.iter().filter(|&&j| j >= 1).count());
 
                                     if !keep.iter().any(|&j| j >= 1) {
                                         let _ = fs::File::create(format!(
@@ -2092,6 +2095,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     let keep: Vec<usize> = (0..n_cols)
                                         .filter(|&j| rows.iter().any(|r| r[j] != 0.0))
                                         .collect();
+                                    n_betadata_beta_columns =
+                                        Some(keep.iter().filter(|&&j| j >= 1).count());
 
                                     if !keep.iter().any(|&j| j >= 1) {
                                         let _ = fs::File::create(format!(
@@ -2209,6 +2214,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             g.record_training_metrics(
                                                 &gene,
                                                 &est.cluster_training_summaries,
+                                                n_betadata_beta_columns,
                                             );
                                         }
                                     }

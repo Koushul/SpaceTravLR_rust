@@ -134,7 +134,8 @@ pub struct TrainingHudState {
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
     /// Mean LASSO R² per completed gene (for TUI best / worst list only).
-    /// Third field: modulator count (`max` over clusters’ `n_modulators`, matches β feature columns).
+    /// Third field: count of `beta_*` columns in written betadata (non-zero across rows/cells);
+    /// falls back to design-matrix width when not supplied (e.g. training demo).
     pub gene_r2_mean: Vec<(String, f64, usize)>,
     pub perf_stats_generation: u64,
     pub gene_train_times: VecDeque<(String, f64)>,
@@ -231,16 +232,23 @@ impl TrainingHudState {
         self.gene_train_times.push_back((gene.to_string(), secs));
     }
 
-    pub fn record_training_metrics(&mut self, gene: &str, summaries: &[ClusterTrainingSummary]) {
+    pub fn record_training_metrics(
+        &mut self,
+        gene: &str,
+        summaries: &[ClusterTrainingSummary],
+        n_betadata_beta_columns: Option<usize>,
+    ) {
         if summaries.is_empty() {
             return;
         }
         let mean: f64 = summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
-        let n_modulators = summaries
-            .iter()
-            .map(|s| s.n_modulators)
-            .max()
-            .unwrap_or(0);
+        let n_modulators = n_betadata_beta_columns.unwrap_or_else(|| {
+            summaries
+                .iter()
+                .map(|s| s.n_modulators)
+                .max()
+                .unwrap_or(0)
+        });
         self.gene_r2_mean
             .push((gene.to_string(), mean, n_modulators));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);

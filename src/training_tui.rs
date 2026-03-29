@@ -1335,7 +1335,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             .border_style(Style::default().fg(PERF_BORD))
                             .title(Span::styled(
                                 format!(
-                                    " ✦ LASSO R²  · n_mod = #β  · {} best / {} worst ",
+                                    " ✦ LASSO R²  · n = β cols in feather  · {} best / {} worst ",
                                     PERF_R2_LEADERBOARD_LEN, PERF_R2_LEADERBOARD_LEN
                                 ),
                                 Style::default().fg(SKY).add_modifier(Modifier::BOLD),
