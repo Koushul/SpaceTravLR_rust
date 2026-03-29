@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -939,4 +939,208 @@ pub fn betadata_feather_top_coefficients_for_selection(
             mean_abs,
         })
         .collect())
+}
+
+/// One row of aggregated β across cells of a chosen type/cluster (Python `Betabase.collect_interactions`).
+#[derive(Clone, Debug, Serialize)]
+pub struct CollectedInteraction {
+    pub interaction: String,
+    pub gene: String,
+    pub beta: f64,
+    pub interaction_type: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BetadataCollectAggregate {
+    Mean,
+    Min,
+    Max,
+    Sum,
+    Positive,
+    Negative,
+}
+
+impl BetadataCollectAggregate {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "mean" => Some(Self::Mean),
+            "min" => Some(Self::Min),
+            "max" => Some(Self::Max),
+            "sum" => Some(Self::Sum),
+            "positive" => Some(Self::Positive),
+            "negative" => Some(Self::Negative),
+            _ => None,
+        }
+    }
+}
+
+fn classify_betadata_column_type(col: &str) -> &'static str {
+    let body = col.strip_prefix("beta_").unwrap_or(col);
+    if body.contains('#') {
+        "ligand-tf"
+    } else if body.contains('$') {
+        "ligand-receptor"
+    } else {
+        "tf"
+    }
+}
+
+fn aggregate_values(vals: &[f64], mode: BetadataCollectAggregate) -> Option<f64> {
+    if vals.is_empty() {
+        return None;
+    }
+    match mode {
+        BetadataCollectAggregate::Mean => Some(vals.iter().sum::<f64>() / vals.len() as f64),
+        BetadataCollectAggregate::Min => vals.iter().copied().reduce(f64::min),
+        BetadataCollectAggregate::Max => vals.iter().copied().reduce(f64::max),
+        BetadataCollectAggregate::Sum => Some(vals.iter().sum::<f64>()),
+        BetadataCollectAggregate::Positive => {
+            let p: Vec<f64> = vals.iter().copied().filter(|x| *x > 0.0).collect();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.iter().sum::<f64>() / p.len() as f64)
+            }
+        }
+        BetadataCollectAggregate::Negative => {
+            let p: Vec<f64> = vals.iter().copied().filter(|x| *x < 0.0).collect();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.iter().sum::<f64>() / p.len() as f64)
+            }
+        }
+    }
+}
+
+/// Aggregates every β column in one target-gene feather for cells matching `cell_include_mask`.
+pub fn betadata_collect_interactions_one_gene(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    clusters: &[usize],
+    cell_include_mask: &[bool],
+    mode: BetadataCollectAggregate,
+) -> Result<Vec<CollectedInteraction>> {
+    anyhow::ensure!(
+        obs_names.len() == clusters.len(),
+        "obs_names len {} != clusters len {}",
+        obs_names.len(),
+        clusters.len()
+    );
+    anyhow::ensure!(
+        obs_names.len() == cell_include_mask.len(),
+        "obs_names len {} != mask len {}",
+        obs_names.len(),
+        cell_include_mask.len()
+    );
+
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        let label_casted = df.column(label_name.as_str())?.cast(&DataType::String)?;
+        label_casted
+            .str()?
+            .into_no_null_iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, clusters);
+    let n_obs = obs_names.len();
+
+    let mut out = Vec::new();
+    for (i, col_name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx {
+            continue;
+        }
+        if is_intercept_column(col_name) {
+            continue;
+        }
+        let col = match df.column(col_name.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let Ok(series) = col.cast(&DataType::Float64) else {
+            continue;
+        };
+        let ca = series.f64()?;
+        let mut vals: Vec<f64> = Vec::new();
+        for (ci, &inc) in cell_include_mask.iter().enumerate() {
+            if !inc || ci >= n_obs {
+                continue;
+            }
+            let r = mapping[ci];
+            let v = ca.get(r).unwrap_or(0.0);
+            vals.push(v);
+        }
+        let Some(beta) = aggregate_values(&vals, mode) else {
+            continue;
+        };
+        if beta == 0.0 || !beta.is_finite() {
+            continue;
+        }
+        let itype = classify_betadata_column_type(col_name);
+        out.push(CollectedInteraction {
+            interaction: col_name.clone(),
+            gene: target_gene.to_string(),
+            beta,
+            interaction_type: itype.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Parallel scan of `genes.len()` feather files (Rayon). Missing files are skipped.
+pub fn betadata_collect_interactions_parallel(
+    dir: &str,
+    genes: &[String],
+    obs_names: &[String],
+    clusters: &[usize],
+    cell_include_mask: &[bool],
+    mode: BetadataCollectAggregate,
+) -> Result<Vec<CollectedInteraction>> {
+    let dir_path = PathBuf::from(dir);
+    let results: Vec<Result<Vec<CollectedInteraction>>> = genes
+        .par_iter()
+        .map(|gene| {
+            let path = dir_path.join(format!("{}_betadata.feather", gene));
+            if !path.is_file() {
+                return Ok(Vec::new());
+            }
+            let ps = path.to_string_lossy().into_owned();
+            betadata_collect_interactions_one_gene(
+                &ps,
+                gene.as_str(),
+                obs_names,
+                clusters,
+                cell_include_mask,
+                mode,
+            )
+        })
+        .collect();
+
+    let mut merged = Vec::new();
+    for r in results {
+        merged.extend(r?);
+    }
+    merged.sort_by(|a, b| {
+        b.beta
+            .abs()
+            .partial_cmp(&a.beta.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.gene.cmp(&b.gene))
+            .then_with(|| a.interaction.cmp(&b.interaction))
+    });
+    Ok(merged)
 }

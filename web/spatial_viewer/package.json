@@ -5,13 +5,22 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:mcp": "vite build --config vite.mcp.config.ts",
+    "build:all": "npm run build && npm run build:mcp",
+    "mcp:serve": "tsx mcp/server.ts",
     "preview": "vite preview"
   },
   "dependencies": {
     "@deck.gl/core": "^9.1.14",
-    "@deck.gl/layers": "^9.1.14"
+    "@deck.gl/layers": "^9.1.14",
+    "@modelcontextprotocol/ext-apps": "^1.3.2",
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "tsx": "^4.21.0",
+    "vite-plugin-singlefile": "^2.3.2",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "typescript": "~5.7.2",
     "vite": "^6.0.3"
   }

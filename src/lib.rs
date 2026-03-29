@@ -23,7 +23,8 @@ pub mod training_demo;
 #[cfg(feature = "tui")]
 pub mod training_tui;
 pub use betadata::{
-    write_betadata_feather, BetaFrame, Betabase, GeneMatrix, TopBetaCoefficient,
+    betadata_collect_interactions_parallel, write_betadata_feather, BetadataCollectAggregate,
+    BetaFrame, Betabase, CollectedInteraction, GeneMatrix, TopBetaCoefficient,
 };
 pub use cnn_gating::CnnGateDecision;
 pub use config::{

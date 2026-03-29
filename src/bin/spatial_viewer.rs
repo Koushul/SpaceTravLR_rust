@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use anndata::AnnData;
@@ -9,9 +10,9 @@ use anndata::AnnDataOp;
 use anndata_hdf5::H5;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, get_service, post};
 use axum::Json;
 use axum::Router;
 use clap::Parser;
@@ -25,17 +26,19 @@ use space_trav_lr_rust::adata_query::{
 };
 use space_trav_lr_rust::network::{infer_species, GeneNetwork};
 use space_trav_lr_rust::betadata::{
-    betadata_feather_per_cell_column, betadata_feather_plottable_columns,
-    betadata_feather_row_id_column, betadata_feather_top_coefficients_for_selection,
-    TopBetaCoefficient,
+    betadata_collect_interactions_parallel, betadata_feather_per_cell_column,
+    betadata_feather_plottable_columns, betadata_feather_row_id_column,
+    betadata_feather_top_coefficients_for_selection, BetadataCollectAggregate,
+    CollectedInteraction, TopBetaCoefficient,
 };
 use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_target_genes};
-use space_trav_lr_rust::config::expand_user_path;
-use space_trav_lr_rust::perturb::{perturb_with_targets, PerturbTarget};
+use space_trav_lr_rust::config::{expand_user_path, SpaceshipConfig};
+use space_trav_lr_rust::perturb::{perturb_with_targets, PerturbConfig, PerturbResult, PerturbTarget};
 use space_trav_lr_rust::perturb_mode::PerturbRuntime;
 use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -59,14 +62,18 @@ struct Cli {
     bind: String,
     #[arg(long, default_value_t = 8080)]
     port: u16,
+    /// Must contain `index.html` from `npm run build` in `web/spatial_viewer` (not `build:mcp` alone).
     #[arg(long, default_value = "web/spatial_viewer/dist")]
     static_dir: PathBuf,
     /// Directory containing `{mouse|human}_network.parquet` (optional; otherwise same search as training).
     #[arg(long)]
     network_dir: Option<PathBuf>,
-    /// `spacetravlr_run_repro.toml` from a training run: enables perturbation and betadata from the TOML’s directory (`data.adata_path` must match `--h5ad`).
+    /// `spacetravlr_run_repro.toml`: enables perturbation + betadata from `[execution].output_dir` (or the TOML’s directory if that field is empty). The loaded AnnData path is taken from `data.adata_path` in the TOML (overrides `--h5ad` when both are set). You may pass only `--run-toml` with no `--h5ad`.
     #[arg(long)]
     run_toml: Option<PathBuf>,
+    /// Allow permissive CORS on `/api/*` (needed for MCP App iframe → local API). Also set `SPATIAL_VIEWER_ALLOW_CORS=1`.
+    #[arg(long)]
+    allow_cors: bool,
 }
 
 #[derive(Clone)]
@@ -110,6 +117,10 @@ struct AppState {
     perturb_load_progress_permille: Arc<AtomicU32>,
     perturb_job_progress_permille: Arc<AtomicU32>,
     perturb_job_active: Arc<AtomicBool>,
+    /// Set true from POST /api/cancel; checked between perturb propagation iterations.
+    perturb_job_cancel: Arc<AtomicBool>,
+    /// After cancel, hide “perturbation loading” until a new load starts (blocking work may still finish).
+    perturb_suppress_bg_loading_ui: Arc<AtomicBool>,
     perturb_progress_message: Arc<Mutex<String>>,
 }
 
@@ -425,6 +436,13 @@ fn permille_to_percent(p: u32) -> u8 {
     ((p.min(1000) as u64 * 100 + 500) / 1000).min(100) as u8
 }
 
+fn schedule_perturb_progress_permille_clear(p: Arc<AtomicU32>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        p.store(0, Ordering::Relaxed);
+    });
+}
+
 fn spawn_perturb_background_load(state: SharedState) {
     tokio::spawn(async move {
         let run_toml = {
@@ -441,6 +459,11 @@ fn spawn_perturb_background_load(state: SharedState) {
             p
         };
         let committed_gen = state.read().await.perturb_bg_gen.load(Ordering::SeqCst);
+        {
+            let g = state.read().await;
+            g.perturb_suppress_bg_loading_ui
+                .store(false, Ordering::SeqCst);
+        }
         let in_flight = Arc::clone(&state.read().await.perturb_bg_in_flight);
         in_flight.store(true, Ordering::SeqCst);
         let _in_flight_guard = ClearPerturbInFlight(in_flight);
@@ -460,39 +483,49 @@ fn spawn_perturb_background_load(state: SharedState) {
             *m = "Starting perturbation runtime load…".into();
         }
         let run_toml_for_blocking = run_toml.clone();
+        let load_perm_block = Arc::clone(&load_perm);
         let pr_result = tokio::task::spawn_blocking(move || {
             PerturbRuntime::from_run_toml_with_progress(
                 run_toml_for_blocking.as_path(),
-                Some(load_perm),
+                Some(load_perm_block),
                 Some(prog_msg),
             )
         })
         .await;
         let mut w = state.write().await;
         if w.perturb_bg_gen.load(Ordering::SeqCst) != committed_gen {
+            load_perm.store(0, Ordering::Relaxed);
             return;
         }
         let Some(ds) = w.dataset.as_mut() else {
+            load_perm.store(0, Ordering::Relaxed);
             return;
         };
         if ds.run_toml.as_ref() != Some(&run_toml) {
+            load_perm.store(0, Ordering::Relaxed);
             return;
         }
         if ds.perturb_runtime.is_some() {
+            load_perm.store(0, Ordering::Relaxed);
             return;
         }
         match pr_result {
             Ok(Ok(pr)) => {
                 if let Err(e) = attach_perturb_runtime_to_dataset(ds, pr, run_toml.as_path()) {
                     tracing::error!("perturbation runtime rejected: {:#}", e);
+                    load_perm.store(0, Ordering::Relaxed);
                     ds.perturb_load_error = Some(format!("{:#}", e));
+                } else {
+                    schedule_perturb_progress_permille_clear(Arc::clone(&load_perm));
                 }
             }
             Ok(Err(e)) => {
                 tracing::error!("perturbation runtime load failed: {:#}", e);
+                load_perm.store(0, Ordering::Relaxed);
                 ds.perturb_load_error = Some(format!("{:#}", e));
             }
             Err(e) => {
+                load_perm.store(0, Ordering::Relaxed);
                 ds.perturb_load_error = Some(format!("perturb load task join: {}", e));
             }
         }
@@ -519,7 +552,7 @@ fn perturb_runtime_or_status(ds: &AppDataset) -> Result<&Arc<PerturbRuntime>, (S
     if ds.run_toml.is_some() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "Perturbation runtime is still loading (large betabase). Poll GET /api/meta until perturb_ready is true."
+            "Perturbation runtime is still loading or was cancelled; use GET /api/meta (perturb_loading) or POST /api/cancel then reload dataset."
                 .into(),
         ));
     }
@@ -584,32 +617,41 @@ fn meta_json(st: &AppState) -> MetaJson {
         network_species: ds.grn.as_ref().map(|g| g.species.clone()),
         betadata_row_id: ds.betadata_row_id.clone(),
         perturb_ready: ds.perturb_runtime.is_some(),
-        perturb_loading: st.perturb_bg_in_flight.load(Ordering::Relaxed)
-            || (ds.run_toml.is_some()
-                && ds.perturb_runtime.is_none()
-                && ds.perturb_load_error.is_none()),
+        perturb_loading: {
+            let suppress = st.perturb_suppress_bg_loading_ui.load(Ordering::Relaxed);
+            (!suppress && st.perturb_bg_in_flight.load(Ordering::Relaxed))
+                || st.perturb_job_active.load(Ordering::Relaxed)
+        },
         perturb_error: ds.perturb_load_error.clone(),
         perturb_progress_percent: {
             let job_on = st.perturb_job_active.load(Ordering::Relaxed);
-            let load_on = st.perturb_bg_in_flight.load(Ordering::Relaxed)
-                || (ds.run_toml.is_some()
-                    && ds.perturb_runtime.is_none()
-                    && ds.perturb_load_error.is_none());
+            let suppress = st.perturb_suppress_bg_loading_ui.load(Ordering::Relaxed);
+            let load_on = !suppress && st.perturb_bg_in_flight.load(Ordering::Relaxed);
+            let job_perm = st.perturb_job_progress_permille.load(Ordering::Relaxed);
+            let load_perm = st.perturb_load_progress_permille.load(Ordering::Relaxed);
             let p = if job_on {
-                Some(st.perturb_job_progress_permille.load(Ordering::Relaxed))
+                Some(job_perm)
             } else if load_on {
-                Some(st.perturb_load_progress_permille.load(Ordering::Relaxed))
+                Some(load_perm)
+            } else if job_perm > 0 {
+                Some(job_perm)
+            } else if !suppress && load_perm > 0 {
+                Some(load_perm)
             } else {
                 None
             };
             p.map(permille_to_percent)
         },
         perturb_progress_label: {
-            let show = st.perturb_job_active.load(Ordering::Relaxed)
-                || st.perturb_bg_in_flight.load(Ordering::Relaxed)
-                || (ds.run_toml.is_some()
-                    && ds.perturb_runtime.is_none()
-                    && ds.perturb_load_error.is_none());
+            let suppress = st.perturb_suppress_bg_loading_ui.load(Ordering::Relaxed);
+            let load_on = !suppress && st.perturb_bg_in_flight.load(Ordering::Relaxed);
+            let job_on = st.perturb_job_active.load(Ordering::Relaxed);
+            let job_perm = st.perturb_job_progress_permille.load(Ordering::Relaxed);
+            let load_perm = st.perturb_load_progress_permille.load(Ordering::Relaxed);
+            let show = job_on
+                || load_on
+                || job_perm > 0
+                || (!suppress && load_perm > 0);
             if !show {
                 None
             } else {
@@ -632,7 +674,27 @@ fn meta_json(st: &AppState) -> MetaJson {
     }
 }
 
-fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
+fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
+    let run_spaceship_cfg = if let Some(ref rtp) = inputs.run_toml {
+        let cfg = SpaceshipConfig::from_file(rtp).map_err(|e| {
+            anyhow::anyhow!("failed to read run TOML {}: {e}", rtp.display())
+        })?;
+        let ap = expand_user_path(cfg.resolve_adata_path().as_str());
+        if ap.is_empty() {
+            anyhow::bail!(
+                "run TOML {} has empty data.adata_path",
+                rtp.display()
+            );
+        }
+        inputs.h5ad = PathBuf::from(ap);
+        Some(cfg)
+    } else {
+        if inputs.h5ad.as_os_str().is_empty() {
+            anyhow::bail!("adata path is required (or pass run_toml with data.adata_path)");
+        }
+        None
+    };
+
     let adata = open_adata(inputs.h5ad.to_string_lossy().as_ref())?;
     let spatial_key = spatial_obsm_key_used(&adata)?;
     let xy = spatial_xy(&adata)?;
@@ -721,20 +783,18 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
                 None
             }
         };
-    let (perturb_runtime, betadata_dir) = if let Some(ref rtp) = inputs.run_toml {
-        let parent = rtp
-            .parent()
-            .map(|p| p.to_path_buf())
-            .ok_or_else(|| anyhow::anyhow!("run TOML path has no parent directory"))?;
-        tracing::info!(
-            "perturbation API will load in background from {} (betadata dir {})",
-            rtp.display(),
-            parent.display()
-        );
-        (None, Some(parent))
-    } else {
-        (None, None)
-    };
+    let (perturb_runtime, betadata_dir) =
+        if let (Some(rtp), Some(cfg)) = (&inputs.run_toml, &run_spaceship_cfg) {
+            let bd = cfg.resolve_training_output_dir(rtp.as_path());
+            tracing::info!(
+                "perturbation API will load in background from {} (betadata dir {})",
+                rtp.display(),
+                bd.display()
+            );
+            (None, Some(bd))
+        } else {
+            (None, None)
+        };
     let betadata_row_id = betadata_dir
         .as_ref()
         .and_then(|d| probe_betadata_row_id(d));
@@ -816,17 +876,18 @@ async fn api_session_configure(
     State(state): State<SharedState>,
     Json(body): Json<SessionConfigureBody>,
 ) -> Result<Json<SessionConfigureResponse>, (StatusCode, String)> {
+    let run_toml = session_path_field(&body.run_toml);
     let h5ad = PathBuf::from(expand_user_path(body.adata_path.trim()));
-    if h5ad.as_os_str().is_empty() {
+    if h5ad.as_os_str().is_empty() && run_toml.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "adata_path is required".into(),
+            "adata_path is required unless run_toml is set (then data.adata_path from the TOML is used)"
+                .into(),
         ));
     }
     let layer = non_empty_trimmed(&body.layer, "imputed_count");
     let cluster_annot = non_empty_trimmed(&body.cluster_annot, "cell_type");
     let network_dir = session_path_field(&body.network_dir);
-    let run_toml = session_path_field(&body.run_toml);
     let inputs = ViewerLoadInputs {
         h5ad,
         layer: layer.clone(),
@@ -840,6 +901,8 @@ async fn api_session_configure(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut w = state.write().await;
     w.perturb_bg_gen.fetch_add(1, Ordering::SeqCst);
+    w.perturb_suppress_bg_loading_ui
+        .store(false, Ordering::SeqCst);
     w.dataset = Some(new_dataset);
     w.default_layer = layer;
     w.default_cluster_annot = cluster_annot;
@@ -858,6 +921,21 @@ async fn api_session_configure(
 async fn api_meta(State(state): State<SharedState>) -> impl IntoResponse {
     let st = state.read().await;
     axum::Json(meta_json(&st))
+}
+
+async fn api_cancel(State(state): State<SharedState>) -> impl IntoResponse {
+    let w = state.write().await;
+    w.perturb_bg_gen.fetch_add(1, Ordering::SeqCst);
+    w.perturb_suppress_bg_loading_ui
+        .store(true, Ordering::SeqCst);
+    w.perturb_job_cancel.store(true, Ordering::SeqCst);
+    w.perturb_job_active.store(false, Ordering::SeqCst);
+    w.perturb_job_progress_permille.store(0, Ordering::Relaxed);
+    w.perturb_load_progress_permille.store(0, Ordering::Relaxed);
+    if let Ok(mut m) = w.perturb_progress_message.lock() {
+        *m = "Cancelled.".into();
+    }
+    Json(serde_json::json!({ "ok": true, "message": "cancel requested" }))
 }
 
 async fn api_spatial(
@@ -940,15 +1018,17 @@ async fn api_gene_expression(
 ) -> Result<Response, (StatusCode, String)> {
     let st = state.read().await;
     let ds = require_dataset(&st)?;
+    let path = ds.adata_path.clone();
     let layer = ds.layer.clone();
     let gene = q.gene;
-    let adata = ds.adata.read().await;
-    let vec = gene_expression_f32(&adata, &layer, &gene).map_err(|e| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("{}", e),
-        )
-    })?;
+    drop(st);
+    let vec = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, String> {
+        let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+        gene_expression_f32(&adata, &layer, &gene).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::NOT_FOUND, e))?;
     Ok(binary_response(f32_vec_to_le_bytes(&vec)))
 }
 
@@ -986,10 +1066,12 @@ async fn api_betadata_columns(
     if !path.is_file() {
         return Err((StatusCode::NOT_FOUND, format!("missing {:?}", path)));
     }
-    match betadata_feather_plottable_columns(path.to_string_lossy().as_ref()) {
-        Ok(cols) => Ok(axum::Json(cols).into_response()),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
-    }
+    let path_s = path.to_string_lossy().into_owned();
+    let cols = tokio::task::spawn_blocking(move || betadata_feather_plottable_columns(&path_s))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(axum::Json(cols).into_response())
 }
 
 async fn api_betadata_values(
@@ -1078,6 +1160,202 @@ async fn api_betadata_top(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(out))
+}
+
+const MAX_COLLECT_INTERACTIONS_OUT: usize = 80_000;
+
+fn default_collect_aggregate_str() -> String {
+    "mean".into()
+}
+
+fn default_collect_filter_mode() -> String {
+    "cell_type".into()
+}
+
+fn default_collect_max_genes() -> usize {
+    2048
+}
+
+#[derive(Deserialize)]
+struct CollectInteractionsBody {
+    #[serde(default = "default_collect_aggregate_str")]
+    aggregate: String,
+    #[serde(default = "default_collect_filter_mode")]
+    filter: String,
+    #[serde(default)]
+    cell_type: Option<String>,
+    #[serde(default)]
+    cluster_id: Option<usize>,
+    #[serde(default = "default_collect_max_genes")]
+    max_genes: usize,
+    #[serde(default)]
+    gene_subset: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct CollectInteractionsResponse {
+    interactions: Vec<CollectedInteraction>,
+    n_reported: usize,
+    n_total: usize,
+    capped: bool,
+}
+
+async fn api_betadata_collect_interactions(
+    State(state): State<SharedState>,
+    Json(body): Json<CollectInteractionsBody>,
+) -> Result<Json<CollectInteractionsResponse>, (StatusCode, String)> {
+    let mode = BetadataCollectAggregate::parse(body.aggregate.trim()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "aggregate must be mean|min|max|sum|positive|negative".into(),
+        )
+    })?;
+    let max_genes = body.max_genes.clamp(1, 4096);
+
+    let (
+        bd_dir,
+        obs_names,
+        clusters,
+        cell_type_categories,
+        cell_type_bin,
+        n_obs,
+    ) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let Some(ref bd) = ds.betadata_dir else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "No betadata directory configured".into(),
+            ));
+        };
+        (
+            bd.to_string_lossy().into_owned(),
+            Arc::clone(&ds.obs_names),
+            Arc::clone(&ds.clusters),
+            Arc::clone(&ds.cell_type_categories),
+            ds.cell_type_codes_bin.clone(),
+            ds.obs_names.len(),
+        )
+    };
+
+    let filter = body.filter.to_ascii_lowercase();
+    let mask: Vec<bool> = match filter.as_str() {
+        "cell_type" | "celltype" => {
+            let label = body
+                .cell_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "cell_type label required when filter=cell_type".into(),
+                    )
+                })?;
+            let want_codes: HashSet<u16> = cell_type_categories
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.as_str() == label)
+                .map(|(i, _)| i as u16)
+                .collect();
+            if want_codes.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("cell_type {:?} not in annotation categories", label),
+                ));
+            }
+            let Some(ref bin) = cell_type_bin else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "dataset has no cell_type column for this filter".into(),
+                ));
+            };
+            let codes: Vec<u16> = bin
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            if codes.len() != n_obs {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cell_type codes length mismatch".into(),
+                ));
+            }
+            (0..n_obs)
+                .map(|i| codes[i] != u16::MAX && want_codes.contains(&codes[i]))
+                .collect()
+        }
+        "cluster" => {
+            let cid = body.cluster_id.ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "cluster_id required when filter=cluster".into(),
+                )
+            })?;
+            (0..n_obs)
+                .map(|i| clusters[i] == cid)
+                .collect()
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "filter must be cell_type or cluster".into(),
+            ));
+        }
+    };
+
+    if !mask.iter().any(|&m| m) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no cells match the filter".into(),
+        ));
+    }
+
+    let mut genes = if let Some(gs) = body.gene_subset {
+        gs
+    } else {
+        list_betadata_target_genes(&bd_dir).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+    genes.retain(|g| !g.trim().is_empty());
+    genes.truncate(max_genes);
+
+    if genes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no target genes to scan (empty gene list)".into(),
+        ));
+    }
+
+    let obs = (*obs_names).clone();
+    let cl = (*clusters).clone();
+    let dir = bd_dir.clone();
+    let mask_clone = mask.clone();
+    let mut interactions = tokio::task::spawn_blocking(move || {
+        betadata_collect_interactions_parallel(
+            &dir,
+            &genes,
+            &obs,
+            &cl,
+            &mask_clone,
+            mode,
+        )
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let n_total = interactions.len();
+    let capped = interactions.len() > MAX_COLLECT_INTERACTIONS_OUT;
+    if capped {
+        interactions.truncate(MAX_COLLECT_INTERACTIONS_OUT);
+    }
+    let n_reported = interactions.len();
+
+    Ok(Json(CollectInteractionsResponse {
+        interactions,
+        n_reported,
+        n_total,
+        capped,
+    }))
 }
 
 async fn api_network_cell_context(
@@ -1315,6 +1593,9 @@ struct PerturbPreviewBody {
     desired_expr: f64,
     #[serde(default)]
     scope: PerturbScopeBody,
+    /// Overrides run TOML `n_propagation` for this request (clamped 1–32).
+    #[serde(default)]
+    n_propagation: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1324,7 +1605,17 @@ enum PerturbScopeBody {
     All,
     Indices { indices: Vec<usize> },
     CellType { category: u16 },
+    /// All cells whose annotation string equals `name` (unions every cluster/category with that label).
+    CellTypeName { name: String },
     Cluster { cluster_id: usize },
+}
+
+fn perturb_cfg_for_request(base: &PerturbConfig, n_propagation: Option<usize>) -> PerturbConfig {
+    let mut c = base.clone();
+    if let Some(n) = n_propagation {
+        c.n_propagation = n.clamp(1, 32);
+    }
+    c
 }
 
 fn build_perturb_targets(
@@ -1389,6 +1680,53 @@ fn build_perturb_targets(
             }
             Some(idx)
         }
+        PerturbScopeBody::CellTypeName { name } => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err((StatusCode::BAD_REQUEST, "cell_type_name is empty".into()));
+            }
+            let cats = st.cell_type_categories.as_ref();
+            let bin = st.cell_type_codes_bin.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "no cell_type annotation in this dataset (obs column missing)".to_string(),
+                )
+            })?;
+            let codes: Vec<u16> = bin
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            if codes.len() != n_obs {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cell_type codes length mismatch".into(),
+                ));
+            }
+            let want_codes: HashSet<u16> = cats
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.as_str() == name)
+                .map(|(i, _)| i as u16)
+                .collect();
+            if want_codes.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("no annotation category named {:?}", name),
+                ));
+            }
+            let idx: Vec<usize> = codes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &c)| (c != u16::MAX && want_codes.contains(&c)).then_some(i))
+                .collect();
+            if idx.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("no cells with annotation {:?}", name),
+                ));
+            }
+            Some(idx)
+        }
         PerturbScopeBody::Cluster { cluster_id } => {
             let idx: Vec<usize> = st
                 .clusters
@@ -1416,7 +1754,8 @@ async fn api_perturb_preview(
     State(state): State<SharedState>,
     Json(body): Json<PerturbPreviewBody>,
 ) -> Result<Response, (StatusCode, String)> {
-    let (n_obs, targets, gj, rt, job_p, job_active, job_msg) = {
+    let n_propagation = body.n_propagation;
+    let (n_obs, targets, gj, rt, job_p, job_active, job_msg, cancel) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let rt = perturb_runtime_or_status(ds)?;
@@ -1447,15 +1786,20 @@ async fn api_perturb_preview(
             Arc::clone(&st.perturb_job_progress_permille),
             Arc::clone(&st.perturb_job_active),
             Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
         )
     };
+    cancel.store(false, Ordering::SeqCst);
+    let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
     job_active.store(true, Ordering::Relaxed);
     if let Ok(mut m) = job_msg.lock() {
         *m = "GRN perturbation…".into();
     }
     let job_active_move = job_active.clone();
-    let vec: Vec<f32> = tokio::task::spawn_blocking(move || {
+    let cancel_move = cancel.clone();
+    let job_p_block = Arc::clone(&job_p);
+    let vec_result = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, ()> {
         let _guard = PerturbJobGuard(job_active_move);
         let result = perturb_with_targets(
             &rt.bb,
@@ -1465,26 +1809,39 @@ async fn api_perturb_preview(
             &rt.rw_ligands_init,
             &rt.rw_tfligands_init,
             &targets,
-            &rt.perturb_cfg,
+            &cfg,
             &rt.lr_radii,
-            Some(&job_p),
-        );
-        job_p.store(1000, Ordering::Relaxed);
-        result
+            Some(&job_p_block),
+            Some(&*cancel_move),
+        )?;
+        job_p_block.store(1000, Ordering::Relaxed);
+        Ok(result
             .delta
             .column(gj)
             .iter()
             .map(|x| *x as f32)
-            .collect()
+            .collect())
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+    let vec = vec_result.map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            "Perturbation cancelled".into(),
+        )
+    })?;
     if vec.len() != n_obs {
+        job_p.store(0, Ordering::Relaxed);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "perturbation output length mismatch".into(),
         ));
     }
+    schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
     Ok(binary_response(f32_vec_to_le_bytes(&vec)))
 }
 
@@ -1634,6 +1991,7 @@ async fn api_perturb_umap_field(
     State(state): State<SharedState>,
     Json(body): Json<UmapTransitionBody>,
 ) -> Result<Json<UmapFieldResponse>, (StatusCode, String)> {
+    let n_propagation = body.perturb.n_propagation;
     let (
         umap_pts,
         highlight_keep,
@@ -1646,6 +2004,7 @@ async fn api_perturb_umap_field(
         job_p,
         job_active,
         job_msg,
+        cancel,
     ) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
@@ -1745,9 +2104,12 @@ async fn api_perturb_umap_field(
             Arc::clone(&st.perturb_job_progress_permille),
             Arc::clone(&st.perturb_job_active),
             Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
         )
     };
 
+    cancel.store(false, Ordering::SeqCst);
+    let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
     job_active.store(true, Ordering::Relaxed);
     if let Ok(mut m) = job_msg.lock() {
@@ -1758,21 +2120,23 @@ async fn api_perturb_umap_field(
         };
     }
     let job_active_move = job_active.clone();
-    let grid = tokio::task::spawn_blocking(move || {
+    let cancel_move = cancel.clone();
+    let job_p_block = Arc::clone(&job_p);
+    let grid = tokio::task::spawn_blocking(move || -> Result<_, ()> {
         let _guard = PerturbJobGuard(job_active_move);
-        job_p.store(20, Ordering::Relaxed);
+        job_p_block.store(20, Ordering::Relaxed);
         let mut delta = if quick {
             if let Ok(mut m) = job_msg.lock() {
                 *m = "Local expression delta…".into();
             }
-            job_p.store(120, Ordering::Relaxed);
+            job_p_block.store(120, Ordering::Relaxed);
             let d = delta_single_gene_to_target(
                 &rt.gene_mtx,
                 gj,
                 targets[0].cell_indices.as_deref(),
                 targets[0].desired_expr,
             );
-            job_p.store(450, Ordering::Relaxed);
+            job_p_block.store(450, Ordering::Relaxed);
             d
         } else {
             if let Ok(mut m) = job_msg.lock() {
@@ -1786,11 +2150,12 @@ async fn api_perturb_umap_field(
                 &rt.rw_ligands_init,
                 &rt.rw_tfligands_init,
                 &targets,
-                &rt.perturb_cfg,
+                &cfg,
                 &rt.lr_radii,
-                Some(&job_p),
-            );
-            job_p.store(880, Ordering::Relaxed);
+                Some(&job_p_block),
+                Some(&*cancel_move),
+            )?;
+            job_p_block.store(880, Ordering::Relaxed);
             result.delta
         };
         if let Some(ref keep) = highlight_keep {
@@ -1804,13 +2169,24 @@ async fn api_perturb_umap_field(
         if let Ok(mut m) = job_msg.lock() {
             *m = "UMAP projection & grid…".into();
         }
-        job_p.store(900, Ordering::Relaxed);
+        job_p_block.store(900, Ordering::Relaxed);
         let g = compute_umap_transition_grid(&rt.gene_mtx, &delta, &umap_pts, &params);
-        job_p.store(1000, Ordering::Relaxed);
-        g
+        job_p_block.store(1000, Ordering::Relaxed);
+        Ok(g)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?
+    .map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            "Perturbation cancelled".into(),
+        )
+    })?;
+    schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
     let nx = grid.grid_x.len();
     let ny = grid.grid_y.len();
     let u: Vec<f64> = grid.vectors.iter().map(|w| w[0]).collect();
@@ -1859,7 +2235,8 @@ async fn api_perturb_summary(
     State(state): State<SharedState>,
     Json(body): Json<PerturbPreviewBody>,
 ) -> Result<Json<PerturbSummaryResponse>, (StatusCode, String)> {
-    let (n_obs, targets, gene, rt, gene_names, job_p, job_active, job_msg) = {
+    let n_propagation = body.n_propagation;
+    let (n_obs, targets, gene, rt, gene_names, job_p, job_active, job_msg, cancel) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let rt = perturb_runtime_or_status(ds)?;
@@ -1881,15 +2258,20 @@ async fn api_perturb_summary(
             Arc::clone(&st.perturb_job_progress_permille),
             Arc::clone(&st.perturb_job_active),
             Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
         )
     };
+    cancel.store(false, Ordering::SeqCst);
+    let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
     job_active.store(true, Ordering::Relaxed);
     if let Ok(mut m) = job_msg.lock() {
         *m = "GRN perturbation (summary)…".into();
     }
     let job_active_move = job_active.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let cancel_move = cancel.clone();
+    let job_p_block = Arc::clone(&job_p);
+    let result = tokio::task::spawn_blocking(move || -> Result<PerturbResult, ()> {
         let _guard = PerturbJobGuard(job_active_move);
         let r = perturb_with_targets(
             &rt.bb,
@@ -1899,15 +2281,26 @@ async fn api_perturb_summary(
             &rt.rw_ligands_init,
             &rt.rw_tfligands_init,
             &targets,
-            &rt.perturb_cfg,
+            &cfg,
             &rt.lr_radii,
-            Some(&job_p),
-        );
-        job_p.store(1000, Ordering::Relaxed);
-        r
+            Some(&job_p_block),
+            Some(&*cancel_move),
+        )?;
+        job_p_block.store(1000, Ordering::Relaxed);
+        Ok(r)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?
+    .map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            "Perturbation cancelled".into(),
+        )
+    })?;
 
     let n_genes = gene_names.len();
     let mut gene_effects: Vec<PerturbGeneEffect> = (0..n_genes)
@@ -1941,6 +2334,7 @@ async fn api_perturb_summary(
     let n_negative = col.iter().filter(|&&v| v < -1e-12).count();
     let n_zero = n_obs - n_positive - n_negative;
 
+    schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
     Ok(Json(PerturbSummaryResponse {
         gene: gene.clone(),
         n_obs,
@@ -1953,19 +2347,183 @@ async fn api_perturb_summary(
     }))
 }
 
+#[derive(Deserialize)]
+struct ClusterMeanExprBody {
+    genes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ClusterMeanExprResponse {
+    cluster_ids: Vec<usize>,
+    genes: HashMap<String, Vec<f64>>,
+    n_cells_per_cluster: Vec<usize>,
+}
+
+async fn api_cluster_mean_expression(
+    State(state): State<SharedState>,
+    Json(body): Json<ClusterMeanExprBody>,
+) -> Result<Json<ClusterMeanExprResponse>, (StatusCode, String)> {
+    let st = state.read().await;
+    let ds = require_dataset(&st)?;
+    let path = ds.adata_path.clone();
+    let layer = ds.layer.clone();
+    let clusters = Arc::clone(&ds.clusters);
+    let n_obs = ds.obs_names.len();
+    drop(st);
+
+    let genes = body.genes;
+    if genes.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "genes list is empty".into()));
+    }
+    if genes.len() > 200 {
+        return Err((StatusCode::BAD_REQUEST, "max 200 genes at a time".into()));
+    }
+
+    let mut unique_clusters: Vec<usize> = clusters.iter().copied().collect::<std::collections::HashSet<_>>().into_iter().collect();
+    unique_clusters.sort_unstable();
+    let cluster_to_idx: HashMap<usize, usize> = unique_clusters.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let n_clusters = unique_clusters.len();
+    let mut n_cells_per_cluster = vec![0usize; n_clusters];
+    for &c in clusters.iter() {
+        if let Some(&idx) = cluster_to_idx.get(&c) {
+            n_cells_per_cluster[idx] += 1;
+        }
+    }
+
+    let genes_clone = genes.clone();
+    let clusters_clone = clusters.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<HashMap<String, Vec<f64>>, String> {
+        let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+        let mut out = HashMap::new();
+        for gene in &genes_clone {
+            match gene_expression_f32(&adata, &layer, gene) {
+                Ok(expr) => {
+                    let mut sums = vec![0.0f64; n_clusters];
+                    let mut counts = vec![0usize; n_clusters];
+                    for i in 0..n_obs.min(expr.len()) {
+                        let c = clusters_clone[i];
+                        if let Some(&idx) = cluster_to_idx.get(&c) {
+                            sums[idx] += expr[i] as f64;
+                            counts[idx] += 1;
+                        }
+                    }
+                    let means: Vec<f64> = (0..n_clusters)
+                        .map(|j| if counts[j] > 0 { sums[j] / counts[j] as f64 } else { 0.0 })
+                        .collect();
+                    out.insert(gene.clone(), means);
+                }
+                Err(_) => {
+                    out.insert(gene.clone(), vec![0.0; n_clusters]);
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    Ok(Json(ClusterMeanExprResponse {
+        cluster_ids: unique_clusters,
+        genes: result,
+        n_cells_per_cluster,
+    }))
+}
+
+#[derive(Deserialize)]
+struct LabelClustersBody {
+    labels: HashMap<String, String>,
+}
+
+async fn api_label_clusters(
+    State(state): State<SharedState>,
+    Json(body): Json<LabelClustersBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut w = state.write().await;
+    let ds = w.dataset.as_mut().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "No dataset loaded".into(),
+    ))?;
+
+    let mut unique_clusters: Vec<usize> = ds.clusters.iter().copied().collect::<std::collections::HashSet<_>>().into_iter().collect();
+    unique_clusters.sort_unstable();
+
+    let mut categories: Vec<String> = Vec::with_capacity(unique_clusters.len());
+    for &cid in &unique_clusters {
+        let label = body.labels.get(&cid.to_string())
+            .cloned()
+            .unwrap_or_else(|| format!("Cluster {}", cid));
+        categories.push(label);
+    }
+
+    let cluster_to_cat: HashMap<usize, u16> = unique_clusters
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i as u16))
+        .collect();
+
+    let n_obs = ds.obs_names.len();
+    let mut codes = vec![0u16; n_obs];
+    for i in 0..n_obs {
+        codes[i] = *cluster_to_cat.get(&ds.clusters[i]).unwrap_or(&u16::MAX);
+    }
+    let codes_bin: Vec<u8> = codes.iter().flat_map(|c| c.to_le_bytes()).collect();
+
+    ds.cell_type_column = Some("annotated_type".into());
+    ds.cell_type_categories = Arc::new(categories.clone());
+    ds.cell_type_codes_bin = Some(Arc::new(codes_bin));
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "categories": categories,
+        "n_clusters": unique_clusters.len(),
+    })))
+}
+
+fn resolve_static_dir(path: &Path) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("static-dir: cannot read current working directory: {e}"))?;
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    joined.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "static-dir `{}` does not exist or is unreachable (cwd `{}`): {e}",
+            joined.display(),
+            cwd.display()
+        )
+    })
+}
+
 /// All HDF5 / Polars / GRN work runs here on a plain OS thread (no Tokio runtime). Starting Tokio
 /// only for `axum::serve` avoids nested-runtime panics when Polars or other code calls into async
 /// runtimes during `LazyFrame::collect()` etc.
 fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
-    let dataset = match cli.h5ad.as_ref() {
-        Some(p) if !p.as_os_str().is_empty() => Some(load_app_state(ViewerLoadInputs {
-            h5ad: p.clone(),
+    let allow_cors = cli.allow_cors
+        || std::env::var("SPATIAL_VIEWER_ALLOW_CORS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    let h5ad_empty = cli
+        .h5ad
+        .as_ref()
+        .map_or(true, |p| p.as_os_str().is_empty());
+    let run_toml_set = cli
+        .run_toml
+        .as_ref()
+        .map_or(false, |p| !p.as_os_str().is_empty());
+    let dataset = if !h5ad_empty || run_toml_set {
+        Some(load_app_state(ViewerLoadInputs {
+            h5ad: cli.h5ad.clone().unwrap_or_default(),
             layer: cli.layer.clone(),
             cluster_annot: cli.cluster_annot.clone(),
             network_dir: cli.network_dir.clone(),
             run_toml: cli.run_toml.clone(),
-        })?),
-        _ => None,
+        })?)
+    } else {
+        None
     };
     let state = Arc::new(RwLock::new(AppState {
         dataset,
@@ -1978,11 +2536,14 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         perturb_load_progress_permille: Arc::new(AtomicU32::new(0)),
         perturb_job_progress_permille: Arc::new(AtomicU32::new(0)),
         perturb_job_active: Arc::new(AtomicBool::new(false)),
+        perturb_job_cancel: Arc::new(AtomicBool::new(false)),
+        perturb_suppress_bg_loading_ui: Arc::new(AtomicBool::new(false)),
         perturb_progress_message: Arc::new(Mutex::new(String::new())),
     }));
 
     let api = Router::new()
         .route("/meta", get(api_meta))
+        .route("/cancel", post(api_cancel))
         .route("/session/configure", post(api_session_configure))
         .route("/spatial", get(api_spatial))
         .route("/umap", get(api_umap))
@@ -1995,19 +2556,45 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         .route("/betadata/columns", get(api_betadata_columns))
         .route("/betadata/values", get(api_betadata_values))
         .route("/betadata/top", post(api_betadata_top))
+        .route(
+            "/betadata/collect_interactions",
+            post(api_betadata_collect_interactions),
+        )
         .route("/network/cell-context", post(api_network_cell_context))
         .route("/perturb/preview", post(api_perturb_preview))
         .route("/perturb/umap-field", post(api_perturb_umap_field))
         .route("/perturb/summary", post(api_perturb_summary))
+        .route("/cluster/mean_expression", post(api_cluster_mean_expression))
+        .route("/meta/label_clusters", post(api_label_clusters))
         .with_state(state.clone())
         .layer(CompressionLayer::new());
 
-    let index = cli.static_dir.join("index.html");
+    let api = if allow_cors {
+        tracing::warn!("CORS enabled on /api (MCP / cross-origin); do not expose this server untrusted");
+        api.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(Any),
+        )
+    } else {
+        api
+    };
+
+    let static_dir = resolve_static_dir(cli.static_dir.as_path())?;
+    let index = static_dir.join("index.html");
+    if !index.is_file() {
+        anyhow::bail!(
+            "--static-dir must contain index.html after resolving path (missing: {})",
+            index.display()
+        );
+    }
+
+    let static_files = ServeDir::new(&static_dir).fallback(ServeFile::new(index.clone()));
     let app = Router::new()
         .nest("/api", api)
-        .fallback_service(
-            ServeDir::new(&cli.static_dir).not_found_service(ServeFile::new(index)),
-        )
+        .route_service("/", get_service(ServeFile::new(index.clone())))
+        .fallback_service(static_files)
         .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = format!("{}:{}", cli.bind, cli.port).parse()?;

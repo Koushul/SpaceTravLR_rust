@@ -112,6 +112,19 @@ cargo run --features spatial-viewer --bin spatial_viewer -- \
 - **`--network-dir`**: optional directory containing `{mouse|human}_network.parquet` for the **cell–cell context** panel (defaults to the same resolution order as training if omitted).
 - **`--static-dir`**: directory for the built viewer (default **`web/spatial_viewer/dist`**, relative to the process working directory). Override if you built the frontend elsewhere.
 - **`--run-toml`**: optional path to `spacetravlr_run_repro.toml` from the **same** SpaceTravLR run as your data (parent directory must contain `*_betadata.feather` files). `data.adata_path` in that file must resolve to the same dataset as **`--h5ad`**, and `n_obs` must match. When valid, `/api/meta` sets `perturb_ready` and `betadata_dir` to that run directory; the UI shows **Betadata** and **Perturbation (KO)** as color sources: gene, target expression (often `0` for KO), and scope (**all cells**, **current selection**, **one annotation cell type**, or **one cluster id** from `--cluster-annot`). **`POST /api/perturb/preview`** accepts JSON `{ "gene", "desired_expr", "scope": { "type": "all" | "indices" | "cell_type" | "cluster", ... } }` and returns little-endian `f32` Δ for the perturbed gene (length `n_obs`). If the dataset has **UMAP** in `obsm`, **`POST /api/perturb/umap-field`** runs the same perturbation, then a Rust port of velocyto **colΔCor** / **colΔCorpartial** (KNN on UMAP) plus SpaceTravLR-style transition probabilities, UMAP projection, and grid smoothing; JSON includes `grid_x`, `grid_y`, `u`, `v` (flattened `nx×ny`) for quiver overlays in the viewer (up to **40k** cells per request). Optional: `include_cell_vectors`, `n_neighbors`, `temperature`, `remove_null`, `unit_directions`, `grid_scale`, `vector_scale`, `delta_rescale`, `magnitude_threshold`, `use_full_graph`, `full_graph_max_cells`.
+- **`--allow-cors`** (or environment variable **`SPATIAL_VIEWER_ALLOW_CORS=1`**): enable permissive CORS on **`/api/*`**. Required when the viewer runs as an **MCP App** inside a host iframe (sandboxed origin) and calls your local `spatial_viewer` API. Do not enable on an internet-facing deployment without additional protection.
+
+**MCP Apps ([ext-apps](https://github.com/modelcontextprotocol/ext-apps))**: To embed the viewer in an MCP-capable client (inline UI for tools), build the single-file bundle and run the Node stdio server from `web/spatial_viewer`:
+
+```bash
+cd web/spatial_viewer && npm install && npm run build:all && cd ../..
+# Terminal A — API + static UI (CORS required for the iframe)
+cargo run --features spatial-viewer --bin spatial_viewer -- --allow-cors --bind 127.0.0.1 --port 8080
+# Terminal B — MCP server (stdio). Optional: SPATIAL_VIEWER_API_BASE, SPATIAL_VIEWER_CONNECT_ORIGINS
+cd web/spatial_viewer && npx tsx mcp/server.ts
+```
+
+Register the MCP server in your client with command `npx` and args `tsx`, `mcp/server.ts` (with `cwd` set to `web/spatial_viewer`), or run `node` on a compiled entry if you prefer. Tools: **`show_spatial_viewer`** (opens the UI and loads dataset paths), **`spatial_viewer_control`** (live UI updates: gene, color source, status text; streaming tool input shows a bottom progress strip while arguments arrive), **`spatial_viewer_report_context`** (UI button **Send context to chat** calls this so the model receives a text summary). Smoke-test with the ext-apps **`basic-host`** example and `SERVERS` pointing at your MCP server if the client supports HTTP transport.
 
 The viewer keeps a slim **chrome strip** (selection stats + a **color bar** with numeric ends when a continuous channel is loaded). **Hide controls** collapses the main toolbar; **Cell types** and **GRN / neighbor context** are collapsible `<details>` sections so the plot can use most of the window.
 

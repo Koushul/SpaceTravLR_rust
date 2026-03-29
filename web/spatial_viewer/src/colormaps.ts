@@ -62,9 +62,11 @@ function divergingRgb(t: number): [number, number, number] {
   ];
 }
 
+export type RgbaByteArray = Uint8Array | Uint8ClampedArray;
+
 export function applyColors(
   values: Float32Array | null,
-  colors: Uint8Array,
+  colors: RgbaByteArray,
   n: number,
   cmap: ColormapId,
 ): { lo: number; hi: number } {
@@ -74,7 +76,7 @@ export function applyColors(
       colors[o] = 55;
       colors[o + 1] = 60;
       colors[o + 2] = 68;
-      colors[o + 3] = 220;
+      colors[o + 3] = 255;
     }
     return { lo: 0, hi: 1 };
   }
@@ -85,7 +87,7 @@ export function applyColors(
     lo = s.lo;
     hi = s.hi;
   } else {
-    const r = robustRange(values);
+    const r = robustRange(values, 0, 1);
     lo = r.lo;
     hi = r.hi;
   }
@@ -95,7 +97,7 @@ export function applyColors(
     colors[o] = rgb[0];
     colors[o + 1] = rgb[1];
     colors[o + 2] = rgb[2];
-    colors[o + 3] = 240;
+    colors[o + 3] = 255;
   }
   return { lo, hi };
 }
@@ -139,8 +141,8 @@ export function mapValueToRgb(
 
 export function robustRange(
   values: Float32Array,
-  lowQ = 0.02,
-  highQ = 0.98,
+  lowQ = 0,
+  highQ = 1,
 ): { lo: number; hi: number } {
   const n = values.length;
   if (n === 0) return { lo: 0, hi: 1 };
@@ -165,19 +167,19 @@ export function symmetricDivergingRange(values: Float32Array): {
   const abs = new Float32Array(n);
   for (let i = 0; i < n; i++) abs[i] = Math.abs(values[i]);
   abs.sort();
-  const i98 = Math.min(Math.floor(0.98 * (n - 1)), n - 1);
-  const m = Math.max(abs[i98], 1e-12);
+  const iHi = Math.min(Math.floor(0.999 * (n - 1)), n - 1);
+  const m = Math.max(abs[iHi], 1e-12);
   return { lo: -m, hi: m };
 }
 
 const ALL_ZERO_EPS = 1e-12;
 
-function setNoSignalColor(colors: Uint8Array, i: number) {
+function setNoSignalColor(colors: RgbaByteArray, i: number) {
   const o = i * 4;
   colors[o] = 55;
   colors[o + 1] = 60;
   colors[o + 2] = 68;
-  colors[o + 3] = 220;
+  colors[o + 3] = 255;
 }
 
 /**
@@ -188,7 +190,7 @@ function setNoSignalColor(colors: Uint8Array, i: number) {
 export function applyBetadataColorsPerCluster(
   values: Float32Array,
   clusters: Uint32Array,
-  colors: Uint8Array,
+  colors: RgbaByteArray,
   n: number,
   cmap: ColormapId,
 ): void {
@@ -239,6 +241,6 @@ export function applyBetadataColorsPerCluster(
     colors[o] = rgb[0];
     colors[o + 1] = rgb[1];
     colors[o + 2] = rgb[2];
-    colors[o + 3] = 240;
+    colors[o + 3] = 255;
   }
 }

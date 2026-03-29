@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use ndarray::{Array2, Zip};
@@ -15,6 +15,7 @@ pub struct PerturbTarget {
     pub cell_indices: Option<Vec<usize>>,
 }
 
+#[derive(Clone)]
 pub struct PerturbConfig {
     pub n_propagation: usize,
     pub scale_factor: f64,
@@ -81,7 +82,9 @@ pub fn perturb(
         config,
         lr_radii,
         None,
+        None,
     )
+    .expect("cancel is only used by spatial viewer")
 }
 
 pub fn perturb_with_targets(
@@ -95,7 +98,8 @@ pub fn perturb_with_targets(
     config: &PerturbConfig,
     lr_radii: &HashMap<String, f64>,
     job_progress: Option<&Arc<AtomicU32>>,
-) -> PerturbResult {
+    cancel: Option<&AtomicBool>,
+) -> Result<PerturbResult, ()> {
     let n_cells = gene_mtx.nrows();
     let n_genes = gene_mtx.ncols();
     let gene_to_idx: HashMap<&str, usize> = gene_names
@@ -171,6 +175,9 @@ pub fn perturb_with_targets(
     }
 
     for iter in 0..config.n_propagation {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(());
+        }
         if job_progress.is_none() {
             eprintln!("  perturb iteration {}/{}", iter + 1, config.n_propagation);
         }
@@ -193,6 +200,9 @@ pub fn perturb_with_targets(
             config.beta_scale_factor as f32,
             config.beta_cap.map(|c| c as f32),
         );
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(());
+        }
 
         // 2. Update gene expression
         gene_mtx_1 = gene_mtx + &delta_simulated;
@@ -284,10 +294,10 @@ pub fn perturb_with_targets(
         }
     }
 
-    PerturbResult {
+    Ok(PerturbResult {
         simulated,
         delta: delta_simulated,
-    }
+    })
 }
 
 /// max(rw_lr, rw_tfl) scattered into a (n_cells × n_genes) dense array.

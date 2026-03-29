@@ -492,7 +492,9 @@ fn test_perturb_with_target_cell_subset() {
         &config,
         &lr_radii,
         None,
-    );
+        None,
+    )
+    .unwrap();
 
     for cell in target_cells {
         assert_eq!(result.simulated[[cell, 0]], 0.0);
@@ -602,7 +604,9 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         &config,
         &lr_radii,
         None,
-    );
+        None,
+    )
+    .unwrap();
 
     let target_idx = *gene2index.get("TARGET").unwrap();
     let tf_idx = *gene2index.get("TF1").unwrap();

@@ -507,4 +507,52 @@ impl SpaceshipConfig {
     pub fn resolve_adata_path(&self) -> String {
         self.data.adata_path.trim().to_string()
     }
+
+    /// Training output directory (contains `*_betadata.feather`): `[execution].output_dir`.
+    ///
+    /// Relative `output_dir` entries are resolved against the directory that contains
+    /// `run_toml_path` so a copied or symlinked repro TOML still finds feathers. If `output_dir`
+    /// is empty, returns the parent of `run_toml_path` (legacy layout: TOML next to feathers).
+    pub fn resolve_training_output_dir(&self, run_toml_path: &Path) -> PathBuf {
+        let toml_dir = run_toml_path.parent().unwrap_or_else(|| Path::new("."));
+        let raw = self.execution.output_dir.trim();
+        if raw.is_empty() {
+            return toml_dir.to_path_buf();
+        }
+        let expanded = expand_user_path(raw);
+        let p = Path::new(expanded.as_str());
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            toml_dir.join(p)
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolve_training_output_dir_tests {
+    use super::SpaceshipConfig;
+    use std::path::Path;
+
+    #[test]
+    fn empty_output_dir_uses_toml_parent() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.execution.output_dir = String::new();
+        let p = Path::new("/configs/x/spacetravlr_run_repro.toml");
+        assert_eq!(
+            cfg.resolve_training_output_dir(p),
+            Path::new("/configs/x")
+        );
+    }
+
+    #[test]
+    fn relative_output_dir_joined_to_toml_parent() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.execution.output_dir = "lasso_out".into();
+        let p = Path::new("/home/u/notebook.toml");
+        assert_eq!(
+            cfg.resolve_training_output_dir(p),
+            Path::new("/home/u/lasso_out")
+        );
+    }
 }

@@ -1,7 +1,10 @@
 import "./style.css";
 
-import { Deck } from "@deck.gl/core";
-import { OrthographicView } from "@deck.gl/core";
+import {
+  Deck,
+  OrthographicView,
+  type OrthographicViewState,
+} from "@deck.gl/core";
 import { LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import {
   applyBetadataColorsPerCluster,
@@ -10,6 +13,25 @@ import {
   type ColormapId,
 } from "./colormaps";
 import { rgbForCategoryIndex } from "./cellTypePalette";
+import {
+  attachMcpCaptureSink,
+  attachMcpCollectInteractionsSink,
+  attachMcpControlSink,
+  attachMcpPerturbRunSink,
+  bootstrapMcp,
+  type McpCaptureRequest,
+  type McpCollectInteractionsRequest,
+  type McpPerturbRunRequest,
+} from "./mcpBridge";
+
+let globalApiBase = "";
+
+function apiUrl(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  const p = path.startsWith("/") ? path : `/${path}`;
+  const b = globalApiBase.replace(/\/$/, "");
+  return b ? `${b}${p}` : p;
+}
 
 const CT_UNKNOWN = 65535;
 
@@ -24,7 +46,7 @@ const ORTHO_CONTROLLER = {
 } as const;
 
 async function fetchF32(path: string): Promise<Float32Array> {
-  const r = await fetch(path);
+  const r = await fetch(apiUrl(path));
   if (!r.ok) {
     throw new Error(`${r.status} ${r.statusText}`);
   }
@@ -33,7 +55,7 @@ async function fetchF32(path: string): Promise<Float32Array> {
 }
 
 async function fetchU32(path: string): Promise<Uint32Array> {
-  const r = await fetch(path);
+  const r = await fetch(apiUrl(path));
   if (!r.ok) {
     throw new Error(`${r.status} ${r.statusText}`);
   }
@@ -80,6 +102,40 @@ interface SessionConfigureResponse {
   ok: boolean;
   message: string;
   meta: Meta;
+}
+
+interface CollectedInteractionRow {
+  interaction: string;
+  gene: string;
+  beta: number;
+  interaction_type: string;
+}
+
+interface CollectInteractionsApiResponse {
+  interactions: CollectedInteractionRow[];
+  n_reported: number;
+  n_total: number;
+  capped: boolean;
+}
+
+function metaDatasetSignature(m: Meta): string {
+  return [
+    m.dataset_ready === false ? "0" : "1",
+    m.n_obs,
+    m.n_vars,
+    m.adata_path,
+    m.layer,
+    m.cluster_annot,
+    m.network_dir ?? "",
+    m.run_toml ?? "",
+  ].join("\u001f");
+}
+
+function cellTypeSignature(m: Meta): string {
+  return [
+    m.cell_type_column ?? "",
+    ...(m.cell_type_categories ?? []),
+  ].join("\u001f");
 }
 
 interface UmapFieldResponse {
@@ -151,18 +207,36 @@ function fitOrthographic(
   return { target: [cx, cy], zoom };
 }
 
-function meanForMask(values: Float32Array | null, mask: Uint8Array): string {
-  if (!values) return "—";
-  let s = 0;
-  let c = 0;
-  for (let i = 0; i < values.length; i++) {
-    if (mask[i]) {
-      s += values[i]!;
-      c++;
-    }
+function canvasToScaledPngBase64(
+  canvas: HTMLCanvasElement,
+  maxW?: number,
+): string {
+  const w = canvas.width;
+  const h = canvas.height;
+  let tw = w;
+  let th = h;
+  if (maxW != null && maxW > 0 && w > maxW) {
+    tw = maxW;
+    th = Math.max(1, Math.round((h * maxW) / w));
   }
-  if (c === 0) return "—";
-  return (s / c).toPrecision(5);
+  const out = document.createElement("canvas");
+  out.width = tw;
+  out.height = th;
+  const ctx = out.getContext("2d");
+  if (!ctx) throw new Error("2d context unavailable");
+  ctx.drawImage(canvas, 0, 0, tw, th);
+  const dataUrl = out.toDataURL("image/png");
+  const i = dataUrl.indexOf(",");
+  if (i < 0) throw new Error("invalid data URL");
+  return dataUrl.slice(i + 1);
+}
+
+async function waitAnimationFrames(count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+  }
 }
 
 function globalMean(values: Float32Array | null): string {
@@ -172,43 +246,10 @@ function globalMean(values: Float32Array | null): string {
   return (s / values.length).toPrecision(5);
 }
 
-function selectInRect(
-  deck: Deck,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  positions: Float32Array,
-  n: number,
-  mask: Uint8Array,
-  allowed: (i: number) => boolean,
-): void {
-  mask.fill(0);
-  const vps = deck.getViewports();
-  if (!vps.length) return;
-  const vp = vps[0]!;
-  const a = vp.unproject([x0, y0], { topLeft: true });
-  const b = vp.unproject([x1, y1], { topLeft: true });
-  const wx0 = Math.min(a[0], b[0]);
-  const wx1 = Math.max(a[0], b[0]);
-  const wy0 = Math.min(a[1], b[1]);
-  const wy1 = Math.max(a[1], b[1]);
-  for (let i = 0; i < n; i++) {
-    const px = positions[i * 2]!;
-    const py = positions[i * 2 + 1]!;
-    if (
-      px >= wx0 &&
-      px <= wx1 &&
-      py >= wy0 &&
-      py <= wy1 &&
-      allowed(i)
-    ) {
-      mask[i] = 1;
-    }
-  }
-}
-
 async function main() {
+  const mcp = await bootstrapMcp();
+  globalApiBase = mcp.apiBase;
+
   const root = document.querySelector<HTMLDivElement>("#app")!;
   root.innerHTML = `
     <div class="app-layout">
@@ -271,6 +312,15 @@ async function main() {
           </div>
         </div>
       </details>
+      <details class="session-panel hidden" id="mcpPanel">
+        <summary class="session-summary">MCP</summary>
+        <p class="session-hint" style="margin:0.35rem 0;font-size:0.85em;color:var(--st-muted);">
+          Send a snapshot of the current viewer state to the assistant (inline MCP host).
+        </p>
+        <button type="button" class="secondary" id="mcpReportContextBtn">
+          Send context to chat
+        </button>
+      </details>
       <div class="control-section">
         <h2 class="control-section-title">Color &amp; data</h2>
       <div class="toolbar toolbar-sidebar">
@@ -284,27 +334,59 @@ async function main() {
         </select>
       </label>
       <div class="perturb-toolbar hidden" id="perturbPanel">
-        <label>Gene to perturb
-          <input id="perturbGene" list="geneHints" placeholder="var symbol" />
+        <label class="perturb-field" for="perturbGene"
+          >Gene to perturb
+          <input
+            id="perturbGene"
+            aria-label="Gene to perturb"
+            list="geneHints"
+            placeholder="var symbol"
+          />
         </label>
-        <label>Target expr
-          <input type="number" id="perturbExpr" value="0" step="any" />
+        <label class="perturb-field" for="perturbExpr"
+          >Target expr
+          <input
+            type="number"
+            id="perturbExpr"
+            aria-label="Target expression after perturbation"
+            value="0"
+            step="any"
+          />
         </label>
-        <label>Where to apply
-          <select id="perturbScope">
+        <label class="perturb-field" for="perturbScope"
+          >Where to apply
+          <select id="perturbScope" aria-label="Perturbation scope">
             <option value="all">All cells</option>
-            <option value="selection">Current selection</option>
             <option value="cell_type">One cell type (annotation)</option>
             <option value="cluster">One cluster id</option>
           </select>
         </label>
         <label id="perturbCellTypeWrap" class="hidden"
           >Cell type
-          <select id="perturbCellType"><option value="">—</option></select>
+          <select id="perturbCellType" aria-label="Perturb cell type category">
+            <option value="">—</option>
+          </select>
         </label>
         <label id="perturbClusterWrap" class="hidden"
           >Cluster id (<code>--cluster-annot</code>)
-          <input type="number" id="perturbClusterId" min="0" step="1" />
+          <input
+            type="number"
+            id="perturbClusterId"
+            aria-label="Perturb cluster id"
+            min="0"
+            step="1"
+          />
+        </label>
+        <label>Perturb iterations
+          <input
+            type="number"
+            id="perturbNProp"
+            aria-label="Perturbation propagation iterations"
+            min="1"
+            max="32"
+            value="3"
+            step="1"
+          />
         </label>
         <button type="button" id="clearPerturb" class="secondary">
           Clear perturb Δ
@@ -345,14 +427,16 @@ async function main() {
           <option value="umap">UMAP</option>
         </select>
       </label>
-      <button type="button" id="loadColor">Load / refresh</button>
-      <label><input type="checkbox" id="brushToggle" /> Rect select</label>
-      <button type="button" id="clearSel" class="secondary">Clear selection</button>
+      <div class="toolbar-load-row">
+        <button type="button" id="loadColor">Load / refresh</button>
+        <button type="button" id="cancelJobsBtn" class="secondary" title="Stop perturb jobs and hide stuck loading (background betabase load exits on its own)">
+          Cancel jobs
+        </button>
+      </div>
       <p class="toolbar-hint">
-        Click a cell to select one · Shift+click to add or remove. Betadata feathers are
-        <strong>seed-only</strong> (<code>Cluster</code> rows, mapped by
-        <code>--cluster-annot</code>) or <strong>spatial</strong> (<code>CellID</code>, per-cell
-        β); status line shows which was detected.
+        With <strong>Interaction lens</strong> on, click a cell to set the sender for GRN context.
+        Betadata feathers are <strong>seed-only</strong> (<code>Cluster</code>) or
+        <strong>spatial</strong> (<code>CellID</code>); status line shows which was detected.
       </p>
       </div>
       </div>
@@ -375,23 +459,23 @@ async function main() {
         <div class="transition-grid">
           <label
             ><code>n_neighbors</code>
-            <input type="number" id="transNeighbors" min="5" max="500" value="150" />
+            <input type="number" id="transNeighbors" min="5" max="500" value="200" />
           </label>
           <label
             >Temperature <code>T</code>
-            <input type="number" id="transT" value="0.05" step="0.005" />
+            <input type="number" id="transT" value="0.06" step="0.005" />
           </label>
           <label
             ><code>grid_scale</code>
-            <input type="number" id="transGridScale" value="1" step="0.1" min="0.1" />
+            <input type="number" id="transGridScale" value="2" step="0.1" min="0.1" />
           </label>
           <label
             ><code>vector_scale</code>
-            <input type="number" id="transVecScale" value="0.85" step="0.05" min="0.01" />
+            <input type="number" id="transVecScale" value="1.35" step="0.05" min="0.01" />
           </label>
           <label
             ><code>rescale</code> (δ before transition)
-            <input type="number" id="transDeltaRescale" value="1" step="0.1" />
+            <input type="number" id="transDeltaRescale" value="4" step="0.1" />
           </label>
           <label
             ><code>threshold</code> (grid arrow mag.)
@@ -456,25 +540,25 @@ async function main() {
         </p>
         <div class="transition-grid quiver-display-grid">
           <label class="toolbar-cell-size"
-            >Vis. length <span id="quiverVisScaleVal">100</span>%
+            >Vis. length <span id="quiverVisScaleVal">185</span>%
             <input
               type="range"
               id="quiverVisScale"
               min="10"
               max="300"
               step="5"
-              value="100"
+              value="185"
             />
           </label>
           <label class="toolbar-cell-size"
-            >Line width <span id="quiverLineWVal">2</span> px
+            >Line width <span id="quiverLineWVal">2.5</span> px
             <input
               type="range"
               id="quiverLineW"
               min="0.5"
               max="8"
               step="0.5"
-              value="2"
+              value="2.5"
             />
           </label>
           <label class="toolbar-cell-size"
@@ -504,16 +588,82 @@ async function main() {
         <div
           class="cell-type-checks"
           id="cellTypeFilters"
-          title="Unchecked types are dimmed and excluded from click and rectangle selection"
+          title="Unchecked types are dimmed on the plot"
         ></div>
+      </div>
+    </details>
+    <details class="ccc-panel filter-details hidden" id="cccInteractionsPanel">
+      <summary class="filter-summary">β interactions (parallel collect)</summary>
+      <div class="ccc-inner">
+        <p class="ccc-hint">
+          Rust + Rayon scans <code>*_betadata.feather</code> like Python
+          <code>Betabase.collect_interactions</code> — see
+          <a
+            href="https://spacetravlr.readthedocs.io/en/latest/ligand_receptor_interactions.html"
+            target="_blank"
+            rel="noopener"
+            >ligand–receptor tutorial</a
+          >.
+        </p>
+        <label class="ccc-show-plot"
+          ><input type="checkbox" id="cccShowPlot" checked /> Show horizontal bar chart</label
+        >
+        <div id="cccChartWrap" class="ccc-chart-wrap">
+          <div class="ccc-chart-title" id="cccChartTitle">Top interactions</div>
+          <div id="cccBars" class="ccc-bars"></div>
+        </div>
+        <div class="ccc-grid">
+          <label
+            >Filter
+            <select id="cccFilterMode">
+              <option value="cell_type">Cell type</option>
+              <option value="cluster">Cluster id</option>
+            </select>
+          </label>
+          <label id="cccCellTypeWrap"
+            >Type
+            <select id="cccCellType"><option value="">—</option></select>
+          </label>
+          <label id="cccClusterWrap" class="hidden"
+            >Cluster id
+            <input type="number" id="cccClusterId" min="0" step="1" value="0" />
+          </label>
+          <label
+            >Aggregate
+            <select id="cccAggregate">
+              <option value="mean">mean</option>
+              <option value="min">min</option>
+              <option value="max">max</option>
+              <option value="sum">sum</option>
+              <option value="positive">positive</option>
+              <option value="negative">negative</option>
+            </select>
+          </label>
+          <label
+            >Plot
+            <select id="cccPlotKind">
+              <option value="ligand-receptor">Ligand–receptor</option>
+              <option value="all">All types</option>
+            </select>
+          </label>
+          <label
+            >Top K
+            <input type="number" id="cccTopK" min="5" max="40" value="15" step="1" />
+          </label>
+        </div>
+        <div class="ccc-actions">
+          <button type="button" id="cccComputeBtn" class="primary">Collect interactions</button>
+          <span class="session-busy hidden" id="cccBusy">Scanning…</span>
+        </div>
+        <p class="ccc-footnote" id="cccFootnote"></p>
       </div>
     </details>
     <details class="interaction-details hidden" id="interactionPanel">
       <summary class="interaction-summary">GRN neighbors (sender cell)</summary>
       <div class="interaction-details-inner">
         <p class="interaction-hint">
-          Select one cell and enable <strong>Interaction lens</strong>. Shows GRN-supported L→R
-          links to spatial kNN or radius neighbors (line color scales with support score).
+          Enable <strong>Interaction lens</strong>, enter a focus gene, then <strong>click a cell</strong>
+          on the plot (sender). Shows GRN-supported L→R links to kNN or radius neighbors.
         </p>
         <div class="interaction-controls interaction-controls-row1">
           <label class="interaction-mode-label"
@@ -574,7 +724,7 @@ async function main() {
           <div class="stage-jitter-group">
             <label
               class="stage-jitter-toggle"
-              title="Very subtle motion on points (visual only; rect select uses true coordinates)"
+              title="Very subtle motion on points (visual only)"
             >
               <input type="checkbox" id="cellJitterToggle" checked /> Jitter
             </label>
@@ -592,7 +742,19 @@ async function main() {
         </div>
         <div class="main" id="main">
           <div id="deck-root"></div>
-          <div class="brush-overlay" id="brushOverlay"></div>
+          <details
+            id="cellTypeLegendWrap"
+            class="cell-type-legend-wrap hidden"
+            open
+          >
+            <summary
+              id="cellTypeLegendSummary"
+              class="cell-type-legend-summary"
+            >
+              Cell types
+            </summary>
+            <div id="cellTypeLegendBody" class="cell-type-legend-body"></div>
+          </details>
         </div>
         <div class="status" id="status"></div>
         <div class="status-progress-wrap hidden" id="statusProgressWrap">
@@ -627,7 +789,6 @@ async function main() {
   const colorBarTitle =
     root.querySelector<HTMLDivElement>("#colorBarTitle")!;
   const deckContainer = root.querySelector<HTMLDivElement>("#deck-root")!;
-  const brushOverlay = root.querySelector<HTMLDivElement>("#brushOverlay")!;
   const colorSource = root.querySelector<HTMLSelectElement>("#colorSource")!;
   const exprGene = root.querySelector<HTMLInputElement>("#exprGene")!;
   const geneHints = root.querySelector<HTMLDataListElement>("#geneHints")!;
@@ -638,8 +799,7 @@ async function main() {
   const betaGeneWrap = root.querySelector<HTMLLabelElement>("#betaGeneWrap")!;
   const betaColWrap = root.querySelector<HTMLLabelElement>("#betaColWrap")!;
   const loadBtn = root.querySelector<HTMLButtonElement>("#loadColor")!;
-  const brushToggle = root.querySelector<HTMLInputElement>("#brushToggle")!;
-  const clearSel = root.querySelector<HTMLButtonElement>("#clearSel")!;
+  const cancelJobsBtn = root.querySelector<HTMLButtonElement>("#cancelJobsBtn")!;
   const cellSizeInput = root.querySelector<HTMLInputElement>("#cellSize")!;
   const cellSizeVal = root.querySelector<HTMLSpanElement>("#cellSizeVal")!;
   const cellTypePanel = root.querySelector<HTMLDetailsElement>("#cellTypePanel")!;
@@ -684,6 +844,8 @@ async function main() {
     root.querySelector<HTMLLabelElement>("#perturbClusterWrap")!;
   const perturbClusterId =
     root.querySelector<HTMLInputElement>("#perturbClusterId")!;
+  const perturbNProp =
+    root.querySelector<HTMLInputElement>("#perturbNProp")!;
   const clearPerturbBtn =
     root.querySelector<HTMLButtonElement>("#clearPerturb")!;
   const layoutToggleWrap =
@@ -702,7 +864,52 @@ async function main() {
   const sessionApplyBtn =
     root.querySelector<HTMLButtonElement>("#sessionApply")!;
   const sessionBusyEl = root.querySelector<HTMLSpanElement>("#sessionBusy")!;
+  const mcpPanel = root.querySelector<HTMLDetailsElement>("#mcpPanel")!;
+  const mcpReportContextBtn =
+    root.querySelector<HTMLButtonElement>("#mcpReportContextBtn")!;
+  const cccInteractionsPanel =
+    root.querySelector<HTMLDetailsElement>("#cccInteractionsPanel")!;
+  const cccShowPlot = root.querySelector<HTMLInputElement>("#cccShowPlot")!;
+  const cccChartWrap = root.querySelector<HTMLDivElement>("#cccChartWrap")!;
+  const cccChartTitle = root.querySelector<HTMLDivElement>("#cccChartTitle")!;
+  const cccBars = root.querySelector<HTMLDivElement>("#cccBars")!;
+  const cccFilterMode = root.querySelector<HTMLSelectElement>("#cccFilterMode")!;
+  const cccCellTypeWrap =
+    root.querySelector<HTMLLabelElement>("#cccCellTypeWrap")!;
+  const cccCellType = root.querySelector<HTMLSelectElement>("#cccCellType")!;
+  const cccClusterWrap =
+    root.querySelector<HTMLLabelElement>("#cccClusterWrap")!;
+  const cccClusterId = root.querySelector<HTMLInputElement>("#cccClusterId")!;
+  const cccAggregate = root.querySelector<HTMLSelectElement>("#cccAggregate")!;
+  const cccPlotKind = root.querySelector<HTMLSelectElement>("#cccPlotKind")!;
+  const cccTopK = root.querySelector<HTMLInputElement>("#cccTopK")!;
+  const cccComputeBtn =
+    root.querySelector<HTMLButtonElement>("#cccComputeBtn")!;
+  const cccBusy = root.querySelector<HTMLSpanElement>("#cccBusy")!;
+  const cccFootnote = root.querySelector<HTMLParagraphElement>("#cccFootnote")!;
+  function syncCccFilterFields() {
+    const m = cccFilterMode.value;
+    cccCellTypeWrap.classList.toggle("hidden", m !== "cell_type");
+    cccClusterWrap.classList.toggle("hidden", m !== "cluster");
+  }
+  syncCccFilterFields();
+  cccFilterMode.addEventListener("change", syncCccFilterFields);
+  cccShowPlot.addEventListener("change", () => {
+    syncCccChartVisibility();
+    renderCccBarChart();
+  });
+  cccPlotKind.addEventListener("change", () => renderCccBarChart());
+  cccTopK.addEventListener("change", () => renderCccBarChart());
+  if (mcp.mcpApp) {
+    mcpPanel.classList.remove("hidden");
+  }
   const mainEl = root.querySelector<HTMLDivElement>("#main")!;
+  const cellTypeLegendWrap =
+    root.querySelector<HTMLDetailsElement>("#cellTypeLegendWrap")!;
+  const cellTypeLegendBody =
+    root.querySelector<HTMLDivElement>("#cellTypeLegendBody")!;
+  const cellTypeLegendSummary =
+    root.querySelector<HTMLElement>("#cellTypeLegendSummary")!;
   const umapQuiverPanel =
     root.querySelector<HTMLDetailsElement>("#umapQuiverPanel")!;
   const transNeighbors =
@@ -823,7 +1030,7 @@ async function main() {
     const id = window.setInterval(() => {
       void (async () => {
         try {
-          const mr = await fetch("/api/meta");
+          const mr = await fetch(apiUrl("/api/meta"));
           if (!mr.ok) return;
           const m = (await mr.json()) as Meta;
           applyMetaProgressToUi(m);
@@ -836,11 +1043,37 @@ async function main() {
       return await work;
     } finally {
       clearInterval(id);
+      try {
+        const mr = await fetch(apiUrl("/api/meta"));
+        if (mr.ok) {
+          const m = (await mr.json()) as Meta;
+          applyMetaProgressToUi(m);
+          const pct = m.perturb_progress_percent;
+          if (pct != null && Number.isFinite(pct)) {
+            await new Promise((r) => setTimeout(r, 280));
+          }
+        }
+      } catch {
+        /* ignore */
+      }
       syncProgressBar(null);
     }
   }
 
-  let meta!: Meta;
+  let meta: Meta = {
+    n_obs: 0,
+    n_vars: 0,
+    spatial_obsm_key: "",
+    layer: "",
+    cluster_annot: "",
+    bounds: { min_x: 0, max_x: 1, min_y: 0, max_y: 1 },
+    adata_path: "",
+    betadata_dir: "",
+    dataset_ready: false,
+  };
+  let lastSyncedDatasetSignature = "";
+  let lastCellTypeSig = "";
+  let datasetHotReloadLock = false;
   let n = 0;
   let cellCategories: string[] = [];
   let cellTypeColumnLabel: string | null = null;
@@ -858,16 +1091,15 @@ async function main() {
   let interactionLineData: InteractionLineDatum[] = [];
   let quiverFieldCache: UmapFieldResponse | null = null;
   let quiverSegData: QuiverSegDatum[] = [];
-  let baseColors!: Uint8Array;
-  let colors!: Uint8Array;
-  let selected!: Uint8Array;
+  let baseColors!: Uint8ClampedArray;
+  let colors!: Uint8ClampedArray;
   let activeValues: Float32Array | null = null;
   let rangeLo = 0;
   let rangeHi = 1;
   let scaleLine = "Scale: —";
   let lastColorSource: "expression" | "betadata" | "perturb" | null = null;
   let perturbDisplayGene = "";
-  let deck: Deck | undefined;
+  let deck: Deck<OrthographicView> | undefined;
 
   toggleToolbarBtn.addEventListener("click", () => {
     const collapsed = appSidebar.classList.toggle("sidebar-collapsed");
@@ -877,35 +1109,6 @@ async function main() {
       collapsed ? "false" : "true",
     );
   });
-
-  function compositeSelectionIntoDisplayColors() {
-    colors.set(baseColors);
-    for (let i = 0; i < n; i++) {
-      if (!selected[i]) continue;
-      const o = i * 4;
-      colors[o] = Math.min(
-        255,
-        Math.round(baseColors[o]! * 0.45 + 255 * 0.55),
-      );
-      colors[o + 1] = Math.min(
-        255,
-        Math.round(baseColors[o + 1]! * 0.45 + 210 * 0.55),
-      );
-      colors[o + 2] = Math.min(
-        255,
-        Math.round(baseColors[o + 2]! * 0.45 + 90 * 0.55),
-      );
-      colors[o + 3] = 255;
-    }
-  }
-
-  function collectSelectedIndices(): number[] {
-    const out: number[] = [];
-    for (let i = 0; i < n; i++) {
-      if (selected[i]) out.push(i);
-    }
-    return out;
-  }
 
   function formatColorTick(x: number): string {
     if (!Number.isFinite(x)) return "—";
@@ -953,20 +1156,60 @@ async function main() {
   }
 
   const updateStats = () => {
-    if (!selected || n === 0) return;
-    let selCount = 0;
-    for (let i = 0; i < n; i++) {
-      if (selected[i]) selCount++;
-    }
-    const anySel = selCount > 0;
-    const mSel = meanForMask(activeValues, selected);
+    if (n === 0) return;
     const mAll = globalMean(activeValues);
-    const selLine = `Selected: <strong>${selCount}</strong> cell(s)`;
-    statsEl.innerHTML = anySel
-      ? `<div>${selLine}</div><div>Selection mean: <strong>${mSel}</strong></div><div>Global mean: ${mAll}</div>`
-      : `<div>${selLine}</div><div>Global mean: <strong>${mAll}</strong></div>`;
+    statsEl.innerHTML = `<div>Global mean: <strong>${mAll}</strong></div>`;
     updateColorBar();
   };
+
+  function updateCellTypeLegend() {
+    const show =
+      cellTypeOverlayEl.checked &&
+      !!cellTypeCodes &&
+      cellCategories.length > 0 &&
+      n > 0;
+    if (!show) {
+      cellTypeLegendWrap.classList.add("hidden");
+      return;
+    }
+    cellTypeLegendWrap.classList.remove("hidden");
+    const codes = cellTypeCodes!;
+    const nc = cellCategories.length;
+    const title =
+      (cellTypeColumnLabel && cellTypeColumnLabel.trim()) || "Cell types";
+    cellTypeLegendSummary.textContent = title;
+    const rows: string[] = [];
+    for (let i = 0; i < nc; i++) {
+      const name = cellCategories[i] ?? `(${i})`;
+      const on =
+        typeFilterChecked.length === 0 ||
+        i >= typeFilterChecked.length ||
+        typeFilterChecked[i];
+      const [r0, g0, b0] = rgbForCategoryIndex(i, nc);
+      const r = on ? r0 : Math.min(255, Math.round(r0 * 0.22));
+      const g = on ? g0 : Math.min(255, Math.round(g0 * 0.22));
+      const b = on ? b0 : Math.min(255, Math.round(b0 * 0.22));
+      const rowClass = on
+        ? "cell-type-legend-row"
+        : "cell-type-legend-row cell-type-legend-row--dimmed";
+      rows.push(
+        `<div class="${rowClass}"><span class="cell-type-legend-swatch" style="background:rgb(${r},${g},${b})"></span><span class="cell-type-legend-label">${escapeHtml(name)}</span></div>`,
+      );
+    }
+    let hasUnknown = false;
+    for (let i = 0; i < n; i++) {
+      if (codes[i] === CT_UNKNOWN) {
+        hasUnknown = true;
+        break;
+      }
+    }
+    if (hasUnknown) {
+      rows.push(
+        `<div class="cell-type-legend-row cell-type-legend-row--unknown"><span class="cell-type-legend-swatch" style="background:rgb(88,88,95)"></span><span class="cell-type-legend-label">Unknown</span></div>`,
+      );
+    }
+    cellTypeLegendBody.innerHTML = rows.join("");
+  }
 
   const syncPerturbScopeFields = () => {
     const s = perturbScope.value;
@@ -1002,12 +1245,6 @@ async function main() {
     if (c === CT_UNKNOWN) return true;
     if (c >= typeFilterChecked.length) return true;
     return typeFilterChecked[c] === true;
-  }
-
-  function pruneSelectionToAllowedTypes() {
-    for (let i = 0; i < n; i++) {
-      if (selected[i] && !cellSelectableByType(i)) selected[i] = 0;
-    }
   }
 
   function fillBaseFromCellTypes() {
@@ -1196,7 +1433,11 @@ async function main() {
         length: n,
         attributes: {
           getPosition: { value: posBuf, size: 2 },
-          getFillColor: { value: colors, size: 4, normalized: true },
+          getFillColor: {
+            value: colors,
+            size: 4,
+            type: "unorm8",
+          },
         },
       },
       pickable: true,
@@ -1206,6 +1447,7 @@ async function main() {
       radiusMaxPixels: px,
       stroked: false,
       billboard: true,
+      parameters: { depthWriteEnabled: false },
     });
     const layers: (LineLayer | ScatterplotLayer)[] = [];
     if (interactionLineData.length > 0) {
@@ -1271,7 +1513,10 @@ async function main() {
   };
 
   const refreshVisualization = () => {
-    if (!selected || n === 0) return;
+    if (n === 0 || !baseColors || !colors) {
+      updateCellTypeLegend();
+      return;
+    }
     const cmap = cmapSel.value as ColormapId;
     const overlayOn =
       cellTypeOverlayEl.checked &&
@@ -1312,10 +1557,10 @@ async function main() {
     }
     applyDisabledTypeDimming();
     applyInteractionContextDimming();
-    pruneSelectionToAllowedTypes();
-    compositeSelectionIntoDisplayColors();
+    colors.set(baseColors);
     rebuildLayer();
     updateStats();
+    updateCellTypeLegend();
   };
 
   function clearInteractionContextVisuals() {
@@ -1328,16 +1573,6 @@ async function main() {
     clearInteractionContextVisuals();
     interactionBodyEl.innerHTML = "";
     refreshVisualization();
-  }
-
-  function singleSelectedIndex(): number | null {
-    let found: number | null = null;
-    for (let i = 0; i < n; i++) {
-      if (!selected[i]) continue;
-      if (found !== null) return null;
-      found = i;
-    }
-    return found;
   }
 
   function renderInteractionPanel(data: CellContextResponse) {
@@ -1416,7 +1651,7 @@ async function main() {
     if (!fg) {
       setStatus("Enter focus gene for interaction context", true);
       interactionBodyEl.innerHTML =
-        '<p class="interaction-empty">Enter a focus gene, then select one cell or click Refresh.</p>';
+        '<p class="interaction-empty">Enter a focus gene, enable Interaction lens, click a cell on the plot, or click Refresh.</p>';
       return;
     }
     const nk = Math.min(
@@ -1439,7 +1674,7 @@ async function main() {
     interactionBodyEl.innerHTML =
       '<p class="interaction-loading">Computing context…</p>';
     try {
-      const r = await fetch("/api/network/cell-context", {
+      const r = await fetch(apiUrl("/api/network/cell-context"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1528,7 +1763,7 @@ async function main() {
       perturbMetaPollTimer = null;
       void (async () => {
         try {
-          const mr = await fetch("/api/meta");
+          const mr = await fetch(apiUrl("/api/meta"));
           if (!mr.ok) return;
           const m = (await mr.json()) as Meta;
           meta = m;
@@ -1563,17 +1798,246 @@ async function main() {
     perturbMetaPollTimer = setTimeout(tick, 400);
   }
 
-  function syncInteractionFromSelection() {
+  function syncInteractionFromSender() {
     if (!meta.network_loaded || !interactionLensEl.checked) return;
-    const one = singleSelectedIndex();
-    if (one !== null) {
-      void fetchAndApplyInteractionContext(one);
+    if (interactionSenderIndex !== null) {
+      void fetchAndApplyInteractionContext(interactionSenderIndex);
     } else {
       clearInteractionContextFull();
     }
   }
 
+  function readUiNPropagation(): number {
+    const v = Math.trunc(Number(perturbNProp.value) || 4);
+    return Math.min(32, Math.max(1, v));
+  }
+
+  let lastCccInteractions: CollectedInteractionRow[] = [];
+
+  function formatCccInteractionLabel(raw: string): string {
+    const s = raw.startsWith("beta_") ? raw.slice(5) : raw;
+    return s.replaceAll("$", "–").replaceAll("#", "→");
+  }
+
+  function syncCccChartVisibility() {
+    cccChartWrap.classList.toggle("hidden", !cccShowPlot.checked);
+  }
+
+  function renderCccBarChart() {
+    syncCccChartVisibility();
+    if (!cccShowPlot.checked) {
+      cccBars.innerHTML = "";
+      return;
+    }
+    const topK = Math.min(
+      40,
+      Math.max(5, Math.trunc(Number(cccTopK.value) || 15)),
+    );
+    const kind = cccPlotKind.value;
+    let rows = lastCccInteractions;
+    if (kind === "ligand-receptor") {
+      rows = rows.filter((r) => r.interaction_type === "ligand-receptor");
+    }
+    const sorted = [...rows].sort(
+      (a, b) => Math.abs(b.beta) - Math.abs(a.beta),
+    );
+    const pick = sorted.slice(0, topK);
+    if (pick.length === 0) {
+      cccChartTitle.textContent = "No rows to plot";
+      cccBars.innerHTML =
+        '<p class="ccc-empty">Run collect with a different filter or aggregate, or enable “All types”.</p>';
+      return;
+    }
+    const maxAbs = Math.max(
+      1e-12,
+      ...pick.map((r) => Math.abs(r.beta)),
+    );
+    cccChartTitle.textContent =
+      kind === "ligand-receptor"
+        ? `Top ${pick.length} ligand–receptor (|β|)`
+        : `Top ${pick.length} interactions (|β|)`;
+    cccBars.innerHTML = pick
+      .map((r) => {
+        const label = formatCccInteractionLabel(r.interaction);
+        const sub = `${escapeHtml(r.gene)} · ${escapeHtml(r.interaction_type)}`;
+        const w = (Math.abs(r.beta) / maxAbs) * 100;
+        const pos = r.beta >= 0;
+        return `<div class="ccc-bar-row">
+  <div class="ccc-bar-meta">
+    <span class="ccc-bar-label" title="${escapeHtml(r.interaction)}">${escapeHtml(label)}</span>
+    <span class="ccc-bar-gene">${sub}</span>
+  </div>
+  <div class="ccc-bar-track">
+    <div class="ccc-bar-fill ${pos ? "ccc-pos" : "ccc-neg"}" style="width:${w.toFixed(2)}%"></div>
+  </div>
+  <span class="ccc-bar-val">${r.beta.toExponential(3)}</span>
+</div>`;
+      })
+      .join("");
+  }
+
+  async function runCollectInteractionsApi(opts: {
+    aggregate: string;
+    filter: string;
+    cell_type?: string;
+    cluster_id?: number;
+    max_genes: number;
+    push_summary_to_chat: boolean;
+  }) {
+    cccBusy.classList.remove("hidden");
+    cccComputeBtn.disabled = true;
+    cccFootnote.textContent = "";
+    try {
+      const body: Record<string, unknown> = {
+        aggregate: opts.aggregate,
+        filter: opts.filter,
+        max_genes: opts.max_genes,
+      };
+      if (opts.filter === "cell_type" && opts.cell_type)
+        body.cell_type = opts.cell_type;
+      if (opts.filter === "cluster")
+        body.cluster_id = opts.cluster_id ?? 0;
+      const r = await fetch(apiUrl("/api/betadata/collect_interactions"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await r.text();
+      if (!r.ok) throw new Error(text);
+      const j = JSON.parse(text) as CollectInteractionsApiResponse;
+      lastCccInteractions = j.interactions;
+      cccFootnote.textContent = `${j.n_reported} rows returned (${j.n_total} before response cap${j.capped ? "; output truncated" : ""}).`;
+      renderCccBarChart();
+      setStatus(`Collected ${j.n_total} interaction rows`);
+      if (opts.push_summary_to_chat && mcp.mcpApp) {
+        const lr = j.interactions
+          .filter((x) => x.interaction_type === "ligand-receptor")
+          .sort((a, b) => Math.abs(b.beta) - Math.abs(a.beta))
+          .slice(0, 14);
+        const lines = [
+          "**β interactions (ligand–receptor, top by |β|)**",
+          `aggregate=${opts.aggregate} filter=${opts.filter}`,
+          "",
+          "| L–R | target | β |",
+          "| --- | --- | --- |",
+          ...lr.map(
+            (row) =>
+              `| ${formatCccInteractionLabel(row.interaction)} | ${row.gene} | ${row.beta.toExponential(3)} |`,
+          ),
+        ];
+        try {
+          await mcp.mcpApp.sendMessage({
+            role: "user",
+            content: [{ type: "text", text: lines.join("\n") }],
+          });
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (e) {
+      cccFootnote.textContent = String(e);
+      setStatus(String(e), true);
+    } finally {
+      cccBusy.classList.add("hidden");
+      cccComputeBtn.disabled = false;
+    }
+  }
+
+  async function runCollectInteractionsFromUi() {
+    const mode = cccFilterMode.value;
+    if (mode === "cell_type") {
+      const idx = Number(cccCellType.value);
+      const label = cellCategories[idx];
+      if (!label) {
+        setStatus("Pick a cell type for β collect", true);
+        return;
+      }
+      await runCollectInteractionsApi({
+        aggregate: cccAggregate.value,
+        filter: "cell_type",
+        cell_type: label,
+        max_genes: 2048,
+        push_summary_to_chat: false,
+      });
+    } else {
+      const cid = Math.trunc(Number(cccClusterId.value));
+      if (!Number.isFinite(cid) || cid < 0) {
+        setStatus("Enter a valid cluster id", true);
+        return;
+      }
+      await runCollectInteractionsApi({
+        aggregate: cccAggregate.value,
+        filter: "cluster",
+        cluster_id: cid,
+        max_genes: 2048,
+        push_summary_to_chat: false,
+      });
+    }
+  }
+
+  cccComputeBtn.addEventListener("click", () => void runCollectInteractionsFromUi());
+
+  async function executePerturbPreview(
+    gene: string,
+    desired: number,
+    scope: unknown,
+    nProp: number,
+  ): Promise<boolean> {
+    if (meta.perturb_error) {
+      setStatus(`Perturbation unavailable: ${meta.perturb_error}`, true);
+      return false;
+    }
+    if (meta.perturb_loading) {
+      setStatus(
+        "Perturbation engine is still loading; wait until the status line shows “perturbation ready”.",
+        true,
+      );
+      return false;
+    }
+    if (!meta.perturb_ready) {
+      setStatus("Perturbation needs server --run-toml", true);
+      return false;
+    }
+    if (!gene.trim()) {
+      setStatus("Enter gene to perturb", true);
+      return false;
+    }
+    setStatus("Running perturbation (may take a while)…");
+    try {
+      const res = await withMetaProgressPoll(
+        fetch(apiUrl("/api/perturb/preview"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            gene: gene.trim(),
+            desired_expr: Number.isFinite(desired) ? desired : 0,
+            scope,
+            n_propagation: nProp,
+          }),
+        }).then(async (rr) => {
+          if (!rr.ok) throw new Error(await rr.text());
+          return rr;
+        }),
+      );
+      const buf = await res.arrayBuffer();
+      activeValues = new Float32Array(buf);
+      if (activeValues.length !== n) {
+        throw new Error(`length ${activeValues.length} != n_obs ${n}`);
+      }
+      lastColorSource = "perturb";
+      perturbDisplayGene = gene.trim();
+      cmapSel.value = "diverging";
+      refreshVisualization();
+      return true;
+    } catch (e) {
+      setStatus(String(e), true);
+      return false;
+    }
+  }
+
   async function initDataset(metaOverride?: Meta): Promise<boolean> {
+    datasetHotReloadLock = true;
+    try {
     stopPerturbMetaPoll();
     syncProgressBar(null);
     stopCellJitterLoop();
@@ -1600,11 +2064,16 @@ async function main() {
     transUmapOnlyHint.classList.add("hidden");
     interactionBodyEl.innerHTML = "";
     interactionLensEl.checked = false;
+    lastCccInteractions = [];
+    cccBars.innerHTML = "";
+    cccFootnote.textContent = "";
+    cccChartTitle.textContent = "Top interactions";
+    syncCccChartVisibility();
     setStatus("Loading dataset…");
     try {
       if (metaOverride) meta = metaOverride;
       else {
-        const mr = await fetch("/api/meta");
+        const mr = await fetch(apiUrl("/api/meta"));
         if (!mr.ok) throw new Error(await mr.text());
         meta = (await mr.json()) as Meta;
       }
@@ -1631,7 +2100,7 @@ async function main() {
 
     if (meta.cell_type_column) {
       try {
-        const cr = await fetch("/api/cell_type/codes");
+        const cr = await fetch(apiUrl("/api/cell_type/codes"));
         if (cr.ok) {
           const buf = await cr.arrayBuffer();
           const arr = new Uint16Array(buf);
@@ -1659,6 +2128,15 @@ async function main() {
               `<option value="${idx}">${escapeHtml(name)}</option>`,
           )
           .join("");
+      cccCellType.innerHTML = cellCategories
+        .map(
+          (name, idx) =>
+            `<option value="${idx}">${escapeHtml(name)}</option>`,
+        )
+        .join("");
+      if (cccCellType.options.length > 0) cccCellType.selectedIndex = 0;
+    } else {
+      cccCellType.innerHTML = '<option value="">—</option>';
     }
     refillTransHighlightTypes();
     transLimitWrap.classList.toggle(
@@ -1676,12 +2154,15 @@ async function main() {
       layoutToggleWrap.classList.add("hidden");
       umapQuiverPanel.classList.add("hidden");
       interactionPanel.classList.add("hidden");
+      cccInteractionsPanel.classList.add("hidden");
       colorSourceBetaOpt.classList.add("hidden");
       colorSourcePerturbOpt.classList.add("hidden");
       setStatus(
         "No dataset loaded — set .h5ad (and optional run TOML) under Dataset paths, then Load dataset.",
       );
       sessionPanel.open = true;
+      lastSyncedDatasetSignature = metaDatasetSignature(meta);
+      lastCellTypeSig = cellTypeSignature(meta);
       return true;
     }
 
@@ -1710,6 +2191,7 @@ async function main() {
     syncInteractionPanelLayout();
     const hasBetadata = !!meta.betadata_row_id;
     colorSourceBetaOpt.classList.toggle("hidden", !hasBetadata);
+    cccInteractionsPanel.classList.toggle("hidden", !hasBetadata);
     colorSourcePerturbOpt.classList.toggle("hidden", !meta.perturb_ready);
     umapQuiverPanel.classList.toggle(
       "hidden",
@@ -1768,9 +2250,8 @@ async function main() {
       }
     }
 
-    baseColors = new Uint8Array(n * 4);
-    colors = new Uint8Array(n * 4);
-    selected = new Uint8Array(n);
+    baseColors = new Uint8ClampedArray(n * 4);
+    colors = new Uint8ClampedArray(n * 4);
     jitterPositions = new Float32Array(n * 2);
 
     const w0 = Math.max(mainEl.clientWidth, 32);
@@ -1785,34 +2266,24 @@ async function main() {
       initialViewState: {
         target: [vs0.target[0], vs0.target[1], 0],
         zoom: vs0.zoom,
-      },
+      } satisfies OrthographicViewState,
       viewState: null,
       controller: ORTHO_CONTROLLER,
       getCursor: ({ isDragging, isHovering }) =>
         isDragging ? "grabbing" : isHovering ? "pointer" : "grab",
       layers: [],
-      onClick: (info, evt) => {
-        if (brushToggle.checked) return;
+      onClick: (info) => {
         const idx = info.index;
         if (idx == null || idx < 0 || idx >= n) return;
         if (!cellSelectableByType(idx)) return;
-        const dom = (evt as { srcEvent?: PointerEvent }).srcEvent;
-        const shift = !!(dom && "shiftKey" in dom && dom.shiftKey);
-        if (shift) {
-          selected[idx] = selected[idx] ? 0 : 1;
-        } else {
-          selected.fill(0);
-          selected[idx] = 1;
-        }
-        compositeSelectionIntoDisplayColors();
-        rebuildLayer();
-        updateStats();
-        syncInteractionFromSelection();
+        if (!interactionLensEl.checked || !meta.network_loaded) return;
+        interactionSenderIndex = idx;
+        void fetchAndApplyInteractionContext(idx);
       },
     });
 
     try {
-      const br = await fetch("/api/betadata/genes");
+      const br = await fetch(apiUrl("/api/betadata/genes"));
       if (br.ok) {
         const genes = (await br.json()) as string[];
         betaGene.innerHTML =
@@ -1829,7 +2300,97 @@ async function main() {
     if (meta.perturb_loading && !meta.perturb_error) {
       schedulePerturbMetaPoll();
     }
+    lastSyncedDatasetSignature = metaDatasetSignature(meta);
+    lastCellTypeSig = cellTypeSignature(meta);
     return true;
+    } finally {
+      datasetHotReloadLock = false;
+    }
+  }
+
+  async function refreshCellTypeInfo(m: Meta) {
+    cellCategories = m.cell_type_categories ?? [];
+    cellTypeColumnLabel = m.cell_type_column ?? null;
+    cellTypeCodes = null;
+    typeFilterChecked = cellCategories.map(() => true);
+
+    cellTypePanel.classList.add("hidden");
+    cellTypeFilters.innerHTML = "";
+    perturbCellType.innerHTML = '<option value="">—</option>';
+
+    if (m.cell_type_column) {
+      try {
+        const cr = await fetch(apiUrl("/api/cell_type/codes"));
+        if (cr.ok) {
+          const buf = await cr.arrayBuffer();
+          const arr = new Uint16Array(buf);
+          if (arr.length === n) cellTypeCodes = arr;
+        }
+      } catch { /* optional */ }
+    }
+
+    if (cellTypeColumnLabel && cellCategories.length > 0) {
+      cellTypePanel.classList.remove("hidden");
+      cellTypeColNameEl.textContent = cellTypeColumnLabel;
+      cellTypeFilters.innerHTML = cellCategories
+        .map(
+          (name, idx) =>
+            `<label class="cell-type-item"><input type="checkbox" data-ct-idx="${idx}" checked /> ${escapeHtml(name)}</label>`,
+        )
+        .join("");
+      perturbCellType.innerHTML =
+        '<option value="">— pick —</option>' +
+        cellCategories
+          .map(
+            (name, idx) =>
+              `<option value="${idx}">${escapeHtml(name)}</option>`,
+          )
+          .join("");
+      cccCellType.innerHTML = cellCategories
+        .map(
+          (name, idx) =>
+            `<option value="${idx}">${escapeHtml(name)}</option>`,
+        )
+        .join("");
+      if (cccCellType.options.length > 0) cccCellType.selectedIndex = 0;
+    } else {
+      cccCellType.innerHTML = '<option value="">—</option>';
+    }
+    refillTransHighlightTypes();
+    transLimitWrap.classList.toggle(
+      "hidden",
+      !m.cell_type_column || cellCategories.length === 0,
+    );
+
+    cellTypeOverlayEl.checked = !!(cellTypeCodes && cellCategories.length > 0);
+
+    meta = m;
+    lastCellTypeSig = cellTypeSignature(m);
+    refreshVisualization();
+  }
+
+  async function pollServerDatasetIfChanged() {
+    if (datasetHotReloadLock) return;
+    try {
+      const mr = await fetch(apiUrl("/api/meta"));
+      if (!mr.ok) return;
+      const m = (await mr.json()) as Meta;
+      const sig = metaDatasetSignature(m);
+      if (sig !== lastSyncedDatasetSignature) {
+        setStatus("Dataset changed on server — refreshing…");
+        await initDataset(m);
+        lastSyncedDatasetSignature = metaDatasetSignature(m);
+        lastCellTypeSig = cellTypeSignature(m);
+        return;
+      }
+      const ctSig = cellTypeSignature(m);
+      if (ctSig !== lastCellTypeSig) {
+        setStatus("Cell type labels updated — refreshing…");
+        await refreshCellTypeInfo(m);
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   const resizeDeck = () => {
@@ -1850,39 +2411,47 @@ async function main() {
         target: [vs.target[0], vs.target[1], 0],
         zoom: vs.zoom,
         transitionDuration: 180,
-      },
+      } satisfies OrthographicViewState,
     });
   }
 
-  layoutModeEl.addEventListener("change", () => {
-    if (!positionsUmap) return;
-    const wantUmap = layoutModeEl.value === "umap";
-    positions = wantUmap ? positionsUmap : positionsSpatial;
+  function applyLayoutChoice(wantUmap: boolean) {
+    if (wantUmap && !positionsUmap) return;
+    layoutModeEl.value = wantUmap ? "umap" : "spatial";
+    positions = wantUmap ? positionsUmap! : positionsSpatial;
     const b =
       wantUmap && meta.umap_bounds ? meta.umap_bounds : meta.bounds;
     fitDeckToBounds(b);
     rebuildLayer();
-    const one = singleSelectedIndex();
-    if (meta.network_loaded && interactionLensEl.checked && one !== null) {
-      void fetchAndApplyInteractionContext(one);
+    if (
+      meta.network_loaded &&
+      interactionLensEl.checked &&
+      interactionSenderIndex !== null
+    ) {
+      void fetchAndApplyInteractionContext(interactionSenderIndex);
     }
+  }
+
+  layoutModeEl.addEventListener("change", () => {
+    if (!positionsUmap) return;
+    applyLayoutChoice(layoutModeEl.value === "umap");
   });
 
   interactionLensEl.addEventListener("change", () => {
     if (!interactionLensEl.checked) {
       clearInteractionContextFull();
     } else {
-      syncInteractionFromSelection();
+      syncInteractionFromSender();
     }
   });
   refreshContextBtn.addEventListener("click", () => {
-    syncInteractionFromSelection();
+    syncInteractionFromSender();
   });
 
   interactionModeSel.addEventListener("change", () => {
     syncInteractionPanelLayout();
     if (interactionLensEl.checked) {
-      syncInteractionFromSelection();
+      syncInteractionFromSender();
     }
   });
 
@@ -1904,7 +2473,7 @@ async function main() {
     sessionApplyBtn.disabled = true;
     sessionBusyEl.classList.remove("hidden");
     try {
-      const r = await fetch("/api/session/configure", {
+      const r = await fetch(apiUrl("/api/session/configure"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1930,8 +2499,6 @@ async function main() {
     }
   });
 
-  await initDataset();
-
   const ro = new ResizeObserver(() => {
     resizeDeck();
     rebuildLayer();
@@ -1949,7 +2516,9 @@ async function main() {
       }
       try {
         const r = await fetch(
-          `/api/genes?prefix=${encodeURIComponent(p)}&limit=40`,
+          apiUrl(
+            `/api/genes?prefix=${encodeURIComponent(p)}&limit=40`,
+          ),
         );
         if (!r.ok) return;
         const list = (await r.json()) as string[];
@@ -1965,7 +2534,9 @@ async function main() {
     const g = betaGene.value;
     if (!g) return;
     try {
-      const r = await fetch(`/api/betadata/columns?gene=${encodeURIComponent(g)}`);
+      const r = await fetch(
+        apiUrl(`/api/betadata/columns?gene=${encodeURIComponent(g)}`),
+      );
       if (!r.ok) throw new Error(await r.text());
       const cols = (await r.json()) as string[];
       betaCol.innerHTML =
@@ -1984,6 +2555,7 @@ async function main() {
           indices?: number[];
           category?: number;
           cluster_id?: number;
+          name?: string;
         };
       }
     | { ok: false; msg: string } {
@@ -1991,22 +2563,16 @@ async function main() {
     if (scopeVal === "all") {
       return { ok: true, scope: { type: "all" } };
     }
-    if (scopeVal === "selection") {
-      const idx = collectSelectedIndices();
-      if (idx.length === 0) {
-        return {
-          ok: false,
-          msg: "Select cells first, or change “Where to apply”",
-        };
-      }
-      return { ok: true, scope: { type: "indices", indices: idx } };
-    }
     if (scopeVal === "cell_type") {
       const cat = Number(perturbCellType.value);
       if (!Number.isFinite(cat) || perturbCellType.value === "") {
         return { ok: false, msg: "Pick a cell type" };
       }
-      return { ok: true, scope: { type: "cell_type", category: cat } };
+      const lab = cellCategories[cat];
+      if (!lab?.trim()) {
+        return { ok: false, msg: "Unknown cell type selection" };
+      }
+      return { ok: true, scope: { type: "cell_type_name", name: lab } };
     }
     const cid = Number(perturbClusterId.value);
     if (!Number.isFinite(cid)) {
@@ -2056,27 +2622,443 @@ async function main() {
     }
   };
 
-  async function runPerturbFromUi() {
+  if (mcp.openSession?.adata_path) {
+    sessionAdataPath.value = mcp.openSession.adata_path;
+    sessionLayer.value = mcp.openSession.layer;
+    sessionClusterAnnot.value = mcp.openSession.cluster_annot;
+    sessionNetworkDir.value = mcp.openSession.network_dir;
+    sessionRunToml.value = mcp.openSession.run_toml;
+    sessionBusyEl.classList.remove("hidden");
+    try {
+      const r = await fetch(apiUrl("/api/session/configure"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          adata_path: mcp.openSession.adata_path,
+          layer: mcp.openSession.layer.trim() || "imputed_count",
+          cluster_annot:
+            mcp.openSession.cluster_annot.trim() || "cell_type",
+          network_dir: mcp.openSession.network_dir.trim(),
+          run_toml: mcp.openSession.run_toml.trim(),
+        }),
+      });
+      const text = await r.text();
+      if (!r.ok) throw new Error(text);
+      const j = JSON.parse(text) as SessionConfigureResponse;
+      const ok = await initDataset(j.meta);
+      if (ok) {
+        setStatus(`Loaded ${meta.n_obs} cells · ${meta.spatial_obsm_key}`);
+      }
+    } catch (e) {
+      setStatus(String(e), true);
+      await initDataset();
+    } finally {
+      sessionBusyEl.classList.add("hidden");
+    }
+  } else {
+    await initDataset();
+  }
+
+  window.setInterval(() => void pollServerDatasetIfChanged(), 2000);
+
+  attachMcpControlSink((args) => {
+    if (typeof args.status_message === "string" && args.status_message.trim()) {
+      setStatus(args.status_message.trim());
+    }
+    const cs = args.color_source;
+    if (cs === "expression" || cs === "betadata" || cs === "perturb") {
+      colorSource.value = cs;
+    }
+    if (
+      typeof args.expression_gene === "string" &&
+      args.expression_gene.trim()
+    ) {
+      exprGene.value = args.expression_gene.trim();
+      colorSource.value = "expression";
+      if (args.apply_expression === true) void loadActiveChannel();
+    } else if (args.apply_expression === true) {
+      void loadActiveChannel();
+    }
+    if (typeof args.focus_gene_context === "string") {
+      focusGeneCtx.value = args.focus_gene_context.trim();
+    }
+  });
+
+  async function runMcpCaptureRender(req: McpCaptureRequest) {
+    const app = mcp.mcpApp;
+    if (!app) return;
+    try {
+      if (!deck || n === 0) {
+        await app.sendMessage({
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "[Spatial viewer] No deck to capture — load a dataset in the viewer first.",
+            },
+          ],
+        });
+        setStatus("Capture skipped — load a dataset first", true);
+        return;
+      }
+      rebuildLayer();
+      const redraw = (
+        deck as { redraw?: (reason?: string) => void }
+      ).redraw;
+      redraw?.("mcp-capture");
+      await waitAnimationFrames(3);
+      const canvas = deckContainer.querySelector("canvas");
+      if (!canvas) throw new Error("WebGL canvas not found under #deck-root");
+      const b64 = canvasToScaledPngBase64(canvas, req.max_width);
+      const layout = layoutModeEl.value === "umap" ? "UMAP" : "spatial";
+      const quiverHint =
+        layoutModeEl.value === "umap" && quiverSegData.length > 0
+          ? `\n- UMAP quiver segments drawn: ${quiverSegData.length}`
+          : "";
+      const text = [
+        "**Spatial viewer render (PNG)**",
+        req.caption.trim() ? `Note: ${req.caption.trim()}` : null,
+        `- Layout: ${layout}`,
+        `- n_obs=${meta.n_obs} · color mode: ${colorSource.value}`,
+        colorSource.value === "expression"
+          ? `- Expression gene: ${exprGene.value.trim() || "—"}`
+          : null,
+        colorSource.value === "betadata"
+          ? `- Betadata: ${betaGene.value || "—"} / ${betaCol.value || "—"}`
+          : null,
+        colorSource.value === "perturb"
+          ? `- Perturb gene: ${perturbDisplayGene || perturbGene.value.trim() || "—"}`
+          : null,
+        quiverHint.trim() ? quiverHint : null,
+        `- Dataset path: ${meta.adata_path || "—"}`,
+      ]
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+        .join("\n");
+      const blocks = [
+        { type: "text" as const, text },
+        { type: "image" as const, data: b64, mimeType: "image/png" },
+      ];
+      try {
+        await app.updateModelContext({ content: blocks });
+      } catch {
+        /* host may not support context images */
+      }
+      const sm = await app.sendMessage({ role: "user", content: blocks });
+      if (sm.isError) {
+        setStatus("Host did not accept screenshot (ui/message)", true);
+      } else {
+        setStatus("Screenshot sent to chat for the assistant");
+      }
+    } catch (e) {
+      const msg = `[Spatial viewer] Capture failed: ${e}`;
+      setStatus(msg, true);
+      try {
+        await mcp.mcpApp?.sendMessage({
+          role: "user",
+          content: [{ type: "text", text: msg }],
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  attachMcpCaptureSink((req) => void runMcpCaptureRender(req));
+
+  function buildUmapTransitionBodyFromUi(
+    gene: string,
+    desired: number,
+    scope: Record<string, unknown>,
+    nProp: number,
+  ) {
+    return {
+      gene,
+      desired_expr: Number.isFinite(desired) ? desired : 0,
+      scope,
+      n_propagation: nProp,
+      n_neighbors: Math.min(
+        500,
+        Math.max(5, Math.trunc(Number(transNeighbors.value) || 150)),
+      ),
+      temperature: Number(transT.value) || 0.05,
+      remove_null: transRemoveNull.checked,
+      unit_directions: transUnitDirs.checked,
+      grid_scale: Number(transGridScale.value) || 1,
+      vector_scale: Number(transVecScale.value) || 0.85,
+      delta_rescale: Number(transDeltaRescale.value) || 1,
+      magnitude_threshold: Math.max(0, Number(transMagThresh.value) || 0),
+      use_full_graph: transFullGraph.checked,
+      full_graph_max_cells: Math.min(
+        8192,
+        Math.max(64, Math.trunc(Number(transFullMax.value) || 4096)),
+      ),
+      quick_ko_sanity: transQuickKo.checked,
+      limit_clusters: transLimitClusters.checked,
+      highlight_cell_types: transLimitClusters.checked
+        ? Array.from(transHighlightTypes.selectedOptions).map((o) => o.value)
+        : [],
+    };
+  }
+
+  async function fetchUmapFieldAndApply(
+    body: ReturnType<typeof buildUmapTransitionBodyFromUi>,
+    statusBusy: string,
+    statusOk: (nx: number, ny: number, nArrows: number) => string,
+  ): Promise<boolean> {
+    setStatus(statusBusy);
+    try {
+      const r = await withMetaProgressPoll(
+        fetch(apiUrl("/api/perturb/umap-field"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }).then(async (res) => {
+          if (!res.ok) throw new Error(await res.text());
+          return res;
+        }),
+      );
+      const data = (await r.json()) as UmapFieldResponse;
+      const nx = data.nx;
+      const ny = data.ny;
+      if (data.u.length !== nx * ny || data.v.length !== nx * ny) {
+        throw new Error("quiver length mismatch");
+      }
+      quiverFieldCache = data;
+      const nArrows = rebuildQuiverFromCache();
+      syncQuiverDisplayLabels();
+      rebuildLayer();
+      setStatus(statusOk(nx, ny, nArrows));
+      return true;
+    } catch (e) {
+      quiverFieldCache = null;
+      quiverSegData.length = 0;
+      rebuildLayer();
+      setStatus(String(e), true);
+      return false;
+    }
+  }
+
+  async function runUmapQuiverAfterMcpPerturb(
+    gene: string,
+    desired: number,
+    scope: Record<string, unknown>,
+    nProp: number,
+  ): Promise<boolean> {
     if (meta.perturb_error) {
       setStatus(`Perturbation unavailable: ${meta.perturb_error}`, true);
-      return;
+      return false;
     }
     if (meta.perturb_loading) {
       setStatus(
-        "Perturbation engine is still loading; wait until the status line shows “perturbation ready”.",
+        "Perturbation engine is still loading; wait for “perturbation ready”.",
         true,
       );
-      return;
+      return false;
     }
     if (!meta.perturb_ready) {
       setStatus("Perturbation needs server --run-toml", true);
+      return false;
+    }
+    if (!meta.umap_obsm_key) {
+      setStatus("No UMAP embedding in this dataset", true);
+      return false;
+    }
+    if (positionsUmap) {
+      applyLayoutChoice(true);
+    }
+    const body = buildUmapTransitionBodyFromUi(gene, desired, scope, nProp);
+    const quick = transQuickKo.checked;
+    return fetchUmapFieldAndApply(
+      body,
+      quick
+        ? "Computing UMAP quiver (MCP, quick single-gene δ)…"
+        : "Computing UMAP transition field (MCP)…",
+      (nx, ny, nArrows) => {
+        const mode = quick ? "quick δ" : "full GRN";
+        return `UMAP quiver (${mode}, MCP): ${nArrows} arrows (${nx}×${ny} grid, ${quiverSegData.length} segments)`;
+      },
+    );
+  }
+
+  function mcpScopeToPerturbBody(
+    req: McpPerturbRunRequest,
+  ):
+    | {
+        ok: true;
+        scope: Record<string, unknown>;
+      }
+    | { ok: false; msg: string } {
+    const sc = req.scope ?? "all";
+    if (sc === "all") {
+      return { ok: true, scope: { type: "all" } };
+    }
+    if (sc === "cell_type") {
+      const lab = req.cell_type_label.trim();
+      if (!lab) {
+        return { ok: false, msg: "cell_type_label required when scope=cell_type" };
+      }
+      if (!cellCategories.some((c) => c === lab)) {
+        return {
+          ok: false,
+          msg: `Unknown cell_type_label ${JSON.stringify(lab)} (not in dataset categories)`,
+        };
+      }
+      return { ok: true, scope: { type: "cell_type_name", name: lab } };
+    }
+    if (sc === "cluster") {
+      return {
+        ok: true,
+        scope: { type: "cluster", cluster_id: Math.trunc(req.cluster_id) },
+      };
+    }
+    if (interactionSenderIndex === null) {
+      return {
+        ok: false,
+        msg:
+          "scope=selection requires a clicked sender cell (enable Interaction lens and click a cell)",
+      };
+    }
+    return {
+      ok: true,
+      scope: { type: "indices", indices: [interactionSenderIndex] },
+    };
+  }
+
+  async function runMcpPerturbFromBridge(req: McpPerturbRunRequest) {
+    const sp = mcpScopeToPerturbBody(req);
+    if (!sp.ok) {
+      setStatus(sp.msg, true);
+      if (mcp.mcpApp?.sendMessage && req.push_summary_to_chat) {
+        try {
+          await mcp.mcpApp.sendMessage({
+            role: "user",
+            content: [
+              { type: "text", text: `[Spatial viewer] Perturb skipped: ${sp.msg}` },
+            ],
+          });
+        } catch {
+          /* ignore */
+        }
+      }
       return;
     }
+    const nProp = req.n_propagation ?? readUiNPropagation();
+    const ok = await executePerturbPreview(
+      req.gene,
+      req.desired_expr ?? 0,
+      sp.scope,
+      nProp,
+    );
+    if (ok && req.run_umap_quiver) {
+      await runUmapQuiverAfterMcpPerturb(
+        req.gene.trim(),
+        req.desired_expr ?? 0,
+        sp.scope,
+        nProp,
+      );
+    }
+    if (
+      ok &&
+      req.push_summary_to_chat &&
+      mcp.mcpApp &&
+      activeValues &&
+      activeValues.length > 0
+    ) {
+      const arr = activeValues;
+      let mn = arr[0]!;
+      let mx = arr[0]!;
+      let s = 0;
+      for (let i = 0; i < arr.length; i++) {
+        const v = arr[i]!;
+        mn = Math.min(mn, v);
+        mx = Math.max(mx, v);
+        s += v;
+      }
+      const mean = s / arr.length;
+      try {
+        await mcp.mcpApp.sendMessage({
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: [
+                `**Perturbation Δ** (${req.gene})`,
+                `- min: ${mn}`,
+                `- max: ${mx}`,
+                `- mean: ${mean}`,
+                `- n_cells: ${arr.length}`,
+              ].join("\n"),
+            },
+          ],
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async function runMcpCollectFromBridge(req: McpCollectInteractionsRequest) {
+    let cellTypeLabel = req.cell_type.trim();
+    if (req.filter === "cell_type" && !cellTypeLabel && cellCategories.length > 0) {
+      cellTypeLabel = cellCategories[0] ?? "";
+    }
+    if (req.filter === "cell_type" && !cellTypeLabel) {
+      const msg = "MCP collect_interactions: cell_type label required";
+      setStatus(msg, true);
+      if (mcp.mcpApp?.sendMessage && req.push_summary_to_chat) {
+        try {
+          await mcp.mcpApp.sendMessage({
+            role: "user",
+            content: [{ type: "text", text: `[Spatial viewer] ${msg}` }],
+          });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    await runCollectInteractionsApi({
+      aggregate: req.aggregate,
+      filter: req.filter,
+      cell_type: req.filter === "cell_type" ? cellTypeLabel : undefined,
+      cluster_id: req.filter === "cluster" ? req.cluster_id : undefined,
+      max_genes: req.max_genes,
+      push_summary_to_chat: req.push_summary_to_chat,
+    });
+  }
+
+  attachMcpPerturbRunSink((req) => void runMcpPerturbFromBridge(req));
+  attachMcpCollectInteractionsSink((req) =>
+    void runMcpCollectFromBridge(req),
+  );
+
+  mcpReportContextBtn.addEventListener("click", async () => {
+    if (!mcp.mcpApp) return;
+    const lines = [
+      "**Spatial viewer**",
+      `- Dataset: ${meta.adata_path} (${meta.n_obs} cells)`,
+      `- Color source: ${colorSource.value}`,
+      `- Expression gene: ${exprGene.value.trim() || "—"}`,
+      `- Betadata: ${betaGene.value || "—"} / ${betaCol.value || "—"}`,
+    ];
+    if (interactionSenderIndex !== null) {
+      lines.push(`- Interaction sender cell index: ${interactionSenderIndex}`);
+    }
+    const summary = lines.join("\n");
+    try {
+      setStatus("Sending context to chat…");
+      await mcp.mcpApp.callServerTool({
+        name: "spatial_viewer_report_context",
+        arguments: { summary },
+      });
+      setStatus("Context sent to chat");
+    } catch (e) {
+      setStatus(String(e), true);
+    }
+  });
+
+  async function runPerturbFromUi() {
     const gene = perturbGene.value.trim();
-    if (!gene) {
-      setStatus("Enter gene to perturb", true);
-      return;
-    }
     const desired = Number(perturbExpr.value);
     const sp = perturbScopePayload();
     if (!sp.ok) {
@@ -2084,35 +3066,13 @@ async function main() {
       return;
     }
     const scopeVal = perturbScope.value;
-    setStatus("Running perturbation (may take a while)…");
-    try {
-      const r = await withMetaProgressPoll(
-        fetch("/api/perturb/preview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            gene,
-            desired_expr: Number.isFinite(desired) ? desired : 0,
-            scope: sp.scope,
-          }),
-        }).then(async (res) => {
-          if (!res.ok) throw new Error(await res.text());
-          return res;
-        }),
-      );
-      const buf = await r.arrayBuffer();
-      activeValues = new Float32Array(buf);
-      if (activeValues.length !== n) {
-        throw new Error(`length ${activeValues.length} != n_obs ${n}`);
-      }
-      lastColorSource = "perturb";
-      perturbDisplayGene = gene;
-      cmapSel.value = "diverging";
-      refreshVisualization();
-      setStatus(`Perturbation Δ · ${gene} · ${scopeVal}`);
-    } catch (e) {
-      setStatus(String(e), true);
-    }
+    const ok = await executePerturbPreview(
+      gene,
+      desired,
+      sp.scope,
+      readUiNPropagation(),
+    );
+    if (ok) setStatus(`Perturbation Δ · ${gene} · ${scopeVal}`);
   }
 
   async function computeUmapTransitionField() {
@@ -2156,68 +3116,23 @@ async function main() {
         return;
       }
     }
-    const body = {
+    const body = buildUmapTransitionBodyFromUi(
       gene,
-      desired_expr: Number.isFinite(desired) ? desired : 0,
-      scope: sp.scope,
-      n_neighbors: Math.min(
-        500,
-        Math.max(5, Math.trunc(Number(transNeighbors.value) || 150)),
-      ),
-      temperature: Number(transT.value) || 0.05,
-      remove_null: transRemoveNull.checked,
-      unit_directions: transUnitDirs.checked,
-      grid_scale: Number(transGridScale.value) || 1,
-      vector_scale: Number(transVecScale.value) || 0.85,
-      delta_rescale: Number(transDeltaRescale.value) || 1,
-      magnitude_threshold: Math.max(0, Number(transMagThresh.value) || 0),
-      use_full_graph: transFullGraph.checked,
-      full_graph_max_cells: Math.min(
-        8192,
-        Math.max(64, Math.trunc(Number(transFullMax.value) || 4096)),
-      ),
-      quick_ko_sanity: transQuickKo.checked,
-      limit_clusters: transLimitClusters.checked,
-      highlight_cell_types: transLimitClusters.checked
-        ? Array.from(transHighlightTypes.selectedOptions).map((o) => o.value)
-        : [],
-    };
-    setStatus(
-      transQuickKo.checked
+      desired,
+      sp.scope as Record<string, unknown>,
+      readUiNPropagation(),
+    );
+    const quick = transQuickKo.checked;
+    await fetchUmapFieldAndApply(
+      body,
+      quick
         ? "Computing UMAP quiver (quick single-gene δ)…"
         : "Computing UMAP transition field…",
+      (nx, ny, nArrows) => {
+        const mode = quick ? "quick δ" : "full GRN";
+        return `UMAP quiver (${mode}): ${nArrows} arrows (${nx}×${ny} grid, ${quiverSegData.length} segments)`;
+      },
     );
-    try {
-      const r = await withMetaProgressPoll(
-        fetch("/api/perturb/umap-field", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }).then(async (res) => {
-          if (!res.ok) throw new Error(await res.text());
-          return res;
-        }),
-      );
-      const data = (await r.json()) as UmapFieldResponse;
-      const nx = data.nx;
-      const ny = data.ny;
-      if (data.u.length !== nx * ny || data.v.length !== nx * ny) {
-        throw new Error("quiver length mismatch");
-      }
-      quiverFieldCache = data;
-      const nArrows = rebuildQuiverFromCache();
-      syncQuiverDisplayLabels();
-      rebuildLayer();
-      const mode = transQuickKo.checked ? "quick δ" : "full GRN";
-      setStatus(
-        `UMAP quiver (${mode}): ${nArrows} arrows (${nx}×${ny} grid, ${quiverSegData.length} segments)`,
-      );
-    } catch (e) {
-      quiverFieldCache = null;
-      quiverSegData.length = 0;
-      rebuildLayer();
-      setStatus(String(e), true);
-    }
   }
 
   computeQuiverBtn.addEventListener("click", () =>
@@ -2275,13 +3190,14 @@ async function main() {
     setStatus("Perturbation summary…");
     try {
       const r = await withMetaProgressPoll(
-        fetch("/api/perturb/summary", {
+        fetch(apiUrl("/api/perturb/summary"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             gene,
             desired_expr: Number.isFinite(desired) ? desired : 0,
             scope: sp.scope,
+            n_propagation: readUiNPropagation(),
           }),
         }).then(async (res) => {
           if (!res.ok) throw new Error(await res.text());
@@ -2341,84 +3257,15 @@ async function main() {
     refreshVisualization();
   });
 
-  clearSel.addEventListener("click", () => {
-    selected.fill(0);
-    clearInteractionContextVisuals();
-    interactionBodyEl.innerHTML = "";
-    refreshVisualization();
-  });
-
-  let brushDown: { x: number; y: number } | null = null;
-  let rectEl: HTMLDivElement | null = null;
-
-  brushToggle.addEventListener("change", () => {
-    brushOverlay.classList.toggle("active", brushToggle.checked);
-    if (!brushToggle.checked) {
-      brushDown = null;
-      if (rectEl) {
-        rectEl.remove();
-        rectEl = null;
-      }
+  cancelJobsBtn.addEventListener("click", async () => {
+    try {
+      const r = await fetch(apiUrl("/api/cancel"), { method: "POST" });
+      if (!r.ok) throw new Error(await r.text());
+      setStatus("Cancel sent — perturb jobs stop at next iteration; UI loading cleared.");
+      schedulePerturbMetaPoll();
+    } catch (e) {
+      setStatus(String(e), true);
     }
-  });
-
-  brushOverlay.addEventListener("mousedown", (ev) => {
-    if (!brushToggle.checked) return;
-    const r = brushOverlay.getBoundingClientRect();
-    brushDown = { x: ev.clientX - r.left, y: ev.clientY - r.top };
-    rectEl = document.createElement("div");
-    rectEl.className = "brush-rect";
-    rectEl.style.left = `${brushDown.x}px`;
-    rectEl.style.top = `${brushDown.y}px`;
-    rectEl.style.width = "0";
-    rectEl.style.height = "0";
-    brushOverlay.appendChild(rectEl);
-  });
-
-  brushOverlay.addEventListener("mousemove", (ev) => {
-    if (!brushDown || !rectEl) return;
-    const r = brushOverlay.getBoundingClientRect();
-    const x = ev.clientX - r.left;
-    const y = ev.clientY - r.top;
-    const x0 = Math.min(brushDown.x, x);
-    const y0 = Math.min(brushDown.y, y);
-    const w = Math.abs(x - brushDown.x);
-    const h = Math.abs(y - brushDown.y);
-    rectEl.style.left = `${x0}px`;
-    rectEl.style.top = `${y0}px`;
-    rectEl.style.width = `${w}px`;
-    rectEl.style.height = `${h}px`;
-  });
-
-  brushOverlay.addEventListener("mouseup", (ev) => {
-    if (!brushDown || !rectEl) return;
-    if (!deck || n === 0) {
-      rectEl.remove();
-      rectEl = null;
-      brushDown = null;
-      return;
-    }
-    const r = brushOverlay.getBoundingClientRect();
-    const x = ev.clientX - r.left;
-    const y = ev.clientY - r.top;
-    selectInRect(deck, brushDown.x, brushDown.y, x, y, positions, n, selected, (i) =>
-      cellSelectableByType(i),
-    );
-    rectEl.remove();
-    rectEl = null;
-    brushDown = null;
-    compositeSelectionIntoDisplayColors();
-    rebuildLayer();
-    updateStats();
-    syncInteractionFromSelection();
-  });
-
-  brushOverlay.addEventListener("mouseleave", () => {
-    if (rectEl) {
-      rectEl.remove();
-      rectEl = null;
-    }
-    brushDown = null;
   });
 }
 

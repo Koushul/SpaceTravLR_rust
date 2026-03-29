@@ -240,13 +240,10 @@ impl PerturbRuntime {
         };
 
         let run_toml_path = run_toml.to_path_buf();
-        let run_dir = run_toml
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("run TOML has no parent directory"))?
-            .to_path_buf();
         set_msg("Reading run configuration…");
         set_p(20);
         let cfg = SpaceshipConfig::from_file(&run_toml_path)?;
+        let run_dir = cfg.resolve_training_output_dir(run_toml);
 
         let adata_path = expand_user_path(cfg.resolve_adata_path().as_str());
         if adata_path.is_empty() {
@@ -272,7 +269,7 @@ impl PerturbRuntime {
 
         let betadata_dir = run_dir
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("run directory is not valid UTF-8"))?;
+            .ok_or_else(|| anyhow::anyhow!("training output directory is not valid UTF-8"))?;
         set_msg("Loading betadata feathers…");
         let p_perm = progress_permille.clone();
         let on_betadata: Option<Arc<dyn Fn(u32) + Send + Sync>> =
@@ -295,7 +292,7 @@ impl PerturbRuntime {
         )
         .with_context(|| {
             format!(
-                "Failed to load *_betadata.feather from run dir {}",
+                "Failed to load *_betadata.feather from {}",
                 run_dir.display()
             )
         })?;
@@ -441,7 +438,9 @@ pub fn execute_marked_perturbations(
                 &runtime.perturb_cfg,
                 &runtime.lr_radii,
                 None,
-            );
+                None,
+            )
+            .expect("perturb batch");
             let out_path = out_dir.join(format!("{}_perturb_expr.feather", gene));
             write_betadata_feather(
                 out_path
