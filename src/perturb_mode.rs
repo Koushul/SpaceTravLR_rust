@@ -1,4 +1,7 @@
-use crate::betadata::{write_betadata_feather, Betabase, GeneMatrix};
+use crate::betadata::{
+    betadata_cluster_keys_from_obs_dataframe, clusters_usize_from_obs_dataframe,
+    resolve_betadata_cluster_key_column, write_betadata_feather, Betabase, GeneMatrix,
+};
 use crate::config::{expand_user_path, SpaceshipConfig};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use crate::spatial_estimator::load_spatial_coords_f64;
@@ -96,25 +99,6 @@ fn read_expression_matrix_dense_f64<AnB: Backend>(
             .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
     };
     array_data_to_dense_f64(data)
-}
-
-fn read_clusters_as_usize<AnB: Backend>(
-    adata: &AnnData<AnB>,
-    cluster_annot: &str,
-) -> anyhow::Result<Vec<usize>> {
-    let obs = adata.read_obs()?;
-    let col = obs
-        .column(cluster_annot)
-        .with_context(|| format!("Missing obs column '{}'", cluster_annot))?;
-    let as_f64 = col
-        .as_materialized_series()
-        .cast(&polars::prelude::DataType::Float64)?;
-    let out = as_f64
-        .f64()?
-        .into_iter()
-        .map(|v| v.unwrap_or(0.0) as usize)
-        .collect::<Vec<_>>();
-    Ok(out)
 }
 
 fn sanitize_float(v: f64) -> String {
@@ -254,7 +238,17 @@ impl PerturbRuntime {
         let adata = AnnData::<H5>::open(H5::open(adata_path.as_str())?)?;
         let gene_names = adata.var_names().into_vec();
         let obs_names = adata.obs_names().into_vec();
-        let clusters = read_clusters_as_usize(&adata, cfg.data.cluster_annot.as_str())?;
+        let obs_df = adata.read_obs()?;
+        let betadata_key_col = resolve_betadata_cluster_key_column(
+            &obs_df,
+            cfg.data.cluster_annot.as_str(),
+        );
+        let cluster_keys =
+            betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
+        let clusters = clusters_usize_from_obs_dataframe(
+            &obs_df,
+            cfg.data.cluster_annot.as_str(),
+        )?;
         let xy = load_spatial_coords_f64(&adata)?;
         let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
         set_msg("Reading expression matrix…");
@@ -286,7 +280,7 @@ impl PerturbRuntime {
         let bb = Betabase::from_directory(
             betadata_dir,
             &obs_names,
-            &clusters,
+            &cluster_keys,
             Some(&gene2index),
             on_betadata,
         )
@@ -437,6 +431,7 @@ pub fn execute_marked_perturbations(
                 &targets,
                 &runtime.perturb_cfg,
                 &runtime.lr_radii,
+                None,
                 None,
                 None,
             )

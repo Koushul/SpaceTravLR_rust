@@ -11,31 +11,29 @@ import {
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
 
+import {
+  buildPerturbScopeBody,
+  buildReferenceCentroidScopeBody,
+  fetchMetaWith,
+  formatStatus,
+  makeConnectDomainList,
+  normalizeApiBase,
+  parseDelimitedGenes,
+  type MetaSnapshot,
+} from "./mcpHttp.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, "..");
 const mcpHtmlPath = path.join(rootDir, "dist", "mcp-app.html");
 
 const RESOURCE_URI = "ui://spacetravlr/spatial-viewer.html";
 
-const defaultApiBase =
-  process.env.SPATIAL_VIEWER_API_BASE?.trim() || "http://127.0.0.1:8080";
-
-function connectOrigin(apiBase: string): string {
-  try {
-    return new URL(apiBase).origin;
-  } catch {
-    return "http://127.0.0.1:8080";
-  }
-}
-
-function connectDomainList(): string[] {
-  const base = connectOrigin(defaultApiBase);
-  const extra = process.env.SPATIAL_VIEWER_CONNECT_ORIGINS?.split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!extra?.length) return [base];
-  return [...new Set([base, ...extra])];
-}
+export type SpatialMcpDeps = {
+  fetch: typeof fetch;
+  defaultApiBase: string;
+  connectDomainList: () => string[];
+  readMcpHtml: () => Promise<string>;
+};
 
 const openInputSchema = {
   adata_path: z
@@ -156,13 +154,53 @@ const controlInputSchema = {
     .optional()
     .describe("Gene symbol for expression coloring (sets color source to expression)"),
   color_source: z
-    .enum(["expression", "betadata", "perturb"])
+    .enum(["expression", "betadata", "perturb", "received_ligand"])
     .optional()
     .describe("Active color mode in the viewer"),
   apply_expression: z
     .boolean()
     .optional()
     .describe("If true with expression_gene, run Load color after setting gene"),
+  received_ligand_genes: z
+    .string()
+    .optional()
+    .describe(
+      "Comma-separated ligand symbols (adata / Gaussian) or one training column name (model); sets color to received_ligand",
+    ),
+  received_ligand_source: z
+    .enum(["adata", "model"])
+    .optional()
+    .describe("Compute from expression+spatial vs slice training GeneMatrix"),
+  received_ligand_matrix: z
+    .enum(["lr", "tfl"])
+    .optional()
+    .describe("Which received-ligand block when source=model"),
+  received_ligand_radius: z
+    .number()
+    .positive()
+    .optional()
+    .describe("Gaussian radius in spatial coordinate units (adata path)"),
+  received_ligand_scale: z
+    .number()
+    .optional()
+    .describe("weighted_ligand scale factor (adata path)"),
+  received_ligand_use_grid: z
+    .boolean()
+    .optional()
+    .describe("Use grid acceleration for adata path (default true in UI)"),
+  received_ligand_grid_factor: z
+    .number()
+    .positive()
+    .optional()
+    .describe("Grid cell size as fraction of radius"),
+  received_ligand_aggregate: z
+    .enum(["sum", "max", "mean"])
+    .optional()
+    .describe("Aggregate multiple ligand channels (adata path only)"),
+  apply_received_ligand: z
+    .boolean()
+    .optional()
+    .describe("If true, run Load received ligand after applying fields above"),
   focus_gene_context: z
     .string()
     .optional()
@@ -173,69 +211,92 @@ const controlInputSchema = {
     .describe("Short message shown in the viewer status bar (LLM narration)"),
 };
 
+const signatureUmapToolInputSchema = {
+  genes: z
+    .string()
+    .min(1)
+    .describe(
+      "Comma-separated gene symbols; signature per cell = sum of expression in the dataset layer (SpaceTravLR VirtualTissue-style)",
+    ),
+  n_knn: z
+    .number()
+    .int()
+    .min(3)
+    .max(200)
+    .optional()
+    .describe("KNN neighbors for interpolating signature onto the UMAP grid (default 30)"),
+  mask_with_perturb_quiver: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true, arrows are zero where the perturbation transition quiver is zero; set perturb gene, scope, and quick-KO in the viewer before calling",
+    ),
+};
+
+const splashNetworkToolInputSchema = {
+  gene_a: z.string().min(1).describe("Upstream / source gene (modulator in splash graph)"),
+  gene_b: z
+    .string()
+    .min(1)
+    .describe("Downstream gene; must be a trained target (has *_betadata.feather)"),
+  surround_hops: z
+    .number()
+    .int()
+    .min(0)
+    .max(4)
+    .optional()
+    .describe("Undirected hops around the A→B shortest path to add context genes (default 1)"),
+  max_nodes: z
+    .number()
+    .int()
+    .min(6)
+    .max(64)
+    .optional()
+    .describe("Cap on number of genes in the subgraph (default 24)"),
+  scope: z.enum(["all", "cell_type", "cluster"]).optional().describe("Cell mask for averaging splash"),
+  cell_type_label: z
+    .string()
+    .optional()
+    .describe("Annotation label when scope=cell_type"),
+  cluster_id: z.number().int().optional().describe("Cluster id when scope=cluster"),
+};
+
+const receivedLigandToolInputSchema = {
+  genes: z
+    .string()
+    .min(1)
+    .describe(
+      "Comma/space-separated ligand gene symbols (adata) or a single column name from training received-ligand matrix (model)",
+    ),
+  source: z
+    .enum(["adata", "model"])
+    .optional()
+    .describe("default adata: recompute weighted neighbors; model needs perturb_ready"),
+  matrix: z
+    .enum(["lr", "tfl"])
+    .optional()
+    .describe("Training matrix slice when source=model (default lr)"),
+  radius: z.number().positive().optional(),
+  scale_factor: z.number().optional(),
+  use_grid: z.boolean().optional(),
+  grid_factor: z.number().positive().optional(),
+  aggregate: z.enum(["sum", "max", "mean"]).optional(),
+};
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-interface MetaSnapshot {
-  n_obs: number;
-  n_vars: number;
-  dataset_ready: boolean;
-  perturb_ready: boolean;
-  perturb_loading: boolean;
-  perturb_progress_percent?: number;
-  perturb_progress_label?: string;
-  perturb_error?: string;
-  cell_type_categories?: string[];
-  cell_type_column?: string;
-  cluster_annot?: string;
-  adata_path?: string;
-  betadata_dir?: string;
-  network_loaded?: boolean;
-  network_species?: string;
-  betadata_row_id?: string;
-  [k: string]: unknown;
-}
+export function createSpatialViewerMcpServer(deps: SpatialMcpDeps): McpServer {
+  const fetchImpl = deps.fetch;
+  const defaultApiBase = deps.defaultApiBase;
+  const connectDomainList = deps.connectDomainList;
+  const readMcpHtml = deps.readMcpHtml;
 
-async function fetchMeta(api: string): Promise<MetaSnapshot> {
-  const res = await fetch(`${api}/api/meta`);
-  if (!res.ok) throw new Error(`/api/meta ${res.status}: ${await res.text()}`);
-  return (await res.json()) as MetaSnapshot;
-}
+  const fetchMeta = (api: string) => fetchMetaWith(fetchImpl, api);
 
-function formatStatus(m: MetaSnapshot): string {
-  const lines: string[] = [];
-  if (!m.dataset_ready) {
-    lines.push("Dataset: not loaded yet");
-  } else {
-    lines.push(
-      `Dataset: ready — ${m.n_obs} cells, ${m.n_vars} genes` +
-        (m.adata_path ? ` (${m.adata_path})` : ""),
-    );
-    if (m.cluster_annot) lines.push(`  clusters: ${m.cluster_annot}`);
-    if (m.cell_type_categories?.length)
-      lines.push(`  cell types: ${m.cell_type_categories.join(", ")}`);
-    if (m.network_loaded) lines.push(`  GRN: ${m.network_species ?? "loaded"}`);
-    if (m.betadata_dir) lines.push(`  betadata: ${m.betadata_dir}`);
-    if (m.betadata_row_id) lines.push(`  betadata row id: ${m.betadata_row_id}`);
-  }
-
-  if (m.perturb_loading) {
-    const pct = m.perturb_progress_percent ?? 0;
-    const label = m.perturb_progress_label ?? "";
-    lines.push(`Perturbation: loading ${pct}% — ${label}`);
-  } else if (m.perturb_error) {
-    lines.push(`Perturbation: ERROR — ${m.perturb_error}`);
-  } else if (m.perturb_ready) {
-    lines.push("Perturbation: ready");
-  } else {
-    lines.push("Perturbation: not configured (no --run-toml)");
-  }
-  return lines.join("\n");
-}
-
-const server = new McpServer({
-  name: "spatial-viewer",
-  version: "1.0.0",
-});
+  const server = new McpServer({
+    name: "spatial-viewer",
+    version: "1.0.0",
+  });
 
 registerAppTool(
   server,
@@ -252,10 +313,11 @@ registerAppTool(
     },
   },
   async (args) => {
-    const api =
-      (args.api_base_url && String(args.api_base_url).trim()) || defaultApiBase;
     const structured = {
-      api_base_url: api.replace(/\/$/, ""),
+      api_base_url: normalizeApiBase(
+        args.api_base_url ? String(args.api_base_url) : undefined,
+        defaultApiBase,
+      ),
       adata_path: args.adata_path,
       layer: args.layer ?? "",
       cluster_annot: args.cluster_annot ?? "",
@@ -296,7 +358,7 @@ registerAppTool(
       _spatialTool: "capture" as const,
       max_width,
       caption,
-      api_base_url: defaultApiBase.replace(/\/$/, ""),
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
     };
     return {
       content: [
@@ -319,7 +381,7 @@ registerAppTool(
     description:
       "Runs in-silico perturbation in the open viewer (same as UI Load with color=perturb). Requires spatial_viewer with --run-toml and perturb_ready (check with spatial_viewer_wait_ready first). The iframe executes POST /api/perturb/preview — this takes 30–120 s depending on dataset size. Use spatial_viewer_check_progress to poll progress if needed. The viewer sends a Δ summary if push_summary_to_chat is true. " +
       "Set scope=cell_type with cell_type_label matching an annotation name (e.g. Epithelial); the server unions all clusters that share that label for a scoped KO. " +
-      "Set run_umap_quiver=true to also compute the UMAP quiver on all cells (uncheck limit_clusters in the UI first).",
+      "Set run_umap_quiver=true to also compute the UMAP quiver (POST /api/perturb/umap-field with export_svg); the server saves an SVG under /tmp on Unix and the viewer status line shows the path. Uncheck limit_clusters in the UI if you want all cells.",
     inputSchema: perturbRunInputSchema,
     _meta: {
       ui: {
@@ -338,7 +400,7 @@ registerAppTool(
       n_propagation: args.n_propagation,
       push_summary_to_chat: args.push_summary_to_chat === true,
       run_umap_quiver: args.run_umap_quiver === true,
-      api_base_url: defaultApiBase.replace(/\/$/, ""),
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
     };
     return {
       content: [
@@ -375,7 +437,7 @@ registerAppTool(
       cluster_id: args.cluster_id ?? 0,
       max_genes: args.max_genes ?? 2048,
       push_summary_to_chat: args.push_summary_to_chat === true,
-      api_base_url: defaultApiBase.replace(/\/$/, ""),
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
     };
     return {
       content: [
@@ -408,13 +470,132 @@ registerAppTool(
     const structured = {
       ...args,
       _spatialTool: "control" as const,
-      api_base_url: defaultApiBase.replace(/\/$/, ""),
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
     };
     return {
       content: [
         {
           type: "text" as const,
           text: `Viewer control: ${JSON.stringify(args)}`,
+        },
+      ],
+      structuredContent: structured,
+    };
+  },
+);
+
+registerAppTool(
+  server,
+  "spatial_viewer_received_ligand",
+  {
+    title: "Spatial viewer — received ligand coloring",
+    description:
+      "Sets the viewer to Color → Received ligand and loads values via POST /api/spatial/received_ligand. " +
+      "adata: Gaussian weighted sum of neighbor ligand expression (same rule as training; optional grid). " +
+      "model: one column from rw_ligands_init / rw_tfligands_init (requires perturb_ready + --run-toml).",
+    inputSchema: receivedLigandToolInputSchema,
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+      },
+    },
+  },
+  async (args) => {
+    const genes = parseDelimitedGenes(String(args.genes));
+    const structured = {
+      _spatialTool: "received_ligand" as const,
+      genes,
+      source: args.source ?? "adata",
+      matrix: args.matrix ?? "lr",
+      radius: args.radius,
+      scale_factor: args.scale_factor,
+      use_grid: args.use_grid,
+      grid_factor: args.grid_factor,
+      aggregate: args.aggregate ?? "sum",
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
+    };
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Received ligand: ${genes.join(", ")} (${structured.source}).`,
+        },
+      ],
+      structuredContent: structured,
+    };
+  },
+);
+
+registerAppTool(
+  server,
+  "spatial_viewer_signature_umap",
+  {
+    title: "Spatial viewer — gene signature UMAP quiver",
+    description:
+      "Runs POST /api/umap/signature_field in the open viewer: KNN-smoothed Σ-expression on the UMAP grid, gradient arrows (Python virtual_tissue.signature2gradient). " +
+      "Switch layout to UMAP to see teal arrows (perturb quiver stays orange). Optional mask uses current perturb row.",
+    inputSchema: signatureUmapToolInputSchema,
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+      },
+    },
+  },
+  async (args) => {
+    const genes = parseDelimitedGenes(String(args.genes));
+    const structured = {
+      _spatialTool: "signature_umap" as const,
+      genes,
+      n_knn: args.n_knn,
+      mask_with_perturb_quiver: args.mask_with_perturb_quiver === true,
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
+    };
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `UMAP gene signature quiver: ${genes.join(", ")}.`,
+        },
+      ],
+      structuredContent: structured,
+    };
+  },
+);
+
+registerAppTool(
+  server,
+  "spatial_viewer_splash_network",
+  {
+    title: "Spatial viewer — splash gene network (D3)",
+    description:
+      "Computes mean splash() derivatives ∂(target)/∂(modulator) over selected cells, finds a directed path gene_a → gene_b, and opens the interactive D3 force layout in the viewer. " +
+      "gene_b must be a trained target. Uses POST /api/perturb/splash_network. Requires perturb_ready.",
+    inputSchema: splashNetworkToolInputSchema,
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+      },
+    },
+  },
+  async (args) => {
+    const gene_a = String(args.gene_a ?? "").trim();
+    const gene_b = String(args.gene_b ?? "").trim();
+    const structured = {
+      _spatialTool: "splash_network" as const,
+      gene_a,
+      gene_b,
+      surround_hops: args.surround_hops ?? 1,
+      max_nodes: args.max_nodes ?? 24,
+      scope: args.scope,
+      cell_type_label: args.cell_type_label,
+      cluster_id: args.cluster_id,
+      api_base_url: normalizeApiBase(undefined, defaultApiBase),
+    };
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Splash network: ${gene_a} → ${gene_b} (${structured.surround_hops} hop context, max ${structured.max_nodes} nodes).`,
         },
       ],
       structuredContent: structured,
@@ -459,9 +640,9 @@ server.registerTool(
     },
   },
   async ({ genes, api_base_url }: { genes: string[]; api_base_url?: string }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
     try {
-      const res = await fetch(`${api}/api/cluster/mean_expression`, {
+      const res = await fetchImpl(`${api}/api/cluster/mean_expression`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ genes }),
@@ -491,9 +672,9 @@ server.registerTool(
     },
   },
   async ({ labels, api_base_url }: { labels: Record<string, string>; api_base_url?: string }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
     try {
-      const res = await fetch(`${api}/api/meta/label_clusters`, {
+      const res = await fetchImpl(`${api}/api/meta/label_clusters`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ labels }),
@@ -529,32 +710,32 @@ server.registerTool(
     gene: string; desired_expr?: number; scope?: string; cell_type_label?: string;
     cluster_id?: number; n_propagation?: number; api_base_url?: string;
   }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
 
     try {
       const meta = await fetchMeta(api);
       if (!meta.perturb_ready) {
         const hint = meta.perturb_loading
-          ? `Perturbation runtime is still loading (${meta.perturb_progress_percent ?? 0}% — ${meta.perturb_progress_label ?? ""}). Use spatial_viewer_wait_ready(require_perturb=true) first.`
+          ? `Perturbation runtime is still loading (${
+              meta.perturb_progress_permille != null && Number.isFinite(meta.perturb_progress_permille)
+                ? `${(meta.perturb_progress_permille / 10).toFixed(1)}%`
+                : `${meta.perturb_progress_percent ?? 0}%`
+            } — ${meta.perturb_progress_label ?? ""}). Use spatial_viewer_wait_ready(require_perturb=true) first.`
           : "Perturbation is not configured. Start the server with --run-toml.";
         return { content: [{ type: "text" as const, text: `NOT READY: ${hint}` }] };
       }
     } catch { /* server may not have /api/meta yet — try the summary anyway */ }
 
-    const s = scope ?? "all";
-    let scopeObj: any;
-    if (s === "cell_type" && cell_type_label != null && String(cell_type_label).trim() !== "") {
-      scopeObj = { type: "cell_type_name", name: String(cell_type_label).trim() };
-    } else if (s === "cluster" && cluster_id != null) {
-      scopeObj = { type: "cluster", cluster_id };
-    } else {
-      scopeObj = { type: "all" };
-    }
-    const reqBody: any = { gene, desired_expr: desired_expr ?? 0, scope: scopeObj };
+    const scopeObj = buildPerturbScopeBody(scope, cell_type_label, cluster_id);
+    const reqBody: Record<string, unknown> = {
+      gene,
+      desired_expr: desired_expr ?? 0,
+      scope: scopeObj,
+    };
     if (n_propagation != null) reqBody.n_propagation = n_propagation;
     const t0 = Date.now();
     try {
-      const res = await fetch(`${api}/api/perturb/summary`, {
+      const res = await fetchImpl(`${api}/api/perturb/summary`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(reqBody),
@@ -578,6 +759,271 @@ server.registerTool(
 );
 
 server.registerTool(
+  "spatial_viewer_perturb_reference_similarity",
+  {
+    description:
+      "POST /api/perturb/reference_similarity: after full GRN perturbation, cosine similarity of each perturbed cell's expression to a reference cell-type centroid (before vs after). Use reference= T_follicular_helper and exclude_perturb_cells_from_reference=true to ask if Tfh became more like other Tfh. BLOCKING like perturb_summary. genes[] optional (marker panel); omit for all model genes.",
+    inputSchema: {
+      gene: z.string().describe("Perturbed gene symbol"),
+      desired_expr: z.number().optional().describe("Target expression level"),
+      scope: z.enum(["all", "cell_type", "cluster"]).optional().describe("Which cells receive the perturbation"),
+      cell_type_label: z.string().optional().describe("Perturbation scope when scope=cell_type"),
+      cluster_id: z.number().int().optional().describe("Perturbation scope when scope=cluster"),
+      n_propagation: z.number().int().min(1).max(32).optional().describe("GRN propagation depth"),
+      reference_scope: z.enum(["all", "cell_type", "cluster"]).describe("Cell set for centroid: all, one cell_type, or one cluster"),
+      reference_cell_type_label: z.string().optional().describe("Reference cell type name when reference_scope=cell_type"),
+      reference_cluster_id: z.number().int().optional().describe("Reference cluster when reference_scope=cluster"),
+      genes: z.array(z.string()).optional().describe("Gene symbols for cosine subspace; omit = all model genes"),
+      exclude_perturb_cells_from_reference: z
+        .boolean()
+        .optional()
+        .describe("Default true: omit perturb-target cells from centroid (recommended when ref type = perturbed type)"),
+      api_base_url: z.string().optional().describe("API base URL"),
+    },
+  },
+  async (args: Record<string, unknown> & { api_base_url?: string }) => {
+    const api = normalizeApiBase(String(args.api_base_url ?? "").trim() || undefined, defaultApiBase);
+    const gene = String(args.gene ?? "").trim();
+    if (!gene) {
+      return { content: [{ type: "text" as const, text: "gene is required." }] };
+    }
+    try {
+      const meta = await fetchMeta(api);
+      if (!meta.perturb_ready) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "perturb_ready is false — use spatial_viewer_wait_ready(require_perturb=true).",
+            },
+          ],
+        };
+      }
+    } catch {
+      /* continue */
+    }
+    const scopeObj = buildPerturbScopeBody(
+      typeof args.scope === "string" ? args.scope : undefined,
+      typeof args.cell_type_label === "string" ? args.cell_type_label : undefined,
+      typeof args.cluster_id === "number" ? args.cluster_id : undefined,
+    );
+    const reference = buildReferenceCentroidScopeBody(
+      typeof args.reference_scope === "string" ? args.reference_scope : undefined,
+      typeof args.reference_cell_type_label === "string"
+        ? args.reference_cell_type_label
+        : undefined,
+      typeof args.reference_cluster_id === "number" ? args.reference_cluster_id : undefined,
+    );
+    const reqBody: Record<string, unknown> = {
+      gene,
+      desired_expr: typeof args.desired_expr === "number" ? args.desired_expr : 0,
+      scope: scopeObj,
+      reference,
+      exclude_perturb_cells_from_reference:
+        args.exclude_perturb_cells_from_reference === false ? false : true,
+    };
+    if (args.n_propagation != null) reqBody.n_propagation = args.n_propagation;
+    if (Array.isArray(args.genes) && args.genes.length > 0) {
+      reqBody.genes = args.genes.map((x) => String(x).trim()).filter(Boolean);
+    }
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(`${api}/api/perturb/reference_similarity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody),
+      });
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!res.ok) {
+        const msg = await res.text();
+        return { content: [{ type: "text" as const, text: `Error ${res.status} (after ${elapsed}s): ${msg}` }] };
+      }
+      const data = await res.json();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Reference similarity (${elapsed}s). mean_delta_cosine > 0 means more like reference after perturb.\n${JSON.stringify(data, null, 2)}`,
+          },
+        ],
+      };
+    } catch (e: any) {
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      return { content: [{ type: "text" as const, text: `Fetch error after ${elapsed}s: ${e.message}` }] };
+    }
+  },
+);
+
+server.registerTool(
+  "spatial_viewer_splash_network_json",
+  {
+    description:
+      "HTTP-only: POST /api/perturb/splash_network and return raw JSON (no iframe). Same parameters as app tool spatial_viewer_splash_network. " +
+      "Splash() derivative graph between two genes (mean over cells in scope). BLOCKING; requires perturb_ready.",
+    inputSchema: {
+      ...splashNetworkToolInputSchema,
+      api_base_url: z.string().optional().describe("API base URL"),
+    },
+  },
+  async (args: Record<string, unknown> & { api_base_url?: string }) => {
+    const api = normalizeApiBase(String(args.api_base_url ?? "").trim() || undefined, defaultApiBase);
+    const gene_a = String(args.gene_a ?? "").trim();
+    const gene_b = String(args.gene_b ?? "").trim();
+    if (!gene_a || !gene_b) {
+      return { content: [{ type: "text" as const, text: "gene_a and gene_b are required." }] };
+    }
+    try {
+      const meta = await fetchMeta(api);
+      if (!meta.perturb_ready) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "perturb_ready is false — start spatial_viewer with --run-toml and wait for load.",
+            },
+          ],
+        };
+      }
+    } catch {
+      /* continue */
+    }
+    const scope = buildPerturbScopeBody(
+      typeof args.scope === "string" ? args.scope : undefined,
+      typeof args.cell_type_label === "string" ? args.cell_type_label : undefined,
+      typeof args.cluster_id === "number" ? args.cluster_id : undefined,
+    );
+    const body: Record<string, unknown> = {
+      gene_a,
+      gene_b,
+      scope,
+      surround_hops:
+        typeof args.surround_hops === "number" && Number.isFinite(args.surround_hops)
+          ? args.surround_hops
+          : 1,
+      max_nodes:
+        typeof args.max_nodes === "number" && Number.isFinite(args.max_nodes)
+          ? args.max_nodes
+          : 24,
+    };
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(`${api}/api/perturb/splash_network`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!res.ok) {
+        const msg = await res.text();
+        return {
+          content: [{ type: "text" as const, text: `Error ${res.status} (after ${elapsed}s): ${msg}` }],
+        };
+      }
+      const data = await res.json();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Splash network ${gene_a} → ${gene_b} (${elapsed}s):\n${JSON.stringify(data, null, 2)}`,
+          },
+        ],
+      };
+    } catch (e: any) {
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      return { content: [{ type: "text" as const, text: `Fetch error after ${elapsed}s: ${e.message}` }] };
+    }
+  },
+);
+
+server.registerTool(
+  "spatial_viewer_perturb_neighbor_sanity",
+  {
+    description:
+      "Single-cell scoped GRN perturbation sanity check: applies desired_expr to exactly one cell (optional require_cluster_id, e.g. Tfh cluster from cell_type_int), runs the same perturbation as /api/perturb/preview, then compares mean |Δ| in spatial neighbors (within neighbor_radius, default = max LR training radius) vs remote cells. BLOCKING (same cost as a full perturb pass). Use after perturb_ready. cell_index is 0-based AnnData row order (matches viewer indices).",
+    inputSchema: {
+      gene: z.string().describe("Gene to perturb (e.g. IL21)"),
+      cell_index: z.number().int().min(0).describe("0-based cell row index to receive the perturbation"),
+      desired_expr: z.number().optional().describe("Target expression on that cell (default 0)"),
+      n_propagation: z.number().int().min(1).max(32).optional().describe("GRN propagation depth"),
+      neighbor_radius: z
+        .number()
+        .optional()
+        .describe("Euclidean cutoff in same units as training spatial coords (default: max ligand radius from run)"),
+      require_cluster_id: z
+        .number()
+        .int()
+        .optional()
+        .describe("If set, fail unless clusters[cell_index] equals this id (e.g. T_follicular_helper cluster int)"),
+      api_base_url: z.string().optional().describe("API base URL"),
+    },
+  },
+  async ({
+    gene,
+    cell_index,
+    desired_expr,
+    n_propagation,
+    neighbor_radius,
+    require_cluster_id,
+    api_base_url,
+  }: {
+    gene: string;
+    cell_index: number;
+    desired_expr?: number;
+    n_propagation?: number;
+    neighbor_radius?: number;
+    require_cluster_id?: number;
+    api_base_url?: string;
+  }) => {
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
+
+    try {
+      const meta = await fetchMeta(api);
+      if (!meta.perturb_ready) {
+        const hint = meta.perturb_loading
+          ? `Perturbation runtime is still loading. Use spatial_viewer_wait_ready(require_perturb=true) first.`
+          : "Perturbation is not configured. Start the server with --run-toml.";
+        return { content: [{ type: "text" as const, text: `NOT READY: ${hint}` }] };
+      }
+    } catch { /* try request anyway */ }
+
+    const reqBody: Record<string, unknown> = {
+      gene,
+      cell_index,
+      desired_expr: desired_expr ?? 0,
+    };
+    if (n_propagation != null) reqBody.n_propagation = n_propagation;
+    if (neighbor_radius != null) reqBody.neighbor_radius = neighbor_radius;
+    if (require_cluster_id != null) reqBody.require_cluster_id = require_cluster_id;
+
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(`${api}/api/perturb/neighbor_sanity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody),
+      });
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!res.ok) {
+        const msg = await res.text();
+        return { content: [{ type: "text" as const, text: `Error ${res.status} (after ${elapsed}s): ${msg}` }] };
+      }
+      const data = await res.json();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Neighbor sanity for ${gene} @ cell ${cell_index} (${elapsed}s):\n${JSON.stringify(data, null, 2)}`,
+          },
+        ],
+      };
+    } catch (e: any) {
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      return { content: [{ type: "text" as const, text: `Fetch error after ${elapsed}s: ${e.message}` }] };
+    }
+  },
+);
+
+server.registerTool(
   "spatial_viewer_get_meta",
   {
     description:
@@ -587,7 +1033,7 @@ server.registerTool(
     },
   },
   async ({ api_base_url }: { api_base_url?: string }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
     try {
       const m = await fetchMeta(api);
       const summary = formatStatus(m);
@@ -612,7 +1058,7 @@ server.registerTool(
     },
   },
   async ({ api_base_url }: { api_base_url?: string }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
     try {
       const m = await fetchMeta(api);
       return { content: [{ type: "text" as const, text: formatStatus(m) }] };
@@ -652,7 +1098,7 @@ server.registerTool(
   async ({ require_perturb, timeout_seconds, api_base_url }: {
     require_perturb?: boolean; timeout_seconds?: number; api_base_url?: string;
   }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
     const needPerturb = require_perturb !== false;
     const timeoutMs = (timeout_seconds ?? 300) * 1000;
     const t0 = Date.now();
@@ -720,9 +1166,9 @@ server.registerTool(
     },
   },
   async ({ api_base_url }: { api_base_url?: string }) => {
-    const api = (api_base_url?.trim() || defaultApiBase).replace(/\/$/, "");
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
     try {
-      const res = await fetch(`${api}/api/cancel`, {
+      const res = await fetchImpl(`${api}/api/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
@@ -764,7 +1210,7 @@ registerAppResource(
     },
   },
   async () => {
-    const text = await readFile(mcpHtmlPath, "utf-8");
+    const text = await readMcpHtml();
     const domains = connectDomainList();
     return {
       contents: [
@@ -783,5 +1229,18 @@ registerAppResource(
   },
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+  return server;
+}
+
+export async function startSpatialViewerMcpStdio(): Promise<void> {
+  const defaultApiBase = process.env.SPATIAL_VIEWER_API_BASE?.trim() || "http://127.0.0.1:8080";
+  const server = createSpatialViewerMcpServer({
+    fetch: globalThis.fetch,
+    defaultApiBase,
+    connectDomainList: () =>
+      makeConnectDomainList(defaultApiBase, process.env.SPATIAL_VIEWER_CONNECT_ORIGINS),
+    readMcpHtml: () => readFile(mcpHtmlPath, "utf-8"),
+  });
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

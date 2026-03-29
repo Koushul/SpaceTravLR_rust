@@ -56,7 +56,8 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
     // Expand to cells (all cells = cluster 0)
     let obs: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = vec![0; n_cells];
-    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&rows, &obs, &clusters));
+    let cluster_keys: Vec<String> = clusters.iter().map(|c| c.to_string()).collect();
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&rows, &obs, &cluster_keys));
     let obs_arc = Arc::new(obs);
 
     bf_d.expand_to_cells(obs_arc.clone(), mapping.clone());
@@ -493,6 +494,7 @@ fn test_perturb_with_target_cell_subset() {
         &lr_radii,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -532,11 +534,11 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
     );
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
-    let clusters = vec![0usize, 0usize];
+    let cluster_keys = vec!["0".to_string(), "0".to_string()];
     let mapping = Arc::new(BetaFrame::compute_cell_mapping(
         &row_labels,
         &obs_names,
-        &clusters,
+        &cluster_keys,
     ));
     bf_target.expand_to_cells(Arc::new(obs_names.clone()), mapping);
     bf_target.modulator_gene_indices = Some(
@@ -603,6 +605,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         ],
         &config,
         &lr_radii,
+        None,
         None,
         None,
     )
@@ -937,8 +940,9 @@ fn build_perturb_inputs(
 ) {
     let obs_names: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
+    let cluster_keys: Vec<String> = clusters.iter().map(|c| c.to_string()).collect();
 
-    let mut bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None, None).unwrap();
+    let mut bb = Betabase::from_directory(betas_dir, &obs_names, &cluster_keys, None, None).unwrap();
 
     let mut all_genes_set: HashSet<String> = HashSet::new();
     for (gene_name, bf) in &bb.data {

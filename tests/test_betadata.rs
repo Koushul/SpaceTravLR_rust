@@ -1,7 +1,37 @@
 use ndarray::{Array2, array};
-use space_trav_lr_rust::betadata::{write_betadata_feather, BetaFrame, Betabase, GeneMatrix};
+use space_trav_lr_rust::betadata::{
+    betadata_pair_lr_parallel, write_betadata_feather, BetaFrame, Betabase, GeneMatrix,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+fn cluster_keys_from_usize(cl: &[usize]) -> Vec<String> {
+    cl.iter().map(|c| c.to_string()).collect()
+}
+
+#[test]
+fn resolve_betadata_key_column_uses_cell_type_int_with_cell_type_annot() {
+    use polars::prelude::*;
+    let df = DataFrame::new(vec![
+        Series::new("cell_type".into(), &["A", "B"]).into(),
+        Series::new("cell_type_int".into(), &[0i32, 10i32]).into(),
+    ])
+    .unwrap();
+    assert_eq!(
+        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&df, "cell_type"),
+        "cell_type_int"
+    );
+    assert_eq!(
+        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&df, "leiden"),
+        "leiden"
+    );
+    let df_no_int =
+        DataFrame::new(vec![Series::new("cell_type".into(), &["A", "B"]).into()]).unwrap();
+    assert_eq!(
+        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&df_no_int, "cell_type"),
+        "cell_type"
+    );
+}
 
 fn make_test_betaframe() -> BetaFrame {
     BetaFrame::from_parts(
@@ -88,11 +118,11 @@ fn test_splash_expanded_cells() {
         "cell2".into(),
         "cell3".into(),
     ];
-    let clusters = [0usize, 0, 1, 1];
+    let cluster_keys = cluster_keys_from_usize(&[0usize, 0, 1, 1]);
     let mapping = Arc::new(BetaFrame::compute_cell_mapping(
         &bf.row_labels,
         &obs,
-        &clusters,
+        &cluster_keys,
     ));
     bf.expand_to_cells(Arc::new(obs), mapping);
     assert_eq!(bf.n_cells, 4);
@@ -223,7 +253,8 @@ fn test_betabase_from_directory_cnn_cellid() {
 
     let obs = vec!["c0".into(), "c1".into()];
     let clusters = [99usize, 99];
-    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None, None).unwrap();
+    let ck = cluster_keys_from_usize(&clusters);
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &ck, None, None).unwrap();
 
     assert_eq!(bb.data.len(), 2);
     let f1 = &bb.data["G1"];
@@ -297,7 +328,8 @@ fn test_betabase_from_directory() {
     let obs: Vec<String> = vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()];
     let clusters = vec![0, 0, 1, 1, 0];
 
-    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None, None).unwrap();
+    let ck = cluster_keys_from_usize(&clusters);
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &ck, None, None).unwrap();
 
     assert_eq!(bb.data.len(), 2);
     assert!(bb.data.contains_key("gene1"));
@@ -311,6 +343,28 @@ fn test_betabase_from_directory() {
     }
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// One bad cluster id must not force obs-name fallback for every cell (seed-only / Cluster rows).
+#[test]
+fn compute_cell_mapping_partial_cluster_still_maps_others() {
+    let row_labels = vec!["0".to_string(), "1".to_string()];
+    let obs = vec!["a".into(), "b".into(), "c".into()];
+    let keys = vec!["0".into(), "1".into(), "999".into()];
+    let m = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
+    assert_eq!(m, vec![0, 1, 0]);
+}
+
+#[test]
+fn compute_cell_mapping_matches_category_name_not_code() {
+    let row_labels = vec!["0".into(), "1".into(), "10".into()];
+    let obs = vec!["a".into(), "b".into(), "c".into()];
+    let keys = vec!["0".into(), "1".into(), "10".into()];
+    let m = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
+    assert_eq!(m, vec![0, 1, 2]);
+    let wrong = vec!["0".into(), "1".into(), "2".into()];
+    let m2 = BetaFrame::compute_cell_mapping(&row_labels, &obs, &wrong);
+    assert_eq!(m2, vec![0, 1, 0]);
 }
 
 #[test]
@@ -336,8 +390,8 @@ fn test_feather_cnn_cellid_columns() {
     assert_eq!(bf.receptors, vec!["D"]);
 
     let obs: Vec<String> = vec!["cell0".into(), "cell1".into()];
-    let clusters = [0usize, 0];
-    let mapping = BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &clusters);
+    let cluster_keys = cluster_keys_from_usize(&[0usize, 0]);
+    let mapping = BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &cluster_keys);
     assert_eq!(mapping, vec![0, 1]);
 
     std::fs::remove_dir_all(&dir).ok();
@@ -371,8 +425,9 @@ fn test_mapping_shared_via_arc() {
 
     let obs: Vec<String> = (0..1000).map(|i| format!("cell{}", i)).collect();
     let clusters: Vec<usize> = (0..1000).map(|i| i % 2).collect();
+    let ck = cluster_keys_from_usize(&clusters);
 
-    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &clusters, None, None).unwrap();
+    let bb = Betabase::from_directory(dir.to_str().unwrap(), &obs, &ck, None, None).unwrap();
 
     let g1 = &bb.data["g1"];
     let g2 = &bb.data["g2"];
@@ -389,8 +444,9 @@ fn build_splash_inputs(
 ) -> (Betabase, GeneMatrix, GeneMatrix, GeneMatrix, Vec<String>) {
     let obs_names: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
+    let ck = cluster_keys_from_usize(&clusters);
 
-    let bb = Betabase::from_directory(betas_dir, &obs_names, &clusters, None, None).unwrap();
+    let bb = Betabase::from_directory(betas_dir, &obs_names, &ck, None, None).unwrap();
 
     let mut all_genes: HashSet<String> = HashSet::new();
     let mut lig_set: HashSet<String> = HashSet::new();
@@ -517,4 +573,48 @@ fn bench_splash() {
         );
     }
     println!();
+}
+
+#[test]
+fn betadata_pair_lr_parallel_seed_clusters() {
+    let dir = std::env::temp_dir().join(format!(
+        "stlr_pair_lr_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("EGFR_betadata.feather");
+    let ids = vec!["0".to_string(), "1".to_string()];
+    let cols = vec!["beta_TGFA$EGFR".to_string()];
+    let data = ndarray::array![[0.7_f64], [0.1_f64]];
+    write_betadata_feather(
+        path.to_str().unwrap(),
+        "Cluster",
+        &ids,
+        &cols,
+        &data,
+    )
+    .unwrap();
+
+    let obs: Vec<String> = (0..10).map(|i| format!("o{}", i)).collect();
+    let clusters: Vec<usize> = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1];
+    let ck = cluster_keys_from_usize(&clusters);
+    let rows = betadata_pair_lr_parallel(
+        dir.to_str().unwrap(),
+        &[String::from("EGFR")],
+        &obs,
+        &ck,
+        0,
+        5,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target_gene, "EGFR");
+    assert_eq!(rows[0].interaction, "beta_TGFA$EGFR");
+    assert!((rows[0].beta_cell_a - 0.7).abs() < 1e-9);
+    assert!((rows[0].beta_cell_b - 0.1).abs() < 1e-9);
+    let _ = std::fs::remove_dir_all(&dir);
 }

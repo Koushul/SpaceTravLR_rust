@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use polars::datatypes::DataType;
+use polars::frame::DataFrame;
 use polars::prelude::*;
 use serde::Serialize;
 use ndarray::{Array1, Array2, ArrayView1};
@@ -48,6 +49,122 @@ impl GeneMatrix {
     pub fn n_cols(&self) -> usize {
         self.data.ncols()
     }
+}
+
+fn obs_df_has_column(obs: &DataFrame, name: &str) -> bool {
+    obs.get_column_names()
+        .iter()
+        .any(|n| n.as_str() == name)
+}
+
+fn is_cell_type_label_column(cluster_annot: &str) -> bool {
+    let t = cluster_annot.trim();
+    t.eq_ignore_ascii_case("cell_type")
+        || t.eq_ignore_ascii_case("cell_types")
+        || t.eq_ignore_ascii_case("celltype")
+        || t.eq_ignore_ascii_case("major_cell_type")
+}
+
+/// Column to use when building feather join keys (see [`betadata_cluster_keys_from_obs_dataframe`]).
+///
+/// Many h5ads store both `cell_type` (labels) and `cell_type_int` (ids that match seed-only
+/// `Cluster` in betadata). If the viewer is configured with a `cell_type*`-style column but
+/// `cell_type_int` exists, we prefer the integer column for betadata only; [`clusters_usize_from_obs_dataframe`]
+/// should still use `cluster_annot` so the UI / filters stay on the user’s chosen grouping.
+pub fn resolve_betadata_cluster_key_column(obs: &DataFrame, cluster_annot: &str) -> String {
+    if obs_df_has_column(obs, "cell_type_int") && is_cell_type_label_column(cluster_annot) {
+        "cell_type_int".to_string()
+    } else {
+        cluster_annot.to_string()
+    }
+}
+
+fn obs_cluster_column_is_numeric_id(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+    )
+}
+
+/// One string per cell for matching feather `Cluster` / `CellID` row labels.
+///
+/// Categorical / enum obs columns use **category names** (e.g. `"10"`), not internal codes (`2`),
+/// so they align with seed-only betadata exported from training. Purely numeric columns use the
+/// same `Int64`→`String` normalization as feather files (`3.0` → `"3"`).
+pub fn betadata_cluster_keys_from_obs_dataframe(
+    obs: &DataFrame,
+    cluster_annot: &str,
+) -> Result<Vec<String>> {
+    let col = obs
+        .column(cluster_annot)
+        .with_context(|| format!("obs column {:?} not found", cluster_annot))?;
+    let series = col.as_materialized_series();
+    let keys: Vec<String> = match series.dtype() {
+        DataType::Categorical(_, _) | DataType::Enum(_, _) => series
+            .cast(&DataType::String)?
+            .str()?
+            .into_iter()
+            .map(|opt| opt.map(|s| s.trim().to_string()).unwrap_or_default())
+            .collect(),
+        dt if obs_cluster_column_is_numeric_id(dt) => series
+            .cast(&DataType::Int64)?
+            .cast(&DataType::String)?
+            .str()?
+            .into_iter()
+            .map(|opt| opt.map(|s| s.to_string()).unwrap_or_else(|| "0".into()))
+            .collect(),
+        _ => series
+            .cast(&DataType::String)?
+            .str()?
+            .into_iter()
+            .map(|opt| opt.map(|s| s.trim().to_string()).unwrap_or_default())
+            .collect(),
+    };
+    Ok(keys)
+}
+
+/// `usize` cluster codes for UI / colormap grouping (Float64 cast + round). For betadata row
+/// matching use [`betadata_cluster_keys_from_obs_dataframe`] instead when the column is categorical.
+pub fn clusters_usize_from_obs_dataframe(
+    obs: &DataFrame,
+    cluster_annot: &str,
+) -> Result<Vec<usize>> {
+    let col = obs
+        .column(cluster_annot)
+        .map_err(|_| {
+            let preview: Vec<String> = obs
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .take(25)
+                .collect();
+            anyhow::anyhow!(
+                "obs column {:?} not found. First columns: {:?}",
+                cluster_annot,
+                preview
+            )
+        })?;
+    let f = col.cast(&DataType::Float64).map_err(|e| {
+        anyhow::anyhow!(
+            "obs column {:?} must be numeric (cluster ids): {}",
+            cluster_annot,
+            e
+        )
+    })?;
+    let ca = f.f64()?;
+    Ok(ca
+        .into_iter()
+        .map(|v| v.unwrap_or(0.0).round() as i64 as usize)
+        .collect())
 }
 
 /// Beta coefficients for a single target gene.
@@ -149,12 +266,7 @@ impl BetaFrame {
 
         let (row_labels, data_col_names) = if let Some(idx) = label_col_idx {
             let label_name = &all_col_names[idx];
-            let label_casted = df.column(label_name)?.cast(&DataType::String)?;
-            let labels: Vec<String> = label_casted
-                .str()?
-                .into_no_null_iter()
-                .map(|s| s.to_string())
-                .collect();
+            let labels = feather_id_column_to_strings(df.column(label_name)?)?;
             let data_names: Vec<String> = all_col_names
                 .iter()
                 .enumerate()
@@ -247,51 +359,55 @@ impl BetaFrame {
 
     /// Determine how to map cell indices to beta rows for a given set of row_labels.
     /// Returns a Vec<usize> of length obs_names.len().
+    ///
+    /// For each cell: match `cluster_keys[i]` to a row label (seed-only `Cluster` column), else
+    /// **obs name** (per-cell `CellID` export), else row `0` with a warning. `cluster_keys` must
+    /// use the same strings as in the feather (e.g. categorical **names** `"10"`, not code `2`).
     pub fn compute_cell_mapping(
         row_labels: &[String],
         obs_names: &[String],
-        clusters: &[usize],
+        cluster_keys: &[String],
     ) -> Vec<usize> {
+        debug_assert_eq!(
+            obs_names.len(),
+            cluster_keys.len(),
+            "compute_cell_mapping length mismatch"
+        );
         let row_map: HashMap<&str, usize> = row_labels
             .iter()
             .enumerate()
             .map(|(i, l)| (l.as_str(), i))
             .collect();
 
-        // Try cluster-based mapping (seed-only: row_labels are "0", "1", …)
-        let cluster_mapping: Option<Vec<usize>> = clusters
-            .iter()
-            .map(|c| {
-                let key = c.to_string();
-                row_map.get(key.as_str()).copied()
-            })
-            .collect();
+        let mut n_via_key = 0usize;
+        let mut n_via_obs = 0usize;
+        let mut n_default = 0usize;
+        let mut mapping = Vec::with_capacity(obs_names.len());
 
-        if let Some(mapping) = cluster_mapping {
-            return mapping;
+        for (name, ck) in obs_names.iter().zip(cluster_keys.iter()) {
+            let idx = if let Some(&i) = row_map.get(ck.as_str()) {
+                n_via_key += 1;
+                i
+            } else if let Some(&i) = row_map.get(name.as_str()) {
+                n_via_obs += 1;
+                i
+            } else {
+                n_default += 1;
+                0
+            };
+            mapping.push(idx);
         }
 
-        // Fall back to obs_name matching (CNN: row_labels are cell IDs)
-        let mut n_missing = 0usize;
-        let mapping: Vec<usize> = obs_names
-            .iter()
-            .map(|name| match row_map.get(name.as_str()).copied() {
-                Some(idx) => idx,
-                None => {
-                    n_missing += 1;
-                    0
-                }
-            })
-            .collect();
-        if n_missing > 0 {
+        if n_default > 0 {
             eprintln!(
-                "Warning: {}/{} cell IDs not found in beta row_labels; \
-                 defaulting to row 0. Check that obs_names match between \
-                 betadata and the input AnnData.",
-                n_missing,
-                obs_names.len()
+                "Warning: {} of {} cells could not map to a betadata row; using row 0 for those. ({} cells mapped via cluster key, {} via obs id.)",
+                n_default,
+                obs_names.len(),
+                n_via_key,
+                n_via_obs
             );
         }
+
         mapping
     }
 
@@ -598,19 +714,25 @@ impl Betabase {
     }
 
     /// Load all `*_betadata.feather` files from `dir` in parallel (rayon),
-    /// then expand every frame to cell level using the given obs_names + clusters.
+    /// then expand every frame to cell level using the given obs_names + `cluster_keys`.
     ///
     /// `on_subprogress`: optional callback with sub-progress in **permille** (0–1000) for this
     /// stage only (roughly 0–700 while reading feathers, 700–1000 while expanding to cells).
     pub fn from_directory(
         dir: &str,
         obs_names: &[String],
-        clusters: &[usize],
+        cluster_keys: &[String],
         gene2index: Option<&HashMap<String, usize>>,
         on_subprogress: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     ) -> Result<Self> {
         let dir_path = Path::new(dir);
         anyhow::ensure!(dir_path.exists(), "Directory {} does not exist", dir);
+        anyhow::ensure!(
+            obs_names.len() == cluster_keys.len(),
+            "obs_names len {} != cluster_keys len {}",
+            obs_names.len(),
+            cluster_keys.len()
+        );
 
         let paths: Vec<String> = std::fs::read_dir(dir)?
             .filter_map(|entry| entry.ok())
@@ -687,7 +809,7 @@ impl Betabase {
                 let m = Arc::new(BetaFrame::compute_cell_mapping(
                     &frame.row_labels,
                     obs_names,
-                    clusters,
+                    cluster_keys,
                 ));
                 last_row_labels = Some(frame.row_labels.clone());
                 last_mapping = Some(m.clone());
@@ -731,6 +853,39 @@ fn betadata_feather_label_column_index(all_names: &[String]) -> Option<usize> {
             || c == "index"
             || c == "obs_names"
     })
+}
+
+fn feather_id_label_dtype_is_numeric(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+    )
+}
+
+/// `Cluster` / `CellID` values as strings aligned with AnnData cluster codes (`"0"`, `"1"`, …).
+/// **Numeric** feather columns are cast through `Int64` so float IDs like `3.0` become `"3"`, not `"3.0"`.
+/// String `CellID` values (e.g. `c0`) stay on the direct string path — Utf8→Int64 in Polars yields nulls,
+/// which would drop rows if we always normalized through integers.
+fn feather_id_column_to_strings(col: &Column) -> Result<Vec<String>> {
+    let string_col = if feather_id_label_dtype_is_numeric(col.dtype()) {
+        col.cast(&DataType::Int64)?.cast(&DataType::String)?
+    } else {
+        col.cast(&DataType::String)?
+    };
+    Ok(string_col
+        .str()?
+        .into_no_null_iter()
+        .map(|s| s.to_string())
+        .collect())
 }
 
 /// Detects how betadata rows map to cells: **`Cluster`** = seed-only lasso (one β row per cluster),
@@ -785,13 +940,13 @@ pub fn betadata_feather_per_cell_column(
     path: &str,
     column: &str,
     obs_names: &[String],
-    clusters: &[usize],
+    cluster_keys: &[String],
 ) -> Result<Vec<f32>> {
     anyhow::ensure!(
-        obs_names.len() == clusters.len(),
-        "obs_names len {} != clusters len {}",
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
         obs_names.len(),
-        clusters.len()
+        cluster_keys.len()
     );
     let f = File::open(path).with_context(|| format!("open {}", path))?;
     let df = IpcReader::new(f)
@@ -805,16 +960,11 @@ pub fn betadata_feather_per_cell_column(
     let label_idx = betadata_feather_label_column_index(&all_names);
     let row_labels: Vec<String> = if let Some(idx) = label_idx {
         let label_name = &all_names[idx];
-        let label_casted = df.column(label_name.as_str())?.cast(&DataType::String)?;
-        label_casted
-            .str()?
-            .into_no_null_iter()
-            .map(|s| s.to_string())
-            .collect()
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, clusters);
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
     let series = df
         .column(column)
         .with_context(|| format!("column {:?}", column))?
@@ -846,15 +996,15 @@ fn is_intercept_column(name: &str) -> bool {
 pub fn betadata_feather_top_coefficients_for_selection(
     path: &str,
     obs_names: &[String],
-    clusters: &[usize],
+    cluster_keys: &[String],
     cell_indices: &[usize],
     top_k: usize,
 ) -> Result<Vec<TopBetaCoefficient>> {
     anyhow::ensure!(
-        obs_names.len() == clusters.len(),
-        "obs_names len {} != clusters len {}",
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
         obs_names.len(),
-        clusters.len()
+        cluster_keys.len()
     );
     if cell_indices.is_empty() || top_k == 0 {
         return Ok(Vec::new());
@@ -872,16 +1022,11 @@ pub fn betadata_feather_top_coefficients_for_selection(
     let label_idx = betadata_feather_label_column_index(&all_names);
     let row_labels: Vec<String> = if let Some(idx) = label_idx {
         let label_name = &all_names[idx];
-        let label_casted = df.column(label_name.as_str())?.cast(&DataType::String)?;
-        label_casted
-            .str()?
-            .into_no_null_iter()
-            .map(|s| s.to_string())
-            .collect()
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, clusters);
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
     let mut columns: Vec<String> = Vec::new();
@@ -939,6 +1084,98 @@ pub fn betadata_feather_top_coefficients_for_selection(
             mean_abs,
         })
         .collect())
+}
+
+fn feather_column_modulator_key(name: &str) -> String {
+    name.strip_prefix("beta_").unwrap_or(name).to_ascii_uppercase()
+}
+
+/// Mean β per modulator column (column name stripped of `beta_` prefix, ASCII-uppercase match) over
+/// the given **cell** indices. One result per `modulators` entry; `None` if no numeric column matches.
+pub fn betadata_feather_modulator_beta_means_for_cells(
+    path: &str,
+    modulators: &[String],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_indices: &[usize],
+) -> Result<Vec<Option<f64>>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    if modulators.is_empty() {
+        return Ok(Vec::new());
+    }
+    if cell_indices.is_empty() {
+        return Ok(modulators.iter().map(|_| None).collect());
+    }
+
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let n_obs = obs_names.len();
+
+    let mut col_by_mod: HashMap<String, String> = HashMap::new();
+    for (i, name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx {
+            continue;
+        }
+        if is_intercept_column(name) {
+            continue;
+        }
+        let col = df.column(name.as_str())?;
+        if col.cast(&DataType::Float64).is_err() {
+            continue;
+        }
+        let key = feather_column_modulator_key(name);
+        col_by_mod.entry(key).or_insert_with(|| name.clone());
+    }
+
+    let mut out = Vec::with_capacity(modulators.len());
+    for m in modulators {
+        let key = m.trim().to_ascii_uppercase();
+        let Some(col_name) = col_by_mod.get(&key) else {
+            out.push(None);
+            continue;
+        };
+        let series = df
+            .column(col_name.as_str())?
+            .cast(&DataType::Float64)?;
+        let ca = series.f64()?;
+        let mut sum = 0.0f64;
+        let mut cnt = 0usize;
+        for &ci in cell_indices {
+            if ci >= n_obs {
+                continue;
+            }
+            let r = mapping[ci];
+            let v = ca.get(r).unwrap_or(0.0);
+            sum += v;
+            cnt += 1;
+        }
+        out.push(if cnt == 0 {
+            None
+        } else {
+            Some(sum / cnt as f64)
+        });
+    }
+    Ok(out)
 }
 
 /// One row of aggregated β across cells of a chosen type/cluster (Python `Betabase.collect_interactions`).
@@ -1018,15 +1255,15 @@ pub fn betadata_collect_interactions_one_gene(
     path: &str,
     target_gene: &str,
     obs_names: &[String],
-    clusters: &[usize],
+    cluster_keys: &[String],
     cell_include_mask: &[bool],
     mode: BetadataCollectAggregate,
 ) -> Result<Vec<CollectedInteraction>> {
     anyhow::ensure!(
-        obs_names.len() == clusters.len(),
-        "obs_names len {} != clusters len {}",
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
         obs_names.len(),
-        clusters.len()
+        cluster_keys.len()
     );
     anyhow::ensure!(
         obs_names.len() == cell_include_mask.len(),
@@ -1047,16 +1284,11 @@ pub fn betadata_collect_interactions_one_gene(
     let label_idx = betadata_feather_label_column_index(&all_names);
     let row_labels: Vec<String> = if let Some(idx) = label_idx {
         let label_name = &all_names[idx];
-        let label_casted = df.column(label_name.as_str())?.cast(&DataType::String)?;
-        label_casted
-            .str()?
-            .into_no_null_iter()
-            .map(|s| s.to_string())
-            .collect()
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, clusters);
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
     let mut out = Vec::new();
@@ -1106,7 +1338,7 @@ pub fn betadata_collect_interactions_parallel(
     dir: &str,
     genes: &[String],
     obs_names: &[String],
-    clusters: &[usize],
+    cluster_keys: &[String],
     cell_include_mask: &[bool],
     mode: BetadataCollectAggregate,
 ) -> Result<Vec<CollectedInteraction>> {
@@ -1123,7 +1355,7 @@ pub fn betadata_collect_interactions_parallel(
                 &ps,
                 gene.as_str(),
                 obs_names,
-                clusters,
+                cluster_keys,
                 cell_include_mask,
                 mode,
             )
@@ -1140,6 +1372,140 @@ pub fn betadata_collect_interactions_parallel(
             .partial_cmp(&a.beta.abs())
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.gene.cmp(&b.gene))
+            .then_with(|| a.interaction.cmp(&b.interaction))
+    });
+    Ok(merged)
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PairLrBetaRow {
+    pub target_gene: String,
+    pub interaction: String,
+    pub beta_cell_a: f64,
+    pub beta_cell_b: f64,
+    /// `max(|beta_cell_a|, |beta_cell_b|)` for ranking.
+    pub score: f64,
+}
+
+/// Per target-gene feather: ligand–receptor β at the feather rows mapped to `cell_a` and `cell_b`.
+pub fn betadata_pair_lr_one_gene(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_a: usize,
+    cell_b: usize,
+) -> Result<Vec<PairLrBetaRow>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    anyhow::ensure!(
+        cell_a < obs_names.len() && cell_b < obs_names.len(),
+        "cell index out of range (n_obs = {})",
+        obs_names.len()
+    );
+    anyhow::ensure!(cell_a != cell_b, "cell_a and cell_b must differ");
+
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let ra = mapping[cell_a];
+    let rb = mapping[cell_b];
+
+    let mut out = Vec::new();
+    for (i, col_name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx {
+            continue;
+        }
+        if is_intercept_column(col_name) {
+            continue;
+        }
+        if classify_betadata_column_type(col_name) != "ligand-receptor" {
+            continue;
+        }
+        let col = match df.column(col_name.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let Ok(series) = col.cast(&DataType::Float64) else {
+            continue;
+        };
+        let ca = series.f64()?;
+        let v_a = ca.get(ra).unwrap_or(0.0);
+        let v_b = ca.get(rb).unwrap_or(0.0);
+        if !v_a.is_finite() || !v_b.is_finite() {
+            continue;
+        }
+        let score = v_a.abs().max(v_b.abs());
+        if score == 0.0 || !score.is_finite() {
+            continue;
+        }
+        out.push(PairLrBetaRow {
+            target_gene: target_gene.to_string(),
+            interaction: col_name.clone(),
+            beta_cell_a: v_a,
+            beta_cell_b: v_b,
+            score,
+        });
+    }
+    Ok(out)
+}
+
+/// Parallel scan of target-gene feathers; merges and sorts by `score` descending.
+pub fn betadata_pair_lr_parallel(
+    dir: &str,
+    genes: &[String],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_a: usize,
+    cell_b: usize,
+) -> Result<Vec<PairLrBetaRow>> {
+    let dir_path = PathBuf::from(dir);
+    let results: Vec<Result<Vec<PairLrBetaRow>>> = genes
+        .par_iter()
+        .map(|gene| {
+            let path = dir_path.join(format!("{}_betadata.feather", gene));
+            if !path.is_file() {
+                return Ok(Vec::new());
+            }
+            let ps = path.to_string_lossy().into_owned();
+            betadata_pair_lr_one_gene(
+                &ps,
+                gene.as_str(),
+                obs_names,
+                cluster_keys,
+                cell_a,
+                cell_b,
+            )
+        })
+        .collect();
+
+    let mut merged = Vec::new();
+    for r in results {
+        merged.extend(r?);
+    }
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.target_gene.cmp(&b.target_gene))
             .then_with(|| a.interaction.cmp(&b.interaction))
     });
     Ok(merged)

@@ -41,6 +41,33 @@ export type McpCollectInteractionsRequest = {
   push_summary_to_chat: boolean;
 };
 
+export type McpReceivedLigandRequest = {
+  genes: string[];
+  source: "adata" | "model";
+  matrix: "lr" | "tfl";
+  radius?: number;
+  scale_factor?: number;
+  use_grid?: boolean;
+  grid_factor?: number;
+  aggregate: "sum" | "max" | "mean";
+};
+
+export type McpSignatureUmapRequest = {
+  genes: string[];
+  n_knn?: number;
+  mask_with_perturb_quiver?: boolean;
+};
+
+export type McpSplashNetworkRequest = {
+  gene_a: string;
+  gene_b: string;
+  surround_hops?: number;
+  max_nodes?: number;
+  scope?: "all" | "cell_type" | "cluster";
+  cell_type_label?: string;
+  cluster_id?: number;
+};
+
 const pendingControl: Record<string, unknown>[] = [];
 let controlSink: ((args: Record<string, unknown>) => void) | null = null;
 
@@ -55,6 +82,21 @@ let perturbRunSink: ((req: McpPerturbRunRequest) => void | Promise<void>) | null
 const pendingCollect: McpCollectInteractionsRequest[] = [];
 let collectInteractionsSink:
   | ((req: McpCollectInteractionsRequest) => void | Promise<void>)
+  | null = null;
+
+const pendingReceivedLigand: McpReceivedLigandRequest[] = [];
+let receivedLigandSink:
+  | ((req: McpReceivedLigandRequest) => void | Promise<void>)
+  | null = null;
+
+const pendingSignatureUmap: McpSignatureUmapRequest[] = [];
+let signatureUmapSink:
+  | ((req: McpSignatureUmapRequest) => void | Promise<void>)
+  | null = null;
+
+const pendingSplashNetwork: McpSplashNetworkRequest[] = [];
+let splashNetworkSink:
+  | ((req: McpSplashNetworkRequest) => void | Promise<void>)
   | null = null;
 
 function emitControl(args: Record<string, unknown>) {
@@ -107,6 +149,45 @@ export function attachMcpCollectInteractionsSink(
   collectInteractionsSink = fn;
   for (const p of pendingCollect) void Promise.resolve(fn(p));
   pendingCollect.length = 0;
+}
+
+function emitReceivedLigand(req: McpReceivedLigandRequest) {
+  if (receivedLigandSink) void Promise.resolve(receivedLigandSink(req));
+  else pendingReceivedLigand.push(req);
+}
+
+export function attachMcpReceivedLigandSink(
+  fn: (req: McpReceivedLigandRequest) => void | Promise<void>,
+): void {
+  receivedLigandSink = fn;
+  for (const p of pendingReceivedLigand) void Promise.resolve(fn(p));
+  pendingReceivedLigand.length = 0;
+}
+
+function emitSignatureUmap(req: McpSignatureUmapRequest) {
+  if (signatureUmapSink) void Promise.resolve(signatureUmapSink(req));
+  else pendingSignatureUmap.push(req);
+}
+
+export function attachMcpSignatureUmapSink(
+  fn: (req: McpSignatureUmapRequest) => void | Promise<void>,
+): void {
+  signatureUmapSink = fn;
+  for (const p of pendingSignatureUmap) void Promise.resolve(fn(p));
+  pendingSignatureUmap.length = 0;
+}
+
+function emitSplashNetwork(req: McpSplashNetworkRequest) {
+  if (splashNetworkSink) void Promise.resolve(splashNetworkSink(req));
+  else pendingSplashNetwork.push(req);
+}
+
+export function attachMcpSplashNetworkSink(
+  fn: (req: McpSplashNetworkRequest) => void | Promise<void>,
+): void {
+  splashNetworkSink = fn;
+  for (const p of pendingSplashNetwork) void Promise.resolve(fn(p));
+  pendingSplashNetwork.length = 0;
 }
 
 function parsePerturbRunFromStructured(
@@ -192,6 +273,121 @@ function parseCaptureFromStructured(
       : undefined;
   const cap = typeof sc.caption === "string" ? sc.caption : "";
   return { max_width, caption: cap };
+}
+
+function normalizeGeneTokenList(v: unknown): string[] {
+  if (Array.isArray(v)) {
+    return v
+      .map((x) => String(x).trim())
+      .filter((s) => s.length > 0);
+  }
+  if (typeof v === "string") {
+    return v
+      .split(/[,;\s]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+  return [];
+}
+
+function parseReceivedLigandFromStructured(
+  sc: Record<string, unknown>,
+): McpReceivedLigandRequest | null {
+  if (sc._spatialTool !== "received_ligand") return null;
+  const genes = normalizeGeneTokenList(sc.genes);
+  if (genes.length === 0) return null;
+  const sourceRaw = typeof sc.source === "string" ? sc.source : "adata";
+  const source: McpReceivedLigandRequest["source"] =
+    sourceRaw === "model" ? "model" : "adata";
+  const matrixRaw = typeof sc.matrix === "string" ? sc.matrix : "lr";
+  const matrix: McpReceivedLigandRequest["matrix"] =
+    matrixRaw === "tfl" ? "tfl" : "lr";
+  const rad = sc.radius;
+  const radius =
+    typeof rad === "number" && Number.isFinite(rad) && rad > 0
+      ? rad
+      : undefined;
+  const sf = sc.scale_factor;
+  const scale_factor =
+    typeof sf === "number" && Number.isFinite(sf) ? sf : undefined;
+  const use_grid =
+    typeof sc.use_grid === "boolean" ? sc.use_grid : undefined;
+  const gf = sc.grid_factor;
+  const grid_factor =
+    typeof gf === "number" && Number.isFinite(gf) && gf > 0
+      ? gf
+      : undefined;
+  const aggRaw = typeof sc.aggregate === "string" ? sc.aggregate : "sum";
+  const aggregate: McpReceivedLigandRequest["aggregate"] =
+    aggRaw === "max" || aggRaw === "mean" ? aggRaw : "sum";
+  return {
+    genes,
+    source,
+    matrix,
+    radius,
+    scale_factor,
+    use_grid,
+    grid_factor,
+    aggregate,
+  };
+}
+
+function parseSignatureUmapFromStructured(
+  sc: Record<string, unknown>,
+): McpSignatureUmapRequest | null {
+  if (sc._spatialTool !== "signature_umap") return null;
+  const genes = normalizeGeneTokenList(sc.genes);
+  if (genes.length === 0) return null;
+  const nk = sc.n_knn;
+  const n_knn =
+    typeof nk === "number" && Number.isFinite(nk)
+      ? Math.min(200, Math.max(3, Math.trunc(nk)))
+      : undefined;
+  return {
+    genes,
+    n_knn,
+    mask_with_perturb_quiver: sc.mask_with_perturb_quiver === true,
+  };
+}
+
+function parseSplashNetworkFromStructured(
+  sc: Record<string, unknown>,
+): McpSplashNetworkRequest | null {
+  if (sc._spatialTool !== "splash_network") return null;
+  const gene_a = typeof sc.gene_a === "string" ? sc.gene_a.trim() : "";
+  const gene_b = typeof sc.gene_b === "string" ? sc.gene_b.trim() : "";
+  if (!gene_a || !gene_b) return null;
+  const sh = sc.surround_hops;
+  const surround_hops =
+    typeof sh === "number" && Number.isFinite(sh)
+      ? Math.min(4, Math.max(0, Math.trunc(sh)))
+      : undefined;
+  const mn = sc.max_nodes;
+  const max_nodes =
+    typeof mn === "number" && Number.isFinite(mn)
+      ? Math.min(64, Math.max(6, Math.trunc(mn)))
+      : undefined;
+  const scopeRaw = typeof sc.scope === "string" ? sc.scope : "";
+  const scope: McpSplashNetworkRequest["scope"] =
+    scopeRaw === "cell_type" || scopeRaw === "cluster"
+      ? scopeRaw
+      : scopeRaw === "all"
+        ? "all"
+        : undefined;
+  const cell_type_label =
+    typeof sc.cell_type_label === "string" ? sc.cell_type_label.trim() : "";
+  const cid = sc.cluster_id;
+  const cluster_id =
+    typeof cid === "number" && Number.isFinite(cid) ? Math.trunc(cid) : undefined;
+  return {
+    gene_a,
+    gene_b,
+    surround_hops,
+    max_nodes,
+    scope,
+    cell_type_label: cell_type_label || undefined,
+    cluster_id,
+  };
 }
 
 export function isMcpApp(): boolean {
@@ -338,6 +534,15 @@ export async function bootstrapMcp(): Promise<{
       args.expression_gene != null ||
       args.color_source != null ||
       args.apply_expression === true ||
+      args.apply_received_ligand === true ||
+      args.received_ligand_genes != null ||
+      args.received_ligand_source != null ||
+      args.received_ligand_matrix != null ||
+      args.received_ligand_radius != null ||
+      args.received_ligand_scale != null ||
+      args.received_ligand_use_grid != null ||
+      args.received_ligand_grid_factor != null ||
+      args.received_ligand_aggregate != null ||
       typeof args.focus_gene_context === "string" ||
       typeof args.status_message === "string";
     if (!hasPath && controlLike) {
@@ -367,6 +572,21 @@ export async function bootstrapMcp(): Promise<{
     const ci = parseCollectInteractionsFromStructured(sc);
     if (ci) {
       emitCollectInteractions(ci);
+      return;
+    }
+    const rl = parseReceivedLigandFromStructured(sc);
+    if (rl) {
+      emitReceivedLigand(rl);
+      return;
+    }
+    const su = parseSignatureUmapFromStructured(sc);
+    if (su) {
+      emitSignatureUmap(su);
+      return;
+    }
+    const sn = parseSplashNetworkFromStructured(sc);
+    if (sn) {
+      emitSplashNetwork(sn);
       return;
     }
     tryResolveOpen(sc, {});

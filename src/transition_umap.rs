@@ -4,11 +4,16 @@
 //! projection (`project_probabilities`), and grid binning / scaling from
 //! `SpaceTravLR.plotting.cartography` (`compute_transition_vector_field` / `plot_umap_quiver`).
 //! In-app perturb flows use `GeneFactory`-style δ, but the UMAP field math matches **cartography + shift**, not `gene_factory.py` itself.
+//!
+//! **Gene-signature quiver** (`compute_signature_umap_grid`) mirrors `VirtualTissue.signature2gradient`
+//! in `SpaceTravLR/virtual_tissue.py`: KNN-smoothed signature on the UMAP grid, `numpy`-style gradient,
+//! `normalize_gradient(sqrt)`, then scale like `plot_umap_quiver`; optional masking where a base field is zero.
 
 use kiddo::ImmutableKdTree;
 use kiddo::SquaredEuclidean;
 use ndarray::Array2;
 use rayon::prelude::*;
+use std::num::NonZero;
 
 const EPS_VAR: f64 = 1e-18;
 
@@ -340,6 +345,25 @@ fn project_dense(umap: &[[f64; 2]], p: &Array2<f64>, unit_directions: bool) -> V
         .collect()
 }
 
+/// UMAP axis-aligned grid (`get_grid_layout` / `plot_umap_quiver`), shared by transition and signature fields.
+pub fn umap_grid_axes(umap: &[[f64; 2]], grid_scale: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for p in umap {
+        min_x = min_x.min(p[0]);
+        max_x = max_x.max(p[0]);
+        min_y = min_y.min(p[1]);
+        max_y = max_y.max(p[1]);
+    }
+    let step_scale = mean_abs_diff_2d(umap);
+    let gs = 10.0 * grid_scale.max(1e-9) / step_scale;
+    let grid_x = grid_axes(min_x, max_x, gs);
+    let grid_y = grid_axes(min_y, max_y, gs);
+    (grid_x, grid_y)
+}
+
 /// Grid layout similar to `get_grid_layout` in `layout.py`.
 fn grid_axes(min_v: f64, max_v: f64, grid_scale: f64) -> Vec<f64> {
     let span = (max_v - min_v).max(1e-12);
@@ -410,6 +434,212 @@ pub struct TransitionGrid {
     /// Flattened `(grid_x.len(), grid_y.len())` row-major `[ix][iy]` → `ix * ny + iy`
     pub vectors: Vec<[f64; 2]>,
     pub cell_vectors: Vec<[f64; 2]>,
+}
+
+/// Parameters for [`compute_signature_umap_grid`] (Python `signature2gradient` + quiver scaling).
+#[derive(Clone, Debug)]
+pub struct SignatureUmapParams {
+    /// KNN count for interpolating signature onto grid points (`KNeighborsRegressor` default uniform mean).
+    pub n_knn: usize,
+    pub grid_scale: f64,
+    pub vector_scale: f64,
+    pub magnitude_threshold: f64,
+    /// Python uses `ref_flow = gradient * 2` after `normalize_gradient`.
+    pub gradient_gain: f64,
+}
+
+impl Default for SignatureUmapParams {
+    fn default() -> Self {
+        Self {
+            n_knn: 30,
+            grid_scale: 1.0,
+            vector_scale: 0.85,
+            magnitude_threshold: 0.0,
+            gradient_gain: 2.0,
+        }
+    }
+}
+
+fn build_grid_points_xy(grid_x: &[f64], grid_y: &[f64]) -> Vec<[f64; 2]> {
+    let nx = grid_x.len();
+    let ny = grid_y.len();
+    let mut out = Vec::with_capacity(nx * ny);
+    for ix in 0..nx {
+        for iy in 0..ny {
+            out.push([grid_x[ix], grid_y[iy]]);
+        }
+    }
+    out
+}
+
+/// Mean of `values` over the `k` nearest UMAP neighbors of each query point (uniform weights).
+fn knn_mean_on_embedding(
+    umap: &[[f64; 2]],
+    values: &[f64],
+    queries: &[[f64; 2]],
+    k: usize,
+) -> Vec<f64> {
+    let n = umap.len();
+    if n == 0 || queries.is_empty() {
+        return vec![0.0; queries.len()];
+    }
+    let points: Vec<[f64; 2]> = umap.iter().copied().collect();
+    let tree = ImmutableKdTree::<f64, 2>::new_from_slice(&points);
+    let k_take = k.max(1).min(n);
+    let k_query = NonZero::new(k_take).unwrap();
+    queries
+        .iter()
+        .map(|q| {
+            let nns = tree.nearest_n::<SquaredEuclidean>(q, k_query);
+            let mut s = 0.0_f64;
+            let mut c = 0_usize;
+            for nn in nns {
+                let j = nn.item as usize;
+                if j < values.len() {
+                    s += values[j];
+                    c += 1;
+                }
+            }
+            if c > 0 {
+                s / c as f64
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// Central / one-sided differences on a scalar field `vals[ix * ny + iy]` with physical grid spacing.
+fn gradient_2d_umap_physical(
+    vals: &[f64],
+    nx: usize,
+    ny: usize,
+    grid_x: &[f64],
+    grid_y: &[f64],
+) -> Vec<[f64; 2]> {
+    let idx = |ix: usize, iy: usize| ix * ny + iy;
+    let mut out = vec![[0.0_f64; 2]; nx * ny];
+    if nx == 0 || ny == 0 {
+        return out;
+    }
+    let vx = |ix: usize, iy: usize| vals[idx(ix, iy)];
+    for ix in 0..nx {
+        for iy in 0..ny {
+            let dsdx = if nx >= 2 {
+                if ix == 0 {
+                    let denom = (grid_x[1] - grid_x[0]).max(1e-18);
+                    (vx(1, iy) - vx(0, iy)) / denom
+                } else if ix + 1 == nx {
+                    let n1 = nx - 1;
+                    let denom = (grid_x[n1] - grid_x[n1 - 1]).max(1e-18);
+                    (vx(n1, iy) - vx(n1 - 1, iy)) / denom
+                } else {
+                    let denom = (grid_x[ix + 1] - grid_x[ix - 1]).max(1e-18);
+                    (vx(ix + 1, iy) - vx(ix - 1, iy)) / denom
+                }
+            } else {
+                0.0
+            };
+            let dsdy = if ny >= 2 {
+                if iy == 0 {
+                    let denom = (grid_y[1] - grid_y[0]).max(1e-18);
+                    (vx(ix, 1) - vx(ix, 0)) / denom
+                } else if iy + 1 == ny {
+                    let n1 = ny - 1;
+                    let denom = (grid_y[n1] - grid_y[n1 - 1]).max(1e-18);
+                    (vx(ix, n1) - vx(ix, n1 - 1)) / denom
+                } else {
+                    let denom = (grid_y[iy + 1] - grid_y[iy - 1]).max(1e-18);
+                    (vx(ix, iy + 1) - vx(ix, iy - 1)) / denom
+                }
+            } else {
+                0.0
+            };
+            out[idx(ix, iy)] = [dsdx, dsdy];
+        }
+    }
+    out
+}
+
+/// `VirtualTissue.normalize_gradient(..., method="sqrt")`.
+fn normalize_gradient_sqrt(grad: &mut [[f64; 2]]) {
+    for g in grad.iter_mut() {
+        let size = (g[0] * g[0] + g[1] * g[1]).sqrt();
+        let size_sq = size.sqrt();
+        let denom = if size_sq < 1e-18 { 1.0 } else { size_sq };
+        g[0] /= denom;
+        g[1] /= denom;
+    }
+}
+
+/// Sum of expression across columns → one scalar per cell (gene-set signature).
+pub fn signature_sum_per_cell(expr_sub: &Array2<f64>) -> Vec<f64> {
+    let n = expr_sub.nrows();
+    (0..n)
+        .map(|i| expr_sub.row(i).sum())
+        .collect()
+}
+
+/// Gradient of a KNN-smoothed gene-set signature on the same UMAP grid as [`compute_umap_transition_grid`].
+/// If `base_field` is `Some`, zero signature arrows where the base vector is (near) zero (Python `signature2gradient` mask).
+pub fn compute_signature_umap_grid(
+    umap: &[[f64; 2]],
+    signature_per_cell: &[f64],
+    base_field: Option<&[[f64; 2]]>,
+    params: &SignatureUmapParams,
+) -> TransitionGrid {
+    assert_eq!(umap.len(), signature_per_cell.len());
+    let (grid_x, grid_y) = umap_grid_axes(umap, params.grid_scale);
+    let nx = grid_x.len();
+    let ny = grid_y.len();
+    let queries = build_grid_points_xy(&grid_x, &grid_y);
+    let sig_on_grid = knn_mean_on_embedding(umap, signature_per_cell, &queries, params.n_knn);
+    let mut grad = gradient_2d_umap_physical(&sig_on_grid, nx, ny, &grid_x, &grid_y);
+    normalize_gradient_sqrt(&mut grad);
+    let gain = params.gradient_gain;
+    for g in &mut grad {
+        g[0] *= gain;
+        g[1] *= gain;
+    }
+    if let Some(base) = base_field {
+        if base.len() == grad.len() {
+            for (k, g) in grad.iter_mut().enumerate() {
+                let b = base[k];
+                if b[0] * b[0] + b[1] * b[1] < 1e-20 {
+                    *g = [0.0, 0.0];
+                }
+            }
+        }
+    }
+    let mut m_comp = 0.0_f64;
+    for w in &grad {
+        m_comp = m_comp.max(w[0].abs()).max(w[1].abs());
+    }
+    if m_comp > 1e-36 {
+        let s = params.vector_scale / m_comp;
+        for w in &mut grad {
+            w[0] *= s;
+            w[1] *= s;
+        }
+    }
+    if params.magnitude_threshold > 0.0 {
+        let t_sq = params.magnitude_threshold * params.magnitude_threshold;
+        for w in &mut grad {
+            if w[0] * w[0] + w[1] * w[1] < t_sq {
+                *w = [0.0, 0.0];
+            }
+        }
+    }
+    let cell_vectors: Vec<[f64; 2]> = signature_per_cell
+        .iter()
+        .map(|&s| [s, 0.0_f64])
+        .collect();
+    TransitionGrid {
+        grid_x,
+        grid_y,
+        vectors: grad,
+        cell_vectors,
+    }
 }
 
 pub fn round_delta_inplace(delta: &mut Array2<f64>, decimals: i32) {
@@ -509,22 +739,7 @@ pub fn compute_umap_transition_grid(
         project_sparse(umap, &p_sparse, params.unit_directions)
     };
 
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for p in umap {
-        min_x = min_x.min(p[0]);
-        max_x = max_x.max(p[0]);
-        min_y = min_y.min(p[1]);
-        max_y = max_y.max(p[1]);
-    }
-
-    let step_scale = mean_abs_diff_2d(umap);
-    let gs = 10.0 * params.grid_scale / step_scale;
-
-    let grid_x = grid_axes(min_x, max_x, gs);
-    let grid_y = grid_axes(min_y, max_y, gs);
+    let (grid_x, grid_y) = umap_grid_axes(umap, params.grid_scale);
 
     let mut field = aggregate_grid_cartography(&v_cell, umap, &grid_x, &grid_y);
 
@@ -600,6 +815,33 @@ mod tests {
 
     fn cell_mag(v: [f64; 2]) -> f64 {
         (v[0] * v[0] + v[1] * v[1]).sqrt()
+    }
+
+    #[test]
+    fn signature_umap_constant_field_near_zero_gradient() {
+        let umap: Vec<[f64; 2]> = (0..24)
+            .map(|i| [i as f64 * 0.12, ((i * 3) % 9) as f64 * 0.07])
+            .collect();
+        let n = umap.len();
+        let sig = vec![2.5_f64; n];
+        let p = SignatureUmapParams {
+            n_knn: 8,
+            grid_scale: 1.0,
+            vector_scale: 1.0,
+            magnitude_threshold: 0.0,
+            gradient_gain: 2.0,
+        };
+        let g = compute_signature_umap_grid(&umap, &sig, None, &p);
+        let max_mag = g
+            .vectors
+            .iter()
+            .map(|w| cell_mag(*w))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_mag < 1e-5,
+            "constant signature should give ~0 gradient, max_mag={}",
+            max_mag
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════

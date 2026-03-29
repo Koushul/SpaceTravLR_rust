@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ndarray::{Array2, Zip};
 use rayon::prelude::*;
@@ -83,8 +83,26 @@ pub fn perturb(
         lr_radii,
         None,
         None,
+        None,
     )
     .expect("cancel is only used by spatial viewer")
+}
+
+#[inline]
+fn report_perturb_step(
+    job_progress: Option<&Arc<AtomicU32>>,
+    job_message: Option<&Arc<Mutex<String>>>,
+    permille: u32,
+    message: &str,
+) {
+    if let Some(p) = job_progress {
+        p.store(permille.min(1000), Ordering::Relaxed);
+    }
+    if let Some(m) = job_message {
+        if let Ok(mut g) = m.lock() {
+            *g = message.to_string();
+        }
+    }
 }
 
 pub fn perturb_with_targets(
@@ -98,6 +116,7 @@ pub fn perturb_with_targets(
     config: &PerturbConfig,
     lr_radii: &HashMap<String, f64>,
     job_progress: Option<&Arc<AtomicU32>>,
+    job_message: Option<&Arc<Mutex<String>>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<PerturbResult, ()> {
     let n_cells = gene_mtx.nrows();
@@ -170,21 +189,34 @@ pub fn perturb_with_targets(
     let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
 
     let n_prop = config.n_propagation.max(1);
-    if let Some(p) = job_progress {
-        p.store(40, Ordering::Relaxed);
-    }
+    let n_prop_u = n_prop as u32;
+    const PROP_LO: u32 = 25;
+    const PROP_HI: u32 = 915;
+    let span = ((PROP_HI - PROP_LO) / n_prop_u).max(1u32);
+
+    report_perturb_step(
+        job_progress,
+        job_message,
+        15,
+        "GRN perturbation · building target δ…",
+    );
 
     for iter in 0..config.n_propagation {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(());
         }
-        if job_progress.is_none() {
+        if job_progress.is_none() && job_message.is_none() {
             eprintln!("  perturb iteration {}/{}", iter + 1, config.n_propagation);
         }
-        if let Some(p) = job_progress {
-            let v = ((iter + 1) as u32 * 860).saturating_div(n_prop as u32).min(860);
-            p.store(v.max(40), Ordering::Relaxed);
-        }
+        let iter_u = iter as u32;
+        let base = PROP_LO + iter_u * span;
+        let msg_prefix = format!("GRN propagation {}/{}", iter + 1, n_prop);
+        report_perturb_step(
+            job_progress,
+            job_message,
+            base,
+            &format!("{msg_prefix} · splash & derivatives"),
+        );
 
         // 1. Splash all trained genes (expression → f32 for splash / betabase RAM)
         let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
@@ -192,7 +224,7 @@ pub fn perturb_with_targets(
             gex_filtered.mapv(|v| v as f32),
             gene_names.to_vec(),
         );
-        let splashed = splash_all(
+        let splashed = compute_splash_all(
             bb,
             &rw_lr_for_splash,
             rw_tfligands_init,
@@ -203,6 +235,12 @@ pub fn perturb_with_targets(
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(());
         }
+        report_perturb_step(
+            job_progress,
+            job_message,
+            base + span.saturating_mul(1) / 5,
+            &format!("{msg_prefix} · spatial ligands (LR)"),
+        );
 
         // 2. Update gene expression
         gene_mtx_1 = gene_mtx + &delta_simulated;
@@ -217,6 +255,12 @@ pub fn perturb_with_targets(
             config.scale_factor,
             config.min_expression,
             config.ligand_grid_factor,
+        );
+        report_perturb_step(
+            job_progress,
+            job_message,
+            base + span.saturating_mul(2) / 5,
+            &format!("{msg_prefix} · spatial ligands (TFL)"),
         );
         let w_tfl_new = recompute_weighted_ligands(
             &gene_mtx_1,
@@ -246,6 +290,12 @@ pub fn perturb_with_targets(
         // 6. Replace ligand deltas with received-ligand deltas
         delta_simulated = &delta_simulated + &delta_rw - &delta_ligands;
 
+        report_perturb_step(
+            job_progress,
+            job_message,
+            base + span.saturating_mul(3) / 5,
+            &format!("{msg_prefix} · GRN step (δ → Δexpr)"),
+        );
         // 7. Perturb all cells: delta_y = splash_derivatives · delta_x
         delta_simulated = perturb_all_cells(gene_names, bb, &splashed, &delta_simulated);
 
@@ -271,11 +321,20 @@ pub fn perturb_with_targets(
                 delta_flat[idx] = val - gmtx_flat[idx];
             }
         }
+        report_perturb_step(
+            job_progress,
+            job_message,
+            (base + span).saturating_sub(1).min(PROP_HI),
+            &format!("{msg_prefix} · clip & sync"),
+        );
     }
 
-    if let Some(p) = job_progress {
-        p.store(900, Ordering::Relaxed);
-    }
+    report_perturb_step(
+        job_progress,
+        job_message,
+        930,
+        "GRN perturbation · assembling result…",
+    );
 
     let mut simulated = gene_mtx + &delta_simulated;
     for target in targets {
@@ -326,7 +385,8 @@ fn scatter_max_to_full(
     result
 }
 
-fn splash_all(
+/// Partial derivatives ∂(target)/∂(modulator) for every trained target (baseline WL + expression).
+pub fn compute_splash_all(
     bb: &Betabase,
     rw_ligands: &GeneMatrix,
     rw_tfligands: &GeneMatrix,
@@ -334,19 +394,49 @@ fn splash_all(
     beta_scale_factor: f32,
     beta_cap: Option<f32>,
 ) -> HashMap<String, GeneMatrix> {
-    bb.data
-        .iter()
-        .map(|(gene_name, bf)| {
-            let splash = bf.splash(
-                rw_ligands,
-                rw_tfligands,
-                gex_df,
-                beta_scale_factor,
-                beta_cap,
-            );
-            (gene_name.clone(), splash)
-        })
-        .collect()
+    compute_splash_all_progress(
+        bb,
+        rw_ligands,
+        rw_tfligands,
+        gex_df,
+        beta_scale_factor,
+        beta_cap,
+        None,
+    )
+}
+
+/// Like [`compute_splash_all`], optionally reporting coarse progress on `progress` (permille 0–1000).
+/// Updates are throttled (~≤30 calls) to avoid sync overhead on large target counts.
+pub fn compute_splash_all_progress(
+    bb: &Betabase,
+    rw_ligands: &GeneMatrix,
+    rw_tfligands: &GeneMatrix,
+    gex_df: &GeneMatrix,
+    beta_scale_factor: f32,
+    beta_cap: Option<f32>,
+    progress: Option<&std::sync::atomic::AtomicU32>,
+) -> HashMap<String, GeneMatrix> {
+    use std::sync::atomic::Ordering;
+    let n = bb.data.len().max(1);
+    let step = (n / 28).max(1);
+    let mut out = HashMap::with_capacity(bb.data.len());
+    for (i, (gene_name, bf)) in bb.data.iter().enumerate() {
+        let splash = bf.splash(
+            rw_ligands,
+            rw_tfligands,
+            gex_df,
+            beta_scale_factor,
+            beta_cap,
+        );
+        out.insert(gene_name.clone(), splash);
+        if let Some(p) = progress {
+            if i % step == 0 || i + 1 == n {
+                let v = 50u32 + ((i as u32 + 1) * 700 / n as u32);
+                p.store(v.min(750), Ordering::Relaxed);
+            }
+        }
+    }
+    out
 }
 
 /// For each gene with a trained model:

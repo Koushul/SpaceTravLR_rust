@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anndata::AnnData;
 use anndata::AnnDataOp;
@@ -16,26 +16,34 @@ use axum::routing::{get, get_service, post};
 use axum::Json;
 use axum::Router;
 use clap::Parser;
-use ndarray::Array2;
-use serde::{Deserialize, Serialize};
+use ndarray::{Array2, Axis};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use space_trav_lr_rust::adata_query::{
     cell_expression_map, cell_type_encoding, clusters_as_u32_le_bytes,
-    expression_profiles_for_cells, f32_vec_to_le_bytes, gene_expression_f32, genes_with_prefix,
-    obs_names, open_adata, spatial_obsm_key_used, spatial_xy,
-    spatial_xy_f32_interleaved, try_umap_xy, u16_vec_to_le_bytes, var_names,
+    expression_matrix_genes_subset, expression_profiles_for_cells, f32_vec_to_le_bytes,
+    gene_expression_f32, genes_with_prefix, obs_names, open_adata, spatial_obsm_key_used,
+    spatial_xy, spatial_xy_f32_interleaved, try_umap_xy, u16_vec_to_le_bytes, var_names,
 };
+use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use space_trav_lr_rust::network::{infer_species, GeneNetwork};
 use space_trav_lr_rust::betadata::{
-    betadata_collect_interactions_parallel, betadata_feather_per_cell_column,
-    betadata_feather_plottable_columns, betadata_feather_row_id_column,
-    betadata_feather_top_coefficients_for_selection, BetadataCollectAggregate,
-    CollectedInteraction, TopBetaCoefficient,
+    betadata_collect_interactions_parallel, betadata_feather_modulator_beta_means_for_cells,
+    betadata_feather_per_cell_column, betadata_feather_plottable_columns,
+    betadata_feather_row_id_column, betadata_feather_top_coefficients_for_selection,
+    betadata_pair_lr_parallel, BetadataCollectAggregate, CollectedInteraction, GeneMatrix,
+    PairLrBetaRow, TopBetaCoefficient,
 };
 use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_target_genes};
 use space_trav_lr_rust::config::{expand_user_path, SpaceshipConfig};
-use space_trav_lr_rust::perturb::{perturb_with_targets, PerturbConfig, PerturbResult, PerturbTarget};
+use space_trav_lr_rust::perturb::{
+    compute_splash_all_progress, perturb_with_targets, PerturbConfig, PerturbResult, PerturbTarget,
+};
 use space_trav_lr_rust::perturb_mode::PerturbRuntime;
-use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+use space_trav_lr_rust::transition_umap::{
+    compute_signature_umap_grid, compute_umap_transition_grid, signature_sum_per_cell,
+    SignatureUmapParams, TransitionGrid, TransitionUmapParams,
+};
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
@@ -46,7 +54,40 @@ const DEFAULT_GENE_SEARCH_LIMIT: usize = 500;
 const FULL_GENE_LIST_THRESHOLD: usize = 50_000;
 const MAX_TOP_BETA_INDICES: usize = 250_000;
 const MAX_UMAP_TRANSITION_CELLS: usize = 40_000;
+const MAX_SIGNATURE_GENES: usize = 128;
 const MAX_LR_NEIGHBORS_RADIUS: usize = 500;
+const MAX_RECEIVED_LIGAND_GENES: usize = 96;
+
+fn deserialize_usize_flex<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct U;
+    impl<'de> Visitor<'de> for U {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a non-negative whole number (JSON integer or float like 42.0)")
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<usize, E> {
+            usize::try_from(v).map_err(E::custom)
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<usize, E> {
+            if v < 0 {
+                return Err(E::custom("negative index"));
+            }
+            Ok(v as usize)
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<usize, E> {
+            if !v.is_finite() || v < 0.0 || v.fract() != 0.0 {
+                return Err(E::custom(
+                    "index must be a finite non-negative whole number (integers or e.g. 12.0)",
+                ));
+            }
+            Ok(v as usize)
+        }
+    }
+    deserializer.deserialize_any(U)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "spatial_viewer")]
@@ -87,6 +128,8 @@ struct AppDataset {
     run_toml: Option<PathBuf>,
     obs_names: Arc<Vec<String>>,
     clusters: Arc<Vec<usize>>,
+    /// Feather `Cluster` join strings (category names, not codes).
+    betadata_cluster_keys: Arc<Vec<String>>,
     spatial_key: String,
     spatial_f32: Arc<Vec<f32>>,
     umap_key: Option<String>,
@@ -103,6 +146,130 @@ struct AppDataset {
     betadata_row_id: Option<String>,
     perturb_runtime: Option<Arc<PerturbRuntime>>,
     perturb_load_error: Option<String>,
+}
+
+fn spatial_model_meta_from_runtime(rt: &PerturbRuntime) -> SpatialModelMeta {
+    let sc = &rt.cfg.spatial;
+    let sample: Vec<String> = rt
+        .rw_ligands_init
+        .col_names
+        .iter()
+        .take(80)
+        .cloned()
+        .collect();
+    SpatialModelMeta {
+        weighted_ligand_scale_factor: sc.weighted_ligand_scale_factor,
+        spatial_radius: sc.radius,
+        contact_distance: sc.contact_distance,
+        spatial_dim: sc.spatial_dim,
+        received_ligand_n_channels: rt.rw_ligands_init.col_names.len(),
+        received_ligand_columns_sample: sample,
+        tfl_ligand_n_channels: rt.rw_tfligands_init.col_names.len(),
+    }
+}
+
+fn aggregate_received_ligand_rows(mat: &Array2<f64>, mode: &str) -> anyhow::Result<Vec<f32>> {
+    let n = mat.nrows();
+    let k = mat.ncols();
+    anyhow::ensure!(k > 0, "no ligand columns");
+    let mut out = Vec::with_capacity(n);
+    match mode.to_ascii_lowercase().as_str() {
+        "sum" => {
+            for row in mat.axis_iter(Axis(0)) {
+                out.push(row.sum() as f32);
+            }
+        }
+        "max" => {
+            for row in mat.axis_iter(Axis(0)) {
+                let v = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                out.push(v as f32);
+            }
+        }
+        "mean" => {
+            let inv = 1.0 / k as f64;
+            for row in mat.axis_iter(Axis(0)) {
+                out.push((row.sum() * inv) as f32);
+            }
+        }
+        _ => anyhow::bail!("aggregate must be sum, max, or mean"),
+    }
+    Ok(out)
+}
+
+fn compute_received_ligand_from_adata(
+    adata: &AnnData<H5>,
+    layer: &str,
+    spatial_f32: &[f32],
+    var_names: &[String],
+    genes: &[String],
+    radius: f64,
+    scale: f64,
+    use_grid: bool,
+    grid_factor: f64,
+    aggregate: &str,
+) -> anyhow::Result<Vec<f32>> {
+    let n = spatial_f32.len() / 2;
+    let mut xy = Array2::<f64>::zeros((n, 2));
+    for i in 0..n {
+        xy[[i, 0]] = spatial_f32[i * 2] as f64;
+        xy[[i, 1]] = spatial_f32[i * 2 + 1] as f64;
+    }
+    let (lig_mat, _) = expression_matrix_genes_subset(adata, layer, genes, var_names)?;
+    anyhow::ensure!(
+        lig_mat.nrows() == n,
+        "expression rows {} != spatial n {}",
+        lig_mat.nrows(),
+        n
+    );
+    let received = if use_grid {
+        calculate_weighted_ligands_grid(&xy, &lig_mat, radius, scale, grid_factor)
+    } else {
+        calculate_weighted_ligands(&xy, &lig_mat, radius, scale)
+    };
+    aggregate_received_ligand_rows(&received, aggregate)
+}
+
+fn runtime_received_ligand_column(
+    rt: &PerturbRuntime,
+    gene: &str,
+    matrix: &str,
+) -> anyhow::Result<Vec<f32>> {
+    let gm = if matrix.eq_ignore_ascii_case("tfl") {
+        &rt.rw_tfligands_init
+    } else {
+        &rt.rw_ligands_init
+    };
+    let view = gm.col(gene).ok_or_else(|| {
+        anyhow::anyhow!(
+            "column {:?} not found in {} received-ligand matrix ({} channels)",
+            gene,
+            if matrix.eq_ignore_ascii_case("tfl") {
+                "TFL"
+            } else {
+                "LR"
+            },
+            gm.col_names.len()
+        )
+    })?;
+    Ok(view.iter().copied().collect())
+}
+
+fn cell_type_label_for_obs(ds: &AppDataset, obs_i: usize) -> Option<String> {
+    let bin = ds.cell_type_codes_bin.as_ref()?;
+    let o = obs_i.checked_mul(2)?;
+    if o + 2 > bin.len() {
+        return None;
+    }
+    let code = u16::from_le_bytes([bin[o], bin[o + 1]]);
+    if code == u16::MAX {
+        return Some("(unknown)".to_string());
+    }
+    Some(
+        ds.cell_type_categories
+            .get(code as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("(code {})", code)),
+    )
 }
 
 #[derive(Clone)]
@@ -122,6 +289,9 @@ struct AppState {
     /// After cancel, hide “perturbation loading” until a new load starts (blocking work may still finish).
     perturb_suppress_bg_loading_ui: Arc<AtomicBool>,
     perturb_progress_message: Arc<Mutex<String>>,
+    /// Splash network job: UI polls `GET /api/perturb/splash_progress` while POST splash_network runs.
+    splash_job_progress_permille: Arc<AtomicU32>,
+    splash_job_active: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -130,6 +300,19 @@ struct MetaBounds {
     max_x: f64,
     min_y: f64,
     max_y: f64,
+}
+
+/// Training spatial + received-ligand channel metadata (present when `perturb_ready`).
+#[derive(Clone, Serialize)]
+struct SpatialModelMeta {
+    weighted_ligand_scale_factor: f64,
+    spatial_radius: f64,
+    contact_distance: f64,
+    spatial_dim: usize,
+    received_ligand_n_channels: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    received_ligand_columns_sample: Vec<String>,
+    tfl_ligand_n_channels: usize,
 }
 
 #[derive(Serialize)]
@@ -161,6 +344,9 @@ struct MetaJson {
     perturb_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     perturb_progress_percent: Option<u8>,
+    /// Raw 0–1000 permille when a load or perturb job is active (finer than `perturb_progress_percent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perturb_progress_permille: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     perturb_progress_label: Option<String>,
     adata_path: String,
@@ -172,6 +358,8 @@ struct MetaJson {
     run_toml: Option<String>,
     #[serde(default)]
     dataset_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spatial_model: Option<SpatialModelMeta>,
 }
 
 #[derive(serde::Deserialize)]
@@ -207,9 +395,10 @@ struct TopBetasBody {
 
 #[derive(Deserialize)]
 struct CellContextBody {
+    #[serde(deserialize_with = "deserialize_usize_flex")]
     cell_index: usize,
     focus_gene: String,
-    #[serde(default = "default_neighbor_k")]
+    #[serde(default = "default_neighbor_k", deserialize_with = "deserialize_usize_flex")]
     neighbor_k: usize,
     #[serde(default)]
     tf_ligand_cutoff: f64,
@@ -221,6 +410,44 @@ struct CellContextBody {
     /// Euclidean radius in **same units as spatial coordinates** (e.g. pixels / µm).
     #[serde(default)]
     radius: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct ReceivedLigandBody {
+    /// `adata` (compute from expression + spatial) or `runtime` / `model` (slice training `GeneMatrix`).
+    #[serde(default = "default_rl_source")]
+    source: String,
+    #[serde(default)]
+    genes: Vec<String>,
+    /// `lr` (default) or `tfl` when source is runtime/model.
+    #[serde(default = "default_rl_matrix")]
+    matrix: String,
+    #[serde(default)]
+    radius: Option<f64>,
+    #[serde(default)]
+    scale_factor: Option<f64>,
+    #[serde(default = "default_rl_use_grid")]
+    use_grid: bool,
+    #[serde(default)]
+    grid_factor: Option<f64>,
+    #[serde(default = "default_rl_aggregate")]
+    aggregate: String,
+}
+
+fn default_rl_source() -> String {
+    "adata".to_string()
+}
+
+fn default_rl_matrix() -> String {
+    "lr".to_string()
+}
+
+fn default_rl_use_grid() -> bool {
+    true
+}
+
+fn default_rl_aggregate() -> String {
+    "sum".to_string()
 }
 
 fn default_neighbor_k() -> usize {
@@ -268,6 +495,10 @@ struct LrEdgeJson {
 struct NeighborContextJson {
     index: usize,
     distance_sq: f64,
+    /// Euclidean distance (√distance_sq) in spatial coordinate units.
+    distance: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cell_type: Option<String>,
     lr_edges: Vec<LrEdgeJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_support_score: Option<f64>,
@@ -588,6 +819,7 @@ fn meta_json(st: &AppState) -> MetaJson {
             perturb_loading: false,
             perturb_error: None,
             perturb_progress_percent: None,
+            perturb_progress_permille: None,
             perturb_progress_label: None,
             adata_path: String::new(),
             betadata_dir: String::new(),
@@ -600,6 +832,7 @@ fn meta_json(st: &AppState) -> MetaJson {
                 .as_ref()
                 .map(|p| p.display().to_string()),
             dataset_ready: false,
+            spatial_model: None,
         };
     };
     MetaJson {
@@ -642,6 +875,25 @@ fn meta_json(st: &AppState) -> MetaJson {
             };
             p.map(permille_to_percent)
         },
+        perturb_progress_permille: {
+            let job_on = st.perturb_job_active.load(Ordering::Relaxed);
+            let suppress = st.perturb_suppress_bg_loading_ui.load(Ordering::Relaxed);
+            let load_on = !suppress && st.perturb_bg_in_flight.load(Ordering::Relaxed);
+            let job_perm = st.perturb_job_progress_permille.load(Ordering::Relaxed);
+            let load_perm = st.perturb_load_progress_permille.load(Ordering::Relaxed);
+            let p = if job_on {
+                Some(job_perm)
+            } else if load_on {
+                Some(load_perm)
+            } else if job_perm > 0 {
+                Some(job_perm)
+            } else if !suppress && load_perm > 0 {
+                Some(load_perm)
+            } else {
+                None
+            };
+            p.filter(|&v| v > 0 && v <= 1000)
+        },
         perturb_progress_label: {
             let suppress = st.perturb_suppress_bg_loading_ui.load(Ordering::Relaxed);
             let load_on = !suppress && st.perturb_bg_in_flight.load(Ordering::Relaxed);
@@ -671,6 +923,10 @@ fn meta_json(st: &AppState) -> MetaJson {
         network_dir: ds.network_dir.as_ref().map(|p| p.display().to_string()),
         run_toml: ds.run_toml.as_ref().map(|p| p.display().to_string()),
         dataset_ready: true,
+        spatial_model: ds
+            .perturb_runtime
+            .as_ref()
+            .map(|rt| spatial_model_meta_from_runtime(rt)),
     }
 }
 
@@ -743,13 +999,33 @@ fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
     if let Some(ref k) = umap_key {
         tracing::info!("UMAP layout available (obsm['{}'])", k);
     }
-    let clusters = Arc::new(space_trav_lr_rust::adata_query::clusters_from_obs_column(
-        &adata,
+    let obs_df = adata.read_obs()?;
+    let clusters = Arc::new(space_trav_lr_rust::adata_query::clusters_from_obs_dataframe(
+        &obs_df,
         &inputs.cluster_annot,
     )?);
+    let betadata_key_col =
+        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&obs_df, &inputs.cluster_annot);
+    if betadata_key_col != inputs.cluster_annot {
+        tracing::info!(
+            "betadata feather join uses obs column {:?} (cluster_annot is {:?})",
+            betadata_key_col,
+            inputs.cluster_annot
+        );
+    }
+    let betadata_cluster_keys = Arc::new(
+        space_trav_lr_rust::betadata::betadata_cluster_keys_from_obs_dataframe(
+            &obs_df,
+            betadata_key_col.as_str(),
+        )?,
+    );
     anyhow::ensure!(
         onames.len() == clusters.len(),
         "cluster column length mismatch"
+    );
+    anyhow::ensure!(
+        onames.len() == betadata_cluster_keys.len(),
+        "betadata cluster keys length mismatch"
     );
     let clusters_bin = Arc::new(clusters_as_u32_le_bytes(clusters.as_ref()));
     let n_vars = adata.n_vars();
@@ -810,6 +1086,7 @@ fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         run_toml: inputs.run_toml,
         obs_names: onames,
         clusters,
+        betadata_cluster_keys,
         spatial_key,
         spatial_f32,
         umap_key,
@@ -932,6 +1209,8 @@ async fn api_cancel(State(state): State<SharedState>) -> impl IntoResponse {
     w.perturb_job_active.store(false, Ordering::SeqCst);
     w.perturb_job_progress_permille.store(0, Ordering::Relaxed);
     w.perturb_load_progress_permille.store(0, Ordering::Relaxed);
+    w.splash_job_active.store(false, Ordering::SeqCst);
+    w.splash_job_progress_permille.store(0, Ordering::Relaxed);
     if let Ok(mut m) = w.perturb_progress_message.lock() {
         *m = "Cancelled.".into();
     }
@@ -1032,6 +1311,120 @@ async fn api_gene_expression(
     Ok(binary_response(f32_vec_to_le_bytes(&vec)))
 }
 
+async fn api_received_ligand(
+    State(state): State<SharedState>,
+    Json(body): Json<ReceivedLigandBody>,
+) -> Result<Response, (StatusCode, String)> {
+    let st = state.read().await;
+    let ds = require_dataset(&st)?;
+    let n = ds.obs_names.len();
+    let path = ds.adata_path.clone();
+    let layer = ds.layer.clone();
+    let spatial = ds.spatial_f32.as_ref().clone();
+    let vn = ds.var_names.as_ref().clone();
+    let rt_opt = ds.perturb_runtime.clone();
+    drop(st);
+
+    let mut genes: Vec<String> = body
+        .genes
+        .iter()
+        .filter_map(|g| {
+            let t = g.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+        .collect();
+    genes.truncate(MAX_RECEIVED_LIGAND_GENES);
+
+    let source = body.source.to_ascii_lowercase();
+    let aggregate = body.aggregate.clone();
+    let matrix_key = body.matrix.clone();
+
+    let vec: Vec<f32> = if source == "runtime" || source == "model" {
+        let rt = rt_opt.ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Perturbation runtime not loaded; use --run-toml and wait until perturb_ready."
+                    .to_string(),
+            )
+        })?;
+        let col = genes.first().cloned().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "runtime/model source requires genes[0] = column name in the received-ligand matrix"
+                    .to_string(),
+            )
+        })?;
+        tokio::task::spawn_blocking(move || {
+            runtime_received_ligand_column(&*rt, &col, &matrix_key)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    } else {
+        if genes.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "adata source requires a non-empty genes list (ligand symbols in var)".into(),
+            ));
+        }
+        let radius = body.radius.unwrap_or(120.0);
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "radius must be finite and > 0 (spatial coordinate units)".into(),
+            ));
+        }
+        let scale = body.scale_factor.unwrap_or(1.0);
+        if !scale.is_finite() {
+            return Err((StatusCode::BAD_REQUEST, "scale_factor must be finite".into()));
+        }
+        let grid_factor = body.grid_factor.unwrap_or(0.5);
+        if !grid_factor.is_finite() || grid_factor <= 0.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "grid_factor must be finite and > 0".into(),
+            ));
+        }
+        let use_grid = body.use_grid;
+        tokio::task::spawn_blocking(move || {
+            let adata = open_adata(path.to_string_lossy().as_ref())
+                .map_err(|e| format!("open adata: {}", e))?;
+            compute_received_ligand_from_adata(
+                &adata,
+                &layer,
+                &spatial,
+                vn.as_ref(),
+                &genes,
+                radius,
+                scale,
+                use_grid,
+                grid_factor,
+                &aggregate,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?
+    };
+
+    if vec.len() != n {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "received_ligand length {} != n_obs {} (check adata vs spatial alignment)",
+                vec.len(),
+                n
+            ),
+        ));
+    }
+    Ok(binary_response(f32_vec_to_le_bytes(&vec)))
+}
+
 async fn api_betadata_genes(
     State(state): State<SharedState>,
 ) -> Result<axum::Json<Vec<String>>, (StatusCode, String)> {
@@ -1094,11 +1487,11 @@ async fn api_betadata_values(
         ));
     }
     let obs = ds.obs_names.clone();
-    let clusters = ds.clusters.clone();
+    let cluster_keys = Arc::clone(&ds.betadata_cluster_keys);
     let path_s = path.to_string_lossy().to_string();
     let column = q.column;
     let vec = tokio::task::spawn_blocking(move || {
-        betadata_feather_per_cell_column(&path_s, &column, &obs, &clusters)
+        betadata_feather_per_cell_column(&path_s, &column, &obs, cluster_keys.as_ref())
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1144,14 +1537,14 @@ async fn api_betadata_top(
         body.top_k.min(100)
     };
     let obs = ds.obs_names.clone();
-    let clusters = ds.clusters.clone();
+    let cluster_keys = Arc::clone(&ds.betadata_cluster_keys);
     let path_s = path.to_string_lossy().to_string();
     let indices = body.indices;
     let out = tokio::task::spawn_blocking(move || {
         betadata_feather_top_coefficients_for_selection(
             &path_s,
             &obs,
-            &clusters,
+            cluster_keys.as_ref(),
             &indices,
             top_k,
         )
@@ -1215,7 +1608,8 @@ async fn api_betadata_collect_interactions(
     let (
         bd_dir,
         obs_names,
-        clusters,
+        betadata_ck,
+        clusters_usize,
         cell_type_categories,
         cell_type_bin,
         n_obs,
@@ -1231,6 +1625,7 @@ async fn api_betadata_collect_interactions(
         (
             bd.to_string_lossy().into_owned(),
             Arc::clone(&ds.obs_names),
+            Arc::clone(&ds.betadata_cluster_keys),
             Arc::clone(&ds.clusters),
             Arc::clone(&ds.cell_type_categories),
             ds.cell_type_codes_bin.clone(),
@@ -1292,7 +1687,7 @@ async fn api_betadata_collect_interactions(
                 )
             })?;
             (0..n_obs)
-                .map(|i| clusters[i] == cid)
+                .map(|i| clusters_usize[i] == cid)
                 .collect()
         }
         _ => {
@@ -1326,7 +1721,7 @@ async fn api_betadata_collect_interactions(
     }
 
     let obs = (*obs_names).clone();
-    let cl = (*clusters).clone();
+    let ck = (*betadata_ck).clone();
     let dir = bd_dir.clone();
     let mask_clone = mask.clone();
     let mut interactions = tokio::task::spawn_blocking(move || {
@@ -1334,7 +1729,7 @@ async fn api_betadata_collect_interactions(
             &dir,
             &genes,
             &obs,
-            &cl,
+            &ck,
             &mask_clone,
             mode,
         )
@@ -1355,6 +1750,118 @@ async fn api_betadata_collect_interactions(
         n_reported,
         n_total,
         capped,
+    }))
+}
+
+fn default_pair_lr_top_n() -> usize {
+    25
+}
+
+#[derive(Deserialize)]
+struct PairLrBody {
+    #[serde(deserialize_with = "deserialize_usize_flex")]
+    cell_a: usize,
+    #[serde(deserialize_with = "deserialize_usize_flex")]
+    cell_b: usize,
+    #[serde(
+        default = "default_pair_lr_top_n",
+        deserialize_with = "deserialize_usize_flex"
+    )]
+    top_n: usize,
+    #[serde(
+        default = "default_collect_max_genes",
+        deserialize_with = "deserialize_usize_flex"
+    )]
+    max_genes: usize,
+    #[serde(default)]
+    gene_subset: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct PairLrResponse {
+    cell_a: usize,
+    cell_b: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    betadata_row_id: Option<String>,
+    rows: Vec<PairLrBetaRow>,
+    n_genes_scanned: usize,
+}
+
+async fn api_betadata_pair_lr(
+    State(state): State<SharedState>,
+    Json(body): Json<PairLrBody>,
+) -> Result<Json<PairLrResponse>, (StatusCode, String)> {
+    if body.cell_a == body.cell_b {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cell_a and cell_b must differ".into(),
+        ));
+    }
+    let top_n = body.top_n.clamp(1, 200);
+    let max_genes = body.max_genes.clamp(1, 4096);
+
+    let (bd_dir, obs_names, betadata_ck, row_id) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let Some(ref bd) = ds.betadata_dir else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "No betadata directory configured".into(),
+            ));
+        };
+        if body.cell_a >= ds.obs_names.len() || body.cell_b >= ds.obs_names.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "cell index out of range (n_obs = {})",
+                    ds.obs_names.len()
+                ),
+            ));
+        };
+        (
+            bd.to_string_lossy().into_owned(),
+            Arc::clone(&ds.obs_names),
+            Arc::clone(&ds.betadata_cluster_keys),
+            ds.betadata_row_id.clone(),
+        )
+    };
+
+    let mut genes = if let Some(gs) = body.gene_subset {
+        gs
+    } else {
+        list_betadata_target_genes(&bd_dir).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+    genes.retain(|g| !g.trim().is_empty());
+    genes.truncate(max_genes);
+
+    if genes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no target genes to scan (empty gene list)".into(),
+        ));
+    }
+
+    let obs = (*obs_names).clone();
+    let ck = (*betadata_ck).clone();
+    let dir = bd_dir.clone();
+    let ca = body.cell_a;
+    let cb = body.cell_b;
+    let n_genes = genes.len();
+    let mut rows = tokio::task::spawn_blocking(move || {
+        betadata_pair_lr_parallel(&dir, &genes, &obs, &ck, ca, cb)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    rows.truncate(top_n);
+
+    Ok(Json(PairLrResponse {
+        cell_a: body.cell_a,
+        cell_b: body.cell_b,
+        betadata_row_id: row_id,
+        rows,
+        n_genes_scanned: n_genes,
     }))
 }
 
@@ -1540,9 +2047,13 @@ async fn api_network_cell_context(
             .map(|e| e.support_score)
             .fold(0.0_f64, f64::max);
         let max_support_score = (max_support_score > 0.0).then_some(max_support_score);
+        let distance = d2.sqrt();
+        let cell_type = cell_type_label_for_obs(ds, nj);
         neighbors_out.push(NeighborContextJson {
             index: nj,
             distance_sq: d2,
+            distance,
+            cell_type,
             lr_edges,
             max_support_score,
         });
@@ -1598,7 +2109,7 @@ struct PerturbPreviewBody {
     n_propagation: Option<usize>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PerturbScopeBody {
     #[default]
@@ -1618,17 +2129,13 @@ fn perturb_cfg_for_request(base: &PerturbConfig, n_propagation: Option<usize>) -
     c
 }
 
-fn build_perturb_targets(
+fn cell_indices_for_perturb_scope(
     st: &AppDataset,
-    body: &PerturbPreviewBody,
+    scope: &PerturbScopeBody,
     n_obs: usize,
-) -> Result<Vec<PerturbTarget>, (StatusCode, String)> {
-    let gene = body.gene.trim();
-    if gene.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "gene is empty".into()));
-    }
-    let cell_indices = match &body.scope {
-        PerturbScopeBody::All => None,
+) -> Result<Option<Vec<usize>>, (StatusCode, String)> {
+    match scope {
+        PerturbScopeBody::All => Ok(None),
         PerturbScopeBody::Indices { indices } => {
             if indices.is_empty() {
                 return Err((
@@ -1648,7 +2155,7 @@ fn build_perturb_targets(
             }
             v.sort_unstable();
             v.dedup();
-            Some(v)
+            Ok(Some(v))
         }
         PerturbScopeBody::CellType { category } => {
             let bin = st.cell_type_codes_bin.as_ref().ok_or_else(|| {
@@ -1678,7 +2185,7 @@ fn build_perturb_targets(
                     "no cells for that cell type category".into(),
                 ));
             }
-            Some(idx)
+            Ok(Some(idx))
         }
         PerturbScopeBody::CellTypeName { name } => {
             let name = name.trim();
@@ -1725,7 +2232,7 @@ fn build_perturb_targets(
                     format!("no cells with annotation {:?}", name),
                 ));
             }
-            Some(idx)
+            Ok(Some(idx))
         }
         PerturbScopeBody::Cluster { cluster_id } => {
             let idx: Vec<usize> = st
@@ -1740,14 +2247,534 @@ fn build_perturb_targets(
                     format!("no cells with cluster id {}", cluster_id),
                 ));
             }
-            Some(idx)
+            Ok(Some(idx))
         }
-    };
+    }
+}
+
+fn build_perturb_targets(
+    st: &AppDataset,
+    body: &PerturbPreviewBody,
+    n_obs: usize,
+) -> Result<Vec<PerturbTarget>, (StatusCode, String)> {
+    let gene = body.gene.trim();
+    if gene.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "gene is empty".into()));
+    }
+    let cell_indices = cell_indices_for_perturb_scope(st, &body.scope, n_obs)?;
     Ok(vec![PerturbTarget {
         gene: gene.to_string(),
         desired_expr: body.desired_expr,
         cell_indices,
     }])
+}
+
+fn mask_from_cell_selection(n_obs: usize, cell_indices: Option<Vec<usize>>) -> Vec<bool> {
+    match cell_indices {
+        None => vec![true; n_obs],
+        Some(idx) => {
+            let mut m = vec![false; n_obs];
+            for i in idx {
+                if i < n_obs {
+                    m[i] = true;
+                }
+            }
+            m
+        }
+    }
+}
+
+fn count_true_mask(m: &[bool]) -> usize {
+    m.iter().filter(|&&x| x).count()
+}
+
+fn mean_splash_col(splash: &GeneMatrix, col: usize, mask: &[bool]) -> f32 {
+    let colv = splash.data.column(col);
+    let mut s = 0.0f64;
+    let mut n = 0usize;
+    for (i, &on) in mask.iter().enumerate() {
+        if on && i < colv.len() {
+            s += f64::from(colv[i]);
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        (s / n as f64) as f32
+    }
+}
+
+fn plain_modulator_name(s: &str) -> &str {
+    s.strip_prefix("beta_").unwrap_or(s)
+}
+
+fn splash_directed_bfs_path(
+    adj: &HashMap<String, Vec<(String, f32)>>,
+    start: &str,
+    goal: &str,
+    max_steps: usize,
+) -> Option<Vec<String>> {
+    if start == goal {
+        return Some(vec![start.to_string()]);
+    }
+    let mut q = VecDeque::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut parent: HashMap<String, String> = HashMap::new();
+    q.push_back((start.to_string(), 0usize));
+    visited.insert(start.to_string());
+    while let Some((u, d)) = q.pop_front() {
+        if u == goal {
+            let mut out = vec![goal.to_string()];
+            let mut cur = goal.to_string();
+            while cur != start {
+                let p = parent.get(&cur)?.clone();
+                out.push(p.clone());
+                cur = p;
+            }
+            out.reverse();
+            return Some(out);
+        }
+        if d >= max_steps {
+            continue;
+        }
+        for (v, _) in adj.get(&u).map(|x| x.as_slice()).unwrap_or(&[]) {
+            if visited.contains(v) {
+                continue;
+            }
+            visited.insert(v.clone());
+            parent.insert(v.clone(), u.clone());
+            q.push_back((v.clone(), d + 1));
+        }
+    }
+    None
+}
+
+fn undirected_adj_from_edges(edges: &[(String, String, f32)]) -> HashMap<String, Vec<String>> {
+    let mut g: HashMap<String, Vec<String>> = HashMap::new();
+    for (a, b, _) in edges {
+        g.entry(a.clone()).or_default().push(b.clone());
+        g.entry(b.clone()).or_default().push(a.clone());
+    }
+    g
+}
+
+fn nodes_within_undirected_hops(
+    sources: &HashSet<String>,
+    und: &HashMap<String, Vec<String>>,
+    max_hops: u32,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    let mut q = VecDeque::new();
+    for s in sources {
+        if out.insert(s.clone()) {
+            q.push_back((s.clone(), 0u32));
+        }
+    }
+    while let Some((u, h)) = q.pop_front() {
+        if h < max_hops {
+            for v in und.get(&u).map(|x| x.as_slice()).unwrap_or(&[]) {
+                if out.insert(v.clone()) {
+                    q.push_back((v.clone(), h + 1));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn node_incident_strength(edges: &[(String, String, f32)]) -> HashMap<String, f32> {
+    let mut m: HashMap<String, f32> = HashMap::new();
+    for (a, b, w) in edges {
+        let t = w.abs();
+        *m.entry(a.clone()).or_insert(0.0) += t;
+        *m.entry(b.clone()).or_insert(0.0) += t;
+    }
+    m
+}
+
+fn trim_nodes_to_budget(
+    candidates: HashSet<String>,
+    must_keep: HashSet<String>,
+    max_n: usize,
+    strength: &HashMap<String, f32>,
+) -> HashSet<String> {
+    if candidates.len() <= max_n {
+        return candidates;
+    }
+    let mut kept: HashSet<String> = must_keep
+        .intersection(&candidates)
+        .cloned()
+        .collect();
+    let mut rest: Vec<String> = candidates.difference(&kept).cloned().collect();
+    rest.sort_by(|a, b| {
+        let wa = strength.get(a).copied().unwrap_or(0.0);
+        let wb = strength.get(b).copied().unwrap_or(0.0);
+        wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for n in rest {
+        if kept.len() >= max_n {
+            break;
+        }
+        kept.insert(n);
+    }
+    kept
+}
+
+#[derive(Serialize)]
+struct SplashNetworkNode {
+    id: String,
+    on_path: bool,
+    role: String,
+}
+
+#[derive(Serialize)]
+struct SplashNetworkLink {
+    source: String,
+    target: String,
+    weight: f32,
+    abs_weight: f32,
+    /// Mean β for this modulator in the **target** gene's betadata row, over the same cells as splash scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beta_mean: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct SplashNetworkResponse {
+    gene_a: String,
+    gene_b: String,
+    n_cells_used: usize,
+    path: Option<Vec<String>>,
+    path_found: bool,
+    nodes: Vec<SplashNetworkNode>,
+    links: Vec<SplashNetworkLink>,
+    message: Option<String>,
+    surround_hops: u32,
+    max_nodes: usize,
+}
+
+fn compute_splash_network(
+    rt: &PerturbRuntime,
+    gene_a: &str,
+    gene_b: &str,
+    mask: &[bool],
+    surround_hops: u32,
+    max_nodes: usize,
+    progress: Option<Arc<AtomicU32>>,
+) -> Result<SplashNetworkResponse, String> {
+    let n_used = count_true_mask(mask);
+    if n_used == 0 {
+        return Err("no cells in scope".into());
+    }
+    if !rt.bb.data.contains_key(gene_b) {
+        return Err(format!(
+            "gene_b {:?} is not a trained target (no betabase model); pick a gene with *_betadata.feather",
+            gene_b
+        ));
+    }
+    if let Some(p) = progress.as_ref() {
+        p.store(5, Ordering::Relaxed);
+    }
+    let gex_f32 = rt.gene_mtx.mapv(|v| v as f32);
+    let gex_df = GeneMatrix::new(gex_f32, rt.gene_names.clone());
+    let splashed = compute_splash_all_progress(
+        &rt.bb,
+        &rt.rw_ligands_init,
+        &rt.rw_tfligands_init,
+        &gex_df,
+        rt.perturb_cfg.beta_scale_factor as f32,
+        rt.perturb_cfg.beta_cap.map(|c| c as f32),
+        progress.as_deref(),
+    );
+    if let Some(p) = progress.as_ref() {
+        p.store(760, Ordering::Relaxed);
+    }
+    let n_targets = splashed.len().max(1);
+    let tgt_step = (n_targets / 22).max(1);
+    let mut max_abs = 0.0f32;
+    let mut raw_edges: Vec<(String, String, f32)> = Vec::new();
+    for (ti, (target, mat)) in splashed.iter().enumerate() {
+        for (j, mod_col) in mat.col_names.iter().enumerate() {
+            let w = mean_splash_col(mat, j, mask);
+            max_abs = max_abs.max(w.abs());
+            let src = plain_modulator_name(mod_col).to_string();
+            raw_edges.push((src, target.clone(), w));
+        }
+        if let Some(p) = progress.as_ref() {
+            if ti % tgt_step == 0 || ti + 1 == n_targets {
+                let v = 760u32 + ((ti as u32 + 1) * 120 / n_targets as u32);
+                p.store(v.min(880), Ordering::Relaxed);
+            }
+        }
+    }
+    let eps = (max_abs * 1e-5f32).max(1e-12f32);
+    let edges: Vec<(String, String, f32)> = raw_edges
+        .into_iter()
+        .filter(|(_, _, w)| w.abs() > eps)
+        .collect();
+    let strength = node_incident_strength(&edges);
+    let mut adj: HashMap<String, Vec<(String, f32)>> = HashMap::new();
+    for (a, b, w) in &edges {
+        adj.entry(a.clone()).or_default().push((b.clone(), *w));
+    }
+    let path = splash_directed_bfs_path(&adj, gene_a, gene_b, 16);
+    let path_found = path.is_some();
+    let mut path_set: HashSet<String> = HashSet::new();
+    if let Some(p) = &path {
+        for n in p {
+            path_set.insert(n.clone());
+        }
+    } else {
+        path_set.insert(gene_a.to_string());
+        path_set.insert(gene_b.to_string());
+    }
+    let und = undirected_adj_from_edges(&edges);
+    let expanded = nodes_within_undirected_hops(&path_set, &und, surround_hops);
+    let must_keep: HashSet<String> = path_set.intersection(&expanded).cloned().collect();
+    let final_nodes = trim_nodes_to_budget(expanded, must_keep, max_nodes, &strength);
+    let mut links: Vec<SplashNetworkLink> = Vec::new();
+    for (a, b, w) in &edges {
+        if final_nodes.contains(a) && final_nodes.contains(b) {
+            links.push(SplashNetworkLink {
+                source: a.clone(),
+                target: b.clone(),
+                weight: *w,
+                abs_weight: w.abs(),
+                beta_mean: None,
+            });
+        }
+    }
+    links.sort_by(|x, y| {
+        y.abs_weight
+            .partial_cmp(&x.abs_weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(p) = progress.as_ref() {
+        p.store(910, Ordering::Relaxed);
+    }
+    let path_ids: HashSet<String> = path
+        .as_ref()
+        .map(|p| p.iter().cloned().collect())
+        .unwrap_or_default();
+    let mut nodes_out: Vec<SplashNetworkNode> = final_nodes
+        .iter()
+        .map(|id| {
+            let on_path = path_ids.contains(id);
+            let role = if id == gene_a {
+                "source"
+            } else if id == gene_b {
+                "sink"
+            } else if on_path {
+                "path"
+            } else {
+                "context"
+            };
+            SplashNetworkNode {
+                id: id.clone(),
+                on_path,
+                role: role.into(),
+            }
+        })
+        .collect();
+    nodes_out.sort_by(|a, b| a.id.cmp(&b.id));
+    let message = if !path_found {
+        Some(format!(
+            "No directed splash path from {} to {} within 16 hops (showing {}-hop neighborhood around {{A,B}} in the undirected derivative graph).",
+            gene_a, gene_b, surround_hops
+        ))
+    } else {
+        None
+    };
+    Ok(SplashNetworkResponse {
+        gene_a: gene_a.to_string(),
+        gene_b: gene_b.to_string(),
+        n_cells_used: n_used,
+        path,
+        path_found,
+        nodes: nodes_out,
+        links,
+        message,
+        surround_hops,
+        max_nodes,
+    })
+}
+
+fn enrich_splash_response_with_betadata(
+    ds: &AppDataset,
+    mask: &[bool],
+    resp: &mut SplashNetworkResponse,
+) {
+    let Some(ref bd) = ds.betadata_dir else {
+        return;
+    };
+    let obs = ds.obs_names.as_ref();
+    let cluster_keys = ds.betadata_cluster_keys.as_ref();
+    let cell_indices: Vec<usize> = mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (*m).then_some(i))
+        .collect();
+    if cell_indices.is_empty() {
+        return;
+    }
+    let dir = bd.to_string_lossy().to_string();
+
+    let mut by_target: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, link) in resp.links.iter().enumerate() {
+        by_target
+            .entry(link.target.clone())
+            .or_default()
+            .push(i);
+    }
+
+    for (target, idxs) in by_target {
+        let path = betadata_feather_path(&dir, &target);
+        if !path.is_file() {
+            continue;
+        }
+        let path_s = path.to_string_lossy().into_owned();
+        let mods: Vec<String> = idxs.iter().map(|&li| resp.links[li].source.clone()).collect();
+        let means = match betadata_feather_modulator_beta_means_for_cells(
+            &path_s,
+            &mods,
+            obs.as_ref(),
+            cluster_keys.as_ref(),
+            &cell_indices,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("splash betadata enrich target {}: {}", target, e);
+                continue;
+            }
+        };
+        for (j, &link_idx) in idxs.iter().enumerate() {
+            if let Some(m) = means.get(j).copied().flatten() {
+                resp.links[link_idx].beta_mean = Some(m as f32);
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SplashNetworkBody {
+    gene_a: String,
+    gene_b: String,
+    #[serde(default)]
+    scope: PerturbScopeBody,
+    #[serde(default = "default_splash_surround_hops")]
+    surround_hops: u32,
+    #[serde(default = "default_splash_max_nodes")]
+    max_nodes: usize,
+}
+
+fn default_splash_surround_hops() -> u32 {
+    1
+}
+
+fn default_splash_max_nodes() -> usize {
+    24
+}
+
+#[derive(Serialize)]
+struct SplashProgressJson {
+    active: bool,
+    permille: u32,
+}
+
+async fn api_splash_progress(State(state): State<SharedState>) -> Json<SplashProgressJson> {
+    let st = state.read().await;
+    Json(SplashProgressJson {
+        active: st.splash_job_active.load(Ordering::Relaxed),
+        permille: st.splash_job_progress_permille.load(Ordering::Relaxed),
+    })
+}
+
+async fn api_perturb_splash_network(
+    State(state): State<SharedState>,
+    Json(body): Json<SplashNetworkBody>,
+) -> Result<Json<SplashNetworkResponse>, (StatusCode, String)> {
+    let gene_a = body.gene_a.trim().to_string();
+    let gene_b = body.gene_b.trim().to_string();
+    if gene_a.is_empty() || gene_b.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "gene_a and gene_b required".into()));
+    }
+    if gene_a == gene_b {
+        return Err((StatusCode::BAD_REQUEST, "gene_a and gene_b must differ".into()));
+    }
+    let surround_hops = body.surround_hops.min(4);
+    let max_nodes = body.max_nodes.clamp(6, 64);
+    let (rt, mask, splash_prog, splash_active) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = Arc::clone(perturb_runtime_or_status(ds)?);
+        let n_obs = ds.obs_names.len();
+        let cell_sel = cell_indices_for_perturb_scope(ds, &body.scope, n_obs)?;
+        let mask = mask_from_cell_selection(n_obs, cell_sel);
+        let n_used = count_true_mask(&mask);
+        if n_used == 0 {
+            return Err((StatusCode::BAD_REQUEST, "no cells in scope".into()));
+        }
+        let vn: HashSet<&str> = rt.gene_names.iter().map(|s| s.as_str()).collect();
+        if !vn.contains(gene_a.as_str()) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene_a {:?} not in model var_names", gene_a),
+            ));
+        }
+        if !vn.contains(gene_b.as_str()) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene_b {:?} not in model var_names", gene_b),
+            ));
+        }
+        (
+            rt,
+            mask,
+            Arc::clone(&st.splash_job_progress_permille),
+            Arc::clone(&st.splash_job_active),
+        )
+    };
+    splash_active.store(true, Ordering::SeqCst);
+    splash_prog.store(0, Ordering::Relaxed);
+    let mask_for_betadata = mask.clone();
+    let ga = gene_a.clone();
+    let gb = gene_b.clone();
+    let prog_for_block = Arc::clone(&splash_prog);
+    let block_result = tokio::task::spawn_blocking(move || {
+        compute_splash_network(
+            &*rt,
+            &ga,
+            &gb,
+            &mask,
+            surround_hops,
+            max_nodes,
+            Some(prog_for_block),
+        )
+    })
+    .await;
+    let mut res = match block_result {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            splash_active.store(false, Ordering::SeqCst);
+            splash_prog.store(0, Ordering::Relaxed);
+            return Err((StatusCode::BAD_REQUEST, e));
+        }
+        Err(e) => {
+            splash_active.store(false, Ordering::SeqCst);
+            splash_prog.store(0, Ordering::Relaxed);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        }
+    };
+    splash_prog.store(940, Ordering::Relaxed);
+    {
+        let st = state.read().await;
+        if let Ok(ds) = require_dataset(&st) {
+            enrich_splash_response_with_betadata(ds, &mask_for_betadata, &mut res);
+        }
+    }
+    splash_prog.store(1000, Ordering::Relaxed);
+    splash_active.store(false, Ordering::SeqCst);
+    Ok(Json(res))
 }
 
 async fn api_perturb_preview(
@@ -1799,6 +2826,7 @@ async fn api_perturb_preview(
     let job_active_move = job_active.clone();
     let cancel_move = cancel.clone();
     let job_p_block = Arc::clone(&job_p);
+    let job_msg_block = Arc::clone(&job_msg);
     let vec_result = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, ()> {
         let _guard = PerturbJobGuard(job_active_move);
         let result = perturb_with_targets(
@@ -1812,6 +2840,7 @@ async fn api_perturb_preview(
             &cfg,
             &rt.lr_radii,
             Some(&job_p_block),
+            Some(&job_msg_block),
             Some(&*cancel_move),
         )?;
         job_p_block.store(1000, Ordering::Relaxed);
@@ -1899,6 +2928,215 @@ fn default_full_graph_max_cells() -> usize {
     4096
 }
 
+fn tmp_umap_signature_svg_path(label: &str) -> PathBuf {
+    let safe: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = format!("spacetravlr_umap_signature_{safe}_{ms}.svg");
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp").join(name)
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join(name)
+    }
+}
+
+fn tmp_umap_quiver_svg_path(gene: &str) -> PathBuf {
+    let safe: String = gene
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = format!("spacetravlr_umap_quiver_{safe}_{ms}.svg");
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp").join(name)
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join(name)
+    }
+}
+
+fn svg_escape_text(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
+/// Matches default **Quiver display** sliders in `web/spatial_viewer/src/main.ts` (vis 185%, head 28%, stride 1).
+fn write_umap_quiver_svg(path: &Path, grid: &TransitionGrid, title: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    const VIS_SCALE: f64 = 1.85;
+    const HEAD_FRAC: f64 = 0.28_f64;
+    const STRIDE: usize = 1;
+    const STROKE_SHAFT_FRAC: f64 = 0.0020;
+    const STROKE_HEAD_FRAC: f64 = 0.0026;
+
+    let nx = grid.grid_x.len();
+    let ny = grid.grid_y.len();
+    if nx == 0 || ny == 0 || grid.vectors.len() != nx * ny {
+        return Ok(());
+    }
+
+    #[derive(Clone, Copy)]
+    struct Seg {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        head: bool,
+    }
+    let mut segs: Vec<Seg> = Vec::new();
+
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    let mut bump = |x: f64, y: f64| {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    };
+
+    for ix in (0..nx).step_by(STRIDE) {
+        let gx = grid.grid_x[ix];
+        for iy in (0..ny).step_by(STRIDE) {
+            let gy = grid.grid_y[iy];
+            let k = ix * ny + iy;
+            let u = grid.vectors[k][0] * VIS_SCALE;
+            let v = grid.vectors[k][1] * VIS_SCALE;
+            let len = (u * u + v * v).sqrt();
+            if len < 1e-12 {
+                continue;
+            }
+            let dx = u / len;
+            let dy = v / len;
+            let hl = (len * HEAD_FRAC).min(len * 0.98);
+            let tx = gx + u;
+            let ty = gy + v;
+            let bx = tx - hl * dx;
+            let by = ty - hl * dy;
+            let px = -dy;
+            let py = dx;
+            let hw = hl * 0.48;
+            let lx = bx + hw * px;
+            let ly = by + hw * py;
+            let rx = bx - hw * px;
+            let ry = by - hw * py;
+
+            bump(gx, gy);
+            bump(bx, by);
+            bump(tx, ty);
+            bump(lx, ly);
+            bump(rx, ry);
+
+            segs.push(Seg {
+                x1: gx,
+                y1: gy,
+                x2: bx,
+                y2: by,
+                head: false,
+            });
+            segs.push(Seg {
+                x1: lx,
+                y1: ly,
+                x2: tx,
+                y2: ty,
+                head: true,
+            });
+            segs.push(Seg {
+                x1: rx,
+                y1: ry,
+                x2: tx,
+                y2: ty,
+                head: true,
+            });
+        }
+    }
+
+    if segs.is_empty() {
+        return Ok(());
+    }
+
+    let span = (max_x - min_x).max(max_y - min_y).max(1e-9);
+    let pad = 0.06 * span;
+    min_x -= pad;
+    max_x += pad;
+    min_y -= pad;
+    max_y += pad;
+    let w = (max_x - min_x).max(1e-9);
+    let h = (max_y - min_y).max(1e-9);
+    let stroke_shaft = STROKE_SHAFT_FRAC * w.max(h);
+    let stroke_head = STROKE_HEAD_FRAC * w.max(h);
+
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(f, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
+    writeln!(
+        f,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {w} {h}" width="960" height="960">"#,
+    )?;
+    writeln!(
+        f,
+        r#"<title>{}</title>"#,
+        svg_escape_text(title)
+    )?;
+    writeln!(
+        f,
+        r#"<rect x="{min_x}" y="{min_y}" width="{w}" height="{h}" fill='#12161c'/>"#
+    )?;
+    writeln!(
+        f,
+        r#"<g fill='none' stroke-linecap='round' opacity='0.92'>"#
+    )?;
+    for s in &segs {
+        let sw = if s.head {
+            stroke_head
+        } else {
+            stroke_shaft
+        };
+        writeln!(
+            f,
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke='#eb6234' stroke-width="{sw}"/>"#,
+            s.x1, s.y1, s.x2, s.y2,
+        )?;
+    }
+    writeln!(f, "</g></svg>")?;
+    f.flush()?;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct UmapTransitionBody {
     #[serde(flatten)]
@@ -1934,6 +3172,9 @@ struct UmapTransitionBody {
     /// If true, skip GRN perturbation: δ = target_expr − expr on the chosen gene (and scope) only.
     #[serde(default)]
     quick_ko_sanity: bool,
+    /// When true, write a quiver-only SVG under `/tmp` (Unix) or the system temp dir and return the path in `svg_export_path`.
+    #[serde(default)]
+    export_svg: bool,
 }
 
 /// Single-gene “virtual KO/OE”: delta[i,g] = target − expr[i,g] for affected cells; other genes 0.
@@ -1985,12 +3226,16 @@ struct UmapFieldResponse {
     cell_u: Option<Vec<f32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cell_v: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    svg_export_path: Option<String>,
 }
 
 async fn api_perturb_umap_field(
     State(state): State<SharedState>,
     Json(body): Json<UmapTransitionBody>,
 ) -> Result<Json<UmapFieldResponse>, (StatusCode, String)> {
+    let export_svg = body.export_svg;
+    let gene_for_svg = body.perturb.gene.trim().to_string();
     let n_propagation = body.perturb.n_propagation;
     let (
         umap_pts,
@@ -2153,9 +3398,10 @@ async fn api_perturb_umap_field(
                 &cfg,
                 &rt.lr_radii,
                 Some(&job_p_block),
+                Some(&job_msg),
                 Some(&*cancel_move),
             )?;
-            job_p_block.store(880, Ordering::Relaxed);
+            job_p_block.store(940, Ordering::Relaxed);
             result.delta
         };
         if let Some(ref keep) = highlight_keep {
@@ -2169,7 +3415,7 @@ async fn api_perturb_umap_field(
         if let Ok(mut m) = job_msg.lock() {
             *m = "UMAP projection & grid…".into();
         }
-        job_p_block.store(900, Ordering::Relaxed);
+        job_p_block.store(965, Ordering::Relaxed);
         let g = compute_umap_transition_grid(&rt.gene_mtx, &delta, &umap_pts, &params);
         job_p_block.store(1000, Ordering::Relaxed);
         Ok(g)
@@ -2198,6 +3444,19 @@ async fn api_perturb_umap_field(
     } else {
         (None, None)
     };
+    let svg_export_path = if export_svg {
+        let path = tmp_umap_quiver_svg_path(gene_for_svg.as_str());
+        let title = format!("UMAP transition quiver · {}", gene_for_svg);
+        match write_umap_quiver_svg(&path, &grid, &title) {
+            Ok(()) => Some(path.display().to_string()),
+            Err(e) => {
+                tracing::warn!("failed to write UMAP quiver SVG: {:#}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(Json(UmapFieldResponse {
         nx,
         ny,
@@ -2207,6 +3466,260 @@ async fn api_perturb_umap_field(
         v,
         cell_u,
         cell_v,
+        svg_export_path,
+    }))
+}
+
+fn default_sig_n_knn() -> usize {
+    30
+}
+
+fn default_sig_gradient_gain() -> f64 {
+    2.0
+}
+
+#[derive(Deserialize)]
+struct UmapSignatureBody {
+    genes: Vec<String>,
+    #[serde(default = "default_sig_n_knn")]
+    n_knn: usize,
+    #[serde(default = "default_transition_grid_scale")]
+    grid_scale: f64,
+    #[serde(default = "default_transition_vector_scale")]
+    vector_scale: f64,
+    #[serde(default)]
+    magnitude_threshold: f64,
+    #[serde(default = "default_sig_gradient_gain")]
+    gradient_gain: f64,
+    /// When true with `mask_perturb`, zero signature arrows where the perturbation quiver is zero (`VirtualTissue.signature2gradient`).
+    #[serde(default)]
+    mask_with_perturb_quiver: bool,
+    /// If true with masking, use single-gene δ only (fast). If false, full GRN perturbation (slow).
+    #[serde(default = "default_true")]
+    mask_quick_ko: bool,
+    #[serde(default)]
+    mask_perturb: Option<PerturbPreviewBody>,
+    #[serde(default)]
+    export_svg: bool,
+}
+
+#[derive(Serialize)]
+struct UmapSignatureFieldResponse {
+    nx: usize,
+    ny: usize,
+    grid_x: Vec<f64>,
+    grid_y: Vec<f64>,
+    u: Vec<f64>,
+    v: Vec<f64>,
+    signature_per_cell: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    svg_export_path: Option<String>,
+}
+
+async fn api_umap_signature_field(
+    State(state): State<SharedState>,
+    Json(body): Json<UmapSignatureBody>,
+) -> Result<Json<UmapSignatureFieldResponse>, (StatusCode, String)> {
+    let export_svg = body.export_svg;
+    let mut genes: Vec<String> = body
+        .genes
+        .iter()
+        .filter_map(|g| {
+            let t = g.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+        .collect();
+    genes.truncate(MAX_SIGNATURE_GENES);
+    if genes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "genes must list at least one non-empty symbol".into(),
+        ));
+    }
+    if body.mask_with_perturb_quiver && body.mask_perturb.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "mask_with_perturb_quiver requires mask_perturb (gene, scope, etc.)".into(),
+        ));
+    }
+
+    let (
+        path,
+        layer,
+        vn,
+        umap_pts,
+        n_obs,
+        sig_params,
+        mask_pack,
+        svg_label,
+    ) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let Some(umap_f32) = ds.umap_f32.as_ref() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "This dataset has no 2D UMAP in obsm (X_umap / umap).".into(),
+            ));
+        };
+        let n_obs = ds.obs_names.len();
+        if n_obs > MAX_UMAP_TRANSITION_CELLS {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "n_obs {} exceeds UMAP field limit {}",
+                    n_obs, MAX_UMAP_TRANSITION_CELLS
+                ),
+            ));
+        }
+        if umap_f32.len() != n_obs * 2 {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UMAP coordinate length mismatch".into(),
+            ));
+        }
+        let umap_pts: Vec<[f64; 2]> = umap_f32
+            .chunks_exact(2)
+            .map(|c| [c[0] as f64, c[1] as f64])
+            .collect();
+        let sig_params = SignatureUmapParams {
+            n_knn: body.n_knn.clamp(3, 200),
+            grid_scale: body.grid_scale.max(1e-6),
+            vector_scale: body.vector_scale.max(1e-9),
+            magnitude_threshold: body.magnitude_threshold.max(0.0),
+            gradient_gain: body.gradient_gain,
+        };
+        let mask_pack = if body.mask_with_perturb_quiver {
+            let rt = perturb_runtime_or_status(ds)?;
+            let pb = body.mask_perturb.as_ref().unwrap();
+            let targets = build_perturb_targets(ds, pb, n_obs)?;
+            let gene = targets[0].gene.clone();
+            if !rt.gene_names.iter().any(|g| g == &gene) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("mask gene {:?} not in model var_names", gene),
+                ));
+            }
+            let gj = rt
+                .gene_names
+                .iter()
+                .position(|g| g == &gene)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal: mask gene index missing".into(),
+                    )
+                })?;
+            let cfg = perturb_cfg_for_request(&rt.perturb_cfg, pb.n_propagation);
+            Some((
+                Arc::clone(rt),
+                targets,
+                gj,
+                cfg,
+                body.mask_quick_ko,
+            ))
+        } else {
+            None
+        };
+        let svg_label = if genes.len() <= 3 {
+            genes.join("+")
+        } else {
+            format!("{}+{}genes", genes[0], genes.len())
+        };
+        (
+            ds.adata_path.clone(),
+            ds.layer.clone(),
+            ds.var_names.as_ref().clone(),
+            umap_pts,
+            n_obs,
+            sig_params,
+            mask_pack,
+            svg_label,
+        )
+    };
+
+    let (grid, sig) = tokio::task::spawn_blocking(move || -> Result<(TransitionGrid, Vec<f64>), String> {
+        let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+        let (mat, _) =
+            expression_matrix_genes_subset(&adata, &layer, &genes, vn.as_ref()).map_err(|e| e.to_string())?;
+        if mat.nrows() != n_obs {
+            return Err(format!(
+                "expression rows {} != n_obs {}",
+                mat.nrows(),
+                n_obs
+            ));
+        }
+        let sig = signature_sum_per_cell(&mat);
+        let base_storage = if let Some((rt, targets, gj, cfg, quick)) = mask_pack {
+            let delta = if quick {
+                delta_single_gene_to_target(
+                    &rt.gene_mtx,
+                    gj,
+                    targets[0].cell_indices.as_deref(),
+                    targets[0].desired_expr,
+                )
+            } else {
+                perturb_with_targets(
+                    &rt.bb,
+                    &rt.gene_mtx,
+                    &rt.gene_names,
+                    &rt.xy,
+                    &rt.rw_ligands_init,
+                    &rt.rw_tfligands_init,
+                    &targets,
+                    &cfg,
+                    &rt.lr_radii,
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|_| "GRN perturbation failed (mask field)".to_string())?
+                .delta
+            };
+            let tparams = TransitionUmapParams::default();
+            let tg = compute_umap_transition_grid(&rt.gene_mtx, &delta, &umap_pts, &tparams);
+            Some(tg.vectors)
+        } else {
+            None
+        };
+        let base_ref = base_storage.as_deref();
+        let grid = compute_signature_umap_grid(&umap_pts, &sig, base_ref, &sig_params);
+        Ok((grid, sig))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let nx = grid.grid_x.len();
+    let ny = grid.grid_y.len();
+    let u: Vec<f64> = grid.vectors.iter().map(|w| w[0]).collect();
+    let v: Vec<f64> = grid.vectors.iter().map(|w| w[1]).collect();
+    let signature_per_cell: Vec<f32> = sig.iter().map(|&x| x as f32).collect();
+    let svg_export_path = if export_svg {
+        let path = tmp_umap_signature_svg_path(&svg_label);
+        let title = format!("UMAP gene signature · {}", svg_label);
+        match write_umap_quiver_svg(&path, &grid, &title) {
+            Ok(()) => Some(path.display().to_string()),
+            Err(e) => {
+                tracing::warn!("failed to write UMAP signature SVG: {:#}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(Json(UmapSignatureFieldResponse {
+        nx,
+        ny,
+        grid_x: grid.grid_x,
+        grid_y: grid.grid_y,
+        u,
+        v,
+        signature_per_cell,
+        svg_export_path,
     }))
 }
 
@@ -2271,6 +3784,7 @@ async fn api_perturb_summary(
     let job_active_move = job_active.clone();
     let cancel_move = cancel.clone();
     let job_p_block = Arc::clone(&job_p);
+    let job_msg_block = Arc::clone(&job_msg);
     let result = tokio::task::spawn_blocking(move || -> Result<PerturbResult, ()> {
         let _guard = PerturbJobGuard(job_active_move);
         let r = perturb_with_targets(
@@ -2284,6 +3798,7 @@ async fn api_perturb_summary(
             &cfg,
             &rt.lr_radii,
             Some(&job_p_block),
+            Some(&job_msg_block),
             Some(&*cancel_move),
         )?;
         job_p_block.store(1000, Ordering::Relaxed);
@@ -2344,6 +3859,594 @@ async fn api_perturb_summary(
         n_negative,
         n_zero,
         top_affected_genes: gene_effects,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PerturbReferenceSimilarityBody {
+    #[serde(flatten)]
+    perturb: PerturbPreviewBody,
+    /// Mean expression over cells in this scope defines the reference profile (same JSON shape as `perturb.scope`).
+    reference: PerturbScopeBody,
+    /// Model `var_names` to use; empty = all genes in the perturb runtime (same space as GRN δ).
+    #[serde(default)]
+    genes: Vec<String>,
+    /// When true, cells matching `perturb.scope` are omitted from the reference centroid (recommended when reference and perturb types match).
+    #[serde(default = "default_true")]
+    exclude_perturb_cells_from_reference: bool,
+}
+
+#[derive(Serialize)]
+struct PerturbReferenceSimilarityResponse {
+    n_genes_used: usize,
+    n_reference_cells: usize,
+    n_eval_cells: usize,
+    exclude_perturb_cells_from_reference: bool,
+    mean_cosine_before: f64,
+    mean_cosine_after: f64,
+    median_cosine_before: f64,
+    median_cosine_after: f64,
+    mean_delta_cosine: f64,
+}
+
+fn resolve_gene_column_indices(
+    gene_names: &[String],
+    genes: &[String],
+) -> Result<Vec<usize>, (StatusCode, String)> {
+    if genes.is_empty() {
+        return Ok((0..gene_names.len()).collect());
+    }
+    let mut cols = Vec::new();
+    for g in genes {
+        let t = g.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(p) = gene_names.iter().position(|x| x == t) {
+            cols.push(p);
+        }
+    }
+    cols.sort_unstable();
+    cols.dedup();
+    if cols.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "genes: no requested symbols found in model var_names".into(),
+        ));
+    }
+    Ok(cols)
+}
+
+fn median_sorted_f64(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    let mut w: Vec<f64> = v.to_vec();
+    w.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = w.len() / 2;
+    if w.len() % 2 == 1 {
+        w[m]
+    } else {
+        0.5 * (w[m - 1] + w[m])
+    }
+}
+
+async fn api_perturb_reference_similarity(
+    State(state): State<SharedState>,
+    Json(body): Json<PerturbReferenceSimilarityBody>,
+) -> Result<Json<PerturbReferenceSimilarityResponse>, (StatusCode, String)> {
+    let n_propagation = body.perturb.n_propagation;
+    let exclude = body.exclude_perturb_cells_from_reference;
+    let genes_filter = body.genes.clone();
+
+    let (
+        targets,
+        rt,
+        cols,
+        eval_rows,
+        ref_rows,
+        job_p,
+        job_active,
+        job_msg,
+        cancel,
+    ) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = perturb_runtime_or_status(ds)?;
+        let n_obs = ds.obs_names.len();
+        let targets = build_perturb_targets(ds, &body.perturb, n_obs)?;
+        let gene = targets[0].gene.clone();
+        if !rt.gene_names.iter().any(|g| g == &gene) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene {:?} not in model var_names", gene),
+            ));
+        }
+        let cols = resolve_gene_column_indices(&rt.gene_names, &genes_filter)?;
+        let eval_opt = cell_indices_for_perturb_scope(ds, &body.perturb.scope, n_obs)?;
+        let eval_rows: Vec<usize> = match eval_opt {
+            None => (0..n_obs).collect(),
+            Some(v) => v,
+        };
+        let ref_opt = cell_indices_for_perturb_scope(ds, &body.reference, n_obs)?;
+        let mut ref_rows: Vec<usize> = match ref_opt {
+            None => (0..n_obs).collect(),
+            Some(v) => v,
+        };
+        if exclude {
+            let perturb_set: HashSet<usize> = match &targets[0].cell_indices {
+                None => (0..n_obs).collect(),
+                Some(v) => v.iter().copied().collect(),
+            };
+            ref_rows.retain(|i| !perturb_set.contains(i));
+        }
+        if ref_rows.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "reference cell set is empty after excluding perturb cells; set exclude_perturb_cells_from_reference=false or use a broader reference scope"
+                    .into(),
+            ));
+        }
+        (
+            targets,
+            Arc::clone(rt),
+            cols,
+            eval_rows,
+            ref_rows,
+            Arc::clone(&st.perturb_job_progress_permille),
+            Arc::clone(&st.perturb_job_active),
+            Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
+        )
+    };
+
+    cancel.store(false, Ordering::SeqCst);
+    let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
+    job_p.store(0, Ordering::Relaxed);
+    job_active.store(true, Ordering::Relaxed);
+    if let Ok(mut m) = job_msg.lock() {
+        *m = "GRN perturbation (reference similarity)…".into();
+    }
+    let job_active_move = job_active.clone();
+    let cancel_move = cancel.clone();
+    let job_p_block = Arc::clone(&job_p);
+    let job_msg_block = Arc::clone(&job_msg);
+
+    let pack = tokio::task::spawn_blocking(move || -> Result<(Vec<f64>, Vec<f64>, f64, f64, usize, usize, usize), String> {
+        let _guard = PerturbJobGuard(job_active_move);
+        let result = perturb_with_targets(
+            &rt.bb,
+            &rt.gene_mtx,
+            &rt.gene_names,
+            &rt.xy,
+            &rt.rw_ligands_init,
+            &rt.rw_tfligands_init,
+            &targets,
+            &cfg,
+            &rt.lr_radii,
+            Some(&job_p_block),
+            Some(&job_msg_block),
+            Some(&*cancel_move),
+        )
+        .map_err(|_| "perturbation failed or cancelled".to_string())?;
+        job_p_block.store(1000, Ordering::Relaxed);
+
+        let gene_mtx = &rt.gene_mtx;
+        let delta = &result.delta;
+        let g = cols.len();
+        let mut centroid = vec![0.0_f64; g];
+        for k in 0..g {
+            let c = cols[k];
+            let mut s = 0.0_f64;
+            for &r in &ref_rows {
+                s += gene_mtx[[r, c]];
+            }
+            centroid[k] = s / ref_rows.len() as f64;
+        }
+        let mut norm_ref = 0.0_f64;
+        for &x in &centroid {
+            norm_ref += x * x;
+        }
+        norm_ref = norm_ref.sqrt();
+        if norm_ref < 1e-14 {
+            return Err(
+                "reference centroid has near-zero norm in the chosen gene subspace; add genes or disable exclusion"
+                    .into(),
+            );
+        }
+
+        let mut before_v: Vec<f64> = Vec::with_capacity(eval_rows.len());
+        let mut after_v: Vec<f64> = Vec::with_capacity(eval_rows.len());
+        for &i in &eval_rows {
+            let mut dot_b = 0.0_f64;
+            let mut na_b = 0.0_f64;
+            let mut dot_a = 0.0_f64;
+            let mut na_a = 0.0_f64;
+            for k in 0..g {
+                let c = cols[k];
+                let b = gene_mtx[[i, c]];
+                let a = b + delta[[i, c]];
+                let ck = centroid[k];
+                dot_b += b * ck;
+                na_b += b * b;
+                dot_a += a * ck;
+                na_a += a * a;
+            }
+            let nb = na_b.sqrt();
+            let na = na_a.sqrt();
+            let cb = if nb < 1e-14 {
+                0.0_f64
+            } else {
+                dot_b / (nb * norm_ref)
+            };
+            let ca = if na < 1e-14 {
+                0.0_f64
+            } else {
+                dot_a / (na * norm_ref)
+            };
+            before_v.push(cb);
+            after_v.push(ca);
+        }
+
+        let n_ev = before_v.len();
+        if n_ev == 0 {
+            return Err("no cells to evaluate (empty perturb scope)".into());
+        }
+        let mean_b: f64 = before_v.iter().sum::<f64>() / n_ev as f64;
+        let mean_a: f64 = after_v.iter().sum::<f64>() / n_ev as f64;
+        Ok((
+            before_v,
+            after_v,
+            mean_b,
+            mean_a,
+            ref_rows.len(),
+            eval_rows.len(),
+            g,
+        ))
+    })
+    .await
+    .map_err(|e| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?
+    .map_err(|msg| {
+        job_p.store(0, Ordering::Relaxed);
+        let code = if msg.contains("perturbation failed") {
+            StatusCode::REQUEST_TIMEOUT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        (code, msg)
+    })?;
+
+    let (before_v, after_v, mean_b, mean_a, n_ref, n_eval, n_genes) = pack;
+
+    let med_b = median_sorted_f64(&before_v);
+    let med_a = median_sorted_f64(&after_v);
+    schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
+    Ok(Json(PerturbReferenceSimilarityResponse {
+        n_genes_used: n_genes,
+        n_reference_cells: n_ref,
+        n_eval_cells: n_eval,
+        exclude_perturb_cells_from_reference: exclude,
+        mean_cosine_before: mean_b,
+        mean_cosine_after: mean_a,
+        median_cosine_before: med_b,
+        median_cosine_after: med_a,
+        mean_delta_cosine: mean_a - mean_b,
+    }))
+}
+
+#[derive(Deserialize)]
+struct NeighborSanityBody {
+    gene: String,
+    #[serde(default)]
+    desired_expr: f64,
+    cell_index: usize,
+    #[serde(default)]
+    n_propagation: Option<usize>,
+    #[serde(default)]
+    neighbor_radius: Option<f64>,
+    #[serde(default)]
+    require_cluster_id: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct NeighborSanityResponse {
+    gene: String,
+    desired_expr: f64,
+    cell_index: usize,
+    cluster_id_at_cell: usize,
+    neighbor_radius_used: f64,
+    n_propagation: usize,
+    n_neighbors_within_radius: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    neighbor_sample: Vec<usize>,
+    ligand_gene_in_lr_model: bool,
+    sender_abs_delta_perturbed_gene: f64,
+    neighbors_mean_abs_delta_perturbed_gene: f64,
+    remote_mean_abs_delta_perturbed_gene: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    neighbors_vs_remote_ratio_perturbed_gene: Option<f64>,
+    neighbors_mean_l1_delta: f64,
+    remote_mean_l1_delta: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    neighbors_vs_remote_ratio_l1: Option<f64>,
+    far_gt_2r_mean_l1_delta: f64,
+    n_remote: usize,
+    n_far: usize,
+    interpretation: String,
+}
+
+fn euclidean_xy(xy: &Array2<f64>, i: usize, j: usize) -> f64 {
+    let dx = xy[[i, 0]] - xy[[j, 0]];
+    let dy = xy[[i, 1]] - xy[[j, 1]];
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn max_ligand_radius(lr_radii: &HashMap<String, f64>) -> f64 {
+    lr_radii
+        .values()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .max(1e-6)
+}
+
+fn row_l1_norm(delta: &Array2<f64>, row: usize) -> f64 {
+    delta.row(row).iter().map(|v| v.abs()).sum()
+}
+
+async fn api_perturb_neighbor_sanity(
+    State(state): State<SharedState>,
+    Json(body): Json<NeighborSanityBody>,
+) -> Result<Json<NeighborSanityResponse>, (StatusCode, String)> {
+    let gene = body.gene.trim().to_string();
+    if gene.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "gene is empty".into()));
+    }
+    let (n_obs, cluster_at, rt, job_p, job_active, job_msg, cancel) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = perturb_runtime_or_status(ds)?;
+        let n_obs = ds.obs_names.len();
+        if body.cell_index >= n_obs {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("cell_index {} out of range (n_obs={})", body.cell_index, n_obs),
+            ));
+        }
+        if let Some(want) = body.require_cluster_id {
+            let got = ds.clusters[body.cell_index];
+            if got != want {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "cell_index {} has cluster_id {} but require_cluster_id was {}",
+                        body.cell_index, got, want
+                    ),
+                ));
+            }
+        }
+        let preview_body = PerturbPreviewBody {
+            gene: gene.clone(),
+            desired_expr: body.desired_expr,
+            scope: PerturbScopeBody::Indices {
+                indices: vec![body.cell_index],
+            },
+            n_propagation: body.n_propagation,
+        };
+        build_perturb_targets(ds, &preview_body, n_obs)?;
+        if !rt.gene_names.iter().any(|g| g == &gene) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene {:?} not in model var_names", gene),
+            ));
+        }
+        let cluster_at = ds.clusters[body.cell_index];
+        (
+            n_obs,
+            cluster_at,
+            Arc::clone(rt),
+            Arc::clone(&st.perturb_job_progress_permille),
+            Arc::clone(&st.perturb_job_active),
+            Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
+        )
+    };
+
+    let radius = body
+        .neighbor_radius
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or_else(|| max_ligand_radius(&rt.lr_radii));
+
+    let desired_expr = body.desired_expr;
+    let targets = vec![PerturbTarget {
+        gene: gene.clone(),
+        desired_expr,
+        cell_indices: Some(vec![body.cell_index]),
+    }];
+
+    cancel.store(false, Ordering::SeqCst);
+    let cfg = perturb_cfg_for_request(&rt.perturb_cfg, body.n_propagation);
+    let n_propagation_used = cfg.n_propagation;
+    job_p.store(0, Ordering::Relaxed);
+    job_active.store(true, Ordering::Relaxed);
+    if let Ok(mut m) = job_msg.lock() {
+        *m = "GRN perturbation (neighbor sanity)…".into();
+    }
+    let cell_index = body.cell_index;
+    let job_active_move = job_active.clone();
+    let cancel_move = cancel.clone();
+    let job_p_block = Arc::clone(&job_p);
+    let job_msg_block = Arc::clone(&job_msg);
+    let rt_block = Arc::clone(&rt);
+    let cfg_block = cfg.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<PerturbResult, ()> {
+        let _guard = PerturbJobGuard(job_active_move);
+        perturb_with_targets(
+            &rt_block.bb,
+            &rt_block.gene_mtx,
+            &rt_block.gene_names,
+            &rt_block.xy,
+            &rt_block.rw_ligands_init,
+            &rt_block.rw_tfligands_init,
+            &targets,
+            &cfg_block,
+            &rt_block.lr_radii,
+            Some(&job_p_block),
+            Some(&job_msg_block),
+            Some(&*cancel_move),
+        )
+    })
+    .await
+    .map_err(|e| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+
+    let result = result.map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            "Perturbation cancelled".into(),
+        )
+    })?;
+
+    schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
+
+    let gj = rt
+        .gene_names
+        .iter()
+        .position(|g| g == gene.as_str())
+        .unwrap_or(0);
+
+    let xy = &rt.xy;
+    let delta = &result.delta;
+    let mut neighbors: Vec<(usize, f64)> = Vec::new();
+    let mut remote: Vec<usize> = Vec::new();
+    let mut far: Vec<usize> = Vec::new();
+    let r2 = radius * 2.0;
+
+    for j in 0..n_obs {
+        if j == cell_index {
+            continue;
+        }
+        let d = euclidean_xy(xy, cell_index, j);
+        if d <= radius {
+            neighbors.push((j, d));
+        } else {
+            remote.push(j);
+        }
+        if d > r2 {
+            far.push(j);
+        }
+    }
+
+    neighbors.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let neighbor_indices: Vec<usize> = neighbors.iter().map(|x| x.0).collect();
+    let neighbor_sample: Vec<usize> = neighbor_indices.iter().copied().take(100).collect();
+
+    let sender_abs = delta[[cell_index, gj]].abs();
+
+    let mean_abs_pg = |rows: &[usize]| -> f64 {
+        if rows.is_empty() {
+            return 0.0;
+        }
+        let s: f64 = rows.iter().map(|&r| delta[[r, gj]].abs()).sum();
+        s / rows.len() as f64
+    };
+
+    let mean_l1 = |rows: &[usize]| -> f64 {
+        if rows.is_empty() {
+            return 0.0;
+        }
+        let s: f64 = rows.iter().map(|&r| row_l1_norm(delta, r)).sum();
+        s / rows.len() as f64
+    };
+
+    let nbr_m_pg = mean_abs_pg(&neighbor_indices);
+    let rem_m_pg = mean_abs_pg(&remote);
+    let nbr_l1 = mean_l1(&neighbor_indices);
+    let rem_l1 = mean_l1(&remote);
+    let far_l1 = mean_l1(&far);
+
+    let ratio = |a: f64, b: f64| -> Option<f64> {
+        if b.abs() > 1e-14 {
+            Some(a / b)
+        } else {
+            None
+        }
+    };
+
+    let lig_lr = rt.bb.ligands_set.contains(gene.as_str());
+
+    let interpretation = if neighbor_indices.is_empty() {
+        "No spatial neighbors within the radius (other cells are farther than neighbor_radius_used). \
+         Increase neighbor_radius or choose a denser region."
+            .to_string()
+    } else if remote.is_empty() {
+        "All other cells are within one radius of the sender; remote comparison is not defined.".to_string()
+    } else {
+        let r2r = ratio(nbr_l1, rem_l1);
+        let mut parts = vec![format!(
+            "Compared {} neighbors (dist ≤ {:.4}) vs {} remote cells (dist > {:.4}) on spatial coordinates.",
+            neighbor_indices.len(),
+            radius,
+            remote.len(),
+            radius
+        )];
+        if let Some(rv) = r2r {
+            if lig_lr && rv > 1.15 {
+                parts.push(format!(
+                    "Mean L1 |Δ| is {:.2}× higher in neighbors than in remote cells — consistent with spatial ligand coupling (gene is in the LR ligand set).",
+                    rv
+                ));
+            } else if lig_lr && rv < 0.9 {
+                parts.push(
+                    "Mean L1 |Δ| is not higher in neighbors than remote despite this gene being modeled as a ligand; propagation may be dominated by intracellular GRN or the chosen cell may have weak outgoing signal in this state."
+                        .to_string(),
+                );
+            } else if !lig_lr {
+                parts.push(
+                    "This gene is not listed as an LR ligand in the loaded betabase; neighbor enrichment is not required for a well-specified spatial GRN (effects may spread through other ligands / TFL edges)."
+                        .to_string(),
+                );
+            } else {
+                parts.push(format!(
+                    "Neighbor vs remote L1 |Δ| ratio ≈ {:.2} (modest); review top affected genes or increase propagation depth if needed.",
+                    rv
+                ));
+            }
+        } else {
+            parts.push("Remote mean |Δ| is near zero; global effect of this single-cell perturbation may be very small.".to_string());
+        }
+        parts.join(" ")
+    };
+
+    Ok(Json(NeighborSanityResponse {
+        gene: gene.clone(),
+        desired_expr: body.desired_expr,
+        cell_index,
+        cluster_id_at_cell: cluster_at,
+        neighbor_radius_used: radius,
+        n_propagation: n_propagation_used,
+        n_neighbors_within_radius: neighbor_indices.len(),
+        neighbor_sample,
+        ligand_gene_in_lr_model: lig_lr,
+        sender_abs_delta_perturbed_gene: sender_abs,
+        neighbors_mean_abs_delta_perturbed_gene: nbr_m_pg,
+        remote_mean_abs_delta_perturbed_gene: rem_m_pg,
+        neighbors_vs_remote_ratio_perturbed_gene: ratio(nbr_m_pg, rem_m_pg),
+        neighbors_mean_l1_delta: nbr_l1,
+        remote_mean_l1_delta: rem_l1,
+        neighbors_vs_remote_ratio_l1: ratio(nbr_l1, rem_l1),
+        far_gt_2r_mean_l1_delta: far_l1,
+        n_remote: remote.len(),
+        n_far: far.len(),
+        interpretation,
     }))
 }
 
@@ -2539,6 +4642,8 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         perturb_job_cancel: Arc::new(AtomicBool::new(false)),
         perturb_suppress_bg_loading_ui: Arc::new(AtomicBool::new(false)),
         perturb_progress_message: Arc::new(Mutex::new(String::new())),
+        splash_job_progress_permille: Arc::new(AtomicU32::new(0)),
+        splash_job_active: Arc::new(AtomicBool::new(false)),
     }));
 
     let api = Router::new()
@@ -2552,6 +4657,7 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         .route("/genes", get(api_genes))
         .route("/genes/full", get(api_genes_full))
         .route("/gene/expression", get(api_gene_expression))
+        .route("/spatial/received_ligand", post(api_received_ligand))
         .route("/betadata/genes", get(api_betadata_genes))
         .route("/betadata/columns", get(api_betadata_columns))
         .route("/betadata/values", get(api_betadata_values))
@@ -2560,10 +4666,22 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
             "/betadata/collect_interactions",
             post(api_betadata_collect_interactions),
         )
+        .route("/betadata/pair_lr", post(api_betadata_pair_lr))
         .route("/network/cell-context", post(api_network_cell_context))
         .route("/perturb/preview", post(api_perturb_preview))
+        .route("/perturb/splash_network", post(api_perturb_splash_network))
+        .route("/perturb/splash_progress", get(api_splash_progress))
         .route("/perturb/umap-field", post(api_perturb_umap_field))
+        .route("/umap/signature_field", post(api_umap_signature_field))
         .route("/perturb/summary", post(api_perturb_summary))
+        .route(
+            "/perturb/reference_similarity",
+            post(api_perturb_reference_similarity),
+        )
+        .route(
+            "/perturb/neighbor_sanity",
+            post(api_perturb_neighbor_sanity),
+        )
         .route("/cluster/mean_expression", post(api_cluster_mean_expression))
         .route("/meta/label_clusters", post(api_label_clusters))
         .with_state(state.clone())

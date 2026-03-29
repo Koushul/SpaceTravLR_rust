@@ -121,10 +121,10 @@ cd web/spatial_viewer && npm install && npm run build:all && cd ../..
 # Terminal A — API + static UI (CORS required for the iframe)
 cargo run --features spatial-viewer --bin spatial_viewer -- --allow-cors --bind 127.0.0.1 --port 8080
 # Terminal B — MCP server (stdio). Optional: SPATIAL_VIEWER_API_BASE, SPATIAL_VIEWER_CONNECT_ORIGINS
-cd web/spatial_viewer && npx tsx mcp/server.ts
+cd web/spatial_viewer && npm run mcp:serve
 ```
 
-Register the MCP server in your client with command `npx` and args `tsx`, `mcp/server.ts` (with `cwd` set to `web/spatial_viewer`), or run `node` on a compiled entry if you prefer. Tools: **`show_spatial_viewer`** (opens the UI and loads dataset paths), **`spatial_viewer_control`** (live UI updates: gene, color source, status text; streaming tool input shows a bottom progress strip while arguments arrive), **`spatial_viewer_report_context`** (UI button **Send context to chat** calls this so the model receives a text summary). Smoke-test with the ext-apps **`basic-host`** example and `SERVERS` pointing at your MCP server if the client supports HTTP transport.
+Register the MCP server in your client with command `npx` and args `tsx`, `mcp/stdio.ts` (with `cwd` set to `web/spatial_viewer`), or use `npm run mcp:serve`, or run `node` on a compiled entry if you prefer. Tools: **`show_spatial_viewer`** (opens the UI and loads dataset paths), **`spatial_viewer_control`** (live UI updates: gene, color source, status text; streaming tool input shows a bottom progress strip while arguments arrive), **`spatial_viewer_report_context`** (UI button **Send context to chat** calls this so the model receives a text summary). Smoke-test with the ext-apps **`basic-host`** example and `SERVERS` pointing at your MCP server if the client supports HTTP transport.
 
 The viewer keeps a slim **chrome strip** (selection stats + a **color bar** with numeric ends when a continuous channel is loaded). **Hide controls** collapses the main toolbar; **Cell types** and **GRN / neighbor context** are collapsible `<details>` sections so the plot can use most of the window.
 

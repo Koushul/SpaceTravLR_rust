@@ -92,38 +92,21 @@ pub fn genes_with_prefix(adata: &AnnData<H5>, prefix: &str, limit: usize) -> Vec
     }
 }
 
+/// Per-cell cluster ids as `usize` (UI / colormap grouping). See
+/// [`crate::betadata::betadata_cluster_keys_from_obs_dataframe`] for feather `Cluster` join keys.
+pub fn clusters_from_obs_dataframe(
+    obs: &DataFrame,
+    cluster_annot: &str,
+) -> anyhow::Result<Vec<usize>> {
+    crate::betadata::clusters_usize_from_obs_dataframe(obs, cluster_annot)
+}
+
 pub fn clusters_from_obs_column(
     adata: &AnnData<H5>,
     cluster_annot: &str,
 ) -> anyhow::Result<Vec<usize>> {
     let obs = adata.read_obs()?;
-    let col = obs
-        .column(cluster_annot)
-        .map_err(|_| {
-            let preview: Vec<String> = obs
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .take(25)
-                .collect();
-            anyhow::anyhow!(
-                "obs column {:?} not found. First columns: {:?}",
-                cluster_annot,
-                preview
-            )
-        })?;
-    let f = col.cast(&DataType::Float64).map_err(|e| {
-        anyhow::anyhow!(
-            "obs column {:?} must be numeric (cluster ids): {}",
-            cluster_annot,
-            e
-        )
-    })?;
-    let ca = f.f64()?;
-    Ok(ca
-        .into_iter()
-        .map(|v| v.unwrap_or(0.0).round() as i64 as usize)
-        .collect())
+    clusters_from_obs_dataframe(&obs, cluster_annot)
 }
 
 pub fn spatial_xy_f32_interleaved(xy: &Array2<f64>) -> Vec<f32> {
@@ -277,6 +260,43 @@ pub fn mean_expression_over_cells(
         s += data[[i, 0]];
     }
     Ok(s / data.nrows() as f64)
+}
+
+/// All cells × requested genes (columns in the same order as `genes` entries that exist in `var_names`).
+/// Skips unknown symbols; errors if none match.
+pub fn expression_matrix_genes_subset(
+    adata: &AnnData<H5>,
+    layer: &str,
+    genes: &[String],
+    var_names: &[String],
+) -> anyhow::Result<(Array2<f64>, Vec<String>)> {
+    let name_to_j: HashMap<&str, usize> = var_names
+        .iter()
+        .enumerate()
+        .map(|(j, s)| (s.as_str(), j))
+        .collect();
+    let mut col_idx = Vec::new();
+    let mut found: Vec<String> = Vec::new();
+    for g in genes {
+        let t = g.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(&j) = name_to_j.get(t) {
+            col_idx.push(j);
+            found.push(t.to_string());
+        }
+    }
+    anyhow::ensure!(
+        !col_idx.is_empty(),
+        "none of the requested genes are present in var_names"
+    );
+    let slice = [
+        SelectInfoElem::full(),
+        SelectInfoElem::Index(col_idx),
+    ];
+    let mat = read_expression_matrix_dense_f64(adata, layer, &slice)?;
+    Ok((mat, found))
 }
 
 pub fn expression_profiles_for_cells(
