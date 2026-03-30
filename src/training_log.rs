@@ -254,14 +254,13 @@ pub fn write_gene_training_log(
     writeln!(w)?;
 
     if let Some(g) = gate {
-        writeln!(w, "# hybrid_cnn_gate (empty use_cnn means non-hybrid or pass-2 full CNN)")?;
-        writeln!(w, "gate_use_cnn\t{}", g.use_cnn)?;
-        writeln!(w, "gate_reason\t{}", g.reason.replace('\t', " "))?;
         writeln!(
             w,
-            "gate_min_cells_per_cluster\t{}",
-            g.min_cells_per_cluster
+            "# hybrid_cnn_gate (empty use_cnn means non-hybrid or pass-2 full CNN)"
         )?;
+        writeln!(w, "gate_use_cnn\t{}", g.use_cnn)?;
+        writeln!(w, "gate_reason\t{}", g.reason.replace('\t', " "))?;
+        writeln!(w, "gate_min_cells_per_cluster\t{}", g.min_cells_per_cluster)?;
         writeln!(w, "gate_n_modulators\t{}", g.n_modulators)?;
         writeln!(w, "gate_n_lr_pairs\t{}", g.n_lr_pairs)?;
         writeln!(w, "gate_n_tfl_pairs\t{}", g.n_tfl_pairs)?;

@@ -113,8 +113,7 @@ impl<B: Backend> CellularNicheNetwork<B> {
     ) -> Tensor<B, 2> {
         let [batch, channels, _h, _w] = spatial_maps.dims();
         debug_assert_eq!(
-            channels,
-            1,
+            channels, 1,
             "VisionEncoder conv1 expects per-cluster niche maps"
         );
         let device = &spatial_maps.device();

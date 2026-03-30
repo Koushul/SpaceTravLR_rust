@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anndata::data::SelectInfoElem;
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
-use ndarray::{s, Array2};
+use ndarray::{Array2, s};
 use polars::datatypes::AnyValue;
 use polars::prelude::*;
 
@@ -63,10 +63,7 @@ pub fn gene_expression_f32(
         .var_names()
         .get_index(gene)
         .ok_or_else(|| anyhow::anyhow!("gene {:?} not found in var_names", gene))?;
-    let slice = [
-        SelectInfoElem::full(),
-        SelectInfoElem::Index(vec![idx]),
-    ];
+    let slice = [SelectInfoElem::full(), SelectInfoElem::Index(vec![idx])];
     let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
     Ok(data.column(0).iter().map(|v| *v as f32).collect())
 }
@@ -291,10 +288,7 @@ pub fn expression_matrix_genes_subset(
         !col_idx.is_empty(),
         "none of the requested genes are present in var_names"
     );
-    let slice = [
-        SelectInfoElem::full(),
-        SelectInfoElem::Index(col_idx),
-    ];
+    let slice = [SelectInfoElem::full(), SelectInfoElem::Index(col_idx)];
     let mat = read_expression_matrix_dense_f64(adata, layer, &slice)?;
     Ok((mat, found))
 }

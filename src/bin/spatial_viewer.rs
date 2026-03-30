@@ -8,13 +8,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anndata::AnnData;
 use anndata::AnnDataOp;
 use anndata_hdf5::H5;
-use axum::body::Bytes;
-use axum::extract::{Query, State};
-use axum::http::{header, Method, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, get_service, post};
+use anyhow::Context;
 use axum::Json;
 use axum::Router;
+use axum::body::Bytes;
+use axum::extract::{Query, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, get_service, post};
 use clap::Parser;
 use ndarray::{Array2, Axis};
 use serde::de::{self, Visitor};
@@ -25,24 +26,24 @@ use space_trav_lr_rust::adata_query::{
     gene_expression_f32, genes_with_prefix, obs_names, open_adata, spatial_obsm_key_used,
     spatial_xy, spatial_xy_f32_interleaved, try_umap_xy, u16_vec_to_le_bytes, var_names,
 };
-use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
-use space_trav_lr_rust::network::{infer_species, GeneNetwork};
 use space_trav_lr_rust::betadata::{
-    betadata_collect_interactions_parallel, betadata_feather_modulator_beta_means_for_cells,
-    betadata_feather_per_cell_column, betadata_feather_plottable_columns,
-    betadata_feather_row_id_column, betadata_feather_top_coefficients_for_selection,
-    betadata_pair_lr_parallel, BetadataCollectAggregate, CollectedInteraction, GeneMatrix,
-    PairLrBetaRow, TopBetaCoefficient,
+    BetadataCollectAggregate, BetadataUiProgress, CollectedInteraction, GeneMatrix, PairLrBetaRow,
+    TopBetaCoefficient, betadata_collect_interactions_parallel,
+    betadata_feather_modulator_beta_means_for_cells, betadata_feather_per_cell_column,
+    betadata_feather_plottable_columns, betadata_feather_row_id_column,
+    betadata_feather_top_coefficients_for_selection, betadata_pair_lr_parallel,
 };
 use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_target_genes};
-use space_trav_lr_rust::config::{expand_user_path, SpaceshipConfig};
+use space_trav_lr_rust::config::{SpaceshipConfig, expand_user_path, normalize_ui_path};
+use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use space_trav_lr_rust::network::{GeneNetwork, infer_species};
 use space_trav_lr_rust::perturb::{
-    compute_splash_all_progress, perturb_with_targets, PerturbConfig, PerturbResult, PerturbTarget,
+    PerturbConfig, PerturbResult, PerturbTarget, compute_splash_all_progress, perturb_with_targets,
 };
 use space_trav_lr_rust::perturb_mode::PerturbRuntime;
 use space_trav_lr_rust::transition_umap::{
-    compute_signature_umap_grid, compute_umap_transition_grid, signature_sum_per_cell,
-    SignatureUmapParams, TransitionGrid, TransitionUmapParams,
+    SignatureUmapParams, TransitionGrid, TransitionUmapParams, compute_signature_umap_grid,
+    compute_umap_transition_grid, signature_sum_per_cell,
 };
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
@@ -281,6 +282,8 @@ struct AppState {
     default_run_toml: Option<PathBuf>,
     perturb_bg_gen: Arc<AtomicU64>,
     perturb_bg_in_flight: Arc<AtomicBool>,
+    /// Another `spawn_perturb_background_load` ran while a load was active; run one more pass after it finishes.
+    perturb_bg_pending: Arc<AtomicBool>,
     perturb_load_progress_permille: Arc<AtomicU32>,
     perturb_job_progress_permille: Arc<AtomicU32>,
     perturb_job_active: Arc<AtomicBool>,
@@ -289,6 +292,7 @@ struct AppState {
     /// After cancel, hide “perturbation loading” until a new load starts (blocking work may still finish).
     perturb_suppress_bg_loading_ui: Arc<AtomicBool>,
     perturb_progress_message: Arc<Mutex<String>>,
+    perturb_betadata_ui: Arc<BetadataUiProgress>,
     /// Splash network job: UI polls `GET /api/perturb/splash_progress` while POST splash_network runs.
     splash_job_progress_permille: Arc<AtomicU32>,
     splash_job_active: Arc<AtomicBool>,
@@ -349,6 +353,12 @@ struct MetaJson {
     perturb_progress_permille: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     perturb_progress_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perturb_betadata_phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perturb_betadata_done: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perturb_betadata_total: Option<u32>,
     adata_path: String,
     /// Training run directory when `--run-toml` was passed (same dir as `*_betadata.feather`); empty otherwise.
     betadata_dir: String,
@@ -398,7 +408,10 @@ struct CellContextBody {
     #[serde(deserialize_with = "deserialize_usize_flex")]
     cell_index: usize,
     focus_gene: String,
-    #[serde(default = "default_neighbor_k", deserialize_with = "deserialize_usize_flex")]
+    #[serde(
+        default = "default_neighbor_k",
+        deserialize_with = "deserialize_usize_flex"
+    )]
     neighbor_k: usize,
     #[serde(default)]
     tf_ligand_cutoff: f64,
@@ -520,7 +533,12 @@ struct CellContextResponse {
     neighbors_in_query: Option<usize>,
 }
 
-fn spatial_k_nearest(spatial_f32: &[f32], n: usize, cell_idx: usize, k: usize) -> Vec<(usize, f64)> {
+fn spatial_k_nearest(
+    spatial_f32: &[f32],
+    n: usize,
+    cell_idx: usize,
+    k: usize,
+) -> Vec<(usize, f64)> {
     if n == 0 || cell_idx >= n {
         return vec![];
     }
@@ -602,8 +620,55 @@ fn binary_response(bytes: Vec<u8>) -> Response {
         .into_response()
 }
 
+fn perturb_export_feather_filename(gene: &str) -> String {
+    let mut s: String = gene
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        s = "perturb".into();
+    }
+    s.truncate(64);
+    format!("{s}_perturb_simulated_expr.feather")
+}
+
+fn feather_download_response(bytes: Vec<u8>, filename: &str) -> Response {
+    let safe: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cd = format!("attachment; filename=\"{safe}\"");
+    let Ok(disposition) = HeaderValue::from_str(&cd) else {
+        return binary_response(bytes);
+    };
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            ),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        Bytes::from(bytes),
+    )
+        .into_response()
+}
+
 type SharedState = Arc<RwLock<AppState>>;
 
+#[derive(Clone)]
 struct ViewerLoadInputs {
     h5ad: PathBuf,
     layer: String,
@@ -623,9 +688,7 @@ fn attach_perturb_runtime_to_dataset(
         .adata_path
         .canonicalize()
         .unwrap_or_else(|_| ds.adata_path.clone());
-    let tcan = tomlp
-        .canonicalize()
-        .unwrap_or_else(|_| tomlp.to_path_buf());
+    let tcan = tomlp.canonicalize().unwrap_or_else(|_| tomlp.to_path_buf());
     if vcan != tcan {
         anyhow::bail!(
             "h5ad {} must match data.adata_path in {} ({}) when using run_toml",
@@ -676,89 +739,126 @@ fn schedule_perturb_progress_permille_clear(p: Arc<AtomicU32>) {
 
 fn spawn_perturb_background_load(state: SharedState) {
     tokio::spawn(async move {
-        let run_toml = {
-            let g = state.read().await;
-            let Some(ds) = g.dataset.as_ref() else {
-                return;
+        loop {
+            let (run_toml, committed_gen) = {
+                let g = state.read().await;
+                let Some(ds) = g.dataset.as_ref() else {
+                    return;
+                };
+                if ds.perturb_runtime.is_some() {
+                    return;
+                }
+                if ds.perturb_load_error.is_some() {
+                    return;
+                }
+                let Some(p) = ds.run_toml.clone() else {
+                    return;
+                };
+                (p, g.perturb_bg_gen.load(Ordering::SeqCst))
             };
-            if ds.perturb_runtime.is_some() || ds.perturb_load_error.is_some() {
+
+            let in_flight_flag = Arc::clone(&state.read().await.perturb_bg_in_flight);
+            if in_flight_flag
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                state
+                    .read()
+                    .await
+                    .perturb_bg_pending
+                    .store(true, Ordering::SeqCst);
                 return;
             }
-            let Some(p) = ds.run_toml.clone() else {
-                return;
-            };
-            p
-        };
-        let committed_gen = state.read().await.perturb_bg_gen.load(Ordering::SeqCst);
-        {
-            let g = state.read().await;
-            g.perturb_suppress_bg_loading_ui
-                .store(false, Ordering::SeqCst);
-        }
-        let in_flight = Arc::clone(&state.read().await.perturb_bg_in_flight);
-        in_flight.store(true, Ordering::SeqCst);
-        let _in_flight_guard = ClearPerturbInFlight(in_flight);
-        tracing::info!(
-            "loading perturbation runtime in background from {} (large betabase runs can take several minutes)",
-            run_toml.display()
-        );
-        let (load_perm, prog_msg) = {
-            let g = state.read().await;
-            (
-                Arc::clone(&g.perturb_load_progress_permille),
-                Arc::clone(&g.perturb_progress_message),
-            )
-        };
-        load_perm.store(0, Ordering::Relaxed);
-        if let Ok(mut m) = prog_msg.lock() {
-            *m = "Starting perturbation runtime load…".into();
-        }
-        let run_toml_for_blocking = run_toml.clone();
-        let load_perm_block = Arc::clone(&load_perm);
-        let pr_result = tokio::task::spawn_blocking(move || {
-            PerturbRuntime::from_run_toml_with_progress(
-                run_toml_for_blocking.as_path(),
-                Some(load_perm_block),
-                Some(prog_msg),
-            )
-        })
-        .await;
-        let mut w = state.write().await;
-        if w.perturb_bg_gen.load(Ordering::SeqCst) != committed_gen {
-            load_perm.store(0, Ordering::Relaxed);
-            return;
-        }
-        let Some(ds) = w.dataset.as_mut() else {
-            load_perm.store(0, Ordering::Relaxed);
-            return;
-        };
-        if ds.run_toml.as_ref() != Some(&run_toml) {
-            load_perm.store(0, Ordering::Relaxed);
-            return;
-        }
-        if ds.perturb_runtime.is_some() {
-            load_perm.store(0, Ordering::Relaxed);
-            return;
-        }
-        match pr_result {
-            Ok(Ok(pr)) => {
-                if let Err(e) = attach_perturb_runtime_to_dataset(ds, pr, run_toml.as_path()) {
-                    tracing::error!("perturbation runtime rejected: {:#}", e);
+
+            {
+                let _in_flight_guard = ClearPerturbInFlight(Arc::clone(&in_flight_flag));
+                {
+                    let g = state.read().await;
+                    g.perturb_suppress_bg_loading_ui
+                        .store(false, Ordering::SeqCst);
+                }
+                tracing::info!(
+                    "loading perturbation runtime in background from {} (large betabase runs can take several minutes)",
+                    run_toml.display()
+                );
+                let (load_perm, prog_msg, betadata_ui) = {
+                    let g = state.read().await;
+                    g.perturb_betadata_ui.reset();
+                    (
+                        Arc::clone(&g.perturb_load_progress_permille),
+                        Arc::clone(&g.perturb_progress_message),
+                        Arc::clone(&g.perturb_betadata_ui),
+                    )
+                };
+                load_perm.store(0, Ordering::Relaxed);
+                if let Ok(mut m) = prog_msg.lock() {
+                    *m = "Starting perturbation runtime load…".into();
+                }
+                let run_toml_for_blocking = run_toml.clone();
+                let load_perm_block = Arc::clone(&load_perm);
+                let betadata_ui_block = Arc::clone(&betadata_ui);
+                let pr_result = tokio::task::spawn_blocking(move || {
+                    PerturbRuntime::from_run_toml_with_progress(
+                        run_toml_for_blocking.as_path(),
+                        Some(load_perm_block),
+                        Some(prog_msg),
+                        Some(betadata_ui_block),
+                    )
+                })
+                .await;
+                let mut w = state.write().await;
+                if w.perturb_bg_gen.load(Ordering::SeqCst) != committed_gen {
                     load_perm.store(0, Ordering::Relaxed);
-                    ds.perturb_load_error = Some(format!("{:#}", e));
+                } else if let Some(ds) = w.dataset.as_mut() {
+                    if ds.run_toml.as_ref() != Some(&run_toml) {
+                        load_perm.store(0, Ordering::Relaxed);
+                    } else if ds.perturb_runtime.is_some() {
+                        load_perm.store(0, Ordering::Relaxed);
+                    } else {
+                        match pr_result {
+                            Ok(Ok(pr)) => {
+                                if let Err(e) =
+                                    attach_perturb_runtime_to_dataset(ds, pr, run_toml.as_path())
+                                {
+                                    tracing::error!("perturbation runtime rejected: {:#}", e);
+                                    load_perm.store(0, Ordering::Relaxed);
+                                    ds.perturb_load_error = Some(format!("{:#}", e));
+                                } else {
+                                    schedule_perturb_progress_permille_clear(Arc::clone(
+                                        &load_perm,
+                                    ));
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::error!("perturbation runtime load failed: {:#}", e);
+                                load_perm.store(0, Ordering::Relaxed);
+                                ds.perturb_load_error = Some(format!("{:#}", e));
+                            }
+                            Err(e) => {
+                                load_perm.store(0, Ordering::Relaxed);
+                                ds.perturb_load_error =
+                                    Some(format!("perturb load task join: {}", e));
+                            }
+                        }
+                    }
                 } else {
-                    schedule_perturb_progress_permille_clear(Arc::clone(&load_perm));
+                    load_perm.store(0, Ordering::Relaxed);
                 }
             }
-            Ok(Err(e)) => {
-                tracing::error!("perturbation runtime load failed: {:#}", e);
-                load_perm.store(0, Ordering::Relaxed);
-                ds.perturb_load_error = Some(format!("{:#}", e));
+
+            let pending = state
+                .read()
+                .await
+                .perturb_bg_pending
+                .swap(false, Ordering::SeqCst);
+            if pending {
+                let mut w = state.write().await;
+                if let Some(ds) = w.dataset.as_mut() {
+                    ds.perturb_load_error = None;
+                }
+                continue;
             }
-            Err(e) => {
-                load_perm.store(0, Ordering::Relaxed);
-                ds.perturb_load_error = Some(format!("perturb load task join: {}", e));
-            }
+            break;
         }
     });
 }
@@ -770,7 +870,9 @@ fn require_dataset(st: &AppState) -> Result<&AppDataset, (StatusCode, String)> {
     ))
 }
 
-fn perturb_runtime_or_status(ds: &AppDataset) -> Result<&Arc<PerturbRuntime>, (StatusCode, String)> {
+fn perturb_runtime_or_status(
+    ds: &AppDataset,
+) -> Result<&Arc<PerturbRuntime>, (StatusCode, String)> {
     if let Some(rt) = ds.perturb_runtime.as_ref() {
         return Ok(rt);
     }
@@ -821,6 +923,9 @@ fn meta_json(st: &AppState) -> MetaJson {
             perturb_progress_percent: None,
             perturb_progress_permille: None,
             perturb_progress_label: None,
+            perturb_betadata_phase: None,
+            perturb_betadata_done: None,
+            perturb_betadata_total: None,
             adata_path: String::new(),
             betadata_dir: String::new(),
             network_dir: st
@@ -900,10 +1005,7 @@ fn meta_json(st: &AppState) -> MetaJson {
             let job_on = st.perturb_job_active.load(Ordering::Relaxed);
             let job_perm = st.perturb_job_progress_permille.load(Ordering::Relaxed);
             let load_perm = st.perturb_load_progress_permille.load(Ordering::Relaxed);
-            let show = job_on
-                || load_on
-                || job_perm > 0
-                || (!suppress && load_perm > 0);
+            let show = job_on || load_on || job_perm > 0 || (!suppress && load_perm > 0);
             if !show {
                 None
             } else {
@@ -912,6 +1014,32 @@ fn meta_json(st: &AppState) -> MetaJson {
                     .ok()
                     .map(|g| g.clone())
                     .filter(|s| !s.is_empty())
+            }
+        },
+        perturb_betadata_phase: {
+            let bdp = st.perturb_betadata_ui.phase.load(Ordering::Relaxed);
+            if bdp == 0 {
+                None
+            } else if bdp == 1 {
+                Some("reading".to_string())
+            } else {
+                Some("expanding".to_string())
+            }
+        },
+        perturb_betadata_done: {
+            let bdp = st.perturb_betadata_ui.phase.load(Ordering::Relaxed);
+            if bdp == 0 {
+                None
+            } else {
+                Some(st.perturb_betadata_ui.done.load(Ordering::Relaxed))
+            }
+        },
+        perturb_betadata_total: {
+            let bdp = st.perturb_betadata_ui.phase.load(Ordering::Relaxed);
+            if bdp == 0 {
+                None
+            } else {
+                Some(st.perturb_betadata_ui.total.load(Ordering::Relaxed))
             }
         },
         adata_path: ds.adata_path.display().to_string(),
@@ -930,17 +1058,15 @@ fn meta_json(st: &AppState) -> MetaJson {
     }
 }
 
-fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
+fn resolve_load_inputs(
+    mut inputs: ViewerLoadInputs,
+) -> anyhow::Result<(ViewerLoadInputs, Option<SpaceshipConfig>)> {
     let run_spaceship_cfg = if let Some(ref rtp) = inputs.run_toml {
-        let cfg = SpaceshipConfig::from_file(rtp).map_err(|e| {
-            anyhow::anyhow!("failed to read run TOML {}: {e}", rtp.display())
-        })?;
-        let ap = expand_user_path(cfg.resolve_adata_path().as_str());
+        let cfg = SpaceshipConfig::from_file(rtp)
+            .map_err(|e| anyhow::anyhow!("failed to read run TOML {}: {e}", rtp.display()))?;
+        let ap = normalize_ui_path(cfg.resolve_adata_path().as_str());
         if ap.is_empty() {
-            anyhow::bail!(
-                "run TOML {} has empty data.adata_path",
-                rtp.display()
-            );
+            anyhow::bail!("run TOML {} has empty data.adata_path", rtp.display());
         }
         inputs.h5ad = PathBuf::from(ap);
         Some(cfg)
@@ -950,8 +1076,35 @@ fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         }
         None
     };
+    Ok((inputs, run_spaceship_cfg))
+}
 
-    let adata = open_adata(inputs.h5ad.to_string_lossy().as_ref())?;
+fn paths_eq_resolved(a: &Path, b: &Path) -> bool {
+    let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
+}
+
+fn dataset_matches_resolved_inputs(ds: &AppDataset, inputs: &ViewerLoadInputs) -> bool {
+    paths_eq_resolved(&ds.adata_path, &inputs.h5ad)
+        && ds.layer == inputs.layer
+        && ds.cluster_annot == inputs.cluster_annot
+        && ds.network_dir == inputs.network_dir
+        && ds.run_toml == inputs.run_toml
+}
+
+fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
+    let (inputs, run_spaceship_cfg) = resolve_load_inputs(inputs)?;
+
+    let adata = open_adata(inputs.h5ad.to_string_lossy().as_ref()).with_context(|| {
+        let mut msg = format!("failed to open AnnData at `{}`", inputs.h5ad.display());
+        if run_spaceship_cfg.is_some() {
+            msg.push_str(
+                " (when Run TOML is set, this path comes from the TOML's data.adata_path, not the AnnData field in Dataset paths — clear Run TOML to load only what you paste there)",
+            );
+        }
+        msg
+    })?;
     let spatial_key = spatial_obsm_key_used(&adata)?;
     let xy = spatial_xy(&adata)?;
     let mut min_x = f64::INFINITY;
@@ -1000,12 +1153,16 @@ fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         tracing::info!("UMAP layout available (obsm['{}'])", k);
     }
     let obs_df = adata.read_obs()?;
-    let clusters = Arc::new(space_trav_lr_rust::adata_query::clusters_from_obs_dataframe(
+    let clusters = Arc::new(
+        space_trav_lr_rust::adata_query::clusters_from_obs_dataframe(
+            &obs_df,
+            &inputs.cluster_annot,
+        )?,
+    );
+    let betadata_key_col = space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(
         &obs_df,
         &inputs.cluster_annot,
-    )?);
-    let betadata_key_col =
-        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&obs_df, &inputs.cluster_annot);
+    );
     if betadata_key_col != inputs.cluster_annot {
         tracing::info!(
             "betadata feather join uses obs column {:?} (cluster_annot is {:?})",
@@ -1047,11 +1204,7 @@ fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
     let grn: Option<Arc<GeneNetwork>> =
         match GeneNetwork::new(species, vn.as_ref(), net_dir.as_deref()) {
             Ok(g) => {
-                tracing::info!(
-                    "loaded GRN species={} path={}",
-                    g.species,
-                    g.network_path
-                );
+                tracing::info!("loaded GRN species={} path={}", g.species, g.network_path);
                 Some(Arc::new(g))
             }
             Err(e) => {
@@ -1071,9 +1224,7 @@ fn load_app_state(mut inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         } else {
             (None, None)
         };
-    let betadata_row_id = betadata_dir
-        .as_ref()
-        .and_then(|d| probe_betadata_row_id(d));
+    let betadata_row_id = betadata_dir.as_ref().and_then(|d| probe_betadata_row_id(d));
     let adata = Arc::new(RwLock::new(adata));
 
     Ok(AppDataset {
@@ -1136,7 +1287,7 @@ fn session_path_field(s: &str) -> Option<PathBuf> {
     if t.is_empty() {
         None
     } else {
-        Some(PathBuf::from(expand_user_path(t)))
+        Some(PathBuf::from(normalize_ui_path(t)))
     }
 }
 
@@ -1154,7 +1305,7 @@ async fn api_session_configure(
     Json(body): Json<SessionConfigureBody>,
 ) -> Result<Json<SessionConfigureResponse>, (StatusCode, String)> {
     let run_toml = session_path_field(&body.run_toml);
-    let h5ad = PathBuf::from(expand_user_path(body.adata_path.trim()));
+    let h5ad = PathBuf::from(normalize_ui_path(&body.adata_path));
     if h5ad.as_os_str().is_empty() && run_toml.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1172,12 +1323,67 @@ async fn api_session_configure(
         network_dir: network_dir.clone(),
         run_toml: run_toml.clone(),
     };
+    let resolved = resolve_load_inputs(inputs.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{:#}", e)))?;
+
+    {
+        let r = state.read().await;
+        if let Some(ds) = r.dataset.as_ref() {
+            if dataset_matches_resolved_inputs(ds, &resolved.0) {
+                let ready = ds.perturb_runtime.is_some();
+                let load_busy = r.perturb_bg_in_flight.load(Ordering::SeqCst)
+                    || r.perturb_bg_pending.load(Ordering::SeqCst);
+                if ready || load_busy {
+                    let meta = meta_json(&*r);
+                    return Ok(Json(SessionConfigureResponse {
+                        ok: true,
+                        message: if ready {
+                            "dataset unchanged (already loaded)".into()
+                        } else {
+                            "dataset unchanged (perturbation runtime still loading)".into()
+                        },
+                        meta,
+                    }));
+                }
+                if ds.run_toml.is_some() && ds.perturb_load_error.is_some() {
+                    drop(r);
+                    let mut w = state.write().await;
+                    let Some(ds_mut) = w.dataset.as_mut() else {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "dataset missing during perturb retry".into(),
+                        ));
+                    };
+                    if !dataset_matches_resolved_inputs(ds_mut, &resolved.0) {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "dataset mismatch during perturb retry".into(),
+                        ));
+                    }
+                    ds_mut.perturb_load_error = None;
+                    w.perturb_bg_gen.fetch_add(1, Ordering::SeqCst);
+                    w.perturb_suppress_bg_loading_ui
+                        .store(false, Ordering::SeqCst);
+                    let meta = meta_json(&*w);
+                    drop(w);
+                    spawn_perturb_background_load(state.clone());
+                    return Ok(Json(SessionConfigureResponse {
+                        ok: true,
+                        message: "retrying perturbation runtime load (same dataset)".into(),
+                        meta,
+                    }));
+                }
+            }
+        }
+    }
+
     let new_dataset = tokio::task::spawn_blocking(move || load_app_state(inputs))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut w = state.write().await;
     w.perturb_bg_gen.fetch_add(1, Ordering::SeqCst);
+    w.perturb_bg_pending.store(false, Ordering::SeqCst);
     w.perturb_suppress_bg_loading_ui
         .store(false, Ordering::SeqCst);
     w.dataset = Some(new_dataset);
@@ -1214,20 +1420,19 @@ async fn api_cancel(State(state): State<SharedState>) -> impl IntoResponse {
     if let Ok(mut m) = w.perturb_progress_message.lock() {
         *m = "Cancelled.".into();
     }
+    w.perturb_betadata_ui.reset();
     Json(serde_json::json!({ "ok": true, "message": "cancel requested" }))
 }
 
-async fn api_spatial(
-    State(state): State<SharedState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn api_spatial(State(state): State<SharedState>) -> Result<Response, (StatusCode, String)> {
     let st = state.read().await;
     let ds = require_dataset(&st)?;
-    Ok(binary_response(f32_vec_to_le_bytes(ds.spatial_f32.as_ref())))
+    Ok(binary_response(f32_vec_to_le_bytes(
+        ds.spatial_f32.as_ref(),
+    )))
 }
 
-async fn api_umap(
-    State(state): State<SharedState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn api_umap(State(state): State<SharedState>) -> Result<Response, (StatusCode, String)> {
     let st = state.read().await;
     let ds = require_dataset(&st)?;
     let Some(ref u) = ds.umap_f32 else {
@@ -1239,9 +1444,7 @@ async fn api_umap(
     Ok(binary_response(f32_vec_to_le_bytes(u.as_ref())))
 }
 
-async fn api_clusters(
-    State(state): State<SharedState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn api_clusters(State(state): State<SharedState>) -> Result<Response, (StatusCode, String)> {
     let st = state.read().await;
     let ds = require_dataset(&st)?;
     Ok(binary_response(ds.clusters_bin.as_ref().clone()))
@@ -1358,12 +1561,10 @@ async fn api_received_ligand(
                     .to_string(),
             )
         })?;
-        tokio::task::spawn_blocking(move || {
-            runtime_received_ligand_column(&*rt, &col, &matrix_key)
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        tokio::task::spawn_blocking(move || runtime_received_ligand_column(&*rt, &col, &matrix_key))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else {
         if genes.is_empty() {
             return Err((
@@ -1380,7 +1581,10 @@ async fn api_received_ligand(
         }
         let scale = body.scale_factor.unwrap_or(1.0);
         if !scale.is_finite() {
-            return Err((StatusCode::BAD_REQUEST, "scale_factor must be finite".into()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "scale_factor must be finite".into(),
+            ));
         }
         let grid_factor = body.grid_factor.unwrap_or(0.5);
         if !grid_factor.is_finite() || grid_factor <= 0.0 {
@@ -1452,10 +1656,7 @@ async fn api_betadata_columns(
             "No betadata directory configured".into(),
         ));
     };
-    let path = betadata_feather_path(
-        bd.to_string_lossy().as_ref(),
-        &q.gene,
-    );
+    let path = betadata_feather_path(bd.to_string_lossy().as_ref(), &q.gene);
     if !path.is_file() {
         return Err((StatusCode::NOT_FOUND, format!("missing {:?}", path)));
     }
@@ -1474,17 +1675,14 @@ async fn api_betadata_values(
     let st = state.read().await;
     let ds = require_dataset(&st)?;
     let bd = ds.betadata_dir.as_ref().ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "No betadata directory configured".into())
+        (
+            StatusCode::BAD_REQUEST,
+            "No betadata directory configured".into(),
+        )
     })?;
-    let path = betadata_feather_path(
-        bd.to_string_lossy().as_ref(),
-        &q.gene,
-    );
+    let path = betadata_feather_path(bd.to_string_lossy().as_ref(), &q.gene);
     if !path.is_file() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("missing {:?}", path),
-        ));
+        return Err((StatusCode::NOT_FOUND, format!("missing {:?}", path)));
     }
     let obs = ds.obs_names.clone();
     let cluster_keys = Arc::clone(&ds.betadata_cluster_keys);
@@ -1519,17 +1717,14 @@ async fn api_betadata_top(
         ));
     }
     let bd = ds.betadata_dir.as_ref().ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "No betadata directory configured".into())
+        (
+            StatusCode::BAD_REQUEST,
+            "No betadata directory configured".into(),
+        )
     })?;
-    let path = betadata_feather_path(
-        bd.to_string_lossy().as_ref(),
-        &body.gene,
-    );
+    let path = betadata_feather_path(bd.to_string_lossy().as_ref(), &body.gene);
     if !path.is_file() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("missing {:?}", path),
-        ));
+        return Err((StatusCode::NOT_FOUND, format!("missing {:?}", path)));
     }
     let top_k = if body.top_k == 0 {
         25
@@ -1686,9 +1881,7 @@ async fn api_betadata_collect_interactions(
                     "cluster_id required when filter=cluster".into(),
                 )
             })?;
-            (0..n_obs)
-                .map(|i| clusters_usize[i] == cid)
-                .collect()
+            (0..n_obs).map(|i| clusters_usize[i] == cid).collect()
         }
         _ => {
             return Err((
@@ -1699,10 +1892,7 @@ async fn api_betadata_collect_interactions(
     };
 
     if !mask.iter().any(|&m| m) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no cells match the filter".into(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "no cells match the filter".into()));
     }
 
     let mut genes = if let Some(gs) = body.gene_subset {
@@ -1725,14 +1915,7 @@ async fn api_betadata_collect_interactions(
     let dir = bd_dir.clone();
     let mask_clone = mask.clone();
     let mut interactions = tokio::task::spawn_blocking(move || {
-        betadata_collect_interactions_parallel(
-            &dir,
-            &genes,
-            &obs,
-            &ck,
-            &mask_clone,
-            mode,
-        )
+        betadata_collect_interactions_parallel(&dir, &genes, &obs, &ck, &mask_clone, mode)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1812,10 +1995,7 @@ async fn api_betadata_pair_lr(
         if body.cell_a >= ds.obs_names.len() || body.cell_b >= ds.obs_names.len() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "cell index out of range (n_obs = {})",
-                    ds.obs_names.len()
-                ),
+                format!("cell index out of range (n_obs = {})", ds.obs_names.len()),
             ));
         };
         (
@@ -1908,7 +2088,10 @@ async fn api_network_cell_context(
         .as_deref()
         .map(|m| m.eq_ignore_ascii_case("radius"))
         .unwrap_or(false)
-        && body.radius.map(|r| r > 0.0 && r.is_finite()).unwrap_or(false);
+        && body
+            .radius
+            .map(|r| r > 0.0 && r.is_finite())
+            .unwrap_or(false);
     let (neighbors_spatial, neighbor_query, radius_used) = if use_radius {
         let r = body.radius.unwrap_or(0.0);
         (
@@ -1926,12 +2109,8 @@ async fn api_network_cell_context(
 
     let expr_map = {
         let adata = ds.adata.read().await;
-        cell_expression_map(&adata, &ds.layer, body.cell_index).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("expression read: {}", e),
-            )
-        })?
+        cell_expression_map(&adata, &ds.layer, body.cell_index)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("expression read: {}", e)))?
     };
 
     let modulators = grn
@@ -2114,11 +2293,19 @@ struct PerturbPreviewBody {
 enum PerturbScopeBody {
     #[default]
     All,
-    Indices { indices: Vec<usize> },
-    CellType { category: u16 },
+    Indices {
+        indices: Vec<usize>,
+    },
+    CellType {
+        category: u16,
+    },
     /// All cells whose annotation string equals `name` (unions every cluster/category with that label).
-    CellTypeName { name: String },
-    Cluster { cluster_id: usize },
+    CellTypeName {
+        name: String,
+    },
+    Cluster {
+        cluster_id: usize,
+    },
 }
 
 fn perturb_cfg_for_request(base: &PerturbConfig, n_propagation: Option<usize>) -> PerturbConfig {
@@ -2298,11 +2485,7 @@ fn mean_splash_col(splash: &GeneMatrix, col: usize, mask: &[bool]) -> f32 {
             n += 1;
         }
     }
-    if n == 0 {
-        0.0
-    } else {
-        (s / n as f64) as f32
-    }
+    if n == 0 { 0.0 } else { (s / n as f64) as f32 }
 }
 
 fn plain_modulator_name(s: &str) -> &str {
@@ -2402,10 +2585,7 @@ fn trim_nodes_to_budget(
     if candidates.len() <= max_n {
         return candidates;
     }
-    let mut kept: HashSet<String> = must_keep
-        .intersection(&candidates)
-        .cloned()
-        .collect();
+    let mut kept: HashSet<String> = must_keep.intersection(&candidates).cloned().collect();
     let mut rest: Vec<String> = candidates.difference(&kept).cloned().collect();
     rest.sort_by(|a, b| {
         let wa = strength.get(a).copied().unwrap_or(0.0);
@@ -2621,10 +2801,7 @@ fn enrich_splash_response_with_betadata(
 
     let mut by_target: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, link) in resp.links.iter().enumerate() {
-        by_target
-            .entry(link.target.clone())
-            .or_default()
-            .push(i);
+        by_target.entry(link.target.clone()).or_default().push(i);
     }
 
     for (target, idxs) in by_target {
@@ -2633,7 +2810,10 @@ fn enrich_splash_response_with_betadata(
             continue;
         }
         let path_s = path.to_string_lossy().into_owned();
-        let mods: Vec<String> = idxs.iter().map(|&li| resp.links[li].source.clone()).collect();
+        let mods: Vec<String> = idxs
+            .iter()
+            .map(|&li| resp.links[li].source.clone())
+            .collect();
         let means = match betadata_feather_modulator_beta_means_for_cells(
             &path_s,
             &mods,
@@ -2699,7 +2879,10 @@ async fn api_perturb_splash_network(
         return Err((StatusCode::BAD_REQUEST, "gene_a and gene_b required".into()));
     }
     if gene_a == gene_b {
-        return Err((StatusCode::BAD_REQUEST, "gene_a and gene_b must differ".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "gene_a and gene_b must differ".into(),
+        ));
     }
     let surround_hops = body.surround_hops.min(4);
     let max_nodes = body.max_nodes.clamp(6, 64);
@@ -2844,12 +3027,7 @@ async fn api_perturb_preview(
             Some(&*cancel_move),
         )?;
         job_p_block.store(1000, Ordering::Relaxed);
-        Ok(result
-            .delta
-            .column(gj)
-            .iter()
-            .map(|x| *x as f32)
-            .collect())
+        Ok(result.delta.column(gj).iter().map(|x| *x as f32).collect())
     })
     .await
     .map_err(|e| {
@@ -2858,10 +3036,7 @@ async fn api_perturb_preview(
     })?;
     let vec = vec_result.map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::REQUEST_TIMEOUT,
-            "Perturbation cancelled".into(),
-        )
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
     if vec.len() != n_obs {
         job_p.store(0, Ordering::Relaxed);
@@ -2872,6 +3047,96 @@ async fn api_perturb_preview(
     }
     schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
     Ok(binary_response(f32_vec_to_le_bytes(&vec)))
+}
+
+async fn api_perturb_export_feather(
+    State(state): State<SharedState>,
+    Json(body): Json<PerturbPreviewBody>,
+) -> Result<Response, (StatusCode, String)> {
+    let n_propagation = body.n_propagation;
+    let fname_gene = body.gene.trim().to_string();
+    let (targets, rt, job_p, job_active, job_msg, cancel) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = perturb_runtime_or_status(ds)?;
+        let n_obs = ds.obs_names.len();
+        let targets = build_perturb_targets(ds, &body, n_obs)?;
+        let gene = targets[0].gene.clone();
+        if !rt.gene_names.iter().any(|g| g == &gene) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene {:?} not in model var_names", gene),
+            ));
+        }
+        (
+            targets,
+            Arc::clone(rt),
+            Arc::clone(&st.perturb_job_progress_permille),
+            Arc::clone(&st.perturb_job_active),
+            Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
+        )
+    };
+    cancel.store(false, Ordering::SeqCst);
+    let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
+    job_p.store(0, Ordering::Relaxed);
+    job_active.store(true, Ordering::Relaxed);
+    if let Ok(mut m) = job_msg.lock() {
+        *m = "GRN perturbation · export simulated expression…".into();
+    }
+    let job_active_move = job_active.clone();
+    let cancel_move = cancel.clone();
+    let job_p_block = Arc::clone(&job_p);
+    let job_msg_block = Arc::clone(&job_msg);
+    let obs_names = rt.obs_names.clone();
+    let gene_names = rt.gene_names.clone();
+    let bytes_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ()> {
+        let _guard = PerturbJobGuard(job_active_move);
+        let result = perturb_with_targets(
+            &rt.bb,
+            &rt.gene_mtx,
+            &rt.gene_names,
+            &rt.xy,
+            &rt.rw_ligands_init,
+            &rt.rw_tfligands_init,
+            &targets,
+            &cfg,
+            &rt.lr_radii,
+            Some(&job_p_block),
+            Some(&job_msg_block),
+            Some(&*cancel_move),
+        )?;
+        job_p_block.store(1000, Ordering::Relaxed);
+        let mut buf = Vec::new();
+        space_trav_lr_rust::betadata::write_betadata_feather_to_writer(
+            &mut buf,
+            "CellID",
+            &obs_names,
+            &gene_names,
+            &result.simulated,
+        )
+        .map_err(|_| ())?;
+        Ok(buf)
+    })
+    .await
+    .map_err(|e| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+    let bytes = bytes_result.map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
+    })?;
+    if bytes.is_empty() {
+        job_p.store(0, Ordering::Relaxed);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "feather export produced no bytes".into(),
+        ));
+    }
+    schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
+    let filename = perturb_export_feather_filename(&fname_gene);
+    Ok(feather_download_response(bytes, &filename))
 }
 
 fn default_transition_neighbors() -> usize {
@@ -2958,13 +3223,7 @@ fn tmp_umap_signature_svg_path(label: &str) -> PathBuf {
 fn tmp_umap_quiver_svg_path(gene: &str) -> PathBuf {
     let safe: String = gene
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3107,11 +3366,7 @@ fn write_umap_quiver_svg(path: &Path, grid: &TransitionGrid, title: &str) -> std
         f,
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {w} {h}" width="960" height="960">"#,
     )?;
-    writeln!(
-        f,
-        r#"<title>{}</title>"#,
-        svg_escape_text(title)
-    )?;
+    writeln!(f, r#"<title>{}</title>"#, svg_escape_text(title))?;
     writeln!(
         f,
         r#"<rect x="{min_x}" y="{min_y}" width="{w}" height="{h}" fill='#12161c'/>"#
@@ -3121,11 +3376,7 @@ fn write_umap_quiver_svg(path: &Path, grid: &TransitionGrid, title: &str) -> std
         r#"<g fill='none' stroke-linecap='round' opacity='0.92'>"#
     )?;
     for s in &segs {
-        let sw = if s.head {
-            stroke_head
-        } else {
-            stroke_shaft
-        };
+        let sw = if s.head { stroke_head } else { stroke_shaft };
         writeln!(
             f,
             r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke='#eb6234' stroke-width="{sw}"/>"#,
@@ -3427,10 +3678,7 @@ async fn api_perturb_umap_field(
     })?
     .map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::REQUEST_TIMEOUT,
-            "Perturbation cancelled".into(),
-        )
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
     schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
     let nx = grid.grid_x.len();
@@ -3547,16 +3795,7 @@ async fn api_umap_signature_field(
         ));
     }
 
-    let (
-        path,
-        layer,
-        vn,
-        umap_pts,
-        n_obs,
-        sig_params,
-        mask_pack,
-        svg_label,
-    ) = {
+    let (path, layer, vn, umap_pts, n_obs, sig_params, mask_pack, svg_label) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let Some(umap_f32) = ds.umap_f32.as_ref() else {
@@ -3614,13 +3853,7 @@ async fn api_umap_signature_field(
                     )
                 })?;
             let cfg = perturb_cfg_for_request(&rt.perturb_cfg, pb.n_propagation);
-            Some((
-                Arc::clone(rt),
-                targets,
-                gj,
-                cfg,
-                body.mask_quick_ko,
-            ))
+            Some((Arc::clone(rt), targets, gj, cfg, body.mask_quick_ko))
         } else {
             None
         };
@@ -3641,57 +3874,58 @@ async fn api_umap_signature_field(
         )
     };
 
-    let (grid, sig) = tokio::task::spawn_blocking(move || -> Result<(TransitionGrid, Vec<f64>), String> {
-        let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
-        let (mat, _) =
-            expression_matrix_genes_subset(&adata, &layer, &genes, vn.as_ref()).map_err(|e| e.to_string())?;
-        if mat.nrows() != n_obs {
-            return Err(format!(
-                "expression rows {} != n_obs {}",
-                mat.nrows(),
-                n_obs
-            ));
-        }
-        let sig = signature_sum_per_cell(&mat);
-        let base_storage = if let Some((rt, targets, gj, cfg, quick)) = mask_pack {
-            let delta = if quick {
-                delta_single_gene_to_target(
-                    &rt.gene_mtx,
-                    gj,
-                    targets[0].cell_indices.as_deref(),
-                    targets[0].desired_expr,
-                )
+    let (grid, sig) =
+        tokio::task::spawn_blocking(move || -> Result<(TransitionGrid, Vec<f64>), String> {
+            let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+            let (mat, _) = expression_matrix_genes_subset(&adata, &layer, &genes, vn.as_ref())
+                .map_err(|e| e.to_string())?;
+            if mat.nrows() != n_obs {
+                return Err(format!(
+                    "expression rows {} != n_obs {}",
+                    mat.nrows(),
+                    n_obs
+                ));
+            }
+            let sig = signature_sum_per_cell(&mat);
+            let base_storage = if let Some((rt, targets, gj, cfg, quick)) = mask_pack {
+                let delta = if quick {
+                    delta_single_gene_to_target(
+                        &rt.gene_mtx,
+                        gj,
+                        targets[0].cell_indices.as_deref(),
+                        targets[0].desired_expr,
+                    )
+                } else {
+                    perturb_with_targets(
+                        &rt.bb,
+                        &rt.gene_mtx,
+                        &rt.gene_names,
+                        &rt.xy,
+                        &rt.rw_ligands_init,
+                        &rt.rw_tfligands_init,
+                        &targets,
+                        &cfg,
+                        &rt.lr_radii,
+                        None,
+                        None,
+                        None,
+                    )
+                    .map_err(|_| "GRN perturbation failed (mask field)".to_string())?
+                    .delta
+                };
+                let tparams = TransitionUmapParams::default();
+                let tg = compute_umap_transition_grid(&rt.gene_mtx, &delta, &umap_pts, &tparams);
+                Some(tg.vectors)
             } else {
-                perturb_with_targets(
-                    &rt.bb,
-                    &rt.gene_mtx,
-                    &rt.gene_names,
-                    &rt.xy,
-                    &rt.rw_ligands_init,
-                    &rt.rw_tfligands_init,
-                    &targets,
-                    &cfg,
-                    &rt.lr_radii,
-                    None,
-                    None,
-                    None,
-                )
-                .map_err(|_| "GRN perturbation failed (mask field)".to_string())?
-                .delta
+                None
             };
-            let tparams = TransitionUmapParams::default();
-            let tg = compute_umap_transition_grid(&rt.gene_mtx, &delta, &umap_pts, &tparams);
-            Some(tg.vectors)
-        } else {
-            None
-        };
-        let base_ref = base_storage.as_deref();
-        let grid = compute_signature_umap_grid(&umap_pts, &sig, base_ref, &sig_params);
-        Ok((grid, sig))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let base_ref = base_storage.as_deref();
+            let grid = compute_signature_umap_grid(&umap_pts, &sig, base_ref, &sig_params);
+            Ok((grid, sig))
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let nx = grid.grid_x.len();
     let ny = grid.grid_y.len();
@@ -3811,10 +4045,7 @@ async fn api_perturb_summary(
     })?
     .map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::REQUEST_TIMEOUT,
-            "Perturbation cancelled".into(),
-        )
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
 
     let n_genes = gene_names.len();
@@ -3838,10 +4069,7 @@ async fn api_perturb_summary(
     });
     gene_effects.truncate(50);
 
-    let perturbed_gene_idx = gene_names
-        .iter()
-        .position(|g| g == &gene)
-        .unwrap_or(0);
+    let perturbed_gene_idx = gene_names.iter().position(|g| g == &gene).unwrap_or(0);
     let col = result.delta.column(perturbed_gene_idx);
     let mean_delta: f64 = col.iter().sum::<f64>() / n_obs as f64;
     let max_abs_delta: f64 = col.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
@@ -3939,17 +4167,7 @@ async fn api_perturb_reference_similarity(
     let exclude = body.exclude_perturb_cells_from_reference;
     let genes_filter = body.genes.clone();
 
-    let (
-        targets,
-        rt,
-        cols,
-        eval_rows,
-        ref_rows,
-        job_p,
-        job_active,
-        job_msg,
-        cancel,
-    ) = {
+    let (targets, rt, cols, eval_rows, ref_rows, job_p, job_active, job_msg, cancel) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let rt = perturb_runtime_or_status(ds)?;
@@ -4185,11 +4403,7 @@ fn euclidean_xy(xy: &Array2<f64>, i: usize, j: usize) -> f64 {
 }
 
 fn max_ligand_radius(lr_radii: &HashMap<String, f64>) -> f64 {
-    lr_radii
-        .values()
-        .copied()
-        .fold(0.0_f64, f64::max)
-        .max(1e-6)
+    lr_radii.values().copied().fold(0.0_f64, f64::max).max(1e-6)
 }
 
 fn row_l1_norm(delta: &Array2<f64>, row: usize) -> f64 {
@@ -4212,7 +4426,10 @@ async fn api_perturb_neighbor_sanity(
         if body.cell_index >= n_obs {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("cell_index {} out of range (n_obs={})", body.cell_index, n_obs),
+                format!(
+                    "cell_index {} out of range (n_obs={})",
+                    body.cell_index, n_obs
+                ),
             ));
         }
         if let Some(want) = body.require_cluster_id {
@@ -4306,10 +4523,7 @@ async fn api_perturb_neighbor_sanity(
 
     let result = result.map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::REQUEST_TIMEOUT,
-            "Perturbation cancelled".into(),
-        )
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
 
     schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
@@ -4342,10 +4556,7 @@ async fn api_perturb_neighbor_sanity(
         }
     }
 
-    neighbors.sort_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let neighbor_indices: Vec<usize> = neighbors.iter().map(|x| x.0).collect();
     let neighbor_sample: Vec<usize> = neighbor_indices.iter().copied().take(100).collect();
 
@@ -4373,13 +4584,8 @@ async fn api_perturb_neighbor_sanity(
     let rem_l1 = mean_l1(&remote);
     let far_l1 = mean_l1(&far);
 
-    let ratio = |a: f64, b: f64| -> Option<f64> {
-        if b.abs() > 1e-14 {
-            Some(a / b)
-        } else {
-            None
-        }
-    };
+    let ratio =
+        |a: f64, b: f64| -> Option<f64> { if b.abs() > 1e-14 { Some(a / b) } else { None } };
 
     let lig_lr = rt.bb.ligands_set.contains(gene.as_str());
 
@@ -4388,7 +4594,8 @@ async fn api_perturb_neighbor_sanity(
          Increase neighbor_radius or choose a denser region."
             .to_string()
     } else if remote.is_empty() {
-        "All other cells are within one radius of the sender; remote comparison is not defined.".to_string()
+        "All other cells are within one radius of the sender; remote comparison is not defined."
+            .to_string()
     } else {
         let r2r = ratio(nbr_l1, rem_l1);
         let mut parts = vec![format!(
@@ -4482,9 +4689,18 @@ async fn api_cluster_mean_expression(
         return Err((StatusCode::BAD_REQUEST, "max 200 genes at a time".into()));
     }
 
-    let mut unique_clusters: Vec<usize> = clusters.iter().copied().collect::<std::collections::HashSet<_>>().into_iter().collect();
+    let mut unique_clusters: Vec<usize> = clusters
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     unique_clusters.sort_unstable();
-    let cluster_to_idx: HashMap<usize, usize> = unique_clusters.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let cluster_to_idx: HashMap<usize, usize> = unique_clusters
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i))
+        .collect();
     let n_clusters = unique_clusters.len();
     let mut n_cells_per_cluster = vec![0usize; n_clusters];
     for &c in clusters.iter() {
@@ -4495,36 +4711,43 @@ async fn api_cluster_mean_expression(
 
     let genes_clone = genes.clone();
     let clusters_clone = clusters.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<HashMap<String, Vec<f64>>, String> {
-        let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
-        let mut out = HashMap::new();
-        for gene in &genes_clone {
-            match gene_expression_f32(&adata, &layer, gene) {
-                Ok(expr) => {
-                    let mut sums = vec![0.0f64; n_clusters];
-                    let mut counts = vec![0usize; n_clusters];
-                    for i in 0..n_obs.min(expr.len()) {
-                        let c = clusters_clone[i];
-                        if let Some(&idx) = cluster_to_idx.get(&c) {
-                            sums[idx] += expr[i] as f64;
-                            counts[idx] += 1;
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<HashMap<String, Vec<f64>>, String> {
+            let adata = open_adata(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+            let mut out = HashMap::new();
+            for gene in &genes_clone {
+                match gene_expression_f32(&adata, &layer, gene) {
+                    Ok(expr) => {
+                        let mut sums = vec![0.0f64; n_clusters];
+                        let mut counts = vec![0usize; n_clusters];
+                        for i in 0..n_obs.min(expr.len()) {
+                            let c = clusters_clone[i];
+                            if let Some(&idx) = cluster_to_idx.get(&c) {
+                                sums[idx] += expr[i] as f64;
+                                counts[idx] += 1;
+                            }
                         }
+                        let means: Vec<f64> = (0..n_clusters)
+                            .map(|j| {
+                                if counts[j] > 0 {
+                                    sums[j] / counts[j] as f64
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .collect();
+                        out.insert(gene.clone(), means);
                     }
-                    let means: Vec<f64> = (0..n_clusters)
-                        .map(|j| if counts[j] > 0 { sums[j] / counts[j] as f64 } else { 0.0 })
-                        .collect();
-                    out.insert(gene.clone(), means);
-                }
-                Err(_) => {
-                    out.insert(gene.clone(), vec![0.0; n_clusters]);
+                    Err(_) => {
+                        out.insert(gene.clone(), vec![0.0; n_clusters]);
+                    }
                 }
             }
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            Ok(out)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     Ok(Json(ClusterMeanExprResponse {
         cluster_ids: unique_clusters,
@@ -4543,17 +4766,25 @@ async fn api_label_clusters(
     Json(body): Json<LabelClustersBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut w = state.write().await;
-    let ds = w.dataset.as_mut().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "No dataset loaded".into(),
-    ))?;
+    let ds = w
+        .dataset
+        .as_mut()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "No dataset loaded".into()))?;
 
-    let mut unique_clusters: Vec<usize> = ds.clusters.iter().copied().collect::<std::collections::HashSet<_>>().into_iter().collect();
+    let mut unique_clusters: Vec<usize> = ds
+        .clusters
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     unique_clusters.sort_unstable();
 
     let mut categories: Vec<String> = Vec::with_capacity(unique_clusters.len());
     for &cid in &unique_clusters {
-        let label = body.labels.get(&cid.to_string())
+        let label = body
+            .labels
+            .get(&cid.to_string())
             .cloned()
             .unwrap_or_else(|| format!("Cluster {}", cid));
         categories.push(label);
@@ -4609,10 +4840,7 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-    let h5ad_empty = cli
-        .h5ad
-        .as_ref()
-        .map_or(true, |p| p.as_os_str().is_empty());
+    let h5ad_empty = cli.h5ad.as_ref().map_or(true, |p| p.as_os_str().is_empty());
     let run_toml_set = cli
         .run_toml
         .as_ref()
@@ -4636,12 +4864,14 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         default_run_toml: cli.run_toml.clone(),
         perturb_bg_gen: Arc::new(AtomicU64::new(0)),
         perturb_bg_in_flight: Arc::new(AtomicBool::new(false)),
+        perturb_bg_pending: Arc::new(AtomicBool::new(false)),
         perturb_load_progress_permille: Arc::new(AtomicU32::new(0)),
         perturb_job_progress_permille: Arc::new(AtomicU32::new(0)),
         perturb_job_active: Arc::new(AtomicBool::new(false)),
         perturb_job_cancel: Arc::new(AtomicBool::new(false)),
         perturb_suppress_bg_loading_ui: Arc::new(AtomicBool::new(false)),
         perturb_progress_message: Arc::new(Mutex::new(String::new())),
+        perturb_betadata_ui: Arc::new(BetadataUiProgress::new()),
         splash_job_progress_permille: Arc::new(AtomicU32::new(0)),
         splash_job_active: Arc::new(AtomicBool::new(false)),
     }));
@@ -4669,6 +4899,7 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         .route("/betadata/pair_lr", post(api_betadata_pair_lr))
         .route("/network/cell-context", post(api_network_cell_context))
         .route("/perturb/preview", post(api_perturb_preview))
+        .route("/perturb/export_feather", post(api_perturb_export_feather))
         .route("/perturb/splash_network", post(api_perturb_splash_network))
         .route("/perturb/splash_progress", get(api_splash_progress))
         .route("/perturb/umap-field", post(api_perturb_umap_field))
@@ -4682,13 +4913,18 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
             "/perturb/neighbor_sanity",
             post(api_perturb_neighbor_sanity),
         )
-        .route("/cluster/mean_expression", post(api_cluster_mean_expression))
+        .route(
+            "/cluster/mean_expression",
+            post(api_cluster_mean_expression),
+        )
         .route("/meta/label_clusters", post(api_label_clusters))
         .with_state(state.clone())
         .layer(CompressionLayer::new());
 
     let api = if allow_cors {
-        tracing::warn!("CORS enabled on /api (MCP / cross-origin); do not expose this server untrusted");
+        tracing::warn!(
+            "CORS enabled on /api (MCP / cross-origin); do not expose this server untrusted"
+        );
         api.layer(
             CorsLayer::new()
                 .allow_origin(Any)

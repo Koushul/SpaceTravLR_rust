@@ -190,7 +190,10 @@ fn test_perturb_knockout_negative_control_unwired_gene_unchanged() {
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
         make_synthetic_inputs(n_cells);
-    let z_idx = gene_names.iter().position(|g| g == "Z").expect("Z in gene list");
+    let z_idx = gene_names
+        .iter()
+        .position(|g| g == "Z")
+        .expect("Z in gene list");
 
     let config = PerturbConfig {
         n_propagation: 4,
@@ -240,7 +243,10 @@ fn test_perturb_knockout_isolated_gene_only_self_changes() {
     let n_cells = 20;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
         make_synthetic_inputs(n_cells);
-    let z_idx = gene_names.iter().position(|g| g == "Z").expect("Z in gene list");
+    let z_idx = gene_names
+        .iter()
+        .position(|g| g == "Z")
+        .expect("Z in gene list");
     let n_genes = gene_names.len();
 
     let config = PerturbConfig {
@@ -567,10 +573,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         [1.0, 10.0, 1.0, 1.0], // cell_0
         [1.0, 0.0, 1.0, 1.0],  // cell_1
     ];
-    let xy = array![
-        [0.0, 0.0],
-        [1.0, 0.0],
-    ];
+    let xy = array![[0.0, 0.0], [1.0, 0.0],];
 
     let lig_vals = gene_mtx.column(1).to_owned().insert_axis(ndarray::Axis(1));
     let rw_data = calculate_weighted_ligands(&xy, &lig_vals, 1.0, 1.0);
@@ -654,7 +657,10 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
     // - cell_0: direct TF + local LR effects
     // - cell_1: spatially propagated LR effect (no direct TF perturbation)
     assert!(delta_target_c0 < 0.0, "cell_0 TARGET should decrease");
-    assert!(delta_target_c1 < 0.0, "cell_1 TARGET should decrease via spatial LR propagation");
+    assert!(
+        delta_target_c1 < 0.0,
+        "cell_1 TARGET should decrease via spatial LR propagation"
+    );
     assert!(
         delta_target_c0 < delta_target_c1,
         "cell_0 decrease should be stronger than cell_1 (direct TF+LR vs propagated LR only)"
@@ -672,7 +678,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
 
 #[test]
 fn test_transition_ko_vs_oe_opposite_direction() {
-    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -701,8 +707,15 @@ fn test_transition_ko_vs_oe_opposite_direction() {
     };
 
     let ko_result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
-        &[("A".to_string(), 0.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
+        &[("A".to_string(), 0.0)],
+        &config,
+        &lr_radii,
     );
     let ko_grid = compute_umap_transition_grid(&gene_mtx, &ko_result.delta, &umap, &params);
 
@@ -710,15 +723,25 @@ fn test_transition_ko_vs_oe_opposite_direction() {
     let gene_mtx_varied = Array2::from_shape_fn((n_cells, gene_names.len()), |(cell, gene)| {
         0.5 + 0.1 * (cell % 5) as f64 + 0.05 * gene as f64
     });
-    let lig_vals = gene_mtx_varied.column(1).to_owned().insert_axis(ndarray::Axis(1));
+    let lig_vals = gene_mtx_varied
+        .column(1)
+        .to_owned()
+        .insert_axis(ndarray::Axis(1));
     let rw_oe = space_trav_lr_rust::betadata::GeneMatrix::new(
         space_trav_lr_rust::ligand::calculate_weighted_ligands(&xy, &lig_vals, 50.0, 1.0)
             .mapv(|v| v as f32),
         vec!["B".to_string()],
     );
     let oe_result = perturb(
-        &bb, &gene_mtx_varied, &gene_names, &xy, &rw_oe, &rw_tfligands,
-        &[("A".to_string(), 5.0)], &config, &lr_radii,
+        &bb,
+        &gene_mtx_varied,
+        &gene_names,
+        &xy,
+        &rw_oe,
+        &rw_tfligands,
+        &[("A".to_string(), 5.0)],
+        &config,
+        &lr_radii,
     );
     let oe_grid = compute_umap_transition_grid(&gene_mtx_varied, &oe_result.delta, &umap, &params);
 
@@ -753,14 +776,16 @@ fn test_transition_ko_vs_oe_opposite_direction() {
         assert!(
             cos_angle < 0.5,
             "KO and OE should produce roughly opposite mean vectors; cos_angle={:.3} (expected < 0.5)\n  mean_ko={:?}\n  mean_oe={:?}",
-            cos_angle, mean_ko, mean_oe,
+            cos_angle,
+            mean_ko,
+            mean_oe,
         );
     }
 }
 
 #[test]
 fn test_transition_magnitude_monotonic_with_perturbation_strength() {
-    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -792,8 +817,15 @@ fn test_transition_magnitude_monotonic_with_perturbation_strength() {
             ..Default::default()
         };
         let result = perturb(
-            &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
-            &[("A".to_string(), level)], &config, &lr_radii,
+            &bb,
+            &gene_mtx,
+            &gene_names,
+            &xy,
+            &rw_ligands,
+            &rw_tfligands,
+            &[("A".to_string(), level)],
+            &config,
+            &lr_radii,
         );
         let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);
 
@@ -811,18 +843,20 @@ fn test_transition_magnitude_monotonic_with_perturbation_strength() {
     assert!(
         magnitudes[0] >= magnitudes[1],
         "stronger perturbation (0.0 vs 0.5) should produce >= magnitude: {:.4} vs {:.4}",
-        magnitudes[0], magnitudes[1]
+        magnitudes[0],
+        magnitudes[1]
     );
     assert!(
         magnitudes[1] >= magnitudes[2],
         "stronger perturbation (0.5 vs 0.9) should produce >= magnitude: {:.4} vs {:.4}",
-        magnitudes[1], magnitudes[2]
+        magnitudes[1],
+        magnitudes[2]
     );
 }
 
 #[test]
 fn test_transition_no_perturbation_no_vectors() {
-    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 16;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -837,9 +871,15 @@ fn test_transition_no_perturbation_no_vectors() {
         ..Default::default()
     };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
         &[("A".to_string(), 1.0)], // no change (original = 1.0)
-        &config, &lr_radii,
+        &config,
+        &lr_radii,
     );
 
     let params = TransitionUmapParams {
@@ -871,7 +911,7 @@ fn test_transition_no_perturbation_no_vectors() {
 
 #[test]
 fn test_transition_isolated_gene_no_field() {
-    use space_trav_lr_rust::transition_umap::{compute_umap_transition_grid, TransitionUmapParams};
+    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 16;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -886,9 +926,15 @@ fn test_transition_isolated_gene_no_field() {
         ..Default::default()
     };
     let result = perturb(
-        &bb, &gene_mtx, &gene_names, &xy, &rw_ligands, &rw_tfligands,
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_ligands,
+        &rw_tfligands,
         &[("Z".to_string(), 0.0)], // Z is unwired
-        &config, &lr_radii,
+        &config,
+        &lr_radii,
     );
 
     let params = TransitionUmapParams {
@@ -942,7 +988,8 @@ fn build_perturb_inputs(
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
     let cluster_keys: Vec<String> = clusters.iter().map(|c| c.to_string()).collect();
 
-    let mut bb = Betabase::from_directory(betas_dir, &obs_names, &cluster_keys, None, None).unwrap();
+    let mut bb =
+        Betabase::from_directory(betas_dir, &obs_names, &cluster_keys, None, None).unwrap();
 
     let mut all_genes_set: HashSet<String> = HashSet::new();
     for (gene_name, bf) in &bb.data {

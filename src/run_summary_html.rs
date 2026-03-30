@@ -1,10 +1,10 @@
 use crate::condition_split::CONDITION_RUNS_SUBDIR;
-use crate::config::{CnnTrainingMode, SpaceshipConfig, RUN_REPRO_TOML_FILENAME};
-use crate::training_log::{scan_gene_training_logs, GeneTrainingRollup};
+use crate::config::{CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig};
+use crate::training_log::{GeneTrainingRollup, scan_gene_training_logs};
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::Context;
-use build_html::{escape_html, Html, HtmlChild, HtmlContainer, HtmlElement, HtmlPage, HtmlTag};
+use build_html::{Html, HtmlChild, HtmlContainer, HtmlElement, HtmlPage, HtmlTag, escape_html};
 use chrono::Utc;
 use glob::Pattern;
 use ndarray::Array2;
@@ -12,11 +12,15 @@ use polars::prelude::DataType;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-const RUN_SUMMARY_CSS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/run_summary_report.css"));
+const RUN_SUMMARY_CSS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/run_summary_report.css"
+));
 
-const RUN_SUMMARY_GENES_JS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/run_summary_genes.js"));
+const RUN_SUMMARY_GENES_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/run_summary_genes.js"
+));
 
 const RUN_CONFIG_ON_DISK_FILENAME: &str = "spacetravlr_config_on_disk.toml";
 
@@ -285,7 +289,11 @@ fn stat_cell(label: &str, value: &str, sub: &str, tone: Option<&str>) -> HtmlEle
 
 fn meta_line(label: &str, value: &str) -> HtmlElement {
     HtmlElement::new(HtmlTag::Div)
-        .with_child(HtmlElement::new(HtmlTag::Strong).with_child(label.into()).into())
+        .with_child(
+            HtmlElement::new(HtmlTag::Strong)
+                .with_child(label.into())
+                .into(),
+        )
         .with_child(format!("\u{00a0}\u{00a0}{}", escape_html(value)).into())
 }
 
@@ -322,7 +330,9 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
 
     let cluster_key = cluster_key.unwrap_or(cfg.data.cluster_annot.as_str());
     let layer = layer_override.unwrap_or(cfg.data.layer.as_str());
-    let manifest = manifest.cloned().unwrap_or_else(|| Value::Object(Default::default()));
+    let manifest = manifest
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
 
     let file = H5::open(adata_path).with_context(|| format!("open {}", adata_path.display()))?;
     let adata = AnnData::<H5>::open(file)?;
@@ -331,13 +341,13 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
     let n_vars = adata.var_names().into_vec().len();
 
     let sp_key = detect_spatial_key(&adata)?;
-    let sp_display = sp_key.map(|s| s.to_string()).unwrap_or_else(|| "—".to_string());
+    let sp_display = sp_key
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "—".to_string());
 
     let obs = adata.read_obs()?;
     let n_clusters = cluster_n_unique(&obs, cluster_key)?;
-    let n_clusters_str = n_clusters
-        .map(fmt_usize)
-        .unwrap_or_else(|| "—".to_string());
+    let n_clusters_str = n_clusters.map(fmt_usize).unwrap_or_else(|| "—".to_string());
 
     let has_umap = obsm_has_umap(&adata)?;
     let umap_display = if has_umap {
@@ -355,7 +365,11 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
 
     let run_id = run_id
         .map(|s| s.to_string())
-        .or_else(|| manifest.get("run_id").and_then(|v| v.as_str().map(String::from)))
+        .or_else(|| {
+            manifest
+                .get("run_id")
+                .and_then(|v| v.as_str().map(String::from))
+        })
         .unwrap_or_else(|| {
             adata_path
                 .file_stem()
@@ -373,9 +387,8 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string());
 
-    let mode_str = manifest_training_mode(&manifest).unwrap_or_else(|| {
-        cnn_mode_label(cfg.resolved_cnn_mode()).to_string()
-    });
+    let mode_str = manifest_training_mode(&manifest)
+        .unwrap_or_else(|| cnn_mode_label(cfg.resolved_cnn_mode()).to_string());
 
     let epochs = manifest
         .get("epochs")
@@ -403,32 +416,30 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         Ok(s) => s,
         Err(_) => {
             cfg.write_run_repro_toml(output_dir)?;
-            std::fs::read_to_string(&repro_path).with_context(|| {
-                format!("read {} after write", repro_path.display())
-            })?
+            std::fs::read_to_string(&repro_path)
+                .with_context(|| format!("read {} after write", repro_path.display()))?
         }
     };
 
-    let on_disk_info: Option<(String, Option<String>, bool)> =
-        if let Some(p) = config_source_path {
-            let disp = p.display().to_string();
-            match std::fs::read_to_string(p) {
-                Ok(raw) => {
-                    let same = normalize_toml_newlines(&raw)
-                        == normalize_toml_newlines(&effective_toml);
-                    let on_disk_path = output_dir.join(RUN_CONFIG_ON_DISK_FILENAME);
-                    if same {
-                        let _ = std::fs::remove_file(&on_disk_path);
-                    } else {
-                        std::fs::write(&on_disk_path, raw.as_str())?;
-                    }
-                    Some((disp, Some(raw), same))
+    let on_disk_info: Option<(String, Option<String>, bool)> = if let Some(p) = config_source_path {
+        let disp = p.display().to_string();
+        match std::fs::read_to_string(p) {
+            Ok(raw) => {
+                let same =
+                    normalize_toml_newlines(&raw) == normalize_toml_newlines(&effective_toml);
+                let on_disk_path = output_dir.join(RUN_CONFIG_ON_DISK_FILENAME);
+                if same {
+                    let _ = std::fs::remove_file(&on_disk_path);
+                } else {
+                    std::fs::write(&on_disk_path, raw.as_str())?;
                 }
-                Err(_) => Some((disp, None, false)),
+                Some((disp, Some(raw), same))
             }
-        } else {
-            None
-        };
+            Err(_) => Some((disp, None, false)),
+        }
+    } else {
+        None
+    };
 
     let config_repro_html = build_config_repro_html(&effective_toml, on_disk_info);
 
@@ -591,13 +602,8 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
                     HtmlElement::new(HtmlTag::Div)
                         .with_attribute("class", "stat-grid")
                         .with_child(
-                            stat_cell(
-                                "Cells (obs)",
-                                &fmt_usize(n_obs),
-                                "in report AnnData",
-                                None,
-                            )
-                            .into(),
+                            stat_cell("Cells (obs)", &fmt_usize(n_obs), "in report AnnData", None)
+                                .into(),
                         )
                         .with_child(
                             stat_cell(
@@ -695,14 +701,7 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         )
         .with_child(
             HtmlElement::new(HtmlTag::Span)
-                .with_child(
-                    format!(
-                        "Generated {} · {}",
-                        gen_stamp,
-                        escape_html(&run_id)
-                    )
-                    .into(),
-                )
+                .with_child(format!("Generated {} · {}", gen_stamp, escape_html(&run_id)).into())
                 .into(),
         );
 
@@ -717,10 +716,7 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
         .with_meta([("charset", "UTF-8")])
         .with_meta([
             ("name", "viewport"),
-            (
-                "content",
-                "width=device-width, initial-scale=1.0",
-            ),
+            ("content", "width=device-width, initial-scale=1.0"),
         ])
         .with_head_link("https://fonts.googleapis.com", "preconnect")
         .with_head_link_attr(

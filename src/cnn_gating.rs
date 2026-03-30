@@ -1,7 +1,7 @@
 use crate::config::HybridCnnGatingConfig;
 use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -250,11 +250,7 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
         );
     }
 
-    let min_cells = summaries
-        .iter()
-        .map(|s| s.n_cells)
-        .min()
-        .unwrap_or(0);
+    let min_cells = summaries.iter().map(|s| s.n_cells).min().unwrap_or(0);
     if min_cells < cfg.min_cells_per_cluster_for_cnn {
         let reason = format!(
             "min_cells_per_cluster {} < {}",
@@ -305,10 +301,7 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
         summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64
     };
     if mean_r2 < min_r2_gate {
-        let reason = format!(
-            "mean_lasso_r2 {:.4} < {:.4} (gate)",
-            mean_r2, min_r2_gate
-        );
+        let reason = format!("mean_lasso_r2 {:.4} < {:.4} (gate)", mean_r2, min_r2_gate);
         return finish_decision(
             false,
             reason,
@@ -381,10 +374,7 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
             );
         }
     } else if !moran_ok {
-        let reason = format!(
-            "moran_p {:.4} > {:.4} (I={:.6})",
-            p_val, moran_p_max, i_obs
-        );
+        let reason = format!("moran_p {:.4} > {:.4} (I={:.6})", p_val, moran_p_max, i_obs);
         return finish_decision(
             false,
             reason,
@@ -451,12 +441,9 @@ fn finish_decision(
         summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64
     };
     let all_conv = summaries.iter().all(|s| s.lasso_converged);
-    let min_cells = summaries
-        .iter()
-        .map(|s| s.n_cells)
-        .min()
-        .unwrap_or(0);
-    let rank_score = (-moran_p.max(1e-300).ln()) + cfg.hybrid_modulator_spatial_weight * frac + mean_r2;
+    let min_cells = summaries.iter().map(|s| s.n_cells).min().unwrap_or(0);
+    let rank_score =
+        (-moran_p.max(1e-300).ln()) + cfg.hybrid_modulator_spatial_weight * frac + mean_r2;
     CnnGateDecision {
         use_cnn,
         reason,
@@ -486,8 +473,8 @@ mod tests {
     use super::*;
     use crate::estimator::ClusterTrainingSummary;
     use ndarray::Array2;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn summary(r2: f64, n_cells: usize) -> ClusterTrainingSummary {
         ClusterTrainingSummary {
@@ -605,7 +592,11 @@ mod tests {
             None,
             &mut rng,
         );
-        assert!(!d_strict.use_cnn, "expected mean_r2 gate fail: {:?}", d_strict.reason);
+        assert!(
+            !d_strict.use_cnn,
+            "expected mean_r2 gate fail: {:?}",
+            d_strict.reason
+        );
 
         cfg.hybrid_cnn_permissiveness = 1.0;
         let mut rng = StdRng::seed_from_u64(42);
@@ -631,9 +622,8 @@ mod tests {
     fn morans_i_binary_residuals_constant_is_zero() {
         let n = 6;
         let e = vec![1.0_f64; n];
-        let neighbors: Vec<Vec<usize>> = (0..n)
-            .map(|i| vec![(i + 1) % n, (i + n - 1) % n])
-            .collect();
+        let neighbors: Vec<Vec<usize>> =
+            (0..n).map(|i| vec![(i + 1) % n, (i + n - 1) % n]).collect();
         let i = morans_i_binary_residuals(&e, &neighbors);
         assert!(i.abs() < 1e-9);
     }

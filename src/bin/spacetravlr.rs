@@ -1,30 +1,32 @@
 mod compute_backend;
 
 use clap::{ArgAction, Parser, Subcommand};
-use serde_json::Value;
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
 };
-use space_trav_lr_rust::config::{
-    default_output_dir_for_adata_path, expand_user_path, CnnOutputActivation, CnnTrainingMode,
-    SpaceshipConfig, RUN_REPRO_TOML_FILENAME,
-};
+use serde_json::Value;
 use space_trav_lr_rust::condition_split::prepare_condition_splits;
-use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
+use space_trav_lr_rust::config::{
+    CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
+    default_output_dir_for_adata_path, expand_user_path,
+};
+#[cfg(feature = "tui")]
+use space_trav_lr_rust::training_demo::run_demo_training;
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_hud::TrainingHudState;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_demo::run_demo_training;
-#[cfg(feature = "tui")]
-use space_trav_lr_rust::training_tui::{TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard};
+use space_trav_lr_rust::training_tui::{
+    TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
+};
+use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "tui")]
-use std::sync::atomic::AtomicBool;
-#[cfg(feature = "tui")]
 use std::sync::Mutex;
+#[cfg(feature = "tui")]
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "tui")]
 use std::thread;
 
@@ -72,7 +74,11 @@ enum Commands {
 
 #[derive(Parser, Debug, Clone)]
 struct RunSummaryCli {
-    #[arg(long, value_name = "PATH", help = "AnnData .h5ad (default: data.adata_path)")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "AnnData .h5ad (default: data.adata_path)"
+    )]
     h5ad: Option<PathBuf>,
     #[arg(
         long,
@@ -335,10 +341,14 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
         cfg.execution.output_dir = jexp;
         apply_cli_join_overrides(cli, &mut cfg);
         if cli.config.is_some() {
-            eprintln!("Note: --join-output-dir ignores --config for training settings (using repro TOML).");
+            eprintln!(
+                "Note: --join-output-dir ignores --config for training settings (using repro TOML)."
+            );
         }
         if cli.max_genes.is_some() || cli.genes.is_some() {
-            eprintln!("Note: --join-output-dir ignores --max-genes and --genes (gene list comes from the shared run).");
+            eprintln!(
+                "Note: --join-output-dir ignores --max-genes and --genes (gene list comes from the shared run)."
+            );
         }
         if cli.epochs.is_some()
             || cli.lr.is_some()
@@ -352,7 +362,9 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             || cli.cnn_output_activation.is_some()
             || cli.weighted_ligand_scale_factor.is_some()
         {
-            eprintln!("Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML).");
+            eprintln!(
+                "Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML)."
+            );
         }
         Ok((cfg, true))
     } else {
@@ -646,11 +658,7 @@ fn main() -> anyhow::Result<()> {
             .or_else(|| SpaceshipConfig::discover_default_path())
     };
 
-    let max_genes = if join_training {
-        None
-    } else {
-        cli.max_genes
-    };
+    let max_genes = if join_training { None } else { cli.max_genes };
     let gene_filter = if join_training {
         None
     } else {
@@ -755,7 +763,14 @@ fn main() -> anyhow::Result<()> {
 
     if !use_dashboard {
         print_compute_notice(&compute);
-        print_plain_preamble(&run_summary, &cfg, &path, &output_dir, mode_label, n_parallel);
+        print_plain_preamble(
+            &run_summary,
+            &cfg,
+            &path,
+            &output_dir,
+            mode_label,
+            n_parallel,
+        );
         if join_training {
             println!(
                 "Join mode: shared directory {}; unfinished genes claimed via .lock; existing *_betadata.feather skipped",

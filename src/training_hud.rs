@@ -242,13 +242,8 @@ impl TrainingHudState {
             return;
         }
         let mean: f64 = summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
-        let n_modulators = n_betadata_beta_columns.unwrap_or_else(|| {
-            summaries
-                .iter()
-                .map(|s| s.n_modulators)
-                .max()
-                .unwrap_or(0)
-        });
+        let n_modulators = n_betadata_beta_columns
+            .unwrap_or_else(|| summaries.iter().map(|s| s.n_modulators).max().unwrap_or(0));
         self.gene_r2_mean
             .push((gene.to_string(), mean, n_modulators));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
@@ -383,10 +378,7 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
     }
     eprintln!("\n=== No betadata Feather files were written this run ===");
     eprintln!("Genes queued: {}", g.total_genes);
-    eprintln!(
-        "  skipped (existing CSV / lock): {}",
-        g.genes_skipped
-    );
+    eprintln!("  skipped (existing CSV / lock): {}", g.genes_skipped);
     eprintln!(
         "  failed (init or fit — check {}/log/ for details): {}",
         g.output_dir, g.genes_failed

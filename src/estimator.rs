@@ -7,7 +7,7 @@ use burn::optim::{AdamConfig, Optimizer};
 use burn::prelude::*;
 use burn::tensor::ElementConversion;
 use burn::tensor::backend::AutodiffBackend;
-use ndarray::{s, Array1, Array2, Array4, Axis};
+use ndarray::{Array1, Array2, Array4, Axis, s};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -127,7 +127,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             let r_sf = self.spatial_feature_radius;
             owned_sf = create_spatial_features(xy, clusters, num_clusters, r_sf);
             owned_sm = xyc2spatial_fast(
-                xy, clusters, num_clusters, self.spatial_dim, self.spatial_dim,
+                xy,
+                clusters,
+                num_clusters,
+                self.spatial_dim,
+                self.spatial_dim,
             );
             (&owned_sf, &owned_sm)
         };
@@ -347,9 +351,14 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
             (&c.spatial_features, &c.spatial_maps)
         } else {
-            owned_sf = create_spatial_features(xy, clusters, num_clusters, self.spatial_feature_radius);
+            owned_sf =
+                create_spatial_features(xy, clusters, num_clusters, self.spatial_feature_radius);
             owned_sm = xyc2spatial_fast(
-                xy, clusters, num_clusters, self.spatial_dim, self.spatial_dim,
+                xy,
+                clusters,
+                num_clusters,
+                self.spatial_dim,
+                self.spatial_dim,
             );
             (&owned_sf, &owned_sm)
         };
@@ -365,8 +374,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             if !self.models.contains_key(&c_id) {
                 continue;
             }
-            let indices: Vec<usize> =
-                (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
+            let indices: Vec<usize> = (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
             if indices.is_empty() {
                 continue;
             }
@@ -437,8 +445,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             let mut optim = adam.init::<B, CellularNicheNetwork<B>>();
             let mut cnn_train_mse_epochs = Vec::with_capacity(epochs);
             for _epoch in 0..epochs {
-                let y_pred =
-                    model.forward(sm_tensor.clone(), x_tensor.clone(), sf_tensor.clone());
+                let y_pred = model.forward(sm_tensor.clone(), x_tensor.clone(), sf_tensor.clone());
                 let loss = burn::nn::loss::MseLoss::new().forward(
                     y_pred,
                     y_tensor.clone(),
@@ -480,11 +487,14 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
             (&c.spatial_features, &c.spatial_maps)
         } else {
-            owned_sf = create_spatial_features(
-                xy, clusters, num_clusters, self.spatial_feature_radius,
-            );
+            owned_sf =
+                create_spatial_features(xy, clusters, num_clusters, self.spatial_feature_radius);
             owned_sm = xyc2spatial_fast(
-                xy, clusters, num_clusters, self.spatial_dim, self.spatial_dim,
+                xy,
+                clusters,
+                num_clusters,
+                self.spatial_dim,
+                self.spatial_dim,
             );
             (&owned_sf, &owned_sm)
         };

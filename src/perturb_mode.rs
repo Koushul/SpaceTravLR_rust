@@ -1,11 +1,12 @@
 use crate::betadata::{
+    Betabase, BetadataProgressPhase, BetadataUiProgress, GeneMatrix,
     betadata_cluster_keys_from_obs_dataframe, clusters_usize_from_obs_dataframe,
-    resolve_betadata_cluster_key_column, write_betadata_feather, Betabase, GeneMatrix,
+    resolve_betadata_cluster_key_column, write_betadata_feather,
 };
-use crate::config::{expand_user_path, SpaceshipConfig};
+use crate::config::{SpaceshipConfig, expand_user_path};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use crate::perturb::{PerturbConfig, PerturbTarget, perturb_with_targets};
 use crate::spatial_estimator::load_spatial_coords_f64;
-use crate::perturb::{perturb_with_targets, PerturbConfig, PerturbTarget};
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
@@ -105,7 +106,12 @@ fn sanitize_float(v: f64) -> String {
     format!("{:.6}", v).replace('-', "m").replace('.', "p")
 }
 
-fn request_output_dir(run_dir: &Path, selected: &[String], value: f64, n_propagation: usize) -> PathBuf {
+fn request_output_dir(
+    run_dir: &Path,
+    selected: &[String],
+    value: f64,
+    n_propagation: usize,
+) -> PathBuf {
     let mut sorted = selected.to_vec();
     sorted.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -200,7 +206,7 @@ fn compute_initial_wl(
 
 impl PerturbRuntime {
     pub fn from_run_toml(run_toml: &Path) -> anyhow::Result<Self> {
-        Self::from_run_toml_with_progress(run_toml, None, None)
+        Self::from_run_toml_with_progress(run_toml, None, None, None)
     }
 
     /// Same as [`from_run_toml`], but reports coarse load progress in **permille** (0–1000) and
@@ -209,6 +215,7 @@ impl PerturbRuntime {
         run_toml: &Path,
         progress_permille: Option<Arc<AtomicU32>>,
         progress_message: Option<Arc<Mutex<String>>>,
+        betadata_progress: Option<Arc<BetadataUiProgress>>,
     ) -> anyhow::Result<Self> {
         let set_p = |v: u32| {
             if let Some(p) = &progress_permille {
@@ -239,16 +246,11 @@ impl PerturbRuntime {
         let gene_names = adata.var_names().into_vec();
         let obs_names = adata.obs_names().into_vec();
         let obs_df = adata.read_obs()?;
-        let betadata_key_col = resolve_betadata_cluster_key_column(
-            &obs_df,
-            cfg.data.cluster_annot.as_str(),
-        );
+        let betadata_key_col =
+            resolve_betadata_cluster_key_column(&obs_df, cfg.data.cluster_annot.as_str());
         let cluster_keys =
             betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
-        let clusters = clusters_usize_from_obs_dataframe(
-            &obs_df,
-            cfg.data.cluster_annot.as_str(),
-        )?;
+        let clusters = clusters_usize_from_obs_dataframe(&obs_df, cfg.data.cluster_annot.as_str())?;
         let xy = load_spatial_coords_f64(&adata)?;
         let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
         set_msg("Reading expression matrix…");
@@ -266,12 +268,27 @@ impl PerturbRuntime {
             .ok_or_else(|| anyhow::anyhow!("training output directory is not valid UTF-8"))?;
         set_msg("Loading betadata feathers…");
         let p_perm = progress_permille.clone();
-        let on_betadata: Option<Arc<dyn Fn(u32) + Send + Sync>> =
-            if progress_permille.is_some() {
-                Some(Arc::new(move |sub: u32| {
+        let ui_prog = betadata_progress.clone();
+        let on_betadata: Option<Arc<dyn Fn(u32, BetadataProgressPhase) + Send + Sync>> =
+            if progress_permille.is_some() || betadata_progress.is_some() {
+                Some(Arc::new(move |sub: u32, phase: BetadataProgressPhase| {
                     if let Some(g) = &p_perm {
                         let v = 120u32.saturating_add(sub.saturating_mul(700) / 1000);
                         g.store(v.min(820), Ordering::Relaxed);
+                    }
+                    if let Some(c) = &ui_prog {
+                        match phase {
+                            BetadataProgressPhase::ReadingFeathers { done, total } => {
+                                c.phase.store(1, Ordering::Relaxed);
+                                c.done.store(done as u32, Ordering::Relaxed);
+                                c.total.store(total as u32, Ordering::Relaxed);
+                            }
+                            BetadataProgressPhase::ExpandingToCells { done, total } => {
+                                c.phase.store(2, Ordering::Relaxed);
+                                c.done.store(done as u32, Ordering::Relaxed);
+                                c.total.store(total as u32, Ordering::Relaxed);
+                            }
+                        }
                     }
                 }))
             } else {
@@ -290,6 +307,9 @@ impl PerturbRuntime {
                 run_dir.display()
             )
         })?;
+        if let Some(ui) = &betadata_progress {
+            ui.reset();
+        }
 
         let mut lr_radii: HashMap<String, f64> = HashMap::new();
         for lig in bb.ligands_set.iter().chain(bb.tfl_ligands_set.iter()) {
@@ -466,7 +486,12 @@ pub fn execute_marked_perturbations(
         ligand_grid_factor: runtime.perturb_cfg.ligand_grid_factor,
         outputs: output_paths
             .iter()
-            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect(),
         selected_cell_types_per_gene: selected
             .iter()
@@ -515,9 +540,16 @@ pub fn run_interactive(runtime: PerturbRuntime) -> anyhow::Result<()> {
     let mut all_cell_types = runtime.cell_types.iter().copied().collect::<Vec<_>>();
     all_cell_types.sort_unstable();
     all_cell_types.dedup();
-    println!("Perturbation mode loaded from {}", runtime.run_toml_path.display());
+    println!(
+        "Perturbation mode loaded from {}",
+        runtime.run_toml_path.display()
+    );
     println!("Run directory: {}", runtime.run_dir.display());
-    println!("Loaded {} genes and {} cells.", runtime.gene_names.len(), runtime.obs_names.len());
+    println!(
+        "Loaded {} genes and {} cells.",
+        runtime.gene_names.len(),
+        runtime.obs_names.len()
+    );
     println!(
         "Commands: list [N], search <query>, mark <gene> [all|ct1,ct2], scope <gene> <all|ct1,ct2>, unmark <gene>, show, run <value>, quit"
     );
@@ -681,23 +713,14 @@ mod tests {
 
     #[test]
     fn write_feather_shape_matches_matrix() {
-        let temp = std::env::temp_dir().join(format!(
-            "spacetravlr_perturb_test_{}",
-            std::process::id()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("spacetravlr_perturb_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp);
         let out = temp.join("matrix.feather");
         let obs = vec!["c1".to_string(), "c2".to_string()];
         let genes = vec!["g1".to_string(), "g2".to_string(), "g3".to_string()];
         let data = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
-        write_betadata_feather(
-            out.to_str().unwrap(),
-            "CellID",
-            &obs,
-            &genes,
-            &data,
-        )
-        .unwrap();
+        write_betadata_feather(out.to_str().unwrap(), "CellID", &obs, &genes, &data).unwrap();
         let f = std::fs::File::open(&out).unwrap();
         let df = polars::prelude::IpcReader::new(f).finish().unwrap();
         assert_eq!(df.height(), 2);

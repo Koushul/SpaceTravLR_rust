@@ -1,10 +1,10 @@
+#[cfg(feature = "libtorch")]
+use burn::backend::LibTorch;
+#[cfg(feature = "libtorch")]
+use burn::backend::libtorch::LibTorchDevice;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
-#[cfg(feature = "libtorch")]
-use burn::backend::libtorch::LibTorchDevice;
-#[cfg(feature = "libtorch")]
-use burn::backend::LibTorch;
 use burn_autodiff::Autodiff;
 use space_trav_lr_rust::config::{
     CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,

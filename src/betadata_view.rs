@@ -2,7 +2,11 @@ use std::path::{Path, PathBuf};
 
 pub fn list_betadata_target_genes(dir: &str) -> anyhow::Result<Vec<String>> {
     let dir_path = Path::new(dir);
-    anyhow::ensure!(dir_path.is_dir(), "betadata directory does not exist: {}", dir);
+    anyhow::ensure!(
+        dir_path.is_dir(),
+        "betadata directory does not exist: {}",
+        dir
+    );
     let mut genes = Vec::new();
     for entry in std::fs::read_dir(dir_path)? {
         let entry = entry?;

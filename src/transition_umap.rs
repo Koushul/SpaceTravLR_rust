@@ -143,7 +143,10 @@ fn softmax_rows_from_sparse_corr(
             if row.is_empty() {
                 return vec![];
             }
-            let max_c = row.iter().map(|&(_, c)| c).fold(f64::NEG_INFINITY, f64::max);
+            let max_c = row
+                .iter()
+                .map(|&(_, c)| c)
+                .fold(f64::NEG_INFINITY, f64::max);
             let mut w: Vec<(usize, f64)> = Vec::with_capacity(row.len());
             let mut sum = 0.0_f64;
             for &(j, c) in row {
@@ -167,35 +170,32 @@ fn softmax_rows_dense(corr: &Array2<f64>, temperature: f64) -> Array2<f64> {
     let t = temperature.max(1e-9);
     let corr_flat = corr.as_slice().expect("corr must be contiguous");
     let mut p_flat = vec![0.0_f64; n * n];
-    p_flat
-        .par_chunks_mut(n)
-        .enumerate()
-        .for_each(|(i, p_row)| {
-            let c_row = &corr_flat[i * n..(i + 1) * n];
-            let mut max_c = f64::NEG_INFINITY;
+    p_flat.par_chunks_mut(n).enumerate().for_each(|(i, p_row)| {
+        let c_row = &corr_flat[i * n..(i + 1) * n];
+        let mut max_c = f64::NEG_INFINITY;
+        for j in 0..n {
+            if j != i && c_row[j] > max_c {
+                max_c = c_row[j];
+            }
+        }
+        let mut sum = 0.0_f64;
+        for j in 0..n {
+            if j == i {
+                continue;
+            }
+            let wt = ((c_row[j] - max_c) / t).exp();
+            p_row[j] = wt;
+            sum += wt;
+        }
+        if sum > 0.0 {
+            let inv = 1.0 / sum;
             for j in 0..n {
-                if j != i && c_row[j] > max_c {
-                    max_c = c_row[j];
+                if j != i {
+                    p_row[j] *= inv;
                 }
             }
-            let mut sum = 0.0_f64;
-            for j in 0..n {
-                if j == i {
-                    continue;
-                }
-                let wt = ((c_row[j] - max_c) / t).exp();
-                p_row[j] = wt;
-                sum += wt;
-            }
-            if sum > 0.0 {
-                let inv = 1.0 / sum;
-                for j in 0..n {
-                    if j != i {
-                        p_row[j] *= inv;
-                    }
-                }
-            }
-        });
+        }
+    });
     Array2::from_shape_vec((n, n), p_flat).unwrap()
 }
 
@@ -500,11 +500,7 @@ fn knn_mean_on_embedding(
                     c += 1;
                 }
             }
-            if c > 0 {
-                s / c as f64
-            } else {
-                0.0
-            }
+            if c > 0 { s / c as f64 } else { 0.0 }
         })
         .collect()
 }
@@ -575,9 +571,7 @@ fn normalize_gradient_sqrt(grad: &mut [[f64; 2]]) {
 /// Sum of expression across columns → one scalar per cell (gene-set signature).
 pub fn signature_sum_per_cell(expr_sub: &Array2<f64>) -> Vec<f64> {
     let n = expr_sub.nrows();
-    (0..n)
-        .map(|i| expr_sub.row(i).sum())
-        .collect()
+    (0..n).map(|i| expr_sub.row(i).sum()).collect()
 }
 
 /// Gradient of a KNN-smoothed gene-set signature on the same UMAP grid as [`compute_umap_transition_grid`].
@@ -630,10 +624,7 @@ pub fn compute_signature_umap_grid(
             }
         }
     }
-    let cell_vectors: Vec<[f64; 2]> = signature_per_cell
-        .iter()
-        .map(|&s| [s, 0.0_f64])
-        .collect();
+    let cell_vectors: Vec<[f64; 2]> = signature_per_cell.iter().map(|&s| [s, 0.0_f64]).collect();
     TransitionGrid {
         grid_x,
         grid_y,
@@ -944,9 +935,11 @@ mod tests {
         let n = 5;
         let g = 4;
         let expr = Array2::from_shape_fn((n, g), |(i, k)| (i + k) as f64 * 0.3);
-        let delta = Array2::from_shape_fn((n, g), |(i, k)| (k as f64).sin() * 0.1 + i as f64 * 0.05);
-        let neigh: Vec<Vec<usize>> =
-            (0..n).map(|i| (0..n).filter(|&j| j != i).collect()).collect();
+        let delta =
+            Array2::from_shape_fn((n, g), |(i, k)| (k as f64).sin() * 0.1 + i as f64 * 0.05);
+        let neigh: Vec<Vec<usize>> = (0..n)
+            .map(|i| (0..n).filter(|&j| j != i).collect())
+            .collect();
         let cp = col_delta_cor_partial(&expr, &delta, &neigh);
         let cf = col_delta_cor(&expr, &delta);
         for i in 0..n {
@@ -957,7 +950,10 @@ mod tests {
                 assert!(
                     (cp[[i, j]] - cf[[i, j]]).abs() < 1e-9,
                     "i={} j={} partial={} full={}",
-                    i, j, cp[[i, j]], cf[[i, j]]
+                    i,
+                    j,
+                    cp[[i, j]],
+                    cf[[i, j]]
                 );
             }
         }
@@ -983,7 +979,10 @@ mod tests {
                 assert!(
                     (v - dense[[i, j]]).abs() < 1e-12,
                     "mismatch at [{},{}]: sparse={} dense={}",
-                    i, j, v, dense[[i, j]]
+                    i,
+                    j,
+                    v,
+                    dense[[i, j]]
                 );
             }
         }
@@ -1005,7 +1004,8 @@ mod tests {
             assert!(
                 (sum - 1.0).abs() < 1e-9,
                 "row {} sums to {}, not 1.0",
-                i, sum
+                i,
+                sum
             );
         }
     }
@@ -1040,7 +1040,8 @@ mod tests {
             assert!(
                 (sum - 1.0).abs() < 1e-9,
                 "row {} sums to {}, not 1.0",
-                i, sum
+                i,
+                sum
             );
             assert_eq!(p[[i, i]], 0.0, "diagonal should be 0");
         }
@@ -1050,7 +1051,13 @@ mod tests {
     fn softmax_dense_no_overflow() {
         let n = 3;
         let corr = Array2::from_shape_fn((n, n), |(i, j)| {
-            if i == j { 0.0 } else if j > i { 50.0 } else { -50.0 }
+            if i == j {
+                0.0
+            } else if j > i {
+                50.0
+            } else {
+                -50.0
+            }
         });
         let p = softmax_rows_dense(&corr, 0.01);
         for val in p.iter() {
@@ -1122,7 +1129,11 @@ mod tests {
             ..base_params()
         };
         let grid = compute_umap_transition_grid(&expr, &delta, &umap, &params);
-        assert!(grid.cell_vectors[1][0] > 0.0, "should point right, got {}", grid.cell_vectors[1][0]);
+        assert!(
+            grid.cell_vectors[1][0] > 0.0,
+            "should point right, got {}",
+            grid.cell_vectors[1][0]
+        );
     }
 
     #[test]
@@ -1137,15 +1148,17 @@ mod tests {
             ..base_params()
         };
         let grid = compute_umap_transition_grid(&expr, &delta, &umap, &params);
-        assert!(grid.cell_vectors[2][0] < 0.0, "should point left, got {}", grid.cell_vectors[2][0]);
+        assert!(
+            grid.cell_vectors[2][0] < 0.0,
+            "should point left, got {}",
+            grid.cell_vectors[2][0]
+        );
     }
 
     #[test]
     fn transition_2d_diagonal() {
-        let expr = Array2::from_shape_vec(
-            (4, 2),
-            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        ).unwrap();
+        let expr =
+            Array2::from_shape_vec((4, 2), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
         let mut delta = Array2::zeros((4, 2));
         delta[[0, 0]] = 1.0;
         delta[[0, 1]] = 1.0;
@@ -1163,10 +1176,8 @@ mod tests {
 
     #[test]
     fn transition_2d_upward_only() {
-        let expr = Array2::from_shape_vec(
-            (4, 2),
-            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        ).unwrap();
+        let expr =
+            Array2::from_shape_vec((4, 2), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
         let mut delta = Array2::zeros((4, 2));
         delta[[0, 0]] = 0.0;
         delta[[0, 1]] = 2.0; // push only gene1 (y-axis in expression space)
@@ -1236,15 +1247,24 @@ mod tests {
             use_full_graph: true,
             ..base_params()
         };
-        let p_yes = TransitionUmapParams { remove_null: true, ..p_no.clone() };
+        let p_yes = TransitionUmapParams {
+            remove_null: true,
+            ..p_no.clone()
+        };
 
         let g_no = compute_umap_transition_grid(&expr, &delta, &umap, &p_no);
         let g_yes = compute_umap_transition_grid(&expr, &delta, &umap, &p_yes);
 
-        assert!(g_no.cell_vectors[1][0] > 1e-12, "without null should point right");
+        assert!(
+            g_no.cell_vectors[1][0] > 1e-12,
+            "without null should point right"
+        );
         let mag = cell_mag(g_yes.cell_vectors[1]);
         if mag > 1e-12 {
-            assert!(g_yes.cell_vectors[1][0] > 0.0, "with null should still point right");
+            assert!(
+                g_yes.cell_vectors[1][0] > 0.0,
+                "with null should still point right"
+            );
         }
     }
 
@@ -1304,7 +1324,14 @@ mod tests {
             let vd = g_dense.cell_vectors[i];
             let vs = g_sparse.cell_vectors[i];
             let diff = ((vd[0] - vs[0]).powi(2) + (vd[1] - vs[1]).powi(2)).sqrt();
-            assert!(diff < 0.1, "cell {} diff={:.4} dense={:?} sparse={:?}", i, diff, vd, vs);
+            assert!(
+                diff < 0.1,
+                "cell {} diff={:.4} dense={:?} sparse={:?}",
+                i,
+                diff,
+                vd,
+                vs
+            );
         }
     }
 
@@ -1351,8 +1378,16 @@ mod tests {
         delta[[1, 0]] = 1.0;
         let umap: Vec<[f64; 2]> = vec![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [10.0, 0.0]];
 
-        let p_unit = TransitionUmapParams { unit_directions: true, n_neighbors: 3, use_full_graph: true, ..base_params() };
-        let p_raw = TransitionUmapParams { unit_directions: false, ..p_unit.clone() };
+        let p_unit = TransitionUmapParams {
+            unit_directions: true,
+            n_neighbors: 3,
+            use_full_graph: true,
+            ..base_params()
+        };
+        let p_raw = TransitionUmapParams {
+            unit_directions: false,
+            ..p_unit.clone()
+        };
 
         let g_unit = compute_umap_transition_grid(&expr, &delta, &umap, &p_unit);
         let g_raw = compute_umap_transition_grid(&expr, &delta, &umap, &p_raw);
@@ -1377,7 +1412,10 @@ mod tests {
     #[test]
     fn grid_axes_small_span() {
         let axes = grid_axes(5.0, 5.001, 1.0);
-        assert!(axes.len() >= 4, "should produce at least 4 ticks even for tiny span");
+        assert!(
+            axes.len() >= 4,
+            "should produce at least 4 ticks even for tiny span"
+        );
     }
 
     #[test]
@@ -1417,8 +1455,16 @@ mod tests {
 
         let bucketed = aggregate_grid_cartography(&v_cell, &umap, &grid_x, &grid_y);
 
-        let x_half = if nx >= 2 { (grid_x[1] - grid_x[0]).abs() / 2.0 } else { 1.0 };
-        let y_half = if ny >= 2 { (grid_y[1] - grid_y[0]).abs() / 2.0 } else { 1.0 };
+        let x_half = if nx >= 2 {
+            (grid_x[1] - grid_x[0]).abs() / 2.0
+        } else {
+            1.0
+        };
+        let y_half = if ny >= 2 {
+            (grid_y[1] - grid_y[0]).abs() / 2.0
+        } else {
+            1.0
+        };
         for ix in 0..nx {
             let gx = grid_x[ix];
             for iy in 0..ny {
@@ -1435,7 +1481,11 @@ mod tests {
                 assert!(
                     (bucketed[idx][0] - sx).abs() < 1e-9 && (bucketed[idx][1] - sy).abs() < 1e-9,
                     "mismatch at [{},{}]: bucketed={:?} brute=[{},{}]",
-                    ix, iy, bucketed[idx], sx, sy
+                    ix,
+                    iy,
+                    bucketed[idx],
+                    sx,
+                    sy
                 );
             }
         }
@@ -1476,9 +1526,7 @@ mod tests {
         let mut delta = Array2::zeros((n, g));
         delta[[5, 0]] = 1.0;
         delta[[10, 2]] = -0.5;
-        let umap: Vec<[f64; 2]> = (0..n)
-            .map(|i| [(i % 6) as f64, (i / 6) as f64])
-            .collect();
+        let umap: Vec<[f64; 2]> = (0..n).map(|i| [(i % 6) as f64, (i / 6) as f64]).collect();
         let params = TransitionUmapParams {
             n_neighbors: 10,
             remove_null: true,
@@ -1530,7 +1578,8 @@ mod tests {
     fn all_vectors_finite() {
         let n = 25;
         let expr = Array2::from_shape_fn((n, 4), |(i, k)| (i as f64 * 0.3 + k as f64).sin());
-        let delta = Array2::from_shape_fn((n, 4), |(i, k)| if i == 5 && k == 0 { 1.0 } else { 0.0 });
+        let delta =
+            Array2::from_shape_fn((n, 4), |(i, k)| if i == 5 && k == 0 { 1.0 } else { 0.0 });
         let umap: Vec<[f64; 2]> = (0..n).map(|i| [(i % 5) as f64, (i / 5) as f64]).collect();
         let params = TransitionUmapParams {
             n_neighbors: 8,
@@ -1570,7 +1619,8 @@ mod tests {
                 assert!(
                     (max_comp - vs).abs() < 1e-5,
                     "max |component| should match cartography np.max scaling, vector_scale={} got {}",
-                    vs, max_comp
+                    vs,
+                    max_comp
                 );
             }
         }
@@ -1591,7 +1641,10 @@ mod tests {
             use_full_graph: true,
             ..base_params()
         };
-        let p2 = TransitionUmapParams { delta_rescale: 0.1, ..p1.clone() };
+        let p2 = TransitionUmapParams {
+            delta_rescale: 0.1,
+            ..p1.clone()
+        };
 
         let g1 = compute_umap_transition_grid(&expr, &delta, &umap, &p1);
         let g2 = compute_umap_transition_grid(&expr, &delta, &umap, &p2);
@@ -1644,7 +1697,12 @@ mod tests {
         };
         let grid = compute_umap_transition_grid(&expr, &delta, &umap, &params);
         for (i, v) in grid.cell_vectors.iter().enumerate() {
-            assert!(cell_mag(*v) < 1e-9, "identical cells should yield zero vectors, cell {} mag={:.6e}", i, cell_mag(*v));
+            assert!(
+                cell_mag(*v) < 1e-9,
+                "identical cells should yield zero vectors, cell {} mag={:.6e}",
+                i,
+                cell_mag(*v)
+            );
         }
     }
 
@@ -1678,9 +1736,7 @@ mod tests {
         let mut delta = Array2::zeros((n, g));
         delta[[50, 0]] = 1.0;
         delta[[100, 3]] = -0.5;
-        let umap: Vec<[f64; 2]> = (0..n)
-            .map(|i| [(i % 15) as f64, (i / 15) as f64])
-            .collect();
+        let umap: Vec<[f64; 2]> = (0..n).map(|i| [(i % 15) as f64, (i / 15) as f64]).collect();
         let params = TransitionUmapParams {
             n_neighbors: 30,
             remove_null: true,
@@ -1690,7 +1746,10 @@ mod tests {
         let grid = compute_umap_transition_grid(&expr, &delta, &umap, &params);
         assert_eq!(grid.cell_vectors.len(), n);
         let any_nonzero = grid.cell_vectors.iter().any(|v| cell_mag(*v) > 1e-12);
-        assert!(any_nonzero, "at least some cell should have a nonzero vector");
+        assert!(
+            any_nonzero,
+            "at least some cell should have a nonzero vector"
+        );
     }
 
     #[test]
@@ -1700,9 +1759,7 @@ mod tests {
         let expr = Array2::from_shape_fn((n, g), |(i, k)| ((i * 3 + k * 5) % 50) as f64 * 0.02);
         let mut delta = Array2::zeros((n, g));
         delta[[25, 0]] = 2.0;
-        let umap: Vec<[f64; 2]> = (0..n)
-            .map(|i| [(i % 10) as f64, (i / 10) as f64])
-            .collect();
+        let umap: Vec<[f64; 2]> = (0..n).map(|i| [(i % 10) as f64, (i / 10) as f64]).collect();
         let params = TransitionUmapParams {
             n_neighbors: 20,
             remove_null: true,

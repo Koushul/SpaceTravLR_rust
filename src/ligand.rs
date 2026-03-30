@@ -310,7 +310,11 @@ mod tests {
         let pi = calculate_weighted_ligands(&xy, &lig, r, std::f64::consts::PI);
         for i in 0..3 {
             assert_abs_diff_eq!(doubled[[i, 0]], 2.0 * base[[i, 0]], epsilon = 1e-9);
-            assert_abs_diff_eq!(pi[[i, 0]], std::f64::consts::PI * base[[i, 0]], epsilon = 1e-9);
+            assert_abs_diff_eq!(
+                pi[[i, 0]],
+                std::f64::consts::PI * base[[i, 0]],
+                epsilon = 1e-9
+            );
         }
     }
 

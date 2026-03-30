@@ -1,6 +1,6 @@
 use ndarray::{Array2, array};
 use space_trav_lr_rust::betadata::{
-    betadata_pair_lr_parallel, write_betadata_feather, BetaFrame, Betabase, GeneMatrix,
+    BetaFrame, Betabase, GeneMatrix, betadata_pair_lr_parallel, write_betadata_feather,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -590,14 +590,7 @@ fn betadata_pair_lr_parallel_seed_clusters() {
     let ids = vec!["0".to_string(), "1".to_string()];
     let cols = vec!["beta_TGFA$EGFR".to_string()];
     let data = ndarray::array![[0.7_f64], [0.1_f64]];
-    write_betadata_feather(
-        path.to_str().unwrap(),
-        "Cluster",
-        &ids,
-        &cols,
-        &data,
-    )
-    .unwrap();
+    write_betadata_feather(path.to_str().unwrap(), "Cluster", &ids, &cols, &data).unwrap();
 
     let obs: Vec<String> = (0..10).map(|i| format!("o{}", i)).collect();
     let clusters: Vec<usize> = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1];

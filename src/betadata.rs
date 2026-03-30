@@ -1,16 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
+use ndarray::{Array1, Array2, ArrayView1};
 use polars::datatypes::DataType;
 use polars::frame::DataFrame;
 use polars::prelude::*;
-use serde::Serialize;
-use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
+use serde::Serialize;
 
 /// Named matrix for gene expression or weighted ligand data.
 /// Wraps a dense 2D array with gene-name → column-index lookup.
@@ -52,9 +52,7 @@ impl GeneMatrix {
 }
 
 fn obs_df_has_column(obs: &DataFrame, name: &str) -> bool {
-    obs.get_column_names()
-        .iter()
-        .any(|n| n.as_str() == name)
+    obs.get_column_names().iter().any(|n| n.as_str() == name)
 }
 
 fn is_cell_type_label_column(cluster_annot: &str) -> bool {
@@ -138,21 +136,19 @@ pub fn clusters_usize_from_obs_dataframe(
     obs: &DataFrame,
     cluster_annot: &str,
 ) -> Result<Vec<usize>> {
-    let col = obs
-        .column(cluster_annot)
-        .map_err(|_| {
-            let preview: Vec<String> = obs
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .take(25)
-                .collect();
-            anyhow::anyhow!(
-                "obs column {:?} not found. First columns: {:?}",
-                cluster_annot,
-                preview
-            )
-        })?;
+    let col = obs.column(cluster_annot).map_err(|_| {
+        let preview: Vec<String> = obs
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .take(25)
+            .collect();
+        anyhow::anyhow!(
+            "obs column {:?} not found. First columns: {:?}",
+            cluster_annot,
+            preview
+        )
+    })?;
     let f = col.cast(&DataType::Float64).map_err(|e| {
         anyhow::anyhow!(
             "obs column {:?} must be numeric (cluster ids): {}",
@@ -205,8 +201,8 @@ pub struct BetaFrame {
 }
 
 /// Write betadata as Feather-compatible Arrow IPC (LZ4). `id_col` is `Cluster` (seed-only) or `CellID` (per-cell CNN).
-pub fn write_betadata_feather(
-    path: &str,
+pub fn write_betadata_feather_to_writer<W: std::io::Write>(
+    writer: W,
     id_col: &str,
     ids: &[String],
     data_columns: &[String],
@@ -232,10 +228,22 @@ pub fn write_betadata_feather(
         columns.push(Series::new(name.as_str().into(), col).into());
     }
     let mut df = DataFrame::new(columns)?;
-    let f = File::create(path).with_context(|| format!("create {}", path))?;
-    let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
-    w.finish(&mut df).with_context(|| format!("write IPC {}", path))?;
+    let mut w = IpcWriter::new(writer).with_compression(Some(IpcCompression::LZ4));
+    w.finish(&mut df).context("write IPC / feather bytes")?;
     Ok(())
+}
+
+/// Write betadata as Feather-compatible Arrow IPC (LZ4). `id_col` is `Cluster` (seed-only) or `CellID` (per-cell CNN).
+pub fn write_betadata_feather(
+    path: &str,
+    id_col: &str,
+    ids: &[String],
+    data_columns: &[String],
+    data: &Array2<f64>,
+) -> Result<()> {
+    let f = File::create(path).with_context(|| format!("create {}", path))?;
+    write_betadata_feather_to_writer(f, id_col, ids, data_columns, data)
+        .with_context(|| format!("write IPC {}", path))
 }
 
 impl BetaFrame {
@@ -697,6 +705,38 @@ pub struct Betabase {
     pub tfs_set: HashSet<String>,
 }
 
+/// Feather read vs cell expansion while [`Betabase::from_directory`] runs.
+#[derive(Clone, Copy, Debug)]
+pub enum BetadataProgressPhase {
+    ReadingFeathers { done: usize, total: usize },
+    ExpandingToCells { done: usize, total: usize },
+}
+
+/// Atomics updated during betadata load for HTTP/UI progress (spatial viewer).
+pub struct BetadataUiProgress {
+    pub done: AtomicU32,
+    pub total: AtomicU32,
+    pub phase: AtomicU8,
+}
+
+const BETADATA_UI_PHASE_IDLE: u8 = 0;
+
+impl BetadataUiProgress {
+    pub fn new() -> Self {
+        Self {
+            done: AtomicU32::new(0),
+            total: AtomicU32::new(0),
+            phase: AtomicU8::new(BETADATA_UI_PHASE_IDLE),
+        }
+    }
+
+    pub fn reset(&self) {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        self.phase.store(BETADATA_UI_PHASE_IDLE, Ordering::Relaxed);
+    }
+}
+
 impl Betabase {
     pub fn apply_modulator_gene_indices(&mut self, gene2index: &HashMap<String, usize>) {
         for frame in self.data.values_mut() {
@@ -717,13 +757,14 @@ impl Betabase {
     /// then expand every frame to cell level using the given obs_names + `cluster_keys`.
     ///
     /// `on_subprogress`: optional callback with sub-progress in **permille** (0–1000) for this
-    /// stage only (roughly 0–700 while reading feathers, 700–1000 while expanding to cells).
+    /// stage only (roughly 0–700 while reading feathers, 700–1000 while expanding to cells), plus
+    /// the current [`BetadataProgressPhase`].
     pub fn from_directory(
         dir: &str,
         obs_names: &[String],
         cluster_keys: &[String],
         gene2index: Option<&HashMap<String, usize>>,
-        on_subprogress: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+        on_subprogress: Option<Arc<dyn Fn(u32, BetadataProgressPhase) + Send + Sync>>,
     ) -> Result<Self> {
         let dir_path = Path::new(dir);
         anyhow::ensure!(dir_path.exists(), "Directory {} does not exist", dir);
@@ -765,7 +806,13 @@ impl Betabase {
                 let pn = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(f) = &on_subprogress {
                     let sub = ((pn as u64 * 700u64) / total_n).min(700) as u32;
-                    f(sub);
+                    f(
+                        sub,
+                        BetadataProgressPhase::ReadingFeathers {
+                            done: pn as usize,
+                            total: paths.len(),
+                        },
+                    );
                 }
                 match result {
                     Ok(frame) => Some(frame),
@@ -795,7 +842,13 @@ impl Betabase {
         for (fi, mut frame) in frames.drain(..).enumerate() {
             if let Some(f) = &on_subprogress {
                 let sub = (700u64 + ((fi as u64 + 1) * 300) / n_expand as u64).min(1000) as u32;
-                f(sub);
+                f(
+                    sub,
+                    BetadataProgressPhase::ExpandingToCells {
+                        done: fi + 1,
+                        total: n_expand,
+                    },
+                );
             }
             ligands_set.extend(frame.ligands.iter().cloned());
             receptors_set.extend(frame.receptors.iter().cloned());
@@ -1046,9 +1099,7 @@ pub fn betadata_feather_top_coefficients_for_selection(
     let mut scores: Vec<(String, f64, f64)> = Vec::with_capacity(columns.len());
 
     for col_name in columns {
-        let series = df
-            .column(col_name.as_str())?
-            .cast(&DataType::Float64)?;
+        let series = df.column(col_name.as_str())?.cast(&DataType::Float64)?;
         let ca = series.f64()?;
         let mut sum = 0.0f64;
         let mut sum_abs = 0.0f64;
@@ -1087,7 +1138,9 @@ pub fn betadata_feather_top_coefficients_for_selection(
 }
 
 fn feather_column_modulator_key(name: &str) -> String {
-    name.strip_prefix("beta_").unwrap_or(name).to_ascii_uppercase()
+    name.strip_prefix("beta_")
+        .unwrap_or(name)
+        .to_ascii_uppercase()
 }
 
 /// Mean β per modulator column (column name stripped of `beta_` prefix, ASCII-uppercase match) over
@@ -1154,9 +1207,7 @@ pub fn betadata_feather_modulator_beta_means_for_cells(
             out.push(None);
             continue;
         };
-        let series = df
-            .column(col_name.as_str())?
-            .cast(&DataType::Float64)?;
+        let series = df.column(col_name.as_str())?.cast(&DataType::Float64)?;
         let ca = series.f64()?;
         let mut sum = 0.0f64;
         let mut cnt = 0usize;
@@ -1486,14 +1537,7 @@ pub fn betadata_pair_lr_parallel(
                 return Ok(Vec::new());
             }
             let ps = path.to_string_lossy().into_owned();
-            betadata_pair_lr_one_gene(
-                &ps,
-                gene.as_str(),
-                obs_names,
-                cluster_keys,
-                cell_a,
-                cell_b,
-            )
+            betadata_pair_lr_one_gene(&ps, gene.as_str(), obs_names, cluster_keys, cell_a, cell_b)
         })
         .collect();
 

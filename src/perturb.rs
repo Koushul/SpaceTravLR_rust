@@ -220,10 +220,7 @@ pub fn perturb_with_targets(
 
         // 1. Splash all trained genes (expression → f32 for splash / betabase RAM)
         let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-        let gex_gm = GeneMatrix::new(
-            gex_filtered.mapv(|v| v as f32),
-            gene_names.to_vec(),
-        );
+        let gex_gm = GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
         let splashed = compute_splash_all(
             bb,
             &rw_lr_for_splash,

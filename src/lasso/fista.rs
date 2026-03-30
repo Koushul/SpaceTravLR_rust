@@ -100,9 +100,7 @@ fn update_step(
 ) -> (Array2<f64>, Array2<f64>, f64) {
     let grad = problem.smooth_grad(y);
     // Standard gradient step (Beck & Teboulle 2009): y − (1/L) · ∇f(y)
-    let step = Array2::from_shape_fn(y.raw_dim(), |(r, c)| {
-        y[[r, c]] - grad[[r, c]] / lipschitz
-    });
+    let step = Array2::from_shape_fn(y.raw_dim(), |(r, c)| y[[r, c]] - grad[[r, c]] / lipschitz);
     let new_x = problem.prox(&step, lipschitz);
     let new_t = next_momentum(t);
 

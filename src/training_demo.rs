@@ -12,9 +12,9 @@ fn demo_delay_ms(base_plus_jitter: u64) -> Duration {
 }
 
 const DEMO_GENES: &[&str] = &[
-    "CD74", "MALAT1", "PAX5", "PTPRC", "TMSB4X", "CD3D", "MS4A1", "CD19", "FCER1G", "GNLY",
-    "CD14", "LYZ", "EPCAM", "KRT8", "ACTA2", "COL1A1", "PECAM1", "VWF", "CD8A", "FOXP3", "IL7R",
-    "CCR7", "IFNG", "TNF", "CD4", "CD68", "DCN", "POSTN", "MKI67", "TOP2A",
+    "CD74", "MALAT1", "PAX5", "PTPRC", "TMSB4X", "CD3D", "MS4A1", "CD19", "FCER1G", "GNLY", "CD14",
+    "LYZ", "EPCAM", "KRT8", "ACTA2", "COL1A1", "PECAM1", "VWF", "CD8A", "FOXP3", "IL7R", "CCR7",
+    "IFNG", "TNF", "CD4", "CD68", "DCN", "POSTN", "MKI67", "TOP2A",
 ];
 
 fn demo_gene_names(total: usize, filter: Option<&[String]>) -> Vec<String> {
@@ -28,11 +28,7 @@ fn demo_gene_names(total: usize, filter: Option<&[String]>) -> Vec<String> {
                 .filter(|g| set.iter().any(|s| s == *g))
                 .map(|s| (*s).to_string())
                 .collect();
-            if v.is_empty() {
-                f.to_vec()
-            } else {
-                v
-            }
+            if v.is_empty() { f.to_vec() } else { v }
         }
     } else {
         DEMO_GENES.iter().map(|s| (*s).to_string()).collect()
@@ -54,7 +50,8 @@ fn demo_gene_names(total: usize, filter: Option<&[String]>) -> Vec<String> {
 }
 
 fn gene_hash(gene: &str) -> u32 {
-    gene.bytes().fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32))
+    gene.bytes()
+        .fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32))
 }
 
 fn fake_summaries(gene: &str, n_clusters: usize, full_cnn: bool) -> Vec<ClusterTrainingSummary> {
@@ -228,10 +225,7 @@ fn demo_worker(
 
         thread::sleep(demo_delay_ms(100 + (gene_hash(&gene) % 150) as u64));
 
-        let n_clusters = hud
-            .lock()
-            .map(|g| g.n_clusters.max(3))
-            .unwrap_or(8);
+        let n_clusters = hud.lock().map(|g| g.n_clusters.max(3)).unwrap_or(8);
         let summaries = fake_summaries(&gene, n_clusters, run_full_cnn);
         if let Ok(mut g) = hud.lock() {
             g.record_gene_time(&gene, job_start.elapsed().as_secs_f64());
@@ -253,7 +247,9 @@ pub fn run_demo_training(
     let names = demo_gene_names(total_genes, gene_filter.as_deref());
 
     let (n_parallel, run_full_cnn, epochs_per_gene) = {
-        let g = hud.lock().map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
+        let g = hud
+            .lock()
+            .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
         (
             g.n_parallel.max(1).min(32),
             g.full_cnn,
@@ -262,7 +258,9 @@ pub fn run_demo_training(
     };
 
     {
-        let mut g = hud.lock().map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
+        let mut g = hud
+            .lock()
+            .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
         g.total_genes = total_genes;
         g.n_cells = 18_432;
         g.n_clusters = 14;
@@ -304,10 +302,13 @@ pub fn run_demo_training(
     }
 
     for h in handles {
-        h.join().map_err(|_| anyhow::anyhow!("demo worker thread panicked"))?;
+        h.join()
+            .map_err(|_| anyhow::anyhow!("demo worker thread panicked"))?;
     }
 
-    let mut g = hud.lock().map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
+    let mut g = hud
+        .lock()
+        .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
     if g.finished.is_none() {
         g.finished = Some(Ok(()));
     }

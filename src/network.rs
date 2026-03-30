@@ -14,11 +14,7 @@ fn push_tried(tried: &mut Vec<String>, p: &Path) {
 
 fn try_file_path(path: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
     push_tried(tried, &path);
-    if path.is_file() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.is_file() { Some(path) } else { None }
 }
 
 /// Resolve `{species}_network.parquet` using config override, env, build-time manifest, exe-relative
@@ -30,7 +26,10 @@ pub fn resolve_species_network_parquet(
     let filename = format!("{}_network.parquet", species);
     let mut tried: Vec<String> = Vec::new();
 
-    if let Some(dir) = config_network_data_dir.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(dir) = config_network_data_dir
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let base = PathBuf::from(expand_user_path(dir));
         let candidate = base.join(&filename);
         if let Some(p) = try_file_path(candidate, &mut tried) {
@@ -640,9 +639,12 @@ mod tests {
     #[test]
     fn resolve_error_lists_tried_paths() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
-        let err = resolve_species_network_parquet("definitely_missing_species_xyz", Some(dir.to_str().unwrap()))
-            .unwrap_err()
-            .to_string();
+        let err = resolve_species_network_parquet(
+            "definitely_missing_species_xyz",
+            Some(dir.to_str().unwrap()),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("definitely_missing_species_xyz_network.parquet"));
         assert!(err.contains(SPACETRAVLR_DATA_DIR_ENV));
         assert!(err.contains("Tried:"));

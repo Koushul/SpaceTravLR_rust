@@ -397,6 +397,68 @@ pub fn expand_user_path(s: &str) -> String {
     s.to_string()
 }
 
+/// Strip a `file:` / `file://` URL prefix so pasted Finder / browser paths open correctly.
+fn strip_file_url_prefix(s: &str) -> &str {
+    let Some(rest) = s.strip_prefix("file:") else {
+        return s;
+    };
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    if rest.is_empty() {
+        return s;
+    }
+    if rest.starts_with('/') {
+        return rest;
+    }
+    match rest.find('/') {
+        Some(i) => &rest[i..],
+        None => s,
+    }
+}
+
+/// Normalize paths pasted into the spatial viewer (or similar UIs): trim, strip UTF-8 BOM,
+/// optional wrapping quotes, `file://` URLs, then [`expand_user_path`].
+pub fn normalize_ui_path(s: &str) -> String {
+    let s = s.trim().trim_start_matches('\u{feff}').trim();
+    let s = if s.len() >= 2 {
+        let b = s.as_bytes();
+        if (b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\'') {
+            s[1..s.len() - 1].trim()
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+    let s = strip_file_url_prefix(s.trim());
+    expand_user_path(s)
+}
+
+#[cfg(test)]
+mod normalize_ui_path_tests {
+    use super::normalize_ui_path;
+
+    #[test]
+    fn file_triple_slash_unix() {
+        assert_eq!(
+            normalize_ui_path("file:///tmp/snrna_human_tonsil_v2.h5ad"),
+            "/tmp/snrna_human_tonsil_v2.h5ad"
+        );
+    }
+
+    #[test]
+    fn file_localhost_unix() {
+        assert_eq!(
+            normalize_ui_path("file://localhost/tmp/a.h5ad"),
+            "/tmp/a.h5ad"
+        );
+    }
+
+    #[test]
+    fn strips_wrapping_quotes() {
+        assert_eq!(normalize_ui_path("  \"/tmp/x.h5ad\"  "), "/tmp/x.h5ad");
+    }
+}
+
 /// Default training output directory: current working directory + `{adata_stem}_{YYYY-MM-DD}`.
 /// `adata_stem` is the `.h5ad` file stem; `/` and `\\` in the stem are replaced with `_`.
 pub fn default_output_dir_for_adata_path(adata_path: impl AsRef<Path>) -> anyhow::Result<String> {
@@ -447,7 +509,10 @@ impl SpaceshipConfig {
     }
 
     /// Write `spacetravlr_run_repro.toml` only if missing (first trainer on a shared output directory).
-    pub fn write_run_repro_toml_if_missing(&self, output_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+    pub fn write_run_repro_toml_if_missing(
+        &self,
+        output_dir: &Path,
+    ) -> anyhow::Result<Option<PathBuf>> {
         std::fs::create_dir_all(output_dir)?;
         let path = output_dir.join(RUN_REPRO_TOML_FILENAME);
         if path.is_file() {
@@ -488,9 +553,7 @@ impl SpaceshipConfig {
     }
 
     pub fn resolved_cnn_mode(&self) -> CnnTrainingMode {
-        self.training
-            .mode
-            .unwrap_or(CnnTrainingMode::Seed)
+        self.training.mode.unwrap_or(CnnTrainingMode::Seed)
     }
 
     pub fn full_cnn(&self) -> bool {
@@ -540,8 +603,7 @@ mod resolve_training_output_dir_tests {
         cfg.grn.tf_priors_feather = Some("/data/priors.feather".into());
         let s = cfg.to_toml_pretty().unwrap();
         assert!(
-            s.contains("tf_priors_feather")
-                && s.contains("/data/priors.feather"),
+            s.contains("tf_priors_feather") && s.contains("/data/priors.feather"),
             "repro TOML should record grn.tf_priors_feather for join / viewer: {s}"
         );
     }
@@ -551,10 +613,7 @@ mod resolve_training_output_dir_tests {
         let mut cfg = SpaceshipConfig::default();
         cfg.execution.output_dir = String::new();
         let p = Path::new("/configs/x/spacetravlr_run_repro.toml");
-        assert_eq!(
-            cfg.resolve_training_output_dir(p),
-            Path::new("/configs/x")
-        );
+        assert_eq!(cfg.resolve_training_output_dir(p), Path::new("/configs/x"));
     }
 
     #[test]

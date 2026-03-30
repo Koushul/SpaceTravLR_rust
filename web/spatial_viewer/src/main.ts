@@ -119,6 +119,10 @@ interface Meta {
   /** 0–1000 permille; prefer over `perturb_progress_percent` for progress bar / label when set. */
   perturb_progress_permille?: number | null;
   perturb_progress_label?: string | null;
+  /** Present while reading / expanding betadata feathers during perturb runtime load. */
+  perturb_betadata_phase?: "reading" | "expanding" | null;
+  perturb_betadata_done?: number | null;
+  perturb_betadata_total?: number | null;
   adata_path: string;
   betadata_dir: string;
   network_dir?: string | null;
@@ -651,6 +655,14 @@ async function main() {
           <button type="button" class="secondary" id="perturbSummaryBtn">
             Perturbation summary
           </button>
+          <button
+            type="button"
+            class="secondary"
+            id="perturbExportFeatherBtn"
+            title="Same perturbation as preview: full simulated expression matrix (cells × genes) as Arrow/Feather IPC"
+          >
+            Download simulated expr (.feather)
+          </button>
           <button type="button" class="secondary" id="clearQuiverBtn">Clear quiver</button>
         </div>
         <div class="signature-umap-wrap">
@@ -752,127 +764,129 @@ async function main() {
                 </div>
                 <div class="splash-net-force-fields hidden" id="splashNetForceFields">
                   <p class="splash-net-force-title">Force layout</p>
-                  <label class="splash-net-slider"
-                    >Link distance (strong) <span id="splashNetForceLinkMinVal">36</span> px
-                    <input
-                      type="range"
-                      id="splashNetForceLinkMin"
-                      min="15"
-                      max="90"
-                      step="1"
-                      value="36"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Link stretch (weak) <span id="splashNetForceLinkSpanVal">120</span> px
-                    <input
-                      type="range"
-                      id="splashNetForceLinkSpan"
-                      min="20"
-                      max="250"
-                      step="2"
-                      value="120"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Link strength <span id="splashNetForceStrengthVal">0.35</span>
-                    <input
-                      type="range"
-                      id="splashNetForceStrength"
-                      min="5"
-                      max="100"
-                      step="1"
-                      value="35"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Repulsion <span id="splashNetForceChargeVal">220</span>
-                    <input
-                      type="range"
-                      id="splashNetForceCharge"
-                      min="40"
-                      max="500"
-                      step="5"
-                      value="220"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Collision padding <span id="splashNetForceCollideVal">14</span> px
-                    <input
-                      type="range"
-                      id="splashNetForceCollide"
-                      min="2"
-                      max="40"
-                      step="1"
-                      value="14"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Cooling (α decay ×10⁴) <span id="splashNetForceAlphaDecayVal">228</span>
-                    <input
-                      type="range"
-                      id="splashNetForceAlphaDecay"
-                      min="80"
-                      max="500"
-                      step="2"
-                      value="228"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Friction (velocity decay) <span id="splashNetForceVelocityVal">0.40</span>
-                    <input
-                      type="range"
-                      id="splashNetForceVelocity"
-                      min="15"
-                      max="85"
-                      step="1"
-                      value="40"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Drag reheat <span id="splashNetForceDragAlphaVal">0.35</span>
-                    <input
-                      type="range"
-                      id="splashNetForceDragAlpha"
-                      min="10"
-                      max="70"
-                      step="1"
-                      value="35"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Link solver passes <span id="splashNetForceLinkIterVal">1</span>
-                    <input
-                      type="range"
-                      id="splashNetForceLinkIter"
-                      min="1"
-                      max="8"
-                      step="1"
-                      value="1"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Zoom min <span id="splashNetForceZoomMinVal">0.35</span>×
-                    <input
-                      type="range"
-                      id="splashNetForceZoomMin"
-                      min="20"
-                      max="90"
-                      step="1"
-                      value="35"
-                    />
-                  </label>
-                  <label class="splash-net-slider"
-                    >Zoom max <span id="splashNetForceZoomMaxVal">3.0</span>×
-                    <input
-                      type="range"
-                      id="splashNetForceZoomMax"
-                      min="150"
-                      max="600"
-                      step="10"
-                      value="300"
-                    />
-                  </label>
+                  <div class="splash-net-force-grid">
+                    <label class="splash-net-slider"
+                      >Link distance (strong) <span id="splashNetForceLinkMinVal">42</span> px
+                      <input
+                        type="range"
+                        id="splashNetForceLinkMin"
+                        min="15"
+                        max="90"
+                        step="1"
+                        value="42"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Link stretch (weak) <span id="splashNetForceLinkSpanVal">100</span> px
+                      <input
+                        type="range"
+                        id="splashNetForceLinkSpan"
+                        min="20"
+                        max="250"
+                        step="2"
+                        value="100"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Link strength <span id="splashNetForceStrengthVal">0.40</span>
+                      <input
+                        type="range"
+                        id="splashNetForceStrength"
+                        min="5"
+                        max="100"
+                        step="1"
+                        value="40"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Repulsion <span id="splashNetForceChargeVal">260</span>
+                      <input
+                        type="range"
+                        id="splashNetForceCharge"
+                        min="40"
+                        max="500"
+                        step="5"
+                        value="260"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Collision padding <span id="splashNetForceCollideVal">16</span> px
+                      <input
+                        type="range"
+                        id="splashNetForceCollide"
+                        min="2"
+                        max="40"
+                        step="1"
+                        value="16"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Cooling (α decay ×10⁴) <span id="splashNetForceAlphaDecayVal">210</span>
+                      <input
+                        type="range"
+                        id="splashNetForceAlphaDecay"
+                        min="80"
+                        max="500"
+                        step="2"
+                        value="210"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Friction (velocity decay) <span id="splashNetForceVelocityVal">0.48</span>
+                      <input
+                        type="range"
+                        id="splashNetForceVelocity"
+                        min="15"
+                        max="85"
+                        step="1"
+                        value="48"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Drag reheat <span id="splashNetForceDragAlphaVal">0.40</span>
+                      <input
+                        type="range"
+                        id="splashNetForceDragAlpha"
+                        min="10"
+                        max="70"
+                        step="1"
+                        value="40"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Link solver passes <span id="splashNetForceLinkIterVal">2</span>
+                      <input
+                        type="range"
+                        id="splashNetForceLinkIter"
+                        min="1"
+                        max="8"
+                        step="1"
+                        value="2"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Zoom min <span id="splashNetForceZoomMinVal">0.40</span>×
+                      <input
+                        type="range"
+                        id="splashNetForceZoomMin"
+                        min="20"
+                        max="90"
+                        step="1"
+                        value="40"
+                      />
+                    </label>
+                    <label class="splash-net-slider"
+                      >Zoom max <span id="splashNetForceZoomMaxVal">2.5</span>×
+                      <input
+                        type="range"
+                        id="splashNetForceZoomMax"
+                        min="150"
+                        max="600"
+                        step="10"
+                        value="250"
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
               <p class="splash-net-scope-hint">
@@ -1150,6 +1164,36 @@ async function main() {
               value="100"
               title="Jitter amplitude"
             />
+            <div
+              class="perturb-status-inline hidden"
+              id="perturbStatusInline"
+              aria-live="polite"
+            >
+              <button
+                type="button"
+                class="perturb-ready-lamp"
+                id="perturbReadyLamp"
+                disabled
+                title="Perturbation runtime"
+                aria-label="Perturbation runtime status"
+              ></button>
+              <span class="perturb-status-msg" id="perturbStatusMsg"></span>
+              <div
+                class="perturb-betadata-bar-wrap hidden"
+                id="perturbBetadataBarWrap"
+              >
+                <div class="perturb-betadata-bar-track">
+                  <div
+                    class="perturb-betadata-bar-fill"
+                    id="perturbBetadataBarFill"
+                  ></div>
+                </div>
+                <span
+                  class="perturb-betadata-bar-label"
+                  id="perturbBetadataBarLabel"
+                ></span>
+              </div>
+            </div>
           </div>
           <div class="stats" id="stats"></div>
         </div>
@@ -1186,6 +1230,18 @@ async function main() {
     root.querySelector<HTMLDivElement>("#statusProgressWrap")!;
   const statusProgressFill =
     root.querySelector<HTMLDivElement>("#statusProgressFill")!;
+  const perturbStatusInline =
+    root.querySelector<HTMLDivElement>("#perturbStatusInline")!;
+  const perturbReadyLamp =
+    root.querySelector<HTMLButtonElement>("#perturbReadyLamp")!;
+  const perturbStatusMsg =
+    root.querySelector<HTMLSpanElement>("#perturbStatusMsg")!;
+  const perturbBetadataBarWrap =
+    root.querySelector<HTMLDivElement>("#perturbBetadataBarWrap")!;
+  const perturbBetadataBarFill =
+    root.querySelector<HTMLDivElement>("#perturbBetadataBarFill")!;
+  const perturbBetadataBarLabel =
+    root.querySelector<HTMLSpanElement>("#perturbBetadataBarLabel")!;
   const statsEl = root.querySelector<HTMLDivElement>("#stats")!;
   const cellJitterToggle =
     root.querySelector<HTMLInputElement>("#cellJitterToggle")!;
@@ -1477,6 +1533,98 @@ async function main() {
   const computeQuiverBtn =
     root.querySelector<HTMLButtonElement>("#computeQuiverBtn")!;
 
+  function syncPerturbRuntimeDock(m: Meta) {
+    const hasDataset = m.dataset_ready !== false && m.n_obs > 0;
+    const wantsPerturb =
+      (!!m.run_toml && m.run_toml.length > 0) ||
+      (!!m.betadata_dir && m.betadata_dir.length > 0);
+    const track =
+      hasDataset &&
+      (wantsPerturb ||
+        !!m.perturb_loading ||
+        !!m.perturb_ready ||
+        !!m.perturb_error);
+
+    perturbStatusInline.classList.toggle("hidden", !track);
+
+    perturbReadyLamp.classList.remove(
+      "perturb-ready-lamp--ready",
+      "perturb-ready-lamp--load",
+      "perturb-ready-lamp--error",
+      "perturb-ready-lamp--idle",
+    );
+    if (m.perturb_error) {
+      perturbReadyLamp.classList.add("perturb-ready-lamp--error");
+      perturbReadyLamp.title = `Perturbation load failed: ${m.perturb_error}`;
+    } else if (m.perturb_ready) {
+      perturbReadyLamp.classList.add("perturb-ready-lamp--ready");
+      perturbReadyLamp.title = "Perturbation runtime ready";
+    } else if (m.perturb_loading) {
+      perturbReadyLamp.classList.add("perturb-ready-lamp--load");
+      perturbReadyLamp.title = "Loading perturbation runtime…";
+    } else {
+      perturbReadyLamp.classList.add("perturb-ready-lamp--idle");
+      perturbReadyLamp.title = "Perturbation runtime preparing…";
+    }
+
+    const ph = m.perturb_betadata_phase;
+    const d = m.perturb_betadata_done;
+    const t = m.perturb_betadata_total;
+    const showBetadataBar =
+      !!m.perturb_loading &&
+      (ph === "reading" || ph === "expanding") &&
+      d != null &&
+      t != null &&
+      t > 0 &&
+      Number.isFinite(d) &&
+      Number.isFinite(t);
+
+    if (showBetadataBar) {
+      perturbBetadataBarWrap.classList.remove("hidden");
+      const frac = Math.min(1, Math.max(0, d! / t!));
+      perturbBetadataBarFill.style.width = `${frac * 100}%`;
+      const phaseW =
+        ph === "reading" ? "Reading betadata" : "Expanding betadata";
+      perturbBetadataBarLabel.textContent = `${phaseW} · ${d}/${t}`;
+    } else {
+      perturbBetadataBarWrap.classList.add("hidden");
+      perturbBetadataBarFill.style.width = "0%";
+      perturbBetadataBarLabel.textContent = "";
+    }
+
+    const pm = m.perturb_progress_permille;
+    const pctx = m.perturb_progress_percent;
+    const pctStr =
+      pm != null && Number.isFinite(pm)
+        ? `${(pm / 10).toFixed(0)}%`
+        : pctx != null && Number.isFinite(pctx)
+          ? `${pctx}%`
+          : "";
+    const plbl = (m.perturb_progress_label ?? "").trim();
+
+    perturbStatusMsg.classList.toggle(
+      "perturb-status-msg--ready",
+      !!m.perturb_ready && !m.perturb_error,
+    );
+    if (m.perturb_error) {
+      perturbStatusMsg.textContent = "Load failed";
+    } else if (m.perturb_ready) {
+      perturbStatusMsg.textContent = "Ready";
+    } else if (m.perturb_loading) {
+      if (showBetadataBar) {
+        perturbStatusMsg.textContent = "Loading betadata…";
+      } else if (pctStr) {
+        perturbStatusMsg.textContent = plbl ? `${plbl} ${pctStr}` : `Loading ${pctStr}`;
+      } else {
+        perturbStatusMsg.textContent = "Loading perturbation…";
+      }
+    } else if (wantsPerturb) {
+      perturbStatusMsg.textContent = "Preparing…";
+    } else {
+      perturbStatusMsg.textContent = "";
+    }
+  }
+
   function syncPerturbPanelsFromMeta() {
     colorSourcePerturbOpt.classList.toggle("hidden", !meta.perturb_ready);
     umapQuiverPanel.classList.toggle("hidden", !meta.perturb_ready);
@@ -1489,6 +1637,8 @@ async function main() {
     );
     fillRecvLigGeneHintsFromMeta();
     syncRecvLigModelOptionAvailability();
+    perturbExportFeatherBtn.disabled = !meta.perturb_ready;
+    syncPerturbRuntimeDock(meta);
   }
   const clearQuiverBtn =
     root.querySelector<HTMLButtonElement>("#clearQuiverBtn")!;
@@ -1496,6 +1646,8 @@ async function main() {
     root.querySelector<HTMLParagraphElement>("#transUmapOnlyHint")!;
   const perturbSummaryBtn =
     root.querySelector<HTMLButtonElement>("#perturbSummaryBtn")!;
+  const perturbExportFeatherBtn =
+    root.querySelector<HTMLButtonElement>("#perturbExportFeatherBtn")!;
   const perturbSummaryBody =
     root.querySelector<HTMLDivElement>("#perturbSummaryBody")!;
   const quiverVisScale =
@@ -1561,6 +1713,18 @@ async function main() {
   }
 
   function applyMetaProgressToUi(m: Meta) {
+    const ph = m.perturb_betadata_phase;
+    const bd = m.perturb_betadata_done;
+    const bt = m.perturb_betadata_total;
+    const showBetadataBar =
+      !!m.perturb_loading &&
+      (ph === "reading" || ph === "expanding") &&
+      bd != null &&
+      bt != null &&
+      bt > 0 &&
+      Number.isFinite(bd) &&
+      Number.isFinite(bt);
+
     const pm = m.perturb_progress_permille;
     const pct = m.perturb_progress_percent;
     const lbl = (m.perturb_progress_label ?? "").trim();
@@ -1576,14 +1740,34 @@ async function main() {
         : pct != null && Number.isFinite(pct)
           ? String(pct)
           : null;
-    if (barPct != null) {
-      syncProgressBar(barPct);
+
+    const betadataFillPct =
+      showBetadataBar && bt! > 0
+        ? Math.min(100, Math.max(0, (bd! / bt!) * 100))
+        : null;
+    const effectiveBarPct = barPct ?? betadataFillPct;
+
+    if (effectiveBarPct != null && !!m.perturb_loading) {
+      syncProgressBar(effectiveBarPct);
+    } else {
+      syncProgressBar(null);
+    }
+
+    if (showBetadataBar) {
+      const phaseLabel =
+        ph === "reading" ? "Reading betadata" : "Expanding betadata to cells";
       setStatus(
-        lbl
-          ? `${lbl} · ${pctLabel}%`
-          : `Working… ${pctLabel}%`,
+        pctLabel
+          ? `${phaseLabel} · ${bd}/${bt} · ${pctLabel}%`
+          : `${phaseLabel} · ${bd}/${bt}`,
+      );
+    } else if (barPct != null) {
+      setStatus(
+        lbl ? `${lbl} · ${pctLabel}%` : `Working… ${pctLabel}%`,
       );
     }
+
+    syncPerturbRuntimeDock(m);
   }
 
   async function withMetaProgressPoll<T>(work: Promise<T>): Promise<T> {
@@ -2734,6 +2918,7 @@ async function main() {
           syncColorModeUi();
           if (meta.perturb_error) {
             syncProgressBar(null);
+            syncPerturbRuntimeDock(meta);
             const base = (statusEl.textContent ?? "").replace(
               /\s*·?\s*perturbation.*$/i,
               "",
@@ -2747,6 +2932,7 @@ async function main() {
             return;
           }
           syncProgressBar(null);
+          syncPerturbRuntimeDock(meta);
           if (meta.perturb_ready) {
             const base = (statusEl.textContent ?? "").replace(
               /\s*·?\s*perturbation.*$/i,
@@ -2996,6 +3182,77 @@ async function main() {
     } catch (e) {
       setStatus(String(e), true);
       return false;
+    }
+  }
+
+  function filenameFromContentDisposition(cd: string | null): string | null {
+    if (!cd) return null;
+    const q = /filename="([^"]+)"/.exec(cd);
+    if (q?.[1]) return q[1]!.trim();
+    const u = /filename=([^;\s]+)/.exec(cd);
+    return u?.[1]?.replace(/^["']|["']$/g, "").trim() ?? null;
+  }
+
+  async function downloadPerturbSimulatedFeather(): Promise<void> {
+    if (meta.perturb_error) {
+      setStatus(`Perturbation unavailable: ${meta.perturb_error}`, true);
+      return;
+    }
+    if (meta.perturb_loading) {
+      setStatus(
+        "Perturbation engine is still loading; wait until the status line shows “perturbation ready”.",
+        true,
+      );
+      return;
+    }
+    if (!meta.perturb_ready) {
+      setStatus("Perturbation needs server --run-toml", true);
+      return;
+    }
+    const sp = perturbScopePayload();
+    if (!sp.ok) {
+      setStatus(sp.msg, true);
+      return;
+    }
+    const gene = perturbGene.value.trim();
+    if (!gene) {
+      setStatus("Enter gene to perturb", true);
+      return;
+    }
+    const desired = Number(perturbExpr.value);
+    setStatus("Exporting simulated expression (.feather)…");
+    try {
+      const res = await withMetaProgressPoll(
+        fetch(apiUrl("/api/perturb/export_feather"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            gene,
+            desired_expr: Number.isFinite(desired) ? desired : 0,
+            scope: sp.scope,
+            n_propagation: readUiNPropagation(),
+          }),
+        }).then(async (rr) => {
+          if (!rr.ok) throw new Error(await rr.text());
+          return rr;
+        }),
+      );
+      const blob = await res.blob();
+      const fn =
+        filenameFromContentDisposition(res.headers.get("Content-Disposition")) ??
+        `${gene.replace(/[^\w.-]+/g, "_")}_perturb_simulated_expr.feather`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fn;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus(`Downloaded ${fn} (${(blob.size / (1024 * 1024)).toFixed(2)} MiB)`);
+    } catch (e) {
+      setStatus(String(e), true);
     }
   }
 
@@ -3687,51 +3944,51 @@ async function main() {
 
   function syncSplashForceLabels() {
     splashNetForceLinkMinVal.textContent = String(
-      Math.min(90, Math.max(15, Math.trunc(Number(splashNetForceLinkMin.value) || 36))),
+      Math.min(90, Math.max(15, Math.trunc(Number(splashNetForceLinkMin.value) || 42))),
     );
     splashNetForceLinkSpanVal.textContent = String(
-      Math.min(250, Math.max(20, Math.trunc(Number(splashNetForceLinkSpan.value) || 120))),
+      Math.min(250, Math.max(20, Math.trunc(Number(splashNetForceLinkSpan.value) || 100))),
     );
-    const str = Math.min(100, Math.max(5, Math.trunc(Number(splashNetForceStrength.value) || 35)));
+    const str = Math.min(100, Math.max(5, Math.trunc(Number(splashNetForceStrength.value) || 40)));
     splashNetForceStrengthVal.textContent = (str / 100).toFixed(2);
     splashNetForceChargeVal.textContent = String(
-      Math.min(500, Math.max(40, Math.trunc(Number(splashNetForceCharge.value) || 220))),
+      Math.min(500, Math.max(40, Math.trunc(Number(splashNetForceCharge.value) || 260))),
     );
     splashNetForceCollideVal.textContent = String(
-      Math.min(40, Math.max(2, Math.trunc(Number(splashNetForceCollide.value) || 14))),
+      Math.min(40, Math.max(2, Math.trunc(Number(splashNetForceCollide.value) || 16))),
     );
-    const ad = Math.min(500, Math.max(80, Math.trunc(Number(splashNetForceAlphaDecay.value) || 228)));
+    const ad = Math.min(500, Math.max(80, Math.trunc(Number(splashNetForceAlphaDecay.value) || 210)));
     splashNetForceAlphaDecayVal.textContent = String(ad);
-    const vel = Math.min(85, Math.max(15, Math.trunc(Number(splashNetForceVelocity.value) || 40)));
+    const vel = Math.min(85, Math.max(15, Math.trunc(Number(splashNetForceVelocity.value) || 48)));
     splashNetForceVelocityVal.textContent = (vel / 100).toFixed(2);
-    const dra = Math.min(70, Math.max(10, Math.trunc(Number(splashNetForceDragAlpha.value) || 35)));
+    const dra = Math.min(70, Math.max(10, Math.trunc(Number(splashNetForceDragAlpha.value) || 40)));
     splashNetForceDragAlphaVal.textContent = (dra / 100).toFixed(2);
     splashNetForceLinkIterVal.textContent = String(
-      Math.min(8, Math.max(1, Math.trunc(Number(splashNetForceLinkIter.value) || 1))),
+      Math.min(8, Math.max(1, Math.trunc(Number(splashNetForceLinkIter.value) || 2))),
     );
-    const zm = Math.min(90, Math.max(20, Math.trunc(Number(splashNetForceZoomMin.value) || 35)));
+    const zm = Math.min(90, Math.max(20, Math.trunc(Number(splashNetForceZoomMin.value) || 40)));
     splashNetForceZoomMinVal.textContent = (zm / 100).toFixed(2);
-    const zx = Math.min(600, Math.max(150, Math.trunc(Number(splashNetForceZoomMax.value) || 300)));
+    const zx = Math.min(600, Math.max(150, Math.trunc(Number(splashNetForceZoomMax.value) || 250)));
     splashNetForceZoomMaxVal.textContent = (zx / 100).toFixed(1);
   }
 
   function readSplashForceParams(): SplashForceParams {
-    const linkMin = Math.min(90, Math.max(15, Math.trunc(Number(splashNetForceLinkMin.value) || 36)));
-    const linkSpan = Math.min(250, Math.max(20, Math.trunc(Number(splashNetForceLinkSpan.value) || 120)));
-    const str = Math.min(100, Math.max(5, Math.trunc(Number(splashNetForceStrength.value) || 35))) / 100;
-    const charge = -Math.min(500, Math.max(40, Math.trunc(Number(splashNetForceCharge.value) || 220)));
-    const collide = Math.min(40, Math.max(2, Math.trunc(Number(splashNetForceCollide.value) || 14)));
+    const linkMin = Math.min(90, Math.max(15, Math.trunc(Number(splashNetForceLinkMin.value) || 42)));
+    const linkSpan = Math.min(250, Math.max(20, Math.trunc(Number(splashNetForceLinkSpan.value) || 100)));
+    const str = Math.min(100, Math.max(5, Math.trunc(Number(splashNetForceStrength.value) || 40))) / 100;
+    const charge = -Math.min(500, Math.max(40, Math.trunc(Number(splashNetForceCharge.value) || 260)));
+    const collide = Math.min(40, Math.max(2, Math.trunc(Number(splashNetForceCollide.value) || 16)));
     const alphaDecay =
-      Math.min(500, Math.max(80, Math.trunc(Number(splashNetForceAlphaDecay.value) || 228))) / 10_000;
+      Math.min(500, Math.max(80, Math.trunc(Number(splashNetForceAlphaDecay.value) || 210))) / 10_000;
     const velocityDecay =
-      Math.min(85, Math.max(15, Math.trunc(Number(splashNetForceVelocity.value) || 40))) / 100;
+      Math.min(85, Math.max(15, Math.trunc(Number(splashNetForceVelocity.value) || 48))) / 100;
     const dragAlphaTarget =
-      Math.min(70, Math.max(10, Math.trunc(Number(splashNetForceDragAlpha.value) || 35))) / 100;
-    const linkIterations = Math.min(8, Math.max(1, Math.trunc(Number(splashNetForceLinkIter.value) || 1)));
+      Math.min(70, Math.max(10, Math.trunc(Number(splashNetForceDragAlpha.value) || 40))) / 100;
+    const linkIterations = Math.min(8, Math.max(1, Math.trunc(Number(splashNetForceLinkIter.value) || 2)));
     let zoomScaleMin =
-      Math.min(90, Math.max(20, Math.trunc(Number(splashNetForceZoomMin.value) || 35))) / 100;
+      Math.min(90, Math.max(20, Math.trunc(Number(splashNetForceZoomMin.value) || 40))) / 100;
     let zoomScaleMax =
-      Math.min(600, Math.max(150, Math.trunc(Number(splashNetForceZoomMax.value) || 300))) / 100;
+      Math.min(600, Math.max(150, Math.trunc(Number(splashNetForceZoomMax.value) || 250))) / 100;
     if (zoomScaleMin >= zoomScaleMax) {
       zoomScaleMax = zoomScaleMin + 0.05;
     }
@@ -4983,6 +5240,10 @@ async function main() {
       perturbSummaryBody.innerHTML = `<p class="interaction-error">${escapeHtml(String(e))}</p>`;
       setStatus(String(e), true);
     }
+  });
+
+  perturbExportFeatherBtn.addEventListener("click", () => {
+    void downloadPerturbSimulatedFeather();
   });
 
   loadBtn.addEventListener("click", () => void loadActiveChannel());
