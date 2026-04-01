@@ -423,12 +423,15 @@ fn compute_notice_text(compute: &ComputeChoice) -> String {
         ComputeChoice::LibTorch(_) => format!("Using LibTorch compute backend: {}", details),
         ComputeChoice::Wgpu(_) => format!("Using WGPU compute backend: {}", details),
         ComputeChoice::NdArray(_) => {
-            let forced = std::env::var("SPACETRAVLR_FORCE_CPU")
+            let forced_cpu = std::env::var("SPACETRAVLR_FORCE_CPU")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            if forced {
+            let disable_wgpu = std::env::var("SPACETRAVLR_DISABLE_WGPU")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if forced_cpu || disable_wgpu {
                 format!(
-                    "SPACETRAVLR_FORCE_CPU: using CPU (NdArray) backend: {}",
+                    "Using CPU (NdArray) backend (SPACETRAVLR_FORCE_CPU / SPACETRAVLR_DISABLE_WGPU): {}",
                     details
                 )
             } else {

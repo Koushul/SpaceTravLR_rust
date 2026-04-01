@@ -31,11 +31,16 @@ impl ComputeChoice {
     }
 }
 
-pub(crate) fn select_compute_backend() -> ComputeChoice {
-    if std::env::var("SPACETRAVLR_FORCE_CPU")
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
-    {
+}
+
+pub(crate) fn select_compute_backend() -> ComputeChoice {
+    // SPACETRAVLR_DISABLE_WGPU: skip Burn/WGPU + CubeCL (avoids GPU autotune panics on drivers
+    // that report an adapter but do not support subgroup / "plane" ops used by some kernels).
+    if env_truthy("SPACETRAVLR_FORCE_CPU") || env_truthy("SPACETRAVLR_DISABLE_WGPU") {
         return ComputeChoice::NdArray(NdArrayDevice::Cpu);
     }
 
