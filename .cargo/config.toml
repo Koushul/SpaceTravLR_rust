@@ -1,3 +1,4 @@
 [build]
 rustc-wrapper = "sccache"
-rustflags = ["-C", "target-cpu=native"]
+# No `target-cpu=native`: that optimizes for the build CPU only and can SIGILL on older CPUs
+# (often first hit in full CNN training). Use RUSTFLAGS='-C target-cpu=native' locally if wanted.
