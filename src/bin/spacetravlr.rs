@@ -419,9 +419,7 @@ fn parse_gene_filter(cli: &Cli) -> Option<Vec<String>> {
 fn compute_notice_text(compute: &ComputeChoice) -> String {
     let details = compute_hardware_details(compute);
     match compute {
-        #[cfg(feature = "libtorch")]
-        ComputeChoice::LibTorch(_) => format!("Using LibTorch compute backend: {}", details),
-        ComputeChoice::Wgpu(_) => format!("Using WGPU compute backend: {}", details),
+        ComputeChoice::Wgpu(_) => format!("Using WebGPU compute backend: {}", details),
         ComputeChoice::NdArray(_) => {
             let forced_cpu = std::env::var("SPACETRAVLR_FORCE_CPU")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

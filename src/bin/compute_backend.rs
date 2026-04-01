@@ -1,7 +1,3 @@
-#[cfg(feature = "libtorch")]
-use burn::backend::LibTorch;
-#[cfg(feature = "libtorch")]
-use burn::backend::libtorch::LibTorchDevice;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
@@ -11,11 +7,10 @@ use space_trav_lr_rust::config::{
 };
 use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
 use space_trav_lr_rust::training_hud::TrainingHud;
+use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]
 pub(crate) enum ComputeChoice {
-    #[cfg(feature = "libtorch")]
-    LibTorch(LibTorchDevice),
     Wgpu(WgpuDevice),
     NdArray(NdArrayDevice),
 }
@@ -23,9 +18,7 @@ pub(crate) enum ComputeChoice {
 impl ComputeChoice {
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            #[cfg(feature = "libtorch")]
-            ComputeChoice::LibTorch(_) => "LibTorch",
-            ComputeChoice::Wgpu(_) => "WGPU",
+            ComputeChoice::Wgpu(_) => "WebGPU",
             ComputeChoice::NdArray(_) => "CPU (NdArray)",
         }
     }
@@ -37,29 +30,23 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Burn **WebGPU** backend when the `wgpu` crate can request an adapter, otherwise Burn **NdArray** on CPU.
+/// `SPACETRAVLR_FORCE_CPU` / `SPACETRAVLR_DISABLE_WGPU` force CPU (no adapter probe).
 pub(crate) fn select_compute_backend() -> ComputeChoice {
-    // SPACETRAVLR_DISABLE_WGPU: skip Burn/WGPU + CubeCL (avoids GPU autotune panics on drivers
-    // that report an adapter but do not support subgroup / "plane" ops used by some kernels).
     if env_truthy("SPACETRAVLR_FORCE_CPU") || env_truthy("SPACETRAVLR_DISABLE_WGPU") {
         return ComputeChoice::NdArray(NdArrayDevice::Cpu);
     }
 
-    #[cfg(feature = "libtorch")]
-    {
-        if tch::Cuda::is_available() {
-            return ComputeChoice::LibTorch(LibTorchDevice::Cuda(0));
-        }
-        #[cfg(target_os = "macos")]
-        if tch::utils::has_mps() {
-            return ComputeChoice::LibTorch(LibTorchDevice::Mps);
-        }
+    match wgpu_adapter_probe_cached().as_ref() {
+        Some(_) => ComputeChoice::Wgpu(WgpuDevice::default()),
+        None => ComputeChoice::NdArray(NdArrayDevice::Cpu),
     }
+}
 
-    if preferred_wgpu_adapter_info().is_some() {
-        ComputeChoice::Wgpu(WgpuDevice::default())
-    } else {
-        ComputeChoice::NdArray(NdArrayDevice::Cpu)
-    }
+static WGPU_ADAPTER_PROBE: OnceLock<Option<wgpu::AdapterInfo>> = OnceLock::new();
+
+fn wgpu_adapter_probe_cached() -> &'static Option<wgpu::AdapterInfo> {
+    WGPU_ADAPTER_PROBE.get_or_init(preferred_wgpu_adapter_info)
 }
 
 fn preferred_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
@@ -78,22 +65,8 @@ fn preferred_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
 
 pub(crate) fn compute_hardware_details(choice: &ComputeChoice) -> String {
     match choice {
-        #[cfg(feature = "libtorch")]
-        ComputeChoice::LibTorch(device) => match device {
-            LibTorchDevice::Cuda(idx) => {
-                let n = tch::Cuda::device_count();
-                format!("CUDA GPU {} of {} (LibTorch)", idx, n)
-            }
-            LibTorchDevice::Mps => "Apple MPS GPU (LibTorch)".to_string(),
-            LibTorchDevice::Cpu => {
-                let arch = std::env::consts::ARCH;
-                let os = std::env::consts::OS;
-                format!("{} {} CPU (LibTorch)", os, arch)
-            }
-            other => format!("{:?} (LibTorch)", other),
-        },
         ComputeChoice::Wgpu(_) => {
-            if let Some(info) = preferred_wgpu_adapter_info() {
+            if let Some(info) = wgpu_adapter_probe_cached().as_ref() {
                 format!(
                     "{} ({:?}, {} backend)",
                     info.name, info.device_type, info.backend
@@ -204,8 +177,6 @@ pub(crate) fn fit_all_genes_dispatch(
     choice: &ComputeChoice,
 ) -> anyhow::Result<()> {
     match choice {
-        #[cfg(feature = "libtorch")]
-        ComputeChoice::LibTorch(device) => dispatch_fit_all_genes!(LibTorch, p, device),
         ComputeChoice::Wgpu(device) => dispatch_fit_all_genes!(Wgpu, p, device),
         ComputeChoice::NdArray(device) => {
             dispatch_fit_all_genes!(NdArray<f32, i32>, p, device)

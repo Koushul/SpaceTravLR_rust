@@ -29,7 +29,6 @@ tui = [
     "dep:unicode-width",
     "dep:tokio",
 ]
-libtorch = ["burn/tch", "dep:tch"]
 dev-main = []
 spatial-viewer = [
     "dep:axum",
@@ -63,7 +62,6 @@ required-features = ["spatial-viewer"]
 
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
-tch = { version = "0.15", optional = true }
 burn-autodiff = { version = "0.16.1" }
 pollster = "0.4"
 wgpu = "23.0"
