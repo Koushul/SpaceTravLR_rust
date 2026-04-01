@@ -1,5 +1,7 @@
 #[cfg(feature = "spatial-viewer")]
 pub mod adata_query;
+#[cfg(feature = "spatial-viewer")]
+pub mod foyer_perturb_cache;
 pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
@@ -13,6 +15,8 @@ pub mod model;
 pub mod network;
 pub mod perturb;
 pub mod perturb_mode;
+#[cfg(feature = "tui")]
+pub mod perturb_tui;
 pub mod run_summary_html;
 pub mod spatial_estimator;
 #[cfg(feature = "tui")]

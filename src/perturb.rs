@@ -1,21 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use ndarray::{Array2, Zip};
+use ndarray::Array2;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::betadata::{Betabase, GeneMatrix};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PerturbTarget {
     pub gene: String,
     pub desired_expr: f64,
     pub cell_indices: Option<Vec<usize>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PerturbConfig {
     pub n_propagation: usize,
     pub scale_factor: f64,
@@ -38,6 +40,30 @@ impl Default for PerturbConfig {
             min_expression: 1e-9,
             ligand_grid_factor: None,
         }
+    }
+}
+
+/// Key for iteration-0 splash reuse across perturbations (same baseline expression / RW state).
+#[derive(Clone, PartialEq)]
+pub struct SplashCacheKey {
+    pub beta_scale_factor: f32,
+    pub beta_cap: Option<f32>,
+    pub min_expression: f64,
+}
+
+pub struct CachedBaselineSplash {
+    pub key: SplashCacheKey,
+    pub splashed: Arc<HashMap<String, GeneMatrix>>,
+}
+
+#[derive(Default)]
+pub struct PerturbTimings {
+    pub entries: Vec<(String, std::time::Duration)>,
+}
+
+impl PerturbTimings {
+    pub fn record(&mut self, label: impl Into<String>, d: std::time::Duration) {
+        self.entries.push((label.into(), d));
     }
 }
 
@@ -71,6 +97,7 @@ pub fn perturb(
             cell_indices: None,
         })
         .collect();
+    let mut no_timings: Option<PerturbTimings> = None;
     perturb_with_targets(
         bb,
         gene_mtx,
@@ -84,6 +111,8 @@ pub fn perturb(
         None,
         None,
         None,
+        None,
+        &mut no_timings,
     )
     .expect("cancel is only used by spatial viewer")
 }
@@ -118,6 +147,8 @@ pub fn perturb_with_targets(
     job_progress: Option<&Arc<AtomicU32>>,
     job_message: Option<&Arc<Mutex<String>>>,
     cancel: Option<&AtomicBool>,
+    baseline_splash_cache: Option<&Mutex<Option<CachedBaselineSplash>>>,
+    timings: &mut Option<PerturbTimings>,
 ) -> Result<PerturbResult, ()> {
     let n_cells = gene_mtx.nrows();
     let n_genes = gene_mtx.ncols();
@@ -219,16 +250,115 @@ pub fn perturb_with_targets(
         );
 
         // 1. Splash all trained genes (expression → f32 for splash / betabase RAM)
-        let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-        let gex_gm = GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
-        let splashed = compute_splash_all(
-            bb,
-            &rw_lr_for_splash,
-            rw_tfligands_init,
-            &gex_gm,
-            config.beta_scale_factor as f32,
-            config.beta_cap.map(|c| c as f32),
-        );
+        let t_splash = Instant::now();
+        let splash_key = SplashCacheKey {
+            beta_scale_factor: config.beta_scale_factor as f32,
+            beta_cap: config.beta_cap.map(|c| c as f32),
+            min_expression: config.min_expression,
+        };
+        let splashed: Arc<HashMap<String, GeneMatrix>> = if iter == 0 {
+            if let Some(slot) = baseline_splash_cache {
+                let mut guard = slot.lock().expect("baseline splash cache poisoned");
+                if let Some(cached) = guard.as_ref() {
+                    if cached.key == splash_key {
+                        Arc::clone(&cached.splashed)
+                    } else {
+                        let gex_filtered =
+                            gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
+                        let gex_gm =
+                            GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+                        let map = compute_splash_all_progress(
+                            bb,
+                            &rw_lr_for_splash,
+                            rw_tfligands_init,
+                            &gex_gm,
+                            config.beta_scale_factor as f32,
+                            config.beta_cap.map(|c| c as f32),
+                            job_progress.map(|p| p.as_ref()),
+                        );
+                        let arc = Arc::new(map);
+                        *guard = Some(CachedBaselineSplash {
+                            key: splash_key,
+                            splashed: Arc::clone(&arc),
+                        });
+                        arc
+                    }
+                } else {
+                    let gex_filtered =
+                        gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
+                    let gex_gm =
+                        GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+                    let map = compute_splash_all_progress(
+                        bb,
+                        &rw_lr_for_splash,
+                        rw_tfligands_init,
+                        &gex_gm,
+                        config.beta_scale_factor as f32,
+                        config.beta_cap.map(|c| c as f32),
+                        job_progress.map(|p| p.as_ref()),
+                    );
+                    let arc = Arc::new(map);
+                    *guard = Some(CachedBaselineSplash {
+                        key: splash_key,
+                        splashed: Arc::clone(&arc),
+                    });
+                    arc
+                }
+            } else {
+                let gex_filtered =
+                    gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
+                let gex_gm = GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+                if job_progress.is_some() {
+                    Arc::new(compute_splash_all_progress(
+                        bb,
+                        &rw_lr_for_splash,
+                        rw_tfligands_init,
+                        &gex_gm,
+                        config.beta_scale_factor as f32,
+                        config.beta_cap.map(|c| c as f32),
+                        job_progress.map(|p| p.as_ref()),
+                    ))
+                } else {
+                    Arc::new(compute_splash_all(
+                        bb,
+                        &rw_lr_for_splash,
+                        rw_tfligands_init,
+                        &gex_gm,
+                        config.beta_scale_factor as f32,
+                        config.beta_cap.map(|c| c as f32),
+                    ))
+                }
+            }
+        } else {
+            let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
+            let gex_gm = GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+            if job_progress.is_some() {
+                Arc::new(compute_splash_all_progress(
+                    bb,
+                    &rw_lr_for_splash,
+                    rw_tfligands_init,
+                    &gex_gm,
+                    config.beta_scale_factor as f32,
+                    config.beta_cap.map(|c| c as f32),
+                    job_progress.map(|p| p.as_ref()),
+                ))
+            } else {
+                Arc::new(compute_splash_all(
+                    bb,
+                    &rw_lr_for_splash,
+                    rw_tfligands_init,
+                    &gex_gm,
+                    config.beta_scale_factor as f32,
+                    config.beta_cap.map(|c| c as f32),
+                ))
+            }
+        };
+        if let Some(t) = timings.as_mut() {
+            t.record(
+                format!("iter{}/splash", iter + 1),
+                t_splash.elapsed(),
+            );
+        }
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(());
         }
@@ -240,6 +370,7 @@ pub fn perturb_with_targets(
         );
 
         // 2. Update gene expression
+        let t_lr = Instant::now();
         gene_mtx_1 = gene_mtx + &delta_simulated;
 
         // 3. Recompute weighted ligands
@@ -253,12 +384,19 @@ pub fn perturb_with_targets(
             config.min_expression,
             config.ligand_grid_factor,
         );
+        if let Some(t) = timings.as_mut() {
+            t.record(
+                format!("iter{}/weighted_ligands_lr", iter + 1),
+                t_lr.elapsed(),
+            );
+        }
         report_perturb_step(
             job_progress,
             job_message,
             base + span.saturating_mul(2) / 5,
             &format!("{msg_prefix} · spatial ligands (TFL)"),
         );
+        let t_tfl = Instant::now();
         let w_tfl_new = recompute_weighted_ligands(
             &gene_mtx_1,
             &gene_to_idx,
@@ -269,8 +407,15 @@ pub fn perturb_with_targets(
             config.min_expression,
             config.ligand_grid_factor,
         );
+        if let Some(t) = timings.as_mut() {
+            t.record(
+                format!("iter{}/weighted_ligands_tfl", iter + 1),
+                t_tfl.elapsed(),
+            );
+        }
 
         // 4. Delta in received ligands
+        let t_grn = Instant::now();
         let rw_max_1 = scatter_max_to_full(&w_lr_new, &w_tfl_new, &gene_to_idx, n_cells, n_genes);
         let delta_rw = &rw_max_1 - &rw_max_0;
 
@@ -294,29 +439,54 @@ pub fn perturb_with_targets(
             &format!("{msg_prefix} · GRN step (δ → Δexpr)"),
         );
         // 7. Perturb all cells: delta_y = splash_derivatives · delta_x
-        delta_simulated = perturb_all_cells(gene_names, bb, &splashed, &delta_simulated);
+        delta_simulated = perturb_all_cells(gene_names, bb, splashed.as_ref(), &delta_simulated);
+        if let Some(t) = timings.as_mut() {
+            t.record(
+                format!("iter{}/grn_propagate", iter + 1),
+                t_grn.elapsed(),
+            );
+        }
 
-        // 8. Pin target genes to their perturbed values
-        Zip::from(&mut delta_simulated)
-            .and(&delta_input)
-            .for_each(|d, &di| {
-                if di != 0.0 {
-                    *d = di;
+        // 8. Pin target genes to their perturbed values (only target columns)
+        let t_clip = Instant::now();
+        for target in targets {
+            if let Some(&gi) = gene_to_idx.get(target.gene.as_str()) {
+                if let Some(cell_indices) = target.cell_indices.as_ref() {
+                    for &cell in cell_indices {
+                        if cell < n_cells {
+                            delta_simulated[[cell, gi]] = delta_input[[cell, gi]];
+                        }
+                    }
+                } else {
+                    delta_simulated.column_mut(gi).assign(&delta_input.column(gi));
+                }
+            }
+        }
+
+        // 9. Clip to [0, max_observed] — zero-alloc, parallel
+        let delta_flat = delta_simulated.as_slice_memory_order_mut().unwrap();
+        let gmtx_flat = gene_mtx.as_slice().unwrap();
+        let max_ref = &max_per_gene;
+        delta_flat
+            .par_chunks_mut(n_genes)
+            .enumerate()
+            .for_each(|(cell, row)| {
+                let base = cell * n_genes;
+                for gene in 0..n_genes {
+                    unsafe {
+                        let orig = *gmtx_flat.get_unchecked(base + gene);
+                        let val = (orig + *row.get_unchecked(gene))
+                            .max(0.0)
+                            .min(*max_ref.get_unchecked(gene));
+                        *row.get_unchecked_mut(gene) = val - orig;
+                    }
                 }
             });
-
-        // 9. Clip to [0, max_observed]
-        let gem = gene_mtx + &delta_simulated;
-        let gem_flat = gem.as_slice().unwrap();
-        let gmtx_flat = gene_mtx.as_slice().unwrap();
-        let delta_flat = delta_simulated.as_slice_memory_order_mut().unwrap();
-        for cell in 0..n_cells {
-            let base = cell * n_genes;
-            for gene in 0..n_genes {
-                let idx = base + gene;
-                let val = gem_flat[idx].max(0.0).min(max_per_gene[gene]);
-                delta_flat[idx] = val - gmtx_flat[idx];
-            }
+        if let Some(t) = timings.as_mut() {
+            t.record(
+                format!("iter{}/pin_clip", iter + 1),
+                t_clip.elapsed(),
+            );
         }
         report_perturb_step(
             job_progress,

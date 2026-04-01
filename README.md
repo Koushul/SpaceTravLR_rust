@@ -124,6 +124,16 @@ cargo run --features spatial-viewer --bin spatial_viewer -- --allow-cors --bind 
 cd web/spatial_viewer && npm run mcp:serve
 ```
 
+### `spacetravlr-perturb` (terminal TUI)
+
+Interactive **Ratatui** perturbation using the same `spacetravlr_run_repro.toml` + `*_betadata.feather` loading path as **`spatial_viewer`** (`PerturbRuntime::from_run_toml`). The runtime is loaded once; then choose a gene (filter with **`/`**), set **`desired_expr`** (**`e`**) and **`n_propagation`** (**`p`**), and run (**`r`**). After each run, review the summary and press any key to queue another perturbation. **`Ctrl+V`** toggles per-step timings for the next result.
+
+```bash
+cargo run --bin spacetravlr-perturb -- --run-toml /path/to/spacetravlr_run_repro.toml
+```
+
+Omit **`--run-toml`** to type the TOML path on the first screen. **`--desired-expr`**, **`--n-propagation`**, and **`--verbose`** set initial TUI defaults. With **`cargo build --no-default-features`**, the same binary uses the legacy stdin **`perturb>`** REPL instead of the TUI. Non-interactive feather export is unchanged: **`--export`** with **`--run-toml`** and **`--gene`**.
+
 Register the MCP server in your client with command `npx` and args `tsx`, `mcp/stdio.ts` (with `cwd` set to `web/spatial_viewer`), or use `npm run mcp:serve`, or run `node` on a compiled entry if you prefer. Tools: **`show_spatial_viewer`** (opens the UI and loads dataset paths), **`spatial_viewer_control`** (live UI updates: gene, color source, status text; streaming tool input shows a bottom progress strip while arguments arrive), **`spatial_viewer_report_context`** (UI button **Send context to chat** calls this so the model receives a text summary). Smoke-test with the ext-apps **`basic-host`** example and `SERVERS` pointing at your MCP server if the client supports HTTP transport.
 
 The viewer keeps a slim **chrome strip** (selection stats + a **color bar** with numeric ends when a continuous channel is loaded). **Hide controls** collapses the main toolbar; **Cell types** and **GRN / neighbor context** are collapsible `<details>` sections so the plot can use most of the window.

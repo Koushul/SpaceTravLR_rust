@@ -1,6 +1,7 @@
 use ndarray::{Array2, array};
 use space_trav_lr_rust::betadata::{
-    BetaFrame, Betabase, GeneMatrix, betadata_pair_lr_parallel, write_betadata_feather,
+    BetaFrame, Betabase, GeneMatrix, betadata_feather_per_cell_column,
+    betadata_pair_lr_parallel, write_betadata_feather,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -260,6 +261,36 @@ fn test_betabase_from_directory_cnn_cellid() {
     let f1 = &bb.data["G1"];
     assert_eq!(f1.n_cells, 2);
     assert_eq!(*f1.cell_to_beta_row, vec![0, 1]);
+    assert!(f1.join_by_obs_name);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// When CellID equals obs name but cluster keys repeat (e.g. all `"0"`), mapping must use obs
+/// names — not cluster keys — or every cell hits the same feather row and spatial β nuance is lost.
+#[test]
+fn betadata_per_cell_column_cellid_ignores_cluster_key_collisions() {
+    let dir = std::env::temp_dir().join("betadata_cellid_map_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("T_betadata.feather");
+    let cols = vec!["beta0".into(), "coef".into()];
+    let m = array![[0.0f64, 10.0], [0.0, 20.0], [0.0, 30.0]];
+    write_betadata_feather(
+        path.to_str().unwrap(),
+        "CellID",
+        &["0".into(), "1".into(), "2".into()],
+        &cols,
+        &m,
+    )
+    .unwrap();
+
+    let obs = vec!["0".into(), "1".into(), "2".into()];
+    let cluster_keys = vec!["0".into(), "0".into(), "0".into()];
+    let v = betadata_feather_per_cell_column(path.to_str().unwrap(), "coef", &obs, &cluster_keys)
+        .unwrap();
+    assert!((v[0] - 10.0).abs() < 1e-5);
+    assert!((v[1] - 20.0).abs() < 1e-5);
+    assert!((v[2] - 30.0).abs() < 1e-5);
 
     std::fs::remove_dir_all(&dir).ok();
 }

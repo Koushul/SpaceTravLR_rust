@@ -59,7 +59,7 @@ Register in the MCP client with working directory `web/spatial_viewer` and args 
 | `spatial_viewer_capture_render` | PNG of current Deck.gl view to chat |
 | `spatial_viewer_run_perturb` | In-iframe perturbation preview (+ optional UMAP quiver, chat Δ summary) |
 | `spatial_viewer_collect_interactions` | Betadata β aggregation for selection/type/cluster |
-| `spatial_viewer_control` | Gene / color mode / status bar |
+| `spatial_viewer_control` | Gene / color mode / status bar; **`betadata_gene`**, **`betadata_column`**, **`apply_betadata`** → GET `/api/betadata/values` and spatial cell colors (CellID = per-cell β) |
 | `spatial_viewer_received_ligand` | Weighted received-ligand layer (POST `/api/spatial/received_ligand`) |
 | `spatial_viewer_signature_umap` | Gene-set signature quiver on UMAP (POST `/api/umap/signature_field`; VirtualTissue-style) |
 | `spatial_viewer_splash_network` | Splash derivative network A→B (D3 force graph in viewer; POST `/api/perturb/splash_network`) |

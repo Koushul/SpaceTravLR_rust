@@ -201,6 +201,24 @@ const controlInputSchema = {
     .boolean()
     .optional()
     .describe("If true, run Load received ligand after applying fields above"),
+  betadata_gene: z
+    .string()
+    .optional()
+    .describe(
+      "Betadata target gene (must match *_betadata.feather stem); sets color source to betadata and selects that target",
+    ),
+  betadata_column: z
+    .string()
+    .optional()
+    .describe(
+      "Coefficient column name from GET /api/betadata/columns?gene=… (e.g. beta_VEGFA or LIG$REC); required for apply_betadata unless exactly one plottable column exists",
+    ),
+  apply_betadata: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true, fetch per-cell β via GET /api/betadata/values and refresh the spatial layer (same as UI Load / refresh). Use with betadata_gene and betadata_column for CellID (spatial) models.",
+    ),
   focus_gene_context: z
     .string()
     .optional()
@@ -458,7 +476,8 @@ registerAppTool(
   {
     title: "Spatial viewer — UI control",
     description:
-      "Update the open spatial viewer (gene, color mode, status). Call after show_spatial_viewer. Same UI resource.",
+      "Update the open spatial viewer (gene, color mode, status). Call after show_spatial_viewer. Same UI resource. " +
+      "For betadata spatial coloring: set betadata_gene, betadata_column (coefficient), and apply_betadata=true so GET /api/betadata/values runs and cells are colored by per-cell β (CellID) or cluster-mapped β (Cluster).",
     inputSchema: controlInputSchema,
     _meta: {
       ui: {

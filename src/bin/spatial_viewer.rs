@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anndata::AnnData;
 use anndata::AnnDataOp;
 use anndata_hdf5::H5;
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
@@ -37,8 +37,12 @@ use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_tar
 use space_trav_lr_rust::config::{SpaceshipConfig, expand_user_path, normalize_ui_path};
 use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use space_trav_lr_rust::network::{GeneNetwork, infer_species};
+use space_trav_lr_rust::foyer_perturb_cache::{
+    self, FoyerPerturbCaches, PerturbCacheKey, UmapGridBlob,
+};
 use space_trav_lr_rust::perturb::{
-    PerturbConfig, PerturbResult, PerturbTarget, compute_splash_all_progress, perturb_with_targets,
+    PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, compute_splash_all_progress,
+    perturb_with_targets,
 };
 use space_trav_lr_rust::perturb_mode::PerturbRuntime;
 use space_trav_lr_rust::transition_umap::{
@@ -116,6 +120,9 @@ struct Cli {
     /// Allow permissive CORS on `/api/*` (needed for MCP App iframe → local API). Also set `SPATIAL_VIEWER_ALLOW_CORS=1`.
     #[arg(long)]
     allow_cors: bool,
+    /// Directory for foyer hybrid disk cache (GRN perturbation + UMAP grid). Default: system temp `spacetravlr_foyer_perturb/`.
+    #[arg(long)]
+    perturb_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -296,6 +303,8 @@ struct AppState {
     /// Splash network job: UI polls `GET /api/perturb/splash_progress` while POST splash_network runs.
     splash_job_progress_permille: Arc<AtomicU32>,
     splash_job_active: Arc<AtomicBool>,
+    foyer_caches: Arc<FoyerPerturbCaches>,
+    dataset_cache_epoch: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -735,6 +744,133 @@ fn schedule_perturb_progress_permille_clear(p: Arc<AtomicU32>) {
         tokio::time::sleep(Duration::from_millis(700)).await;
         p.store(0, Ordering::Relaxed);
     });
+}
+
+const MAX_GRN_PERTURB_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+fn transition_grid_to_blob(grid: &TransitionGrid) -> UmapGridBlob {
+    let nx = grid.grid_x.len();
+    let ny = grid.grid_y.len();
+    UmapGridBlob {
+        nx,
+        ny,
+        grid_x: grid.grid_x.clone(),
+        grid_y: grid.grid_y.clone(),
+        u: grid.vectors.iter().map(|w| w[0]).collect(),
+        v: grid.vectors.iter().map(|w| w[1]).collect(),
+        cell_u: grid.cell_vectors.iter().map(|w| w[0] as f32).collect(),
+        cell_v: grid.cell_vectors.iter().map(|w| w[1] as f32).collect(),
+    }
+}
+
+fn transition_grid_from_blob(b: UmapGridBlob) -> anyhow::Result<TransitionGrid> {
+    let n = b.nx * b.ny;
+    anyhow::ensure!(b.u.len() == n && b.v.len() == n, "quiver u/v length mismatch");
+    anyhow::ensure!(b.cell_u.len() == b.cell_v.len(), "cell quiver length mismatch");
+    let vectors: Vec<[f64; 2]> = b
+        .u
+        .iter()
+        .zip(&b.v)
+        .map(|(&u, &v)| [u, v])
+        .collect();
+    let cell_vectors: Vec<[f64; 2]> = b
+        .cell_u
+        .iter()
+        .zip(&b.cell_v)
+        .map(|(&u, &v)| [f64::from(u), f64::from(v)])
+        .collect();
+    Ok(TransitionGrid {
+        grid_x: b.grid_x,
+        grid_y: b.grid_y,
+        vectors,
+        cell_vectors,
+    })
+}
+
+async fn cached_grn_perturb_result(
+    foyer: &FoyerPerturbCaches,
+    cache_key: PerturbCacheKey,
+    n_cells: usize,
+    n_genes: usize,
+    rt: Arc<PerturbRuntime>,
+    targets: Vec<PerturbTarget>,
+    cfg: PerturbConfig,
+    job_p: Arc<AtomicU32>,
+    job_msg: Arc<Mutex<String>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<PerturbResult, ()> {
+    let est = n_cells.saturating_mul(n_genes).saturating_mul(16);
+    if est > MAX_GRN_PERTURB_CACHE_BYTES {
+        return tokio::task::spawn_blocking(move || {
+            let mut no_timings: Option<PerturbTimings> = None;
+            perturb_with_targets(
+                &rt.bb,
+                &rt.gene_mtx,
+                &rt.gene_names,
+                &rt.xy,
+                &rt.rw_ligands_init,
+                &rt.rw_tfligands_init,
+                &targets,
+                &cfg,
+                &rt.lr_radii,
+                Some(&job_p),
+                Some(&job_msg),
+                Some(&*cancel),
+                Some(&rt.baseline_splash_cache),
+                &mut no_timings,
+            )
+        })
+        .await
+        .unwrap_or(Err(()));
+    }
+
+    let grn = foyer.grn.clone();
+    let rt_c = Arc::clone(&rt);
+    let targets_c = targets.clone();
+    let cfg_c = cfg.clone();
+    let job_p_c = Arc::clone(&job_p);
+    let job_msg_c = Arc::clone(&job_msg);
+    let cancel_c = Arc::clone(&cancel);
+    let entry = grn
+        .get_or_fetch(&cache_key, move || {
+            let rt_c = Arc::clone(&rt_c);
+            let targets_c = targets_c.clone();
+            let cfg_c = cfg_c.clone();
+            let job_p_c = Arc::clone(&job_p_c);
+            let job_msg_c = Arc::clone(&job_msg_c);
+            let cancel_c = Arc::clone(&cancel_c);
+            async move {
+                let pr = tokio::task::spawn_blocking(move || {
+                    let mut no_timings: Option<PerturbTimings> = None;
+                    perturb_with_targets(
+                        &rt_c.bb,
+                        &rt_c.gene_mtx,
+                        &rt_c.gene_names,
+                        &rt_c.xy,
+                        &rt_c.rw_ligands_init,
+                        &rt_c.rw_tfligands_init,
+                        &targets_c,
+                        &cfg_c,
+                        &rt_c.lr_radii,
+                        Some(&job_p_c),
+                        Some(&job_msg_c),
+                        Some(&*cancel_c),
+                        Some(&rt_c.baseline_splash_cache),
+                        &mut no_timings,
+                    )
+                    .map_err(|_| anyhow!("perturbation cancelled"))
+                })
+                .await
+                .map_err(|e| anyhow!("{e}"))?
+                .map_err(|e| e)?;
+                let enc = foyer_perturb_cache::encode_perturb_result(&pr)
+                    .map_err(|e| anyhow!("{e}"))?;
+                Ok::<Vec<u8>, anyhow::Error>(enc)
+            }
+        })
+        .await
+        .map_err(|_| ())?;
+    foyer_perturb_cache::decode_perturb_result(entry.value()).map_err(|_| ())
 }
 
 fn spawn_perturb_background_load(state: SharedState) {
@@ -1382,6 +1518,7 @@ async fn api_session_configure(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut w = state.write().await;
+    w.dataset_cache_epoch.fetch_add(1, Ordering::SeqCst);
     w.perturb_bg_gen.fetch_add(1, Ordering::SeqCst);
     w.perturb_bg_pending.store(false, Ordering::SeqCst);
     w.perturb_suppress_bg_loading_ui
@@ -2965,40 +3102,49 @@ async fn api_perturb_preview(
     Json(body): Json<PerturbPreviewBody>,
 ) -> Result<Response, (StatusCode, String)> {
     let n_propagation = body.n_propagation;
-    let (n_obs, targets, gj, rt, job_p, job_active, job_msg, cancel) = {
-        let st = state.read().await;
-        let ds = require_dataset(&st)?;
-        let rt = perturb_runtime_or_status(ds)?;
-        let n_obs = ds.obs_names.len();
-        let targets = build_perturb_targets(ds, &body, n_obs)?;
-        let gene = targets[0].gene.clone();
-        if !rt.gene_names.iter().any(|g| g == &gene) {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("gene {:?} not in model var_names", gene),
-            ));
-        }
-        let gj = rt
-            .gene_names
-            .iter()
-            .position(|g| g == &gene)
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal: gene index missing".into(),
-                )
-            })?;
-        (
-            n_obs,
-            targets,
-            gj,
-            Arc::clone(rt),
-            Arc::clone(&st.perturb_job_progress_permille),
-            Arc::clone(&st.perturb_job_active),
-            Arc::clone(&st.perturb_progress_message),
-            Arc::clone(&st.perturb_job_cancel),
-        )
-    };
+    let (n_obs, targets, gj, rt, job_p, job_active, job_msg, cancel, n_vars, adata_path, foyer, epoch) =
+        {
+            let st = state.read().await;
+            let ds = require_dataset(&st)?;
+            let rt = perturb_runtime_or_status(ds)?;
+            let n_obs = ds.obs_names.len();
+            let targets = build_perturb_targets(ds, &body, n_obs)?;
+            let gene = targets[0].gene.clone();
+            if !rt.gene_names.iter().any(|g| g == &gene) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("gene {:?} not in model var_names", gene),
+                ));
+            }
+            let gj = rt
+                .gene_names
+                .iter()
+                .position(|g| g == &gene)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal: gene index missing".into(),
+                    )
+                })?;
+            let n_vars = ds.n_vars;
+            let adata_path = ds.adata_path.to_string_lossy().into_owned();
+            let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+            let foyer = Arc::clone(&st.foyer_caches);
+            (
+                n_obs,
+                targets,
+                gj,
+                Arc::clone(rt),
+                Arc::clone(&st.perturb_job_progress_permille),
+                Arc::clone(&st.perturb_job_active),
+                Arc::clone(&st.perturb_progress_message),
+                Arc::clone(&st.perturb_job_cancel),
+                n_vars,
+                adata_path,
+                foyer,
+                epoch,
+            )
+        };
     cancel.store(false, Ordering::SeqCst);
     let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
@@ -3007,37 +3153,35 @@ async fn api_perturb_preview(
         *m = "GRN perturbation…".into();
     }
     let job_active_move = job_active.clone();
-    let cancel_move = cancel.clone();
-    let job_p_block = Arc::clone(&job_p);
-    let job_msg_block = Arc::clone(&job_msg);
-    let vec_result = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, ()> {
-        let _guard = PerturbJobGuard(job_active_move);
-        let result = perturb_with_targets(
-            &rt.bb,
-            &rt.gene_mtx,
-            &rt.gene_names,
-            &rt.xy,
-            &rt.rw_ligands_init,
-            &rt.rw_tfligands_init,
-            &targets,
-            &cfg,
-            &rt.lr_radii,
-            Some(&job_p_block),
-            Some(&job_msg_block),
-            Some(&*cancel_move),
-        )?;
-        job_p_block.store(1000, Ordering::Relaxed);
-        Ok(result.delta.column(gj).iter().map(|x| *x as f32).collect())
-    })
+    let _guard = PerturbJobGuard(job_active_move);
+    let cache_key = foyer_perturb_cache::grn_perturb_cache_key(
+        epoch,
+        false,
+        &adata_path,
+        n_obs,
+        n_vars,
+        &targets,
+        &cfg,
+    );
+    let pr = cached_grn_perturb_result(
+        foyer.as_ref(),
+        cache_key,
+        n_obs,
+        rt.gene_names.len(),
+        Arc::clone(&rt),
+        targets,
+        cfg,
+        Arc::clone(&job_p),
+        Arc::clone(&job_msg),
+        Arc::clone(&cancel),
+    )
     .await
-    .map_err(|e| {
-        job_p.store(0, Ordering::Relaxed);
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
-    let vec = vec_result.map_err(|_| {
+    .map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
+    job_p.store(1000, Ordering::Relaxed);
+    let vec: Vec<f32> = pr.delta.column(gj).iter().map(|x| *x as f32).collect();
     if vec.len() != n_obs {
         job_p.store(0, Ordering::Relaxed);
         return Err((
@@ -3055,28 +3199,38 @@ async fn api_perturb_export_feather(
 ) -> Result<Response, (StatusCode, String)> {
     let n_propagation = body.n_propagation;
     let fname_gene = body.gene.trim().to_string();
-    let (targets, rt, job_p, job_active, job_msg, cancel) = {
-        let st = state.read().await;
-        let ds = require_dataset(&st)?;
-        let rt = perturb_runtime_or_status(ds)?;
-        let n_obs = ds.obs_names.len();
-        let targets = build_perturb_targets(ds, &body, n_obs)?;
-        let gene = targets[0].gene.clone();
-        if !rt.gene_names.iter().any(|g| g == &gene) {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("gene {:?} not in model var_names", gene),
-            ));
-        }
-        (
-            targets,
-            Arc::clone(rt),
-            Arc::clone(&st.perturb_job_progress_permille),
-            Arc::clone(&st.perturb_job_active),
-            Arc::clone(&st.perturb_progress_message),
-            Arc::clone(&st.perturb_job_cancel),
-        )
-    };
+    let (targets, rt, job_p, job_active, job_msg, cancel, n_obs, n_vars, adata_path, foyer, epoch) =
+        {
+            let st = state.read().await;
+            let ds = require_dataset(&st)?;
+            let rt = perturb_runtime_or_status(ds)?;
+            let n_obs = ds.obs_names.len();
+            let targets = build_perturb_targets(ds, &body, n_obs)?;
+            let gene = targets[0].gene.clone();
+            if !rt.gene_names.iter().any(|g| g == &gene) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("gene {:?} not in model var_names", gene),
+                ));
+            }
+            let n_vars = ds.n_vars;
+            let adata_path = ds.adata_path.to_string_lossy().into_owned();
+            let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+            let foyer = Arc::clone(&st.foyer_caches);
+            (
+                targets,
+                Arc::clone(rt),
+                Arc::clone(&st.perturb_job_progress_permille),
+                Arc::clone(&st.perturb_job_active),
+                Arc::clone(&st.perturb_progress_message),
+                Arc::clone(&st.perturb_job_cancel),
+                n_obs,
+                n_vars,
+                adata_path,
+                foyer,
+                epoch,
+            )
+        };
     cancel.store(false, Ordering::SeqCst);
     let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
@@ -3085,35 +3239,45 @@ async fn api_perturb_export_feather(
         *m = "GRN perturbation · export simulated expression…".into();
     }
     let job_active_move = job_active.clone();
-    let cancel_move = cancel.clone();
-    let job_p_block = Arc::clone(&job_p);
-    let job_msg_block = Arc::clone(&job_msg);
+    let _guard = PerturbJobGuard(job_active_move);
+    let cache_key = foyer_perturb_cache::grn_perturb_cache_key(
+        epoch,
+        false,
+        &adata_path,
+        n_obs,
+        n_vars,
+        &targets,
+        &cfg,
+    );
+    let pr = cached_grn_perturb_result(
+        foyer.as_ref(),
+        cache_key,
+        n_obs,
+        rt.gene_names.len(),
+        Arc::clone(&rt),
+        targets,
+        cfg,
+        Arc::clone(&job_p),
+        Arc::clone(&job_msg),
+        Arc::clone(&cancel),
+    )
+    .await
+    .map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
+    })?;
+    job_p.store(1000, Ordering::Relaxed);
     let obs_names = rt.obs_names.clone();
     let gene_names = rt.gene_names.clone();
+    let simulated = pr.simulated;
     let bytes_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ()> {
-        let _guard = PerturbJobGuard(job_active_move);
-        let result = perturb_with_targets(
-            &rt.bb,
-            &rt.gene_mtx,
-            &rt.gene_names,
-            &rt.xy,
-            &rt.rw_ligands_init,
-            &rt.rw_tfligands_init,
-            &targets,
-            &cfg,
-            &rt.lr_radii,
-            Some(&job_p_block),
-            Some(&job_msg_block),
-            Some(&*cancel_move),
-        )?;
-        job_p_block.store(1000, Ordering::Relaxed);
         let mut buf = Vec::new();
         space_trav_lr_rust::betadata::write_betadata_feather_to_writer(
             &mut buf,
             "CellID",
             &obs_names,
             &gene_names,
-            &result.simulated,
+            &simulated,
         )
         .map_err(|_| ())?;
         Ok(buf)
@@ -3125,7 +3289,10 @@ async fn api_perturb_export_feather(
     })?;
     let bytes = bytes_result.map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
-        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "feather export failed".into(),
+        )
     })?;
     if bytes.is_empty() {
         job_p.store(0, Ordering::Relaxed);
@@ -3501,6 +3668,11 @@ async fn api_perturb_umap_field(
         job_active,
         job_msg,
         cancel,
+        n_obs,
+        n_vars,
+        adata_path,
+        foyer,
+        epoch,
     ) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
@@ -3588,6 +3760,10 @@ async fn api_perturb_umap_field(
         };
         let include_cv = body.include_cell_vectors;
         let quick = body.quick_ko_sanity;
+        let n_vars = ds.n_vars;
+        let adata_path = ds.adata_path.to_string_lossy().into_owned();
+        let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+        let foyer = Arc::clone(&st.foyer_caches);
         (
             umap_pts,
             highlight_keep,
@@ -3601,6 +3777,11 @@ async fn api_perturb_umap_field(
             Arc::clone(&st.perturb_job_active),
             Arc::clone(&st.perturb_progress_message),
             Arc::clone(&st.perturb_job_cancel),
+            n_obs,
+            n_vars,
+            adata_path,
+            foyer,
+            epoch,
         )
     };
 
@@ -3616,70 +3797,133 @@ async fn api_perturb_umap_field(
         };
     }
     let job_active_move = job_active.clone();
-    let cancel_move = cancel.clone();
-    let job_p_block = Arc::clone(&job_p);
-    let grid = tokio::task::spawn_blocking(move || -> Result<_, ()> {
-        let _guard = PerturbJobGuard(job_active_move);
-        job_p_block.store(20, Ordering::Relaxed);
-        let mut delta = if quick {
-            if let Ok(mut m) = job_msg.lock() {
-                *m = "Local expression delta…".into();
-            }
-            job_p_block.store(120, Ordering::Relaxed);
-            let d = delta_single_gene_to_target(
-                &rt.gene_mtx,
-                gj,
-                targets[0].cell_indices.as_deref(),
-                targets[0].desired_expr,
-            );
-            job_p_block.store(450, Ordering::Relaxed);
-            d
-        } else {
-            if let Ok(mut m) = job_msg.lock() {
-                *m = "GRN perturbation…".into();
-            }
-            let result = perturb_with_targets(
-                &rt.bb,
-                &rt.gene_mtx,
-                &rt.gene_names,
-                &rt.xy,
-                &rt.rw_ligands_init,
-                &rt.rw_tfligands_init,
-                &targets,
-                &cfg,
-                &rt.lr_radii,
-                Some(&job_p_block),
-                Some(&job_msg),
-                Some(&*cancel_move),
-            )?;
-            job_p_block.store(940, Ordering::Relaxed);
-            result.delta
-        };
-        if let Some(ref keep) = highlight_keep {
-            let nrows = delta.nrows();
-            for i in 0..nrows {
-                if i < keep.len() && !keep[i] {
-                    delta.row_mut(i).fill(0.0);
-                }
-            }
-        }
+    let _guard = PerturbJobGuard(job_active_move);
+
+    let grn_key = foyer_perturb_cache::grn_perturb_cache_key(
+        epoch,
+        quick,
+        &adata_path,
+        n_obs,
+        n_vars,
+        &targets,
+        &cfg,
+    );
+    let grid_key = foyer_perturb_cache::umap_grid_cache_key(
+        epoch,
+        grn_key.fingerprint,
+        body.limit_clusters,
+        &body.highlight_cell_types,
+        &params,
+        include_cv,
+    );
+
+    let mut delta = if quick {
+        job_p.store(20, Ordering::Relaxed);
         if let Ok(mut m) = job_msg.lock() {
-            *m = "UMAP projection & grid…".into();
+            *m = "Local expression delta…".into();
         }
-        job_p_block.store(965, Ordering::Relaxed);
-        let g = compute_umap_transition_grid(&rt.gene_mtx, &delta, &umap_pts, &params);
-        job_p_block.store(1000, Ordering::Relaxed);
-        Ok(g)
-    })
-    .await
+        job_p.store(120, Ordering::Relaxed);
+        let rt_q = Arc::clone(&rt);
+        let targets_q = targets.clone();
+        let d = tokio::task::spawn_blocking(move || {
+            delta_single_gene_to_target(
+                &rt_q.gene_mtx,
+                gj,
+                targets_q[0].cell_indices.as_deref(),
+                targets_q[0].desired_expr,
+            )
+        })
+        .await
+        .map_err(|e| {
+            job_p.store(0, Ordering::Relaxed);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
+        job_p.store(450, Ordering::Relaxed);
+        d
+    } else {
+        if let Ok(mut m) = job_msg.lock() {
+            *m = "GRN perturbation…".into();
+        }
+        let pr = cached_grn_perturb_result(
+            foyer.as_ref(),
+            grn_key,
+            n_obs,
+            rt.gene_names.len(),
+            Arc::clone(&rt),
+            targets.clone(),
+            cfg.clone(),
+            Arc::clone(&job_p),
+            Arc::clone(&job_msg),
+            Arc::clone(&cancel),
+        )
+        .await
+        .map_err(|_| {
+            job_p.store(0, Ordering::Relaxed);
+            (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
+        })?;
+        job_p.store(940, Ordering::Relaxed);
+        pr.delta
+    };
+
+    if let Some(ref keep) = highlight_keep {
+        let nrows = delta.nrows();
+        for i in 0..nrows {
+            if i < keep.len() && !keep[i] {
+                delta.row_mut(i).fill(0.0);
+            }
+        }
+    }
+    if let Ok(mut m) = job_msg.lock() {
+        *m = "UMAP projection & grid…".into();
+    }
+    job_p.store(965, Ordering::Relaxed);
+
+    let grid_cache = foyer.grid.clone();
+    let rt_g = Arc::clone(&rt);
+    let umap_pts_g = umap_pts.clone();
+    let params_g = params.clone();
+    let delta_g = delta.clone();
+    let gentry = grid_cache
+        .get_or_fetch(&grid_key, move || {
+            let rt_g = Arc::clone(&rt_g);
+            let umap_pts_g = umap_pts_g.clone();
+            let params_g = params_g.clone();
+            let delta_g = delta_g.clone();
+            async move {
+                let g = tokio::task::spawn_blocking(move || {
+                    compute_umap_transition_grid(&rt_g.gene_mtx, &delta_g, &umap_pts_g, &params_g)
+                })
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
+                let enc = foyer_perturb_cache::encode_umap_grid_blob(&transition_grid_to_blob(&g))
+                    .map_err(|e| anyhow!("{e}"))?;
+                Ok::<Vec<u8>, anyhow::Error>(enc)
+            }
+        })
+        .await
+        .map_err(|e| {
+            job_p.store(0, Ordering::Relaxed);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
+        })?;
+
+    let grid = transition_grid_from_blob(
+        foyer_perturb_cache::decode_umap_grid_blob(gentry.value()).map_err(|e| {
+            job_p.store(0, Ordering::Relaxed);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("grid cache decode: {e}"),
+            )
+        })?,
+    )
     .map_err(|e| {
         job_p.store(0, Ordering::Relaxed);
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?
-    .map_err(|_| {
-        job_p.store(0, Ordering::Relaxed);
-        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("grid restore: {e}"),
+        )
     })?;
+
+    job_p.store(1000, Ordering::Relaxed);
     schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
     let nx = grid.grid_x.len();
     let ny = grid.grid_y.len();
@@ -3795,7 +4039,8 @@ async fn api_umap_signature_field(
         ));
     }
 
-    let (path, layer, vn, umap_pts, n_obs, sig_params, mask_pack, svg_label) = {
+    let (path, layer, vn, umap_pts, n_obs, sig_params, mask_pack, svg_label, foyer, epoch, n_vars) =
+        {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let Some(umap_f32) = ds.umap_f32.as_ref() else {
@@ -3871,8 +4116,54 @@ async fn api_umap_signature_field(
             sig_params,
             mask_pack,
             svg_label,
+            Arc::clone(&st.foyer_caches),
+            st.dataset_cache_epoch.load(Ordering::SeqCst),
+            ds.var_names.as_ref().len(),
         )
     };
+
+    let pre_delta: Option<Array2<f64>> =
+        if let Some((rt, targets, _gj, cfg, quick)) = mask_pack.as_ref() {
+            if *quick {
+                None
+            } else {
+                let adata_s = path.to_string_lossy();
+                let cache_key = foyer_perturb_cache::grn_perturb_cache_key(
+                    epoch,
+                    false,
+                    adata_s.as_ref(),
+                    n_obs,
+                    n_vars,
+                    targets,
+                    cfg,
+                );
+                let job_p = Arc::new(AtomicU32::new(0));
+                let job_msg = Arc::new(Mutex::new(String::new()));
+                let cancel = Arc::new(AtomicBool::new(false));
+                let pr = cached_grn_perturb_result(
+                    foyer.as_ref(),
+                    cache_key,
+                    n_obs,
+                    rt.gene_names.len(),
+                    Arc::clone(rt),
+                    targets.clone(),
+                    cfg.clone(),
+                    job_p,
+                    job_msg,
+                    cancel,
+                )
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::REQUEST_TIMEOUT,
+                        "Perturbation cancelled".into(),
+                    )
+                })?;
+                Some(pr.delta)
+            }
+        } else {
+            None
+        };
 
     let (grid, sig) =
         tokio::task::spawn_blocking(move || -> Result<(TransitionGrid, Vec<f64>), String> {
@@ -3888,7 +4179,9 @@ async fn api_umap_signature_field(
             }
             let sig = signature_sum_per_cell(&mat);
             let base_storage = if let Some((rt, targets, gj, cfg, quick)) = mask_pack {
-                let delta = if quick {
+                let delta = if let Some(d) = pre_delta {
+                    d
+                } else if quick {
                     delta_single_gene_to_target(
                         &rt.gene_mtx,
                         gj,
@@ -3896,6 +4189,7 @@ async fn api_umap_signature_field(
                         targets[0].desired_expr,
                     )
                 } else {
+                    let mut no_timings: Option<PerturbTimings> = None;
                     perturb_with_targets(
                         &rt.bb,
                         &rt.gene_mtx,
@@ -3909,6 +4203,8 @@ async fn api_umap_signature_field(
                         None,
                         None,
                         None,
+                        Some(&rt.baseline_splash_cache),
+                        &mut no_timings,
                     )
                     .map_err(|_| "GRN perturbation failed (mask field)".to_string())?
                     .delta
@@ -3983,31 +4279,40 @@ async fn api_perturb_summary(
     Json(body): Json<PerturbPreviewBody>,
 ) -> Result<Json<PerturbSummaryResponse>, (StatusCode, String)> {
     let n_propagation = body.n_propagation;
-    let (n_obs, targets, gene, rt, gene_names, job_p, job_active, job_msg, cancel) = {
-        let st = state.read().await;
-        let ds = require_dataset(&st)?;
-        let rt = perturb_runtime_or_status(ds)?;
-        let n_obs = ds.obs_names.len();
-        let targets = build_perturb_targets(ds, &body, n_obs)?;
-        let gene = targets[0].gene.clone();
-        if !rt.gene_names.iter().any(|g| g == &gene) {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("gene {:?} not in model var_names", gene),
-            ));
-        }
-        (
-            n_obs,
-            targets,
-            gene.clone(),
-            Arc::clone(rt),
-            rt.gene_names.clone(),
-            Arc::clone(&st.perturb_job_progress_permille),
-            Arc::clone(&st.perturb_job_active),
-            Arc::clone(&st.perturb_progress_message),
-            Arc::clone(&st.perturb_job_cancel),
-        )
-    };
+    let (n_obs, targets, gene, rt, gene_names, job_p, job_active, job_msg, cancel, n_vars, adata_path, foyer, epoch) =
+        {
+            let st = state.read().await;
+            let ds = require_dataset(&st)?;
+            let rt = perturb_runtime_or_status(ds)?;
+            let n_obs = ds.obs_names.len();
+            let targets = build_perturb_targets(ds, &body, n_obs)?;
+            let gene = targets[0].gene.clone();
+            if !rt.gene_names.iter().any(|g| g == &gene) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("gene {:?} not in model var_names", gene),
+                ));
+            }
+            let n_vars = ds.n_vars;
+            let adata_path = ds.adata_path.to_string_lossy().into_owned();
+            let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+            let foyer = Arc::clone(&st.foyer_caches);
+            (
+                n_obs,
+                targets,
+                gene.clone(),
+                Arc::clone(rt),
+                rt.gene_names.clone(),
+                Arc::clone(&st.perturb_job_progress_permille),
+                Arc::clone(&st.perturb_job_active),
+                Arc::clone(&st.perturb_progress_message),
+                Arc::clone(&st.perturb_job_cancel),
+                n_vars,
+                adata_path,
+                foyer,
+                epoch,
+            )
+        };
     cancel.store(false, Ordering::SeqCst);
     let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
@@ -4016,37 +4321,34 @@ async fn api_perturb_summary(
         *m = "GRN perturbation (summary)…".into();
     }
     let job_active_move = job_active.clone();
-    let cancel_move = cancel.clone();
-    let job_p_block = Arc::clone(&job_p);
-    let job_msg_block = Arc::clone(&job_msg);
-    let result = tokio::task::spawn_blocking(move || -> Result<PerturbResult, ()> {
-        let _guard = PerturbJobGuard(job_active_move);
-        let r = perturb_with_targets(
-            &rt.bb,
-            &rt.gene_mtx,
-            &rt.gene_names,
-            &rt.xy,
-            &rt.rw_ligands_init,
-            &rt.rw_tfligands_init,
-            &targets,
-            &cfg,
-            &rt.lr_radii,
-            Some(&job_p_block),
-            Some(&job_msg_block),
-            Some(&*cancel_move),
-        )?;
-        job_p_block.store(1000, Ordering::Relaxed);
-        Ok(r)
-    })
+    let _guard = PerturbJobGuard(job_active_move);
+    let cache_key = foyer_perturb_cache::grn_perturb_cache_key(
+        epoch,
+        false,
+        &adata_path,
+        n_obs,
+        n_vars,
+        &targets,
+        &cfg,
+    );
+    let result = cached_grn_perturb_result(
+        foyer.as_ref(),
+        cache_key,
+        n_obs,
+        rt.gene_names.len(),
+        Arc::clone(&rt),
+        targets,
+        cfg,
+        Arc::clone(&job_p),
+        Arc::clone(&job_msg),
+        Arc::clone(&cancel),
+    )
     .await
-    .map_err(|e| {
-        job_p.store(0, Ordering::Relaxed);
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?
     .map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
+    job_p.store(1000, Ordering::Relaxed);
 
     let n_genes = gene_names.len();
     let mut gene_effects: Vec<PerturbGeneEffect> = (0..n_genes)
@@ -4167,7 +4469,22 @@ async fn api_perturb_reference_similarity(
     let exclude = body.exclude_perturb_cells_from_reference;
     let genes_filter = body.genes.clone();
 
-    let (targets, rt, cols, eval_rows, ref_rows, job_p, job_active, job_msg, cancel) = {
+    let (
+        targets,
+        rt,
+        cols,
+        eval_rows,
+        ref_rows,
+        job_p,
+        job_active,
+        job_msg,
+        cancel,
+        n_obs,
+        n_vars,
+        adata_path,
+        foyer,
+        epoch,
+    ) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let rt = perturb_runtime_or_status(ds)?;
@@ -4205,6 +4522,10 @@ async fn api_perturb_reference_similarity(
                     .into(),
             ));
         }
+        let n_vars = ds.n_vars;
+        let adata_path = ds.adata_path.to_string_lossy().into_owned();
+        let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+        let foyer = Arc::clone(&st.foyer_caches);
         (
             targets,
             Arc::clone(rt),
@@ -4215,6 +4536,11 @@ async fn api_perturb_reference_similarity(
             Arc::clone(&st.perturb_job_active),
             Arc::clone(&st.perturb_progress_message),
             Arc::clone(&st.perturb_job_cancel),
+            n_obs,
+            n_vars,
+            adata_path,
+            foyer,
+            epoch,
         )
     };
 
@@ -4226,31 +4552,42 @@ async fn api_perturb_reference_similarity(
         *m = "GRN perturbation (reference similarity)…".into();
     }
     let job_active_move = job_active.clone();
-    let cancel_move = cancel.clone();
-    let job_p_block = Arc::clone(&job_p);
-    let job_msg_block = Arc::clone(&job_msg);
-
-    let pack = tokio::task::spawn_blocking(move || -> Result<(Vec<f64>, Vec<f64>, f64, f64, usize, usize, usize), String> {
-        let _guard = PerturbJobGuard(job_active_move);
-        let result = perturb_with_targets(
-            &rt.bb,
-            &rt.gene_mtx,
-            &rt.gene_names,
-            &rt.xy,
-            &rt.rw_ligands_init,
-            &rt.rw_tfligands_init,
-            &targets,
-            &cfg,
-            &rt.lr_radii,
-            Some(&job_p_block),
-            Some(&job_msg_block),
-            Some(&*cancel_move),
+    let _guard = PerturbJobGuard(job_active_move);
+    let cache_key = foyer_perturb_cache::grn_perturb_cache_key(
+        epoch,
+        false,
+        &adata_path,
+        n_obs,
+        n_vars,
+        &targets,
+        &cfg,
+    );
+    let pr = cached_grn_perturb_result(
+        foyer.as_ref(),
+        cache_key,
+        n_obs,
+        rt.gene_names.len(),
+        Arc::clone(&rt),
+        targets,
+        cfg,
+        Arc::clone(&job_p),
+        Arc::clone(&job_msg),
+        Arc::clone(&cancel),
+    )
+    .await
+    .map_err(|_| {
+        job_p.store(0, Ordering::Relaxed);
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            "Perturbation cancelled".into(),
         )
-        .map_err(|_| "perturbation failed or cancelled".to_string())?;
-        job_p_block.store(1000, Ordering::Relaxed);
+    })?;
+    job_p.store(1000, Ordering::Relaxed);
 
+    let delta_arr = pr.delta;
+    let pack = tokio::task::spawn_blocking(move || -> Result<(Vec<f64>, Vec<f64>, f64, f64, usize, usize, usize), String> {
         let gene_mtx = &rt.gene_mtx;
-        let delta = &result.delta;
+        let delta = &delta_arr;
         let g = cols.len();
         let mut centroid = vec![0.0_f64; g];
         for k in 0..g {
@@ -4418,7 +4755,8 @@ async fn api_perturb_neighbor_sanity(
     if gene.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "gene is empty".into()));
     }
-    let (n_obs, cluster_at, rt, job_p, job_active, job_msg, cancel) = {
+    let (n_obs, cluster_at, rt, job_p, job_active, job_msg, cancel, n_vars, adata_path, foyer, epoch) =
+        {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let rt = perturb_runtime_or_status(ds)?;
@@ -4460,6 +4798,10 @@ async fn api_perturb_neighbor_sanity(
             ));
         }
         let cluster_at = ds.clusters[body.cell_index];
+        let n_vars = ds.n_vars;
+        let adata_path = ds.adata_path.to_string_lossy().into_owned();
+        let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+        let foyer = Arc::clone(&st.foyer_caches);
         (
             n_obs,
             cluster_at,
@@ -4468,6 +4810,10 @@ async fn api_perturb_neighbor_sanity(
             Arc::clone(&st.perturb_job_active),
             Arc::clone(&st.perturb_progress_message),
             Arc::clone(&st.perturb_job_cancel),
+            n_vars,
+            adata_path,
+            foyer,
+            epoch,
         )
     };
 
@@ -4493,38 +4839,34 @@ async fn api_perturb_neighbor_sanity(
     }
     let cell_index = body.cell_index;
     let job_active_move = job_active.clone();
-    let cancel_move = cancel.clone();
-    let job_p_block = Arc::clone(&job_p);
-    let job_msg_block = Arc::clone(&job_msg);
-    let rt_block = Arc::clone(&rt);
-    let cfg_block = cfg.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<PerturbResult, ()> {
-        let _guard = PerturbJobGuard(job_active_move);
-        perturb_with_targets(
-            &rt_block.bb,
-            &rt_block.gene_mtx,
-            &rt_block.gene_names,
-            &rt_block.xy,
-            &rt_block.rw_ligands_init,
-            &rt_block.rw_tfligands_init,
-            &targets,
-            &cfg_block,
-            &rt_block.lr_radii,
-            Some(&job_p_block),
-            Some(&job_msg_block),
-            Some(&*cancel_move),
-        )
-    })
+    let _guard = PerturbJobGuard(job_active_move);
+    let cache_key = foyer_perturb_cache::grn_perturb_cache_key(
+        epoch,
+        false,
+        &adata_path,
+        n_obs,
+        n_vars,
+        &targets,
+        &cfg,
+    );
+    let result = cached_grn_perturb_result(
+        foyer.as_ref(),
+        cache_key,
+        n_obs,
+        rt.gene_names.len(),
+        Arc::clone(&rt),
+        targets,
+        cfg,
+        Arc::clone(&job_p),
+        Arc::clone(&job_msg),
+        Arc::clone(&cancel),
+    )
     .await
-    .map_err(|e| {
-        job_p.store(0, Ordering::Relaxed);
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
-
-    let result = result.map_err(|_| {
+    .map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
+    job_p.store(1000, Ordering::Relaxed);
 
     schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
 
@@ -4834,7 +5176,7 @@ fn resolve_static_dir(path: &Path) -> anyhow::Result<PathBuf> {
 /// All HDF5 / Polars / GRN work runs here on a plain OS thread (no Tokio runtime). Starting Tokio
 /// only for `axum::serve` avoids nested-runtime panics when Polars or other code calls into async
 /// runtimes during `LazyFrame::collect()` etc.
-fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
+fn build_app(cli: Cli, foyer: FoyerPerturbCaches) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
     let allow_cors = cli.allow_cors
         || std::env::var("SPATIAL_VIEWER_ALLOW_CORS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -4856,6 +5198,7 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
     } else {
         None
     };
+    let dataset_cache_epoch = Arc::new(AtomicU64::new(if dataset.is_some() { 1 } else { 0 }));
     let state = Arc::new(RwLock::new(AppState {
         dataset,
         default_layer: cli.layer.clone(),
@@ -4874,6 +5217,8 @@ fn build_app(cli: Cli) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
         perturb_betadata_ui: Arc::new(BetadataUiProgress::new()),
         splash_job_progress_permille: Arc::new(AtomicU32::new(0)),
         splash_job_active: Arc::new(AtomicBool::new(false)),
+        foyer_caches: Arc::new(foyer),
+        dataset_cache_epoch,
     }));
 
     let api = Router::new()
@@ -4964,16 +5309,26 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let (addr, app, state) = build_app(cli)?;
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let foyer = rt.block_on(foyer_perturb_cache::open_foyer_perturb_caches(
+        cli.perturb_cache_dir.as_deref(),
+    ))
+    .map_err(|e| anyhow!("foyer hybrid cache: {e}"))?;
+    let (addr, app, state) = build_app(cli, foyer)?;
+
     rt.block_on(async move {
         tracing::info!("listening on http://{}", addr);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         spawn_perturb_background_load(state.clone());
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await?;
+        let fc = state.read().await.foyer_caches.clone();
+        let _ = foyer_perturb_cache::close_foyer_caches(fc.as_ref()).await;
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())

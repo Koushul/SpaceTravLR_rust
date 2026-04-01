@@ -1,4 +1,5 @@
-use ndarray::{Array2, array};
+use ndarray::{Array2, Zip, array};
+use rayon::prelude::*;
 use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
 use space_trav_lr_rust::ligand::calculate_weighted_ligands;
 use space_trav_lr_rust::perturb::{PerturbConfig, PerturbTarget, perturb, perturb_with_targets};
@@ -484,6 +485,7 @@ fn test_perturb_with_target_cell_subset() {
         ..Default::default()
     };
     let target_cells = vec![0usize, 1usize, 2usize];
+    let mut no_timings: Option<space_trav_lr_rust::perturb::PerturbTimings> = None;
     let result = perturb_with_targets(
         &bb,
         &gene_mtx,
@@ -501,6 +503,8 @@ fn test_perturb_with_target_cell_subset() {
         None,
         None,
         None,
+        None,
+        &mut no_timings,
     )
     .unwrap();
 
@@ -587,6 +591,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         n_propagation: 1,
         ..Default::default()
     };
+    let mut no_timings: Option<space_trav_lr_rust::perturb::PerturbTimings> = None;
     let result = perturb_with_targets(
         &bb,
         &gene_mtx,
@@ -611,6 +616,8 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         None,
         None,
         None,
+        None,
+        &mut no_timings,
     )
     .unwrap();
 
@@ -1457,4 +1464,114 @@ fn bench_perturb() {
         );
     }
     println!();
+}
+
+#[test]
+fn test_pin_clip_parity_and_perf() {
+    use std::time::Instant;
+
+    let n_genes = 2000;
+    let target_genes: Vec<usize> = vec![0, 42, 999];
+
+    eprintln!();
+    eprintln!("pin_clip parity & performance (n_genes={})", n_genes);
+    eprintln!(
+        "  {:>6}  {:>10}  {:>10}  {:>8}  {:>12}",
+        "cells", "old(ms)", "new(ms)", "speedup", "max_diff"
+    );
+    eprintln!("  {}", "-".repeat(56));
+
+    for &n_cells in &[500, 2_000, 10_000, 50_000] {
+        let gene_mtx = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
+            0.5 + 0.1 * ((c * 7 + g * 13) % 17) as f64
+        });
+        let max_per_gene: Vec<f64> = (0..n_genes)
+            .map(|j| gene_mtx.column(j).iter().cloned().fold(0.0f64, f64::max))
+            .collect();
+
+        let delta_input = {
+            let mut d = Array2::zeros((n_cells, n_genes));
+            for &gi in &target_genes {
+                for c in 0..n_cells {
+                    d[[c, gi]] = 0.0 - gene_mtx[[c, gi]];
+                }
+            }
+            d
+        };
+
+        let delta_after_grn = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
+            -0.1 + 0.02 * ((c * 3 + g * 11) % 23) as f64
+        });
+
+        // ---- OLD implementation (full-matrix Zip + allocating clip) ----
+        let mut delta_old = delta_after_grn.clone();
+        let t0 = Instant::now();
+        Zip::from(&mut delta_old)
+            .and(&delta_input)
+            .for_each(|d, &di| {
+                if di != 0.0 {
+                    *d = di;
+                }
+            });
+        let gem = &gene_mtx + &delta_old;
+        let gem_flat = gem.as_slice().unwrap();
+        let gmtx_flat_old = gene_mtx.as_slice().unwrap();
+        let delta_flat_old = delta_old.as_slice_memory_order_mut().unwrap();
+        for cell in 0..n_cells {
+            let base = cell * n_genes;
+            for gene in 0..n_genes {
+                let idx = base + gene;
+                let val = gem_flat[idx].max(0.0).min(max_per_gene[gene]);
+                delta_flat_old[idx] = val - gmtx_flat_old[idx];
+            }
+        }
+        let old_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // ---- NEW implementation (column pin + zero-alloc parallel clip) ----
+        let mut delta_new = delta_after_grn.clone();
+        let t0 = Instant::now();
+        for &gi in &target_genes {
+            delta_new.column_mut(gi).assign(&delta_input.column(gi));
+        }
+        let delta_flat_new = delta_new.as_slice_memory_order_mut().unwrap();
+        let gmtx_flat_new = gene_mtx.as_slice().unwrap();
+        let max_ref = &max_per_gene;
+        delta_flat_new
+            .par_chunks_mut(n_genes)
+            .enumerate()
+            .for_each(|(cell, row)| {
+                let base = cell * n_genes;
+                for gene in 0..n_genes {
+                    unsafe {
+                        let orig = *gmtx_flat_new.get_unchecked(base + gene);
+                        let val = (orig + *row.get_unchecked(gene))
+                            .max(0.0)
+                            .min(*max_ref.get_unchecked(gene));
+                        *row.get_unchecked_mut(gene) = val - orig;
+                    }
+                }
+            });
+        let new_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // ---- Numerical parity ----
+        let max_diff = delta_old
+            .iter()
+            .zip(delta_new.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+
+        let speedup = old_ms / new_ms;
+        eprintln!(
+            "  {:>6}  {:>10.2}  {:>10.2}  {:>7.1}x  {:>12.2e}",
+            n_cells, old_ms, new_ms, speedup, max_diff
+        );
+
+        assert!(
+            max_diff < 1e-14,
+            "pin_clip old vs new max_diff={:.2e} exceeds tolerance at n_cells={}",
+            max_diff,
+            n_cells
+        );
+    }
+    eprintln!();
 }

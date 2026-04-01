@@ -48,6 +48,11 @@ function apiUrl(path: string): string {
 
 const CT_UNKNOWN = 65535;
 
+/** Feather row key is one row per observation (CellID / obs_names / cell_id), not Cluster. */
+function isBetadataPerCellRowId(rid: string | null | undefined): boolean {
+  return rid === "CellID" || rid === "obs_names" || rid === "cell_id";
+}
+
 const ORTHO_CONTROLLER = {
   dragPan: true,
   scrollZoom: { speed: 0.01, smooth: false },
@@ -1847,6 +1852,7 @@ async function main() {
   let pairLrRadiusDebounce: ReturnType<typeof setTimeout> | null = null;
   let cellSizeDebounce: ReturnType<typeof setTimeout> | null = null;
   let quiverDisplayDebounce: ReturnType<typeof setTimeout> | null = null;
+  let umapTransitionRefetchDebounce: ReturnType<typeof setTimeout> | null = null;
   let pairLrRows: PairLrRow[] = [];
   let interactionLineData: InteractionLineDatum[] = [];
   let quiverFieldCache: UmapFieldResponse | null = null;
@@ -1956,7 +1962,11 @@ async function main() {
     colorBarGradient.style.backgroundImage = colormapLegendGradientCss(cmap);
     let lo = rangeLo;
     let hi = rangeHi;
-    if (lastColorSource === "betadata" && clusterIds) {
+    if (
+      lastColorSource === "betadata" &&
+      clusterIds &&
+      meta.betadata_row_id === "Cluster"
+    ) {
       const mm = dataMinMax(activeValues);
       lo = mm.lo;
       hi = mm.hi;
@@ -2584,7 +2594,11 @@ async function main() {
         rangeLo = rr.lo;
         rangeHi = rr.hi;
         scaleLine = `Gene signature (Σ expr) [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}]`;
-      } else if (lastColorSource === "betadata" && clusterIds) {
+      } else if (
+        lastColorSource === "betadata" &&
+        clusterIds &&
+        meta.betadata_row_id === "Cluster"
+      ) {
         applyBetadataColorsPerCluster(
           activeValues,
           clusterIds,
@@ -2597,10 +2611,17 @@ async function main() {
         const rr = applyColors(activeValues, baseColors, n, cmap);
         rangeLo = rr.lo;
         rangeHi = rr.hi;
-        scaleLine =
-          lastColorSource === "betadata" && !clusterIds
-            ? `Scale: global [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}] (no cluster ids)`
-            : `Scale: global [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}]`;
+        if (lastColorSource === "betadata") {
+          if (isBetadataPerCellRowId(meta.betadata_row_id)) {
+            scaleLine = `β per-cell (spatial) [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}]`;
+          } else if (!clusterIds) {
+            scaleLine = `Scale: global [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}] (no cluster ids)`;
+          } else {
+            scaleLine = `Scale: global [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}]`;
+          }
+        } else {
+          scaleLine = `Scale: global [${rangeLo.toPrecision(4)}, ${rangeHi.toPrecision(4)}]`;
+        }
       }
     } else {
       const rr = applyColors(null, baseColors, n, cmap);
@@ -3414,8 +3435,8 @@ async function main() {
       }
       if (meta.betadata_row_id === "Cluster") {
         parts.push("β seed-only (Cluster)");
-      } else       if (meta.betadata_row_id === "CellID") {
-        parts.push("β spatial (CellID)");
+      } else if (isBetadataPerCellRowId(meta.betadata_row_id)) {
+        parts.push(`β per-cell (${meta.betadata_row_id})`);
       }
       if (meta.perturb_loading) {
         parts.push("perturbation loading (may take minutes)…");
@@ -4455,6 +4476,84 @@ async function main() {
       willAsyncLoad = true;
       void loadActiveChannel();
     }
+
+    const betadataGeneArg =
+      typeof args.betadata_gene === "string" ? args.betadata_gene.trim() : "";
+    const betadataColumnArg =
+      typeof args.betadata_column === "string"
+        ? args.betadata_column.trim()
+        : "";
+    const applyBetadataArg = args.apply_betadata === true;
+
+    const ensureSelectHasValue = (sel: HTMLSelectElement, value: string) => {
+      if (!value) return;
+      const exists = Array.from(sel.options).some((o) => o.value === value);
+      if (!exists) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = value;
+        sel.appendChild(opt);
+      }
+    };
+
+    if (betadataGeneArg || betadataColumnArg || applyBetadataArg) {
+      colorSource.value = "betadata";
+      needColorUiRefresh = true;
+    }
+    if (betadataGeneArg) {
+      ensureSelectHasValue(betaGene, betadataGeneArg);
+      betaGene.value = betadataGeneArg;
+    }
+    if (betadataGeneArg || applyBetadataArg) {
+      willAsyncLoad = true;
+      void (async () => {
+        try {
+          colorSource.value = "betadata";
+          syncColorModeUi();
+          const g = betaGene.value.trim();
+          if (!g) {
+            setStatus(
+              "MCP betadata: set betadata_gene or pick a betadata target in the UI",
+              true,
+            );
+            return;
+          }
+          const r = await fetch(
+            apiUrl(`/api/betadata/columns?gene=${encodeURIComponent(g)}`),
+          );
+          if (!r.ok) throw new Error(await r.text());
+          const cols = (await r.json()) as string[];
+          betaCol.innerHTML =
+            '<option value="">— pick —</option>' +
+            cols
+              .map(
+                (c) =>
+                  `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`,
+              )
+              .join("");
+          if (betadataColumnArg && cols.includes(betadataColumnArg)) {
+            betaCol.value = betadataColumnArg;
+          } else if (!betadataColumnArg && cols.length === 1) {
+            betaCol.value = cols[0]!;
+          }
+          if (!applyBetadataArg) {
+            refreshVisualization();
+            return;
+          }
+          if (!betaCol.value) {
+            setStatus(
+              "MCP betadata: pass betadata_column (see /api/betadata/columns) or use a target with one coefficient column",
+              true,
+            );
+            return;
+          }
+          await loadActiveChannel();
+        } catch (e) {
+          setStatus(`MCP betadata: ${e}`, true);
+        }
+      })();
+    }
+
     if (
       needColorUiRefresh ||
       args.apply_received_ligand === true ||
@@ -5110,10 +5209,43 @@ async function main() {
     );
   }
 
+  const UMAP_TRANS_SLIDER_DEBOUNCE_MS = 220;
+  function scheduleDebouncedUmapTransitionRefetch() {
+    if (!quiverFieldCache) return;
+    if (umapTransitionRefetchDebounce != null) {
+      clearTimeout(umapTransitionRefetchDebounce);
+    }
+    umapTransitionRefetchDebounce = setTimeout(() => {
+      umapTransitionRefetchDebounce = null;
+      void computeUmapTransitionField();
+    }, UMAP_TRANS_SLIDER_DEBOUNCE_MS);
+  }
+
+  const transitionOnlyInputs: HTMLElement[] = [
+    transNeighbors,
+    transT,
+    transGridScale,
+    transVecScale,
+    transDeltaRescale,
+    transMagThresh,
+    transRemoveNull,
+    transUnitDirs,
+    transFullGraph,
+    transFullMax,
+  ];
+  for (const el of transitionOnlyInputs) {
+    el.addEventListener("input", () => scheduleDebouncedUmapTransitionRefetch());
+    el.addEventListener("change", () => scheduleDebouncedUmapTransitionRefetch());
+  }
+
   computeQuiverBtn.addEventListener("click", () =>
     void computeUmapTransitionField(),
   );
   clearQuiverBtn.addEventListener("click", () => {
+    if (umapTransitionRefetchDebounce != null) {
+      clearTimeout(umapTransitionRefetchDebounce);
+      umapTransitionRefetchDebounce = null;
+    }
     quiverFieldCache = null;
     quiverSegData.length = 0;
     rebuildLayer();

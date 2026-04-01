@@ -13,6 +13,7 @@ use kiddo::ImmutableKdTree;
 use kiddo::SquaredEuclidean;
 use ndarray::Array2;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 
 const EPS_VAR: f64 = 1e-18;
@@ -394,7 +395,7 @@ fn mean_abs_diff_2d(umap: &[[f64; 2]]) -> f64 {
 }
 
 /// Parameters for `compute_umap_transition_grid` (mirror `cartography` / UI).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransitionUmapParams {
     pub n_neighbors: usize,
     pub temperature: f64,

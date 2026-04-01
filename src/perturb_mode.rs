@@ -5,8 +5,25 @@ use crate::betadata::{
 };
 use crate::config::{SpaceshipConfig, expand_user_path};
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
-use crate::perturb::{PerturbConfig, PerturbTarget, perturb_with_targets};
+use crate::perturb::{
+    CachedBaselineSplash, PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets,
+};
 use crate::spatial_estimator::load_spatial_coords_f64;
+
+pub fn single_perturb_target(
+    gene: &str,
+    desired_expr: f64,
+    gene_names: &[String],
+) -> anyhow::Result<PerturbTarget> {
+    if !gene_names.iter().any(|g| g == gene) {
+        anyhow::bail!("Gene '{}' is not present in AnnData var_names.", gene);
+    }
+    Ok(PerturbTarget {
+        gene: gene.to_string(),
+        desired_expr,
+        cell_indices: None,
+    })
+}
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
@@ -35,6 +52,8 @@ pub struct PerturbRuntime {
     pub rw_tfligands_init: GeneMatrix,
     pub lr_radii: HashMap<String, f64>,
     pub perturb_cfg: PerturbConfig,
+    /// Reuse iteration-0 `compute_splash_all` across perturbations with matching splash parameters.
+    pub baseline_splash_cache: Mutex<Option<CachedBaselineSplash>>,
 }
 
 fn array_data_to_dense_f64(data: ArrayData) -> anyhow::Result<Array2<f64>> {
@@ -206,7 +225,12 @@ fn compute_initial_wl(
 
 impl PerturbRuntime {
     pub fn from_run_toml(run_toml: &Path) -> anyhow::Result<Self> {
-        Self::from_run_toml_with_progress(run_toml, None, None, None)
+        // Use a dummy BetadataUiProgress so Betabase::from_directory receives an
+        // `on_subprogress` callback and suppresses the internal indicatif bar.
+        // The TUI shows its own spinner / status, so a second terminal bar is
+        // distracting and can remain stuck on screen after loading.
+        let dummy_ui = Arc::new(BetadataUiProgress::new());
+        Self::from_run_toml_with_progress(run_toml, None, None, Some(dummy_ui))
     }
 
     /// Same as [`from_run_toml`], but reports coarse load progress in **permille** (0–1000) and
@@ -372,6 +396,7 @@ impl PerturbRuntime {
             rw_tfligands_init,
             lr_radii,
             perturb_cfg,
+            baseline_splash_cache: Mutex::new(None),
         })
     }
 }
@@ -441,6 +466,7 @@ pub fn execute_marked_perturbations(
                 desired_expr: value,
                 cell_indices: selected_cells,
             }];
+            let mut no_timings: Option<PerturbTimings> = None;
             let result = perturb_with_targets(
                 &runtime.bb,
                 &runtime.gene_mtx,
@@ -454,6 +480,8 @@ pub fn execute_marked_perturbations(
                 None,
                 None,
                 None,
+                Some(&runtime.baseline_splash_cache),
+                &mut no_timings,
             )
             .expect("perturb batch");
             let out_path = out_dir.join(format!("{}_perturb_expr.feather", gene));
@@ -701,6 +729,19 @@ mod tests {
     use super::*;
     use ndarray::array;
     use polars::prelude::SerReader;
+
+    #[test]
+    fn single_perturb_target_unknown_gene() {
+        assert!(single_perturb_target("Nope", 0.0, &["A".into()]).is_err());
+    }
+
+    #[test]
+    fn single_perturb_target_ok() {
+        let t = single_perturb_target("A", 1.5, &["A".into(), "B".into()]).unwrap();
+        assert_eq!(t.gene, "A");
+        assert_eq!(t.desired_expr, 1.5);
+        assert!(t.cell_indices.is_none());
+    }
 
     #[test]
     fn output_dir_is_deterministic() {

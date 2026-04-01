@@ -545,7 +545,10 @@ export async function bootstrapMcp(): Promise<{
       args.received_ligand_grid_factor != null ||
       args.received_ligand_aggregate != null ||
       typeof args.focus_gene_context === "string" ||
-      typeof args.status_message === "string";
+      typeof args.status_message === "string" ||
+      typeof args.betadata_gene === "string" ||
+      typeof args.betadata_column === "string" ||
+      args.apply_betadata === true;
     if (!hasPath && controlLike) {
       emitControl(args);
       return;

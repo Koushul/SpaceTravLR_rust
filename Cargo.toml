@@ -22,7 +22,13 @@ codegen-units = 1
 
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:unicode-width"]
+tui = [
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:sysinfo",
+    "dep:unicode-width",
+    "dep:tokio",
+]
 libtorch = ["burn/tch", "dep:tch"]
 dev-main = []
 spatial-viewer = [
@@ -31,6 +37,10 @@ spatial-viewer = [
     "dep:tower-http",
     "dep:tracing",
     "dep:tracing-subscriber",
+    "dep:foyer",
+    "dep:bincode",
+    "dep:blake3",
+    "dep:tempfile",
 ]
 
 [[bin]]
@@ -107,6 +117,8 @@ tokio = { version = "1", optional = true, features = [
     "macros",
     "net",
     "signal",
+    "sync",
+    "time",
 ] }
 tower-http = { version = "0.6", optional = true, features = [
     "cors",
@@ -116,4 +128,8 @@ tower-http = { version = "0.6", optional = true, features = [
 ] }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
+foyer = { version = "0.22.3", optional = true, features = ["serde"] }
+bincode = { version = "2", optional = true, features = ["serde"] }
+blake3 = { version = "1.5", optional = true }
+tempfile = { version = "3", optional = true }
 

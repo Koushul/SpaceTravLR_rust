@@ -3,6 +3,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::io::IsTerminal;
 
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2, ArrayView1};
@@ -198,6 +199,10 @@ pub struct BetaFrame {
     pub modulator_genes: Vec<String>,
     /// Maps each modulator gene to its index in a global gene list (set externally).
     pub modulator_gene_indices: Option<Vec<usize>>,
+
+    /// Feather rows are keyed by **`CellID`** (per-cell CNN): map cells **only** via `obs_names`.
+    /// When `false` (e.g. **`Cluster`** column), map via `cluster_keys` first, then obs name.
+    pub join_by_obs_name: bool,
 }
 
 /// Write betadata as Feather-compatible Arrow IPC (LZ4). `id_col` is `Cluster` (seed-only) or `CellID` (per-cell CNN).
@@ -263,14 +268,11 @@ impl BetaFrame {
             .map(|c| c.name().to_string())
             .collect();
 
-        let label_col_idx = all_col_names.iter().position(|c| {
-            c == "Cluster"
-                || c == "CellID"
-                || c.starts_with("__index")
-                || c == "cell_id"
-                || c == "index"
-                || c == "obs_names"
-        });
+        let label_col_idx = betadata_feather_label_column_index(&all_col_names);
+
+        let join_by_obs_name = label_col_idx
+            .and_then(|i| all_col_names.get(i).map(|s| s.as_str()))
+            .is_some_and(label_name_is_per_cell_identity);
 
         let (row_labels, data_col_names) = if let Some(idx) = label_col_idx {
             let label_name = &all_col_names[idx];
@@ -300,7 +302,13 @@ impl BetaFrame {
         }
 
         let gene_name = Self::extract_gene_name(path);
-        Self::from_raw(gene_name, row_labels, data_col_names, raw)
+        Self::from_raw(
+            gene_name,
+            row_labels,
+            data_col_names,
+            raw,
+            join_by_obs_name,
+        )
     }
 
     /// Construct directly from typed arrays (useful for tests and programmatic construction).
@@ -345,6 +353,7 @@ impl BetaFrame {
             tfl_regulators,
             modulator_genes,
             modulator_gene_indices: None,
+            join_by_obs_name: false,
         }
     }
 
@@ -419,6 +428,38 @@ impl BetaFrame {
         mapping
     }
 
+    /// Map each AnnData cell to a feather row by **`obs_names[i]`** matching `row_labels`.
+    /// Used when the feather id column is **`CellID`**. Do not use `cluster_keys` here: those
+    /// are cell-type (or other) labels and can spuriously match row ids or force row `0`,
+    /// destroying per-cell spatial β variation.
+    pub fn compute_cell_mapping_cellid_rows(
+        row_labels: &[String],
+        obs_names: &[String],
+    ) -> Vec<usize> {
+        let mut row_map: HashMap<&str, usize> = HashMap::new();
+        for (i, l) in row_labels.iter().enumerate() {
+            row_map.entry(l.as_str()).or_insert(i);
+        }
+        let mut n_default = 0usize;
+        let mapping: Vec<usize> = obs_names
+            .iter()
+            .map(|name| {
+                row_map.get(name.as_str()).copied().unwrap_or_else(|| {
+                    n_default += 1;
+                    0
+                })
+            })
+            .collect();
+        if n_default > 0 {
+            eprintln!(
+                "Warning: {} of {} cells could not map to a betadata CellID row; using row 0 for those.",
+                n_default,
+                obs_names.len()
+            );
+        }
+        mapping
+    }
+
     fn extract_gene_name(path: &str) -> String {
         Path::new(path)
             .file_stem()
@@ -456,6 +497,7 @@ impl BetaFrame {
         row_labels: Vec<String>,
         data_col_names: Vec<String>,
         data: Array2<f32>,
+        join_by_obs_name: bool,
     ) -> Result<Self> {
         let n_rows = row_labels.len();
 
@@ -539,6 +581,7 @@ impl BetaFrame {
             tfl_regulators,
             modulator_genes,
             modulator_gene_indices: None,
+            join_by_obs_name,
         })
     }
 
@@ -788,12 +831,23 @@ impl Betabase {
             })
             .collect();
 
-        let pb = indicatif::ProgressBar::new(paths.len() as u64);
-        pb.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} Reading betadata")?
-                .progress_chars("#>-"),
-        );
+        // When a higher-level UI (e.g. spatial_viewer) is tracking betadata progress via
+        // `on_subprogress`, avoid drawing a second terminal progress bar here; it causes
+        // duplicated / glitchy output. Also skip the bar entirely when stderr is not a TTY
+        // (e.g. in notebook / web hosts where it would get stuck at the bottom of the page).
+        let pb = if on_subprogress.is_none() && std::io::stderr().is_terminal() {
+            let pb = indicatif::ProgressBar::new(paths.len() as u64);
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template(
+                        "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} Reading betadata",
+                    )?
+                    .progress_chars("#>-"),
+            );
+            Some(pb)
+        } else {
+            None
+        };
 
         let total_n = paths.len().max(1) as u64;
         let processed = Arc::new(AtomicU32::new(0));
@@ -802,7 +856,9 @@ impl Betabase {
             .par_iter()
             .filter_map(|path| {
                 let result = BetaFrame::from_path(path);
-                pb.inc(1);
+                if let Some(pb) = &pb {
+                    pb.inc(1);
+                }
                 let pn = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(f) = &on_subprogress {
                     let sub = ((pn as u64 * 700u64) / total_n).min(700) as u32;
@@ -824,12 +880,15 @@ impl Betabase {
             })
             .collect();
 
-        pb.finish_with_message("Done loading betadata");
+        if let Some(pb) = pb {
+            pb.finish_with_message("Done loading betadata");
+        }
 
         // Expand all frames to cell level. Compute the mapping once per unique
         // set of row_labels and share via Arc to avoid duplicating per gene.
         let cell_labels = Arc::new(obs_names.to_vec());
         let mut last_row_labels: Option<Vec<String>> = None;
+        let mut last_join_by_obs: Option<bool> = None;
         let mut last_mapping: Option<Arc<Vec<usize>>> = None;
 
         let mut data = HashMap::new();
@@ -855,16 +914,23 @@ impl Betabase {
             tfl_ligands_set.extend(frame.tfl_ligands.iter().cloned());
             tfs_set.extend(frame.tfs.iter().cloned());
 
-            // Reuse the mapping Arc when row_labels haven't changed
-            let mapping = if last_row_labels.as_ref() == Some(&frame.row_labels) {
+            // Reuse the mapping Arc when row_labels and join mode haven't changed
+            let mapping = if last_row_labels.as_ref() == Some(&frame.row_labels)
+                && last_join_by_obs == Some(frame.join_by_obs_name)
+            {
                 last_mapping.as_ref().unwrap().clone()
             } else {
-                let m = Arc::new(BetaFrame::compute_cell_mapping(
-                    &frame.row_labels,
-                    obs_names,
-                    cluster_keys,
-                ));
+                let m = Arc::new(if frame.join_by_obs_name {
+                    BetaFrame::compute_cell_mapping_cellid_rows(&frame.row_labels, obs_names)
+                } else {
+                    BetaFrame::compute_cell_mapping(
+                        &frame.row_labels,
+                        obs_names,
+                        cluster_keys,
+                    )
+                });
                 last_row_labels = Some(frame.row_labels.clone());
+                last_join_by_obs = Some(frame.join_by_obs_name);
                 last_mapping = Some(m.clone());
                 m
             };
@@ -897,15 +963,39 @@ impl Betabase {
     }
 }
 
-fn betadata_feather_label_column_index(all_names: &[String]) -> Option<usize> {
-    all_names.iter().position(|c| {
-        c == "Cluster"
-            || c == "CellID"
-            || c.starts_with("__index")
-            || c == "cell_id"
-            || c == "index"
-            || c == "obs_names"
-    })
+/// Feather column used as β row key. **Order matters:** many CNN exports include both `Cluster`
+/// and `CellID`; Arrow column order often has `Cluster` first — taking the first match used to
+/// collapse all cells in the same cluster onto one feather row (no spatial variance in the UI).
+pub(crate) fn betadata_feather_label_column_index(all_names: &[String]) -> Option<usize> {
+    const EXACT: &[&str] = &["CellID", "obs_names", "cell_id", "Cluster"];
+    for &name in EXACT {
+        if let Some(i) = all_names.iter().position(|c| c == name) {
+            return Some(i);
+        }
+    }
+    all_names.iter().position(|c| c.starts_with("__index") || c == "index")
+}
+
+#[inline]
+fn label_name_is_per_cell_identity(name: &str) -> bool {
+    name == "CellID" || name == "obs_names" || name == "cell_id"
+}
+
+fn betadata_feather_cell_mapping(
+    all_names: &[String],
+    label_idx: Option<usize>,
+    row_labels: &[String],
+    obs_names: &[String],
+    cluster_keys: &[String],
+) -> Vec<usize> {
+    let per_cell = label_idx
+        .and_then(|i| all_names.get(i).map(|s| s.as_str()))
+        .is_some_and(label_name_is_per_cell_identity);
+    if per_cell {
+        BetaFrame::compute_cell_mapping_cellid_rows(row_labels, obs_names)
+    } else {
+        BetaFrame::compute_cell_mapping(row_labels, obs_names, cluster_keys)
+    }
 }
 
 fn feather_id_label_dtype_is_numeric(dt: &DataType) -> bool {
@@ -941,8 +1031,8 @@ fn feather_id_column_to_strings(col: &Column) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Detects how betadata rows map to cells: **`Cluster`** = seed-only lasso (one β row per cluster),
-/// **`CellID`** = spatial CNN export (per-cell β). Used by the spatial viewer to label the UI.
+/// Detects how betadata rows map to cells: same precedence as [`betadata_feather_label_column_index`]
+/// (**`CellID`** / **`obs_names`** / **`cell_id`** before **`Cluster`**). Used by the spatial viewer meta.
 pub fn betadata_feather_row_id_column(path: &str) -> Result<Option<String>> {
     let f = File::open(path).with_context(|| format!("open {}", path))?;
     let df = IpcReader::new(f)
@@ -953,13 +1043,7 @@ pub fn betadata_feather_row_id_column(path: &str) -> Result<Option<String>> {
         .iter()
         .map(|c| c.name().to_string())
         .collect();
-    if all_names.iter().any(|n| n == "Cluster") {
-        return Ok(Some("Cluster".to_string()));
-    }
-    if all_names.iter().any(|n| n == "CellID") {
-        return Ok(Some("CellID".to_string()));
-    }
-    Ok(None)
+    Ok(betadata_feather_label_column_index(&all_names).and_then(|i| all_names.get(i).cloned()))
 }
 
 /// Numeric data columns suitable for spatial coloring (excludes id / label column).
@@ -988,7 +1072,8 @@ pub fn betadata_feather_plottable_columns(path: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// One scalar per AnnData cell: feather row → cell via [`BetaFrame::compute_cell_mapping`].
+/// One scalar per AnnData cell: feather row → cell via cluster-key + obs mapping for **`Cluster`**
+/// feathers, or **obs-name-only** mapping when the id column is **`CellID`** (spatial CNN export).
 pub fn betadata_feather_per_cell_column(
     path: &str,
     column: &str,
@@ -1017,7 +1102,13 @@ pub fn betadata_feather_per_cell_column(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let mapping = betadata_feather_cell_mapping(
+        &all_names,
+        label_idx,
+        &row_labels,
+        obs_names,
+        cluster_keys,
+    );
     let series = df
         .column(column)
         .with_context(|| format!("column {:?}", column))?
@@ -1079,7 +1170,13 @@ pub fn betadata_feather_top_coefficients_for_selection(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let mapping = betadata_feather_cell_mapping(
+        &all_names,
+        label_idx,
+        &row_labels,
+        obs_names,
+        cluster_keys,
+    );
     let n_obs = obs_names.len();
 
     let mut columns: Vec<String> = Vec::new();
@@ -1181,7 +1278,13 @@ pub fn betadata_feather_modulator_beta_means_for_cells(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let mapping = betadata_feather_cell_mapping(
+        &all_names,
+        label_idx,
+        &row_labels,
+        obs_names,
+        cluster_keys,
+    );
     let n_obs = obs_names.len();
 
     let mut col_by_mod: HashMap<String, String> = HashMap::new();
@@ -1339,7 +1442,13 @@ pub fn betadata_collect_interactions_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let mapping = betadata_feather_cell_mapping(
+        &all_names,
+        label_idx,
+        &row_labels,
+        obs_names,
+        cluster_keys,
+    );
     let n_obs = obs_names.len();
 
     let mut out = Vec::new();
@@ -1476,7 +1585,13 @@ pub fn betadata_pair_lr_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = BetaFrame::compute_cell_mapping(&row_labels, obs_names, cluster_keys);
+    let mapping = betadata_feather_cell_mapping(
+        &all_names,
+        label_idx,
+        &row_labels,
+        obs_names,
+        cluster_keys,
+    );
     let ra = mapping[cell_a];
     let rb = mapping[cell_b];
 
@@ -1553,4 +1668,25 @@ pub fn betadata_pair_lr_parallel(
             .then_with(|| a.interaction.cmp(&b.interaction))
     });
     Ok(merged)
+}
+
+#[cfg(test)]
+mod feather_label_tests {
+    use super::betadata_feather_label_column_index;
+
+    #[test]
+    fn label_index_prefers_cellid_when_cluster_is_first_column() {
+        let names = vec![
+            "Cluster".into(),
+            "CellID".into(),
+            "beta0".into(),
+        ];
+        assert_eq!(betadata_feather_label_column_index(&names), Some(1));
+    }
+
+    #[test]
+    fn label_index_falls_back_to_cluster_when_no_cellid() {
+        let names = vec!["Cluster".into(), "beta0".into()];
+        assert_eq!(betadata_feather_label_column_index(&names), Some(0));
+    }
 }
