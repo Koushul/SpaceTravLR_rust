@@ -6,7 +6,7 @@ use compute_backend::{
     select_compute_backend,
 };
 use serde_json::Value;
-use space_trav_lr_rust::condition_split::prepare_condition_splits;
+use space_trav_lr_rust::condition_split::{prepare_condition_splits, scan_condition_status};
 use space_trav_lr_rust::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
     default_output_dir_for_adata_path, expand_user_path,
@@ -245,7 +245,7 @@ struct Cli {
     #[arg(
         long = "join-output-dir",
         value_name = "DIR",
-        help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). Works with --condition: DIR is the parent output directory; condition splits are auto-discovered from [data].condition in the repro TOML. Use --parallel to set this machine's worker count."
+        help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). With --condition, resumes into the same DIR/conditions/<group>/ trees by matching condition_label.txt so betadata stays in sync across hosts. [data].condition comes from the repro TOML. Use --parallel to set this machine's worker count."
     )]
     join_output_dir: Option<PathBuf>,
 
@@ -272,6 +272,12 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
     }
     if let Some(p) = &cli.tf_priors_feather {
         cfg.grn.tf_priors_feather = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    }
+    if let Some(ref c) = cli.condition {
+        let t = c.trim();
+        if !t.is_empty() {
+            cfg.data.condition = Some(t.to_string());
+        }
     }
 }
 
@@ -325,6 +331,12 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
     if cli.save_cnn_weights {
         cfg.model_export.save_cnn_weights = true;
     }
+    if let Some(ref c) = cli.condition {
+        let t = c.trim();
+        if !t.is_empty() {
+            cfg.data.condition = Some(t.to_string());
+        }
+    }
 }
 
 fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
@@ -338,6 +350,22 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             );
         }
         let mut cfg = SpaceshipConfig::from_file(&repro)?;
+        let repro_file_condition = cfg.data.condition.clone();
+        if let Some(cli_raw) = cli.condition.as_deref() {
+            let cli_c = cli_raw.trim();
+            if !cli_c.is_empty() {
+                if let Some(ref file_c) = repro_file_condition {
+                    if !cli_c.eq_ignore_ascii_case(file_c.trim()) {
+                        anyhow::bail!(
+                            "--condition {:?} does not match [data].condition = {:?} in {}; omit --condition to use the file, or fix the mismatch.",
+                            cli_c,
+                            file_c,
+                            repro.display()
+                        );
+                    }
+                }
+            }
+        }
         cfg.execution.output_dir = jexp;
         apply_cli_join_overrides(cli, &mut cfg);
         if cli.config.is_some() {
@@ -671,16 +699,15 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    if join_training && cli.condition.is_some() && cfg.data.condition.is_some() {
-        let cli_cond = cli.condition.as_deref().unwrap().trim();
-        let toml_cond = cfg.data.condition.as_deref().unwrap().trim();
-        if !cli_cond.eq_ignore_ascii_case(toml_cond) {
-            anyhow::bail!(
-                "--condition {:?} does not match the leader's [data].condition = {:?} in the repro TOML; \
-                 drop --condition to use the value from the shared run config, or ensure they match.",
-                cli_cond, toml_cond
-            );
-        }
+    if join_training
+        && condition_column.is_none()
+        && Path::new(&cfg.execution.output_dir)
+            .join(space_trav_lr_rust::condition_split::CONDITION_RUNS_SUBDIR)
+            .is_dir()
+    {
+        eprintln!(
+            "Warning: --join-output-dir points at a run with a `conditions/` subtree, but neither --condition nor [data].condition in the repro TOML is set; training will use a single output directory (not per-condition). Pass --condition <obs_column> if you meant to resume condition splits."
+        );
     }
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
@@ -791,15 +818,34 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if let Some(condition_col) = condition_column.as_deref() {
-            let splits = prepare_condition_splits(&path, &output_dir, condition_col)?;
+            if !join_training {
+                cfg.write_run_repro_toml_if_missing(Path::new(&output_dir))?;
+            }
+            let splits = prepare_condition_splits(&path, &output_dir, condition_col, join_training)?;
             println!(
                 "Condition split: obs.{:?} -> {} groups (betadata under {}/conditions/<group>/)",
                 condition_col,
                 splits.len(),
                 output_dir.trim_end_matches('/')
             );
-            if !join_training {
-                cfg.write_run_repro_toml_if_missing(Path::new(&output_dir))?;
+            if join_training {
+                let dir_status = scan_condition_status(&output_dir)?;
+                if !dir_status.is_empty() {
+                    println!("Condition status (from filesystem):");
+                    for cs in &dir_status {
+                        let status = if cs.n_locks > 0 {
+                            "in progress"
+                        } else if cs.n_done() > 0 {
+                            "has results"
+                        } else {
+                            "not started"
+                        };
+                        println!(
+                            "  {}: {} done ({} feather + {} orphan), {} active locks [{}]",
+                            cs.label, cs.n_done(), cs.n_feathers, cs.n_orphans, cs.n_locks, status,
+                        );
+                    }
+                }
             }
             for split in splits {
                 let split_output_dir = split.output_dir.display().to_string();
@@ -918,10 +964,11 @@ fn main() -> anyhow::Result<()> {
 
         let handle = thread::spawn(move || {
             if let Some(condition_col) = condition_column_thread {
-                let splits = prepare_condition_splits(&path, &output_dir, &condition_col)?;
                 if !join_training {
                     cfg.write_run_repro_toml_if_missing(Path::new(&output_dir))?;
                 }
+                let splits =
+                    prepare_condition_splits(&path, &output_dir, &condition_col, join_training)?;
                 let n_splits = splits.len();
                 for (si, split) in splits.into_iter().enumerate() {
                     let split_output_dir = split.output_dir.display().to_string();

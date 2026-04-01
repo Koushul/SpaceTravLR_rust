@@ -1315,30 +1315,41 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             fs::create_dir_all(training_dir)?;
             fs::create_dir_all(format!("{training_dir}/log"))?;
 
-            let repro_path = Path::new(training_dir).join(RUN_REPRO_TOML_FILENAME);
-            match spaceship_config.write_run_repro_toml_if_missing(Path::new(training_dir)) {
-                Ok(Some(p)) => log_line(
-                    &hud,
-                    format!(
-                        "Wrote {} (shared run config for additional trainers: use --join-output-dir on other hosts)",
-                        p.display()
+            // Per-condition splits use `output_dir = .../conditions/<group>/`. The canonical
+            // `spacetravlr_run_repro.toml` lives at the parent output root (written by the CLI before
+            // splits). Do not write a second repro into each condition subfolder — that confuses
+            // `--join-output-dir` and duplicates config.
+            if obs_row_subset.is_none() {
+                let repro_path = Path::new(training_dir).join(RUN_REPRO_TOML_FILENAME);
+                match spaceship_config.write_run_repro_toml_if_missing(Path::new(training_dir)) {
+                    Ok(Some(p)) => log_line(
+                        &hud,
+                        format!(
+                            "Wrote {} (shared run config for additional trainers: use --join-output-dir on other hosts)",
+                            p.display()
+                        ),
                     ),
-                ),
-                Ok(None) => {
-                    if join_training {
-                        log_line(
-                            &hud,
-                            format!(
-                                "Join mode: using existing run config {}",
-                                repro_path.display()
-                            ),
-                        );
+                    Ok(None) => {
+                        if join_training {
+                            log_line(
+                                &hud,
+                                format!(
+                                    "Join mode: using existing run config {}",
+                                    repro_path.display()
+                                ),
+                            );
+                        }
                     }
+                    Err(e) => log_line(
+                        &hud,
+                        format!("Could not write run repro TOML (early): {}", e),
+                    ),
                 }
-                Err(e) => log_line(
+            } else if join_training {
+                log_line(
                     &hud,
-                    format!("Could not write run repro TOML (early): {}", e),
-                ),
+                    "Join mode (condition split): canonical spacetravlr_run_repro.toml is under the parent output directory, not this conditions/<group>/ folder.".to_string(),
+                );
             }
 
             // ── Setup: build gene list and pre-cache shared metadata ──────────────
@@ -2465,7 +2476,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 "Join mode: did not overwrite spacetravlr_run_repro.toml (canonical copy from leader run)"
                     .to_string(),
             );
-            } else {
+            } else if obs_row_subset.is_none() {
                 match spaceship_config.write_run_repro_toml(Path::new(training_dir)) {
                     Ok(p) => log_line(&hud, format!("Wrote run repro {}", p.display())),
                     Err(e) => log_line(&hud, format!("Run repro TOML not written: {}", e)),
