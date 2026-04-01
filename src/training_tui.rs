@@ -236,6 +236,7 @@ fn brighten(c: Color, amt: u8) -> Color {
 // ── Workers: multi-column (display-width–fixed cells so │ stays aligned) ─────
 const GENE_DISP: usize = 16;
 const STAT_DISP: usize = 38;
+const GENE_STAT_SEP: &str = " · ";
 
 fn pad_or_trunc_display(s: &str, width: usize) -> String {
     if width == 0 {
@@ -245,6 +246,36 @@ fn pad_or_trunc_display(s: &str, width: usize) -> String {
     if w <= width {
         let pad = width - w;
         return format!("{}{}", s, " ".repeat(pad));
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    let el = '…';
+    let el_w = el.width().unwrap_or(1);
+    let budget = width.saturating_sub(el_w);
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push(el);
+    let rem = width.saturating_sub(out.width());
+    if rem > 0 {
+        out.push_str(&" ".repeat(rem));
+    }
+    out
+}
+
+fn pad_left_trunc_display(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let w = s.width();
+    if w <= width {
+        let pad = width - w;
+        return format!("{}{}", " ".repeat(pad), s);
     }
     let mut out = String::new();
     let mut used = 0usize;
@@ -279,7 +310,7 @@ fn workers_in_columns(
         )))];
     }
     let prefix_w = "✿ ".width();
-    let mid_w = "  ·  ".width();
+    let mid_w = GENE_STAT_SEP.width();
     let sep_w = " │ ".width();
     let entry_w = prefix_w + GENE_DISP + mid_w + STAT_DISP;
     let n_cols = ((content_w + sep_w) / (entry_w + sep_w)).max(1);
@@ -314,10 +345,13 @@ fn workers_in_columns(
                 };
                 spans.push(Span::styled("✿ ", Style::default().fg(LABEL)));
                 spans.push(Span::styled(
-                    pad_or_trunc_display(gene.as_str(), GENE_DISP),
+                    pad_left_trunc_display(gene.as_str(), GENE_DISP),
                     Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled("  ·  ", Style::default().fg(MUTED)));
+                spans.push(Span::styled(
+                    GENE_STAT_SEP,
+                    Style::default().fg(MUTED),
+                ));
                 spans.push(Span::styled(
                     pad_or_trunc_display(&status_line, STAT_DISP),
                     Style::default().fg(pc),
