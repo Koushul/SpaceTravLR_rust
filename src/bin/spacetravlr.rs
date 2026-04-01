@@ -121,7 +121,7 @@ struct RunSummaryCli {
     name = "spacetravlr",
     version,
     about = "SpaceTravLR — spatial GRN training from single-cell spatial AnnData (.h5ad).",
-    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training. For multiple machines on one shared output directory, start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine."
+    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training. For multiple machines on one shared output directory, start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine. With --condition, --join-output-dir points to the parent output directory (conditions/<group>/ subdirectories are auto-discovered from the repro TOML)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -245,7 +245,7 @@ struct Cli {
     #[arg(
         long = "join-output-dir",
         value_name = "DIR",
-        help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). Overrides local spaceship_config.toml for training hyperparameters. Use --parallel to set this machine's worker count."
+        help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). Works with --condition: DIR is the parent output directory; condition splits are auto-discovered from [data].condition in the repro TOML. Use --parallel to set this machine's worker count."
     )]
     join_output_dir: Option<PathBuf>,
 
@@ -671,10 +671,16 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    if join_training && condition_column.is_some() {
-        anyhow::bail!(
-            "--join-output-dir is not supported with --condition / [data].condition (use a single output directory per split)."
-        );
+    if join_training && cli.condition.is_some() && cfg.data.condition.is_some() {
+        let cli_cond = cli.condition.as_deref().unwrap().trim();
+        let toml_cond = cfg.data.condition.as_deref().unwrap().trim();
+        if !cli_cond.eq_ignore_ascii_case(toml_cond) {
+            anyhow::bail!(
+                "--condition {:?} does not match the leader's [data].condition = {:?} in the repro TOML; \
+                 drop --condition to use the value from the shared run config, or ensure they match.",
+                cli_cond, toml_cond
+            );
+        }
     }
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
@@ -772,10 +778,17 @@ fn main() -> anyhow::Result<()> {
             n_parallel,
         );
         if join_training {
-            println!(
-                "Join mode: shared directory {}; unfinished genes claimed via .lock; existing *_betadata.feather skipped",
-                output_dir
-            );
+            if condition_column.is_some() {
+                println!(
+                    "Join mode (condition): shared parent directory {}; each conditions/<group>/ uses .lock coordination",
+                    output_dir
+                );
+            } else {
+                println!(
+                    "Join mode: shared directory {}; unfinished genes claimed via .lock; existing *_betadata.feather skipped",
+                    output_dir
+                );
+            }
         }
         if let Some(condition_col) = condition_column.as_deref() {
             let splits = prepare_condition_splits(&path, &output_dir, condition_col)?;
@@ -785,6 +798,9 @@ fn main() -> anyhow::Result<()> {
                 splits.len(),
                 output_dir.trim_end_matches('/')
             );
+            if !join_training {
+                cfg.write_run_repro_toml_if_missing(Path::new(&output_dir))?;
+            }
             for split in splits {
                 let split_output_dir = split.output_dir.display().to_string();
                 let obs_subset = Arc::from(split.obs_indices.into_boxed_slice());
@@ -903,6 +919,9 @@ fn main() -> anyhow::Result<()> {
         let handle = thread::spawn(move || {
             if let Some(condition_col) = condition_column_thread {
                 let splits = prepare_condition_splits(&path, &output_dir, &condition_col)?;
+                if !join_training {
+                    cfg.write_run_repro_toml_if_missing(Path::new(&output_dir))?;
+                }
                 let n_splits = splits.len();
                 for (si, split) in splits.into_iter().enumerate() {
                     let split_output_dir = split.output_dir.display().to_string();
