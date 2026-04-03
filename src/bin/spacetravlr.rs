@@ -427,6 +427,12 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     if let Some(ref raw) = cli.extra_lr {
         cfg.grn.extra_lr.extend(grn_extra::parse_extra_lr_cli(raw)?);
     }
+    if let Some(genes) = parse_gene_filter(cli) {
+        cfg.training.genes = Some(genes);
+    }
+    if let Some(n) = cli.max_genes {
+        cfg.training.max_genes = Some(n);
+    }
     Ok(())
 }
 
@@ -466,7 +472,8 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
         }
         if cli.max_genes.is_some() || cli.genes.is_some() {
             eprintln!(
-                "Note: --join-output-dir ignores --max-genes and --genes (gene list comes from the shared run)."
+                "Note: --join-output-dir uses [training] genes / max_genes from {}; --genes and --max-genes on this command are ignored.",
+                repro.display()
             );
         }
         if cli.epochs.is_some()
@@ -696,8 +703,8 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     };
     apply_cli_to_config(cli, &mut cfg)?;
 
-    let gene_filter = parse_gene_filter(cli);
-    let demo_total = cli.max_genes.unwrap_or(24).clamp(1, 512);
+    let gene_filter = cfg.training.genes.clone();
+    let demo_total = cfg.training.max_genes.unwrap_or(24).clamp(1, 512);
 
     let config_path_ref = cli.config.as_deref();
     let run_summary = RunConfigSummary::build(
@@ -778,12 +785,8 @@ fn main() -> anyhow::Result<()> {
             .or_else(SpaceshipConfig::discover_default_path)
     };
 
-    let max_genes = if join_training { None } else { cli.max_genes };
-    let gene_filter = if join_training {
-        None
-    } else {
-        parse_gene_filter(&cli)
-    };
+    let max_genes = cfg.training.max_genes;
+    let gene_filter = cfg.training.genes.clone();
     let condition_column = cli
         .condition
         .clone()

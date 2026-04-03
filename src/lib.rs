@@ -36,7 +36,7 @@ pub use cnn_gating::CnnGateDecision;
 pub use config::{
     CnnConfig, CnnOutputActivation, CnnTrainingMode, HybridCnnGatingConfig,
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, default_output_dir_for_adata_path, expand_user_path,
-    normalize_ui_path,
+    filter_training_var_names, normalize_ui_path, resolve_training_target_genes,
 };
 pub use estimator::{CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR};
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};

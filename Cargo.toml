@@ -13,6 +13,9 @@ exclude = [".agent/", ".agents/", ".claude/", "skills-lock.json"]
 default-run = "spacetravlr"
 autobins = false
 
+[package.metadata.cargo-llvm-cov]
+ignore-filename-regex = ["/\\.cargo/registry/", "/\\.cargo/git/"]
+
 [profile.dev]
 incremental = true
 

@@ -1416,20 +1416,26 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
             let all_var_names = setup_adata.var_names().into_vec();
 
-            let mut target_genes = all_var_names.clone();
-            if let Some(filter) = gene_filter {
-                let msg = format!("Filtering for specific genes: {:?}", filter);
-                log_line(&hud, msg.clone());
-                target_genes.retain(|g| filter.contains(g));
-                let msg = format!("Retained {} genes for training", target_genes.len());
-                log_line(&hud, msg.clone());
+            let mut target_genes =
+                crate::config::filter_training_var_names(&all_var_names, gene_filter.as_deref());
+            if let Some(ref filter) = gene_filter {
+                log_line(
+                    &hud,
+                    format!("Filtering for specific genes: {:?}", filter),
+                );
+                log_line(
+                    &hud,
+                    format!("Retained {} genes for training", target_genes.len()),
+                );
             }
             if let Some(n) = max_genes {
                 if target_genes.len() > n {
                     target_genes.truncate(n);
                     let preview: Vec<_> = target_genes.iter().take(5).cloned().collect();
-                    let msg = format!("Using first {} genes (preview: {:?})", n, preview);
-                    log_line(&hud, msg.clone());
+                    log_line(
+                        &hud,
+                        format!("Using first {} genes (preview: {:?})", n, preview),
+                    );
                 }
             }
 

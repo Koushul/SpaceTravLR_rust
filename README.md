@@ -91,6 +91,41 @@ cargo run --release -- --help
 
 (`default-run` in `Cargo.toml` is `spacetravlr`, so you do not need `--bin` for that target.)
 
+### Test coverage (cargo-llvm-cov)
+
+Install the subcommand once (see [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)):
+
+```bash
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+```
+
+Use a **rustup-managed** `cargo`/`rustc` (not a standalone Homebrew Rust) so `llvm-tools-preview` matches the compiler `cargo-llvm-cov` invokes.
+
+Print a line-coverage summary (default features, same as `cargo test`):
+
+```bash
+cargo llvm-cov
+```
+
+Include optional crates (`spatial-viewer`, `dev-main`, etc.):
+
+```bash
+cargo llvm-cov --all-features
+```
+
+HTML report under `target/llvm-cov/html` (open `index.html`):
+
+```bash
+cargo llvm-cov --all-features --html
+```
+
+If WebGPU/Burn tests misbehave on your machine, force CPU like training:
+
+```bash
+SPACETRAVLR_FORCE_CPU=1 cargo llvm-cov --all-features
+```
+
 ### Spatial + betadata web viewer (optional)
 
 Interactive **deck.gl** UI for spatial coordinates from an `.h5ad` (`obsm["spatial"]`, then `X_spatial`, then `spatial_loc`) with coloring by **expression** (one gene from `X` or a layer), **betadata** (when a run TOML is supplied), or **cell type** when a standard `obs` cell-type column exists. Betadata is read from the **same directory as `spacetravlr_run_repro.toml`** (not a separate CLI path): **seed-only** models use a `Cluster` column (one β row per cluster; cells get values via `--cluster-annot`), while **spatial / full CNN** exports use `CellID` (per-cell β). `/api/meta` includes `betadata_row_id` (`Cluster` or `CellID`) when the first feather in that run directory can be probed.
@@ -788,6 +823,8 @@ The `fit_all_genes` pipeline trains all genes in parallel using a shared work qu
 - **Arc sharing**: Coordinates, cluster assignments, and the GRN are loaded once and shared across all worker threads via `Arc`
 - **Lock files**: Each gene creates a `.lock` file during training, allowing multiple processes to train different genes concurrently without duplication
 - **Incremental**: Already-trained genes (existing `_betadata.csv`) are skipped automatically
+
+**Multi-host (`--join-output-dir`)**: The leader writes `spacetravlr_run_repro.toml` with the executed `SpaceshipConfig`, including optional **`[training] genes`** and **`[training] max_genes`** (set by the leader’s `--genes` / `--max-genes` or by those keys in `spaceship_config.toml`). Hosts that join with `--join-output-dir` load that file and use the same subset for the work queue; **`--genes` and `--max-genes` on the join command are ignored** so the queue matches the leader. Older repro files without those keys keep the previous behavior (full `var` list).
 
 ---
 

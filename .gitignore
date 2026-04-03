@@ -1,4 +1,5 @@
 /target
+lcov.info
 .venv-bench/
 .cache/
 .claude/

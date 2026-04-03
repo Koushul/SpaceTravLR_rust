@@ -80,6 +80,9 @@ epochs          = 10
 learning_rate   = 2e-4
 # Minimum mean lasso R² to allow CNN in hybrid mode (also used when hybrid.min_mean_lasso_r2_for_cnn is unset)
 score_threshold = 0.1
+# Optional target subset (CLI: --genes / --max-genes). Persisted in spacetravlr_run_repro.toml for --join-output-dir.
+# genes = ["GENE1", "GENE2"]
+# max_genes = 500
 
 # Hybrid gating (only when mode = "hybrid"); see src/cnn_gating.rs / log gate_* fields
 [training.hybrid]

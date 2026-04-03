@@ -206,6 +206,13 @@ pub struct TrainingConfig {
     pub score_threshold: f64,
     #[serde(default)]
     pub hybrid: HybridCnnGatingConfig,
+    /// Subset of AnnData `var` to train (`--genes`, `[training] genes`). Persisted in
+    /// `spacetravlr_run_repro.toml` for `--join-output-dir`.
+    #[serde(default)]
+    pub genes: Option<Vec<String>>,
+    /// Cap after the `genes` filter (`--max-genes`, `[training] max_genes`). Persisted for join.
+    #[serde(default)]
+    pub max_genes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -407,8 +414,37 @@ impl Default for TrainingConfig {
             learning_rate: 1e-3,
             score_threshold: 0.2,
             hybrid: HybridCnnGatingConfig::default(),
+            genes: None,
+            max_genes: None,
         }
     }
+}
+
+/// Intersect AnnData `var` names with an optional allow-list, preserving `all_var_names` order.
+pub fn filter_training_var_names(
+    all_var_names: &[String],
+    gene_filter: Option<&[String]>,
+) -> Vec<String> {
+    let mut v = all_var_names.to_vec();
+    if let Some(filter) = gene_filter {
+        v.retain(|g| filter.contains(g));
+    }
+    v
+}
+
+/// Filter (see [`filter_training_var_names`]) then cap length at `max_genes` when set.
+pub fn resolve_training_target_genes(
+    all_var_names: &[String],
+    gene_filter: Option<&[String]>,
+    max_genes: Option<usize>,
+) -> Vec<String> {
+    let mut v = filter_training_var_names(all_var_names, gene_filter);
+    if let Some(n) = max_genes {
+        if v.len() > n {
+            v.truncate(n);
+        }
+    }
+    v
 }
 
 impl Default for ExecutionConfig {
@@ -691,5 +727,107 @@ mod resolve_training_output_dir_tests {
             cfg.resolve_training_output_dir(p),
             Path::new("/home/u/lasso_out")
         );
+    }
+
+    #[test]
+    fn repro_toml_roundtrip_training_genes_and_max_genes() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.training.genes = Some(vec!["Actb".into(), "Gapdh".into()]);
+        cfg.training.max_genes = Some(128);
+        let s = cfg.to_toml_pretty().unwrap();
+        let back: SpaceshipConfig = toml::from_str(&s).expect("deserialize repro TOML");
+        assert_eq!(back.training.genes, Some(vec!["Actb".into(), "Gapdh".into()]));
+        assert_eq!(back.training.max_genes, Some(128));
+    }
+
+    #[test]
+    fn repro_toml_deserialize_without_training_genes_defaults_none() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 5
+learning_rate = 0.001
+score_threshold = 0.1
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.training.genes.is_none());
+        assert!(cfg.training.max_genes.is_none());
+    }
+}
+
+#[cfg(test)]
+mod training_target_genes_tests {
+    use super::{filter_training_var_names, resolve_training_target_genes};
+
+    fn vars() -> Vec<String> {
+        vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+            "e".into(),
+        ]
+    }
+
+    #[test]
+    fn filter_none_keeps_order_and_len() {
+        let v = vars();
+        let out = filter_training_var_names(&v, None);
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn filter_preserves_var_order() {
+        let v = vars();
+        let f = vec!["c".into(), "a".into()];
+        let out = filter_training_var_names(&v, Some(&f));
+        assert_eq!(out, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn filter_empty_list_yields_empty() {
+        let v = vars();
+        let f: Vec<String> = vec![];
+        let out = filter_training_var_names(&v, Some(&f));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resolve_cap_only_truncates_prefix_in_var_order() {
+        let v = vars();
+        let out = resolve_training_target_genes(&v, None, Some(3));
+        assert_eq!(out, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn resolve_filter_then_cap() {
+        let v = vars();
+        let f = vec!["e".into(), "b".into(), "a".into(), "d".into()];
+        let out = resolve_training_target_genes(&v, Some(&f), Some(2));
+        assert_eq!(out, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn resolve_cap_larger_than_filtered_no_op() {
+        let v = vars();
+        let f = vec!["b".into(), "c".into()];
+        let out = resolve_training_target_genes(&v, Some(&f), Some(10));
+        assert_eq!(out, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn resolve_matches_sequential_filter_and_truncate() {
+        let v = vars();
+        let f = vec!["d".into(), "b".into()];
+        let mut manual = filter_training_var_names(&v, Some(&f));
+        manual.truncate(1);
+        let resolved = resolve_training_target_genes(&v, Some(&f), Some(1));
+        assert_eq!(resolved, manual);
+        assert_eq!(resolved, vec!["b"]);
     }
 }
