@@ -9,7 +9,7 @@ pub mod cnn_gating;
 pub mod condition_split;
 pub mod config;
 pub mod estimator;
-mod grn_extra;
+pub mod grn_extra;
 pub mod lasso;
 pub mod ligand;
 pub mod model;

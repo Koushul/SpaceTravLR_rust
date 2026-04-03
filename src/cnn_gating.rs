@@ -501,8 +501,10 @@ mod tests {
 
     #[test]
     fn effective_permissiveness_scales_moran_and_r2_gates() {
-        let mut c = HybridCnnGatingConfig::default();
-        c.hybrid_cnn_permissiveness = 0.0;
+        let mut c = HybridCnnGatingConfig {
+            hybrid_cnn_permissiveness: 0.0,
+            ..Default::default()
+        };
         assert!((c.effective_moran_p_max() - 0.05 * 0.3).abs() < 1e-9);
         assert!((c.effective_min_mean_lasso_r2(0.1) - 0.14).abs() < 1e-9);
         c.hybrid_cnn_permissiveness = 0.5;

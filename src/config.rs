@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub const RUN_REPRO_TOML_FILENAME: &str = "spacetravlr_run_repro.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct SpaceshipConfig {
     #[serde(default)]
     pub data: DataConfig,
@@ -442,21 +443,6 @@ impl Default for ModelExportConfig {
     }
 }
 
-impl Default for SpaceshipConfig {
-    fn default() -> Self {
-        Self {
-            data: DataConfig::default(),
-            spatial: SpatialConfig::default(),
-            grn: GrnConfig::default(),
-            cnn: CnnConfig::default(),
-            lasso: LassoConfig::default(),
-            training: TrainingConfig::default(),
-            execution: ExecutionConfig::default(),
-            perturbation: PerturbationConfig::default(),
-            model_export: ModelExportConfig::default(),
-        }
-    }
-}
 
 /// Expand `~` / `~/` in a path string (HOME / USERPROFILE).
 pub fn expand_user_path(s: &str) -> String {

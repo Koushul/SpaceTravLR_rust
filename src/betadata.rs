@@ -764,6 +764,12 @@ pub struct BetadataUiProgress {
 
 const BETADATA_UI_PHASE_IDLE: u8 = 0;
 
+impl Default for BetadataUiProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BetadataUiProgress {
     pub fn new() -> Self {
         Self {

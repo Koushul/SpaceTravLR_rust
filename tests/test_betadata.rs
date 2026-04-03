@@ -368,7 +368,7 @@ fn test_betabase_from_directory() {
     assert!(bb.tfs_set.contains("TF1"));
     assert!(bb.ligands_set.contains("L1"));
 
-    for (_, frame) in &bb.data {
+    for frame in bb.data.values() {
         assert_eq!(frame.n_cells, 5);
         assert_eq!(*frame.cell_to_beta_row, vec![0, 0, 1, 1, 0]);
     }

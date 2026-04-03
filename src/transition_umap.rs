@@ -86,7 +86,7 @@ pub fn umap_knn_indices(umap: &[[f64; 2]], k: usize) -> Vec<Vec<usize>> {
         return vec![];
     }
     let k_eff = k.min(n.saturating_sub(1).max(1));
-    let points: Vec<[f64; 2]> = umap.iter().copied().collect();
+    let points: Vec<[f64; 2]> = umap.to_vec();
     let tree = ImmutableKdTree::<f64, 2>::new_from_slice(&points);
     let k_query = std::num::NonZero::new(k_eff + 1).unwrap();
     (0..n)
@@ -484,7 +484,7 @@ fn knn_mean_on_embedding(
     if n == 0 || queries.is_empty() {
         return vec![0.0; queries.len()];
     }
-    let points: Vec<[f64; 2]> = umap.iter().copied().collect();
+    let points: Vec<[f64; 2]> = umap.to_vec();
     let tree = ImmutableKdTree::<f64, 2>::new_from_slice(&points);
     let k_take = k.max(1).min(n);
     let k_query = NonZero::new(k_take).unwrap();
@@ -1511,7 +1511,7 @@ mod tests {
         let grid = compute_umap_transition_grid(&expr, &delta, &umap, &params);
         for v in &grid.vectors {
             let mag = cell_mag(*v);
-            assert!(mag < 1e-9 || mag >= 0.5, "got mag={}", mag);
+            assert!(!(1e-9..0.5).contains(&mag), "got mag={}", mag);
         }
     }
 

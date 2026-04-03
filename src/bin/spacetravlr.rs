@@ -11,6 +11,7 @@ use space_trav_lr_rust::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
     default_output_dir_for_adata_path, expand_user_path,
 };
+use space_trav_lr_rust::grn_extra;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_demo::run_demo_training;
 use space_trav_lr_rust::training_hud::RunConfigSummary;
@@ -126,152 +127,210 @@ struct RunSummaryCli {
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
     #[arg(
         short = 'c',
         long,
         value_name = "PATH",
-        help = "spaceship_config.toml path"
+        help_heading = "Input",
+        help = "spaceship_config.toml (searched nearby if omitted)"
     )]
     config: Option<PathBuf>,
 
     #[arg(
         long,
         value_name = "PATH",
-        help = "AnnData .h5ad path (overrides config data.adata_path)"
+        help_heading = "Input",
+        help = "Spatial AnnData .h5ad — overrides [data].adata_path"
     )]
     h5ad: Option<PathBuf>,
 
     #[arg(
         long = "tf-prior",
         value_name = "PATH",
-        help = "Optional TF priors Feather (source,target,cell_type); overrides grn.tf_priors_feather"
+        help_heading = "Input",
+        help = "Feather with TF priors (source, target, cell_type) — overrides [grn].tf_priors_feather"
     )]
     tf_priors_feather: Option<PathBuf>,
 
     #[arg(
         long,
-        value_name = "MODE",
-        value_enum,
-        help = "full | seed | hybrid (default: seed)"
-    )]
-    training_mode: Option<TrainingModeArg>,
-
-    #[arg(long, value_name = "N", help = "CNN fine-tuning epochs per gene")]
-    epochs: Option<usize>,
-
-    #[arg(long, value_name = "N", help = "Parallel gene workers")]
-    parallel: Option<usize>,
-
-    #[arg(
-        long = "max-lr-pairs",
-        value_name = "N",
-        help = "Cap LR pairs from the database (database order); overrides grn.max_lr_pairs"
-    )]
-    max_lr_pairs: Option<usize>,
-
-    #[arg(long, value_name = "N", help = "Train at most N genes (var order)")]
-    max_genes: Option<usize>,
-
-    #[arg(
-        long,
         value_name = "LIST",
-        help = "Comma-separated target genes (filters the gene list)"
+        help_heading = "Gene list & GRN extras",
+        help = "Train only these targets — comma-separated symbols, same style as a single-line gene list"
     )]
     genes: Option<String>,
 
     #[arg(
         long,
-        value_name = "DIR",
-        help = "Output for *_betadata.feather (default: cwd/{adata_stem}_YYYY-MM-DD when unset in config)"
+        value_name = "N",
+        help_heading = "Gene list & GRN extras",
+        help = "Stop after N genes (AnnData var order, after --genes filter)"
     )]
-    output_dir: Option<PathBuf>,
+    max_genes: Option<usize>,
+
+    #[arg(
+        long = "max-lr-pairs",
+        value_name = "N",
+        help_heading = "Gene list & GRN extras",
+        help = "Max ligand–receptor pairs from the reference GRN (database order)"
+    )]
+    max_lr_pairs: Option<usize>,
+
+    #[arg(
+        long = "extra-modulators",
+        value_name = "GENES",
+        help_heading = "Gene list & GRN extras",
+        help = "Comma-separated genes added as an extra Lasso modulator block — merged with [grn].extra_modulators / *_file"
+    )]
+    extra_modulators: Option<String>,
+
+    #[arg(
+        long = "extra-lr",
+        value_name = "PAIRS",
+        help_heading = "Gene list & GRN extras",
+        help = "Extra ligand→receptor pairs, merged with [grn].extra_lr / *_file. Forms: L1$R1,L2$R2  or  L1,R1;L2,R2  or  single L1,R1"
+    )]
+    extra_lr: Option<String>,
 
     #[arg(
         long,
-        value_name = "OBS_COLUMN",
-        help = "Optional obs column to split training by condition (one run per distinct value; *_betadata.feather under <output_dir>/conditions/<group>/, see condition_label.txt)"
+        value_name = "MODE",
+        value_enum,
+        help_heading = "Training",
+        help = "seed | full | hybrid CNN (default from config, usually seed)"
     )]
-    condition: Option<String>,
+    training_mode: Option<TrainingModeArg>,
 
-    #[arg(long, value_name = "F", help = "L1 regularization (lasso)")]
+    #[arg(
+        long,
+        value_name = "N",
+        help_heading = "Training",
+        help = "CNN epochs per gene when CNN runs"
+    )]
+    epochs: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help_heading = "Training",
+        help = "Parallel worker threads (one gene per worker at a time)"
+    )]
+    parallel: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "F",
+        help_heading = "Training",
+        help = "L1 penalty for Lasso (element-wise)"
+    )]
     l1_reg: Option<f64>,
 
-    #[arg(long, value_name = "F", help = "Group regularization (lasso)")]
+    #[arg(
+        long,
+        value_name = "F",
+        help_heading = "Training",
+        help = "Group penalty for Lasso (per modulator group)"
+    )]
     group_reg: Option<f64>,
 
-    #[arg(long, value_name = "F", help = "Adam learning rate (CNN phase)")]
+    #[arg(
+        long,
+        value_name = "F",
+        help_heading = "Training",
+        help = "Adam learning rate for CNN fine-tuning"
+    )]
     lr: Option<f64>,
 
     #[arg(
         long = "cnn-output-activation",
         value_enum,
         value_name = "MODE",
-        help = "After final CNN head linear, before anchor scaling: identity | sigmoid | tanh | sigmoid-x2 — 2·sigmoid, range (0,2) (default: sigmoid-x2)"
+        help_heading = "Training",
+        help = "CNN head nonlinearity before Lasso-anchor scaling: identity | sigmoid | tanh | sigmoid-x2"
     )]
     cnn_output_activation: Option<CnnOutputActivationArg>,
 
-    #[arg(long, value_name = "N", help = "Max FISTA iterations")]
+    #[arg(
+        long,
+        value_name = "N",
+        help_heading = "Training",
+        help = "Max FISTA iterations for Lasso"
+    )]
     n_iter: Option<usize>,
 
-    #[arg(long, value_name = "F", help = "FISTA convergence tolerance")]
+    #[arg(
+        long,
+        value_name = "F",
+        help_heading = "Training",
+        help = "FISTA relative tolerance"
+    )]
     tol: Option<f64>,
 
     #[arg(
-        long,
-        help = "Line-oriented logs on stdout (no full-screen dashboard when built with the `tui` feature)"
+        long = "weighted-ligand-scale-factor",
+        value_name = "F",
+        help_heading = "Training",
+        help = "Scales Gaussian weights when aggregating received ligands — overrides [spatial].weighted_ligand_scale_factor"
     )]
-    plain: bool,
+    weighted_ligand_scale_factor: Option<f64>,
 
     #[arg(
         long,
-        help = "Simulated training dashboard only: fake workers, gene progress, and R² stats — no AnnData I/O, no exports, no GPU (omit --plain)"
+        value_name = "DIR",
+        help_heading = "Output",
+        help = "Directory for *_betadata.feather and logs (default: dated folder from stem of .h5ad)"
     )]
-    demo: bool,
+    output_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "OBS_COLUMN",
+        help_heading = "Output",
+        help = "Split training by this obs column (one subdirectory per value under output_dir/conditions/)"
+    )]
+    condition: Option<String>,
+
+    #[arg(
+        long = "join-output-dir",
+        value_name = "DIR",
+        help_heading = "Output",
+        help = "Resume/join a shared run: read DIR/spacetravlr_run_repro.toml; claim unfinished genes via locks. Hyperparameters come from the repro file (not --config)"
+    )]
+    join_output_dir: Option<PathBuf>,
 
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Write spacetravlr_minimal_repro.h5ad under output_dir (slow for large AnnData); overrides [execution].write_minimal_repro_h5ad"
+        help_heading = "Output",
+        help = "Write spacetravlr_minimal_repro.h5ad into the run directory (large I/O)"
     )]
     write_minimal_repro_h5ad: bool,
 
     #[arg(
         long = "save-cnn-weights",
         action = ArgAction::SetTrue,
-        help = "Export trained CNN weights as .npz under output_dir / [model_export].output_subdir (default CNN_weights); sets [model_export].save_cnn_weights"
+        help_heading = "Output",
+        help = "Save CNN weights as .npz under the run directory"
     )]
     save_cnn_weights: bool,
 
     #[arg(
-        long = "join-output-dir",
-        value_name = "DIR",
-        help = "Shared training output directory: load spaceship settings from DIR/spacetravlr_run_repro.toml (must exist), then train only genes not yet done (same as other hosts). With --condition, resumes into the same DIR/conditions/<group>/ trees by matching condition_label.txt so betadata stays in sync across hosts. [data].condition comes from the repro TOML. Use --parallel to set this machine's worker count."
+        long,
+        help_heading = "Interface",
+        help = "Print line-oriented logs instead of the full-screen dashboard (when built with `tui`)"
     )]
-    join_output_dir: Option<PathBuf>,
+    plain: bool,
 
     #[arg(
-        long = "weighted-ligand-scale-factor",
-        value_name = "F",
-        help = "Scales Gaussian weights in received-ligand aggregation; overrides [spatial].weighted_ligand_scale_factor"
+        long,
+        help_heading = "Interface",
+        help = "Fake training dashboard only — no AnnData, no disk exports, no accelerator"
     )]
-    weighted_ligand_scale_factor: Option<f64>,
-
-    #[arg(
-        long = "extra-modulators-file",
-        value_name = "PATH",
-        help = "Append genes from file to [grn].extra_modulators (one per line or comma-separated; # comments); merged with TOML list"
-    )]
-    extra_modulators_file: Option<PathBuf>,
-
-    #[arg(
-        long = "extra-lr-file",
-        value_name = "PATH",
-        help = "Append L–R pairs from file to [grn].extra_lr (LIG$REC or LIG,REC per line); merged with TOML list"
-    )]
-    extra_lr_file: Option<PathBuf>,
+    demo: bool,
 }
 
-fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
+fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
     if let Some(v) = cli.parallel {
         cfg.execution.n_parallel = v.max(1);
     }
@@ -293,15 +352,18 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
             cfg.data.condition = Some(t.to_string());
         }
     }
-    if let Some(p) = &cli.extra_modulators_file {
-        cfg.grn.extra_modulators_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    if let Some(ref raw) = cli.extra_modulators {
+        cfg.grn
+            .extra_modulators
+            .extend(grn_extra::parse_extra_modulators_cli(raw));
     }
-    if let Some(p) = &cli.extra_lr_file {
-        cfg.grn.extra_lr_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    if let Some(ref raw) = cli.extra_lr {
+        cfg.grn.extra_lr.extend(grn_extra::parse_extra_lr_cli(raw)?);
     }
+    Ok(())
 }
 
-fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
+fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
     if let Some(v) = cli.epochs {
         cfg.training.epochs = v;
     }
@@ -336,7 +398,7 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
         cfg.spatial.weighted_ligand_scale_factor = v;
     }
     if let Some(p) = &cli.h5ad {
-        cfg.data.adata_path = p.display().to_string();
+        cfg.data.adata_path = expand_user_path(p.to_string_lossy().as_ref());
     }
     if let Some(p) = &cli.tf_priors_feather {
         cfg.grn.tf_priors_feather = Some(expand_user_path(p.to_string_lossy().as_ref()));
@@ -357,12 +419,15 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
             cfg.data.condition = Some(t.to_string());
         }
     }
-    if let Some(p) = &cli.extra_modulators_file {
-        cfg.grn.extra_modulators_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    if let Some(ref raw) = cli.extra_modulators {
+        cfg.grn
+            .extra_modulators
+            .extend(grn_extra::parse_extra_modulators_cli(raw));
     }
-    if let Some(p) = &cli.extra_lr_file {
-        cfg.grn.extra_lr_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    if let Some(ref raw) = cli.extra_lr {
+        cfg.grn.extra_lr.extend(grn_extra::parse_extra_lr_cli(raw)?);
     }
+    Ok(())
 }
 
 fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
@@ -393,7 +458,7 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             }
         }
         cfg.execution.output_dir = jexp;
-        apply_cli_join_overrides(cli, &mut cfg);
+        apply_cli_join_overrides(cli, &mut cfg)?;
         if cli.config.is_some() {
             eprintln!(
                 "Note: --join-output-dir ignores --config for training settings (using repro TOML)."
@@ -426,7 +491,7 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             Some(path) => SpaceshipConfig::from_file(path)?,
             None => SpaceshipConfig::load(),
         };
-        apply_cli_to_config(cli, &mut cfg);
+        apply_cli_to_config(cli, &mut cfg)?;
         Ok((cfg, false))
     }
 }
@@ -600,7 +665,7 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
         .as_ref()
         .or(cli.config.as_ref())
         .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
-        .or_else(|| SpaceshipConfig::discover_default_path());
+        .or_else(SpaceshipConfig::discover_default_path);
 
     cfg.write_run_repro_toml(&output_dir)?;
 
@@ -629,10 +694,10 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         Some(path) => SpaceshipConfig::from_file(path)?,
         None => SpaceshipConfig::load(),
     };
-    apply_cli_to_config(cli, &mut cfg);
+    apply_cli_to_config(cli, &mut cfg)?;
 
     let gene_filter = parse_gene_filter(cli);
-    let demo_total = cli.max_genes.unwrap_or(24).max(1).min(512);
+    let demo_total = cli.max_genes.unwrap_or(24).clamp(1, 512);
 
     let config_path_ref = cli.config.as_deref();
     let run_summary = RunConfigSummary::build(
@@ -710,7 +775,7 @@ fn main() -> anyhow::Result<()> {
         cli.config
             .as_ref()
             .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
-            .or_else(|| SpaceshipConfig::discover_default_path())
+            .or_else(SpaceshipConfig::discover_default_path)
     };
 
     let max_genes = if join_training { None } else { cli.max_genes };

@@ -57,7 +57,7 @@ fn gene_hash(gene: &str) -> u32 {
 fn fake_summaries(gene: &str, n_clusters: usize, full_cnn: bool) -> Vec<ClusterTrainingSummary> {
     let h = gene_hash(gene);
     let base = 0.35 + ((h % 1000) as f64 / 1000.0) * 0.55;
-    let k = n_clusters.max(3).min(12);
+    let k = n_clusters.clamp(3, 12);
     let mut v = Vec::with_capacity(k);
     for i in 0..k {
         let jitter = (i as f64 * 0.03 - (k as f64 / 2.0) * 0.03) * 0.5;
@@ -198,7 +198,7 @@ fn demo_worker(
                 let mut g = hud.lock().unwrap_or_else(|e| e.into_inner());
                 g.set_gene_status(&gene, format!("lasso+cnn | {n_mods} mods"));
             }
-            let ep = epochs_per_gene.max(1).min(32);
+            let ep = epochs_per_gene.clamp(1, 32);
             for e in 1..=ep {
                 if hud.lock().map(|g| g.should_cancel()).unwrap_or(true) {
                     let _ = hud.lock().map(|mut g| g.remove_gene(&gene));
@@ -243,7 +243,7 @@ pub fn run_demo_training(
     total_genes: usize,
     gene_filter: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
-    let total_genes = total_genes.max(1).min(512);
+    let total_genes = total_genes.clamp(1, 512);
     let names = demo_gene_names(total_genes, gene_filter.as_deref());
 
     let (n_parallel, run_full_cnn, epochs_per_gene) = {
@@ -251,7 +251,7 @@ pub fn run_demo_training(
             .lock()
             .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
         (
-            g.n_parallel.max(1).min(32),
+            g.n_parallel.clamp(1, 32),
             g.full_cnn,
             g.epochs_per_gene.max(1),
         )

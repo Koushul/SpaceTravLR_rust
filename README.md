@@ -246,7 +246,7 @@ In `[grn]` (and matching CLI file overrides), you can mirror the Python `extra_m
 - **`extra_lr`** — extra ligand–receptor pairs as strings `LIG$REC` or `LIG,REC`. These are appended **after** parquet-derived LR pairs, so `max_lr_pairs` / `top_lr_pairs_by_mean_expression` apply only to the database edges. Pairs touching the training target as ligand or receptor are skipped. When `use_lr_modulators = false`, user LR extras are not added. (NicheNet TF–ligand modulators are still derived from the database LR table only; extra pairs add **LR interaction columns** but do not re-query NicheNet for new ligands.)
 - **`extra_lr_file`** — one pair per line (`LIG$REC` or `LIG,REC`); `#` comments.
 
-CLI: **`--extra-modulators-file`** and **`--extra-lr-file`** set the same paths as the TOML fields (expanded paths; relative paths resolve from the config file’s directory when you load `-c`).
+CLI: **`--extra-modulators`** takes comma-separated genes (like **`--genes`**); **`--extra-lr`** takes pairs (`L1$R2,...` or `L1,R1;L2,R2`). Both merge with the TOML lists and optional `*_file` paths.
 
 Symbols almost perfectly correlated with the target are **not** filtered automatically; interpret \(\beta\) as associational unless you design features for a causal claim.
 

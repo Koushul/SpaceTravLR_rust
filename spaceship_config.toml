@@ -46,7 +46,7 @@ tf_ligand_cutoff = 0.15
 # Extra L–R pairs (LIG$REC or LIG,REC strings); merged after DB LRs; target never ligand/receptor.
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
-# CLI: --extra-modulators-file, --extra-lr-file
+# CLI: --extra-modulators GENE,…  --extra-lr PAIRS (see spacetravlr --help)
 
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)

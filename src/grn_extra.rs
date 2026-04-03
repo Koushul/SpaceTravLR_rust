@@ -54,6 +54,92 @@ fn parse_extra_lr_line(line: &str) -> Option<(String, String)> {
     parse_extra_lr_token(t)
 }
 
+fn canonical_lr_pair(l: &str, r: &str) -> String {
+    format!("{}${}", l.trim(), r.trim())
+}
+
+/// Comma-separated gene symbols (same as `--genes`). Empty tokens and `#…` comments are skipped; order preserved, duplicates dropped.
+pub fn parse_extra_modulators_cli(s: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let g = part.trim();
+        if g.is_empty() || g.starts_with('#') {
+            continue;
+        }
+        if seen.insert(g.to_string()) {
+            out.push(g.to_string());
+        }
+    }
+    out
+}
+
+/// Parse `--extra-lr` the same way as multiple TOML `extra_lr` entries (merged with config).
+///
+/// - **`LIG$REC` list:** comma-separated, e.g. `L1$R1,L2$R2`.
+/// - **`LIG,REC` list:** semicolon-separated pairs, e.g. `L1,R1;L2,R2`.
+/// - **Single `LIG,REC` pair:** one comma, no `$`, e.g. `VEGFA,FLT1`.
+pub fn parse_extra_lr_cli(s: &str) -> anyhow::Result<Vec<String>> {
+    let s = s.trim();
+    if s.is_empty() || s.starts_with('#') {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<String> = Vec::new();
+
+    if s.contains(';') {
+        for part in s.split(';') {
+            let t = part.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let Some((l, r)) = parse_extra_lr_token(t) else {
+                anyhow::bail!(
+                    "invalid ligand–receptor {:?}: use LIG$REC or LIG,REC (separate pairs with ';')",
+                    t
+                );
+            };
+            out.push(canonical_lr_pair(&l, &r));
+        }
+        return Ok(out);
+    }
+
+    if s.contains('$') {
+        for part in s.split(',') {
+            let t = part.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let Some((l, r)) = parse_extra_lr_token(t) else {
+                anyhow::bail!(
+                    "invalid segment {:?}: with '$' in the value, use comma-separated LIG$REC tokens (e.g. L1$R1,L2$R2)",
+                    t
+                );
+            };
+            out.push(canonical_lr_pair(&l, &r));
+        }
+        return Ok(out);
+    }
+
+    let comma_n = s.matches(',').count();
+    if comma_n == 0 {
+        anyhow::bail!(
+            "expected LIG$REC, or LIG,REC, or multiple pairs (L1$R1,L2$R2 or L1,R1;L2,R2)"
+        );
+    }
+    if comma_n > 1 {
+        anyhow::bail!(
+            "multiple comma-separated pairs: use ';' between LIG,REC pairs (e.g. L1,R1;L2,R2) or use L1$R1,L2$R2"
+        );
+    }
+
+    let Some((l, r)) = parse_extra_lr_token(s) else {
+        anyhow::bail!("invalid ligand–receptor pair {:?}", s);
+    };
+    out.push(canonical_lr_pair(&l, &r));
+    Ok(out)
+}
+
 /// Genes from file: one symbol per line (or comma-separated on a line); `#` comments.
 pub fn load_extra_modulators_file(path: &Path) -> anyhow::Result<Vec<String>> {
     let s = std::fs::read_to_string(path)
@@ -215,5 +301,32 @@ mod tests {
     fn invariants_reject_target_in_lr() {
         let e = verify_modulator_invariants("TG", &[], &["X$TG".into()], &[]);
         assert!(e.is_err());
+    }
+
+    #[test]
+    fn parse_extra_modulators_cli_dedup_and_trim() {
+        assert_eq!(
+            parse_extra_modulators_cli(" A , B , A ,#c"),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert!(parse_extra_modulators_cli("  ,  ").is_empty());
+    }
+
+    #[test]
+    fn parse_extra_lr_cli_variants() {
+        assert_eq!(
+            parse_extra_lr_cli("L1$R1,L2$R2").unwrap(),
+            vec!["L1$R1".to_string(), "L2$R2".to_string()]
+        );
+        assert_eq!(
+            parse_extra_lr_cli("L1,R1;L2,R2").unwrap(),
+            vec!["L1$R1".to_string(), "L2$R2".to_string()]
+        );
+        assert_eq!(
+            parse_extra_lr_cli("VEGFA,FLT1").unwrap(),
+            vec!["VEGFA$FLT1".to_string()]
+        );
+        assert!(parse_extra_lr_cli("").unwrap().is_empty());
+        assert!(parse_extra_lr_cli("a,b,c,d").is_err());
     }
 }

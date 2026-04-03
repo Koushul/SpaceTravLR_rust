@@ -731,9 +731,7 @@ pub fn write_run_summary_html(p: RunSummaryParams<'_>) -> anyhow::Result<PathBuf
 
     let genes_json = serde_json::to_string(&gene_rollups)?;
     let genes_json_safe = genes_json.replace("</script>", "<\\/script>");
-    let gene_section = format!(
-        r#"<div class="gene-metrics-outer" id="gene-metrics-root"><div class="section-label">Per-gene training metrics</div><p class="gene-metrics-blurb">Values are parsed from <code>log/&lt;gene&gt;.log</code> (same tab-separated format the trainer writes). Use the filter box, click column headers to sort, and click a gene row to expand per-cluster LASSO R², convergence, and CNN epoch counts.</p><input type="search" class="gene-filter" id="gene-filter-input" placeholder="Filter genes…" autocomplete="off" /><p id="gene-metrics-count"></p><div class="gene-table-wrap" id="gene-table-wrap"></div></div>"#
-    );
+    let gene_section = r#"<div class="gene-metrics-outer" id="gene-metrics-root"><div class="section-label">Per-gene training metrics</div><p class="gene-metrics-blurb">Values are parsed from <code>log/&lt;gene&gt;.log</code> (same tab-separated format the trainer writes). Use the filter box, click column headers to sort, and click a gene row to expand per-cluster LASSO R², convergence, and CNN epoch counts.</p><input type="search" class="gene-filter" id="gene-filter-input" placeholder="Filter genes…" autocomplete="off" /><p id="gene-metrics-count"></p><div class="gene-table-wrap" id="gene-table-wrap"></div></div>"#.to_string();
 
     let html = page
         .to_html_string()

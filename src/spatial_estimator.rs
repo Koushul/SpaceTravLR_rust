@@ -209,8 +209,8 @@ fn ensure_expression_layer_readable<AnB: Backend>(
     layer: &str,
 ) -> anyhow::Result<()> {
     let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
-    if layer != "X" && !layer.is_empty() {
-        if adata.layers().get(layer).is_none() {
+    if layer != "X" && !layer.is_empty()
+        && adata.layers().get(layer).is_none() {
             let keys = adata.layers().keys();
             let preview: Vec<String> = keys.into_iter().take(20).collect();
             anyhow::bail!(
@@ -219,7 +219,6 @@ fn ensure_expression_layer_readable<AnB: Backend>(
                 preview
             );
         }
-    }
     let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
     if data.nrows() != adata.n_obs() {
         anyhow::bail!(
@@ -487,7 +486,7 @@ fn export_minimal_repro_adata_with_cache(
                 Ok(None) => continue,
                 Err(e) => {
                     if layer_name == layer {
-                        return Err(e.into());
+                        return Err(e);
                     }
                     continue;
                 }
@@ -1764,30 +1763,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let cached_spatial = cached_spatial.clone();
                 let obs_subset = obs_row_subset_for_workers.clone();
 
-                // scalar params
-                let (radius, spatial_dim, contact_distance, tf_ligand_cutoff) =
-                    (radius, spatial_dim, contact_distance, tf_ligand_cutoff);
-                let max_lr_pairs = max_lr_pairs;
-                let top_lr_pairs_by_mean_expression = top_lr_pairs_by_mean_expression;
-                let ligand_grid_factor = ligand_grid_factor;
-                let weighted_ligand_scale_factor = weighted_ligand_scale_factor;
-                let use_tf_modulators = use_tf_modulators;
-                let use_lr_modulators = use_lr_modulators;
-                let use_tfl_modulators = use_tfl_modulators;
                 let gene_mean_arc = gene_mean_arc.clone();
                 let extra_mod_arc_w = extra_mod_arc.clone();
                 let extra_lr_arc_w = extra_lr_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
-                let (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol) = (
-                    epochs,
-                    learning_rate,
-                    score_threshold,
-                    l1_reg,
-                    group_reg,
-                    n_iter,
-                    tol,
-                );
                 let cnn_mode_w = cnn_training_mode;
                 let hybrid_pass2 = hybrid_pass2_full_cnn;
                 let hybrid_cfg = hybrid_gating.clone();
@@ -1798,14 +1778,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let candidates_w = cnn_candidates.clone();
                 let model_export_w = model_export.clone();
                 let collect_top_k = hybrid_collect_top_k;
-                let num_clusters = num_clusters;
-                let stale_lock_secs_w = stale_lock_secs;
 
                 let handle = thread::Builder::new()
                     .stack_size(8 * 1024 * 1024)
                     .spawn(move || {
                         let thread_adata =
-                            match H5::open(&adata_path).and_then(|f| AnnData::<H5>::open(f)) {
+                            match H5::open(&adata_path).and_then(AnnData::<H5>::open) {
                                 Ok(a) => Arc::new(a),
                                 Err(e) => {
                                     log_line(
@@ -1865,7 +1843,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 continue;
                             }
 
-                            if stale_lock_secs_w > 0 {
+                            if stale_lock_secs > 0 {
                                 let lp = Path::new(&lock_path);
                                 if lp.is_file() {
                                     if let Ok(meta) = fs::metadata(lp) {
@@ -1873,7 +1851,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             if let Ok(age) =
                                                 SystemTime::now().duration_since(modified)
                                             {
-                                                if age.as_secs() >= stale_lock_secs_w {
+                                                if age.as_secs() >= stale_lock_secs {
                                                     let _ = fs::remove_file(lp);
                                                     log_line(
                                                         &hud,
@@ -2652,7 +2630,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 let idx = gene_to_idx[lig];
                 lig_expr.column_mut(k).assign(&expr_matrix.column(idx));
             }
-            let grid_factor = self.ligand_grid_factor.or_else(|| {
+            let grid_factor = self.ligand_grid_factor.or({
                 if n > LARGE_DATASET_GRID_AUTO_CELLS {
                     Some(DEFAULT_LIGAND_GRID_FACTOR)
                 } else {

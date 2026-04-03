@@ -565,7 +565,7 @@ pub fn interactive_run_toml_prompt() -> anyhow::Result<PathBuf> {
 pub fn run_interactive(runtime: PerturbRuntime) -> anyhow::Result<()> {
     let mut selected: HashSet<String> = HashSet::new();
     let mut selected_cell_types_per_gene: GeneCellTypeScopes = HashMap::new();
-    let mut all_cell_types = runtime.cell_types.iter().copied().collect::<Vec<_>>();
+    let mut all_cell_types = runtime.cell_types.to_vec();
     all_cell_types.sort_unstable();
     all_cell_types.dedup();
     println!(

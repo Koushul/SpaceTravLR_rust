@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn finite_or_zero_f64_normal() {
-        assert_abs_diff_eq!(finite_or_zero_f64(3.14), 3.14, epsilon = 1e-15);
+        assert_abs_diff_eq!(finite_or_zero_f64(2.5), 2.5, epsilon = 1e-15);
         assert_abs_diff_eq!(finite_or_zero_f64(-2.0), -2.0, epsilon = 1e-15);
         assert_abs_diff_eq!(finite_or_zero_f64(0.0), 0.0, epsilon = 1e-15);
     }
