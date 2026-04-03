@@ -255,6 +255,20 @@ struct Cli {
         help = "Scales Gaussian weights in received-ligand aggregation; overrides [spatial].weighted_ligand_scale_factor"
     )]
     weighted_ligand_scale_factor: Option<f64>,
+
+    #[arg(
+        long = "extra-modulators-file",
+        value_name = "PATH",
+        help = "Append genes from file to [grn].extra_modulators (one per line or comma-separated; # comments); merged with TOML list"
+    )]
+    extra_modulators_file: Option<PathBuf>,
+
+    #[arg(
+        long = "extra-lr-file",
+        value_name = "PATH",
+        help = "Append L–R pairs from file to [grn].extra_lr (LIG$REC or LIG,REC per line); merged with TOML list"
+    )]
+    extra_lr_file: Option<PathBuf>,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
@@ -278,6 +292,12 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) {
         if !t.is_empty() {
             cfg.data.condition = Some(t.to_string());
         }
+    }
+    if let Some(p) = &cli.extra_modulators_file {
+        cfg.grn.extra_modulators_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    }
+    if let Some(p) = &cli.extra_lr_file {
+        cfg.grn.extra_lr_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
     }
 }
 
@@ -336,6 +356,12 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) {
         if !t.is_empty() {
             cfg.data.condition = Some(t.to_string());
         }
+    }
+    if let Some(p) = &cli.extra_modulators_file {
+        cfg.grn.extra_modulators_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
+    }
+    if let Some(p) = &cli.extra_lr_file {
+        cfg.grn.extra_lr_file = Some(expand_user_path(p.to_string_lossy().as_ref()));
     }
 }
 

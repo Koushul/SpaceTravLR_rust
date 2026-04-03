@@ -1,5 +1,6 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Canonical per-run TOML in the training output directory (full `SpaceshipConfig` as executed).
@@ -70,6 +71,17 @@ pub struct GrnConfig {
     pub use_lr_modulators: bool,
     #[serde(default = "default_true")]
     pub use_tfl_modulators: bool,
+    /// Genes to add as raw-expression modulators (fourth Lasso group). Excludes target and any gene
+    /// already used as TF / LR / TFL (see `resolve_extra_modulators_and_lr`).
+    #[serde(default)]
+    pub extra_modulators: Vec<String>,
+    /// Optional file: one gene per line or comma-separated; `#` comments. Appended to `extra_modulators`.
+    pub extra_modulators_file: Option<String>,
+    /// Extra L–R pairs as `LIG$REC` strings (or `LIG,REC` per element). Merged after database LR selection.
+    #[serde(default)]
+    pub extra_lr: Vec<String>,
+    /// Optional file: one pair per line (`LIG$REC` or `LIG,REC`); `#` comments.
+    pub extra_lr_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,7 +300,75 @@ impl Default for GrnConfig {
             use_tf_modulators: true,
             use_lr_modulators: true,
             use_tfl_modulators: true,
+            extra_modulators: Vec::new(),
+            extra_modulators_file: None,
+            extra_lr: Vec::new(),
+            extra_lr_file: None,
         }
+    }
+}
+
+impl GrnConfig {
+    /// Merge TOML `extra_modulators` / `extra_lr` with optional files. Paths are expanded (`~`);
+    /// relative paths resolve against `config_file_parent` when provided.
+    pub fn resolve_extra_modulators_and_lr(
+        &self,
+        config_file_parent: Option<&Path>,
+    ) -> anyhow::Result<(Vec<String>, Vec<(String, String)>)> {
+        let resolve_path = |raw: &str| -> PathBuf {
+            let exp = expand_user_path(raw.trim());
+            let pb = Path::new(&exp);
+            if pb.is_absolute() {
+                pb.to_path_buf()
+            } else if let Some(parent) = config_file_parent {
+                parent.join(pb)
+            } else {
+                pb.to_path_buf()
+            }
+        };
+
+        let mut genes: Vec<String> = Vec::new();
+        let mut gene_seen: HashSet<String> = HashSet::new();
+        for g in &self.extra_modulators {
+            let t = g.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let s = t.to_string();
+            if gene_seen.insert(s.clone()) {
+                genes.push(s);
+            }
+        }
+        if let Some(ref f) = self.extra_modulators_file {
+            let path = resolve_path(f);
+            for g in crate::grn_extra::load_extra_modulators_file(&path)? {
+                if gene_seen.insert(g.clone()) {
+                    genes.push(g);
+                }
+            }
+        }
+
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut pair_seen: HashSet<String> = HashSet::new();
+        for s in &self.extra_lr {
+            if let Some(p) = crate::grn_extra::parse_extra_lr_token(s) {
+                let key = format!("{}${}", p.0, p.1);
+                if pair_seen.insert(key.clone()) {
+                    pairs.push(p);
+                }
+            }
+        }
+        if let Some(ref f) = self.extra_lr_file {
+            let path = resolve_path(f);
+            for p in crate::grn_extra::load_extra_lr_file(&path)? {
+                let key = format!("{}${}", p.0, p.1);
+                if pair_seen.insert(key) {
+                    pairs.push(p);
+                }
+            }
+        }
+
+        Ok((genes, pairs))
     }
 }
 

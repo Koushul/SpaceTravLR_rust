@@ -1085,6 +1085,8 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub tfl_regulators: Vec<String>,
     pub lr_pairs: Vec<String>,
     pub tfl_pairs: Vec<String>,
+    /// User-requested genes in the fourth Lasso group (raw expression), after filtering vs target/occupied.
+    pub extra_modulators: Vec<String>,
     pub modulators_genes: Vec<String>,
     pub max_lr_pairs: Option<usize>,
     pub regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>>,
@@ -1118,9 +1120,13 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         ligand_grid_factor: Option<f64>,
         weighted_ligand_scale_factor: f64,
         obs_row_subset: Option<Arc<[usize]>>,
+        extra_lr_pairs: &[(String, String)],
+        extra_modulator_candidates: &[String],
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
         let cluster_annot = "cell_type_int".to_string();
+
+        let var_set: HashSet<String> = adata.var_names().into_vec().into_iter().collect();
 
         let modulators = grn
             .get_modulators(
@@ -1131,6 +1137,21 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 gene_mean_expression.as_deref(),
             )?
             .apply_modulator_mask(use_tf_modulators, use_lr_modulators, use_tfl_modulators);
+
+        let mut ligands = modulators.ligands.clone();
+        let mut receptors = modulators.receptors.clone();
+        let mut lr_pairs = modulators.lr_pairs.clone();
+        if use_lr_modulators && !extra_lr_pairs.is_empty() {
+            crate::grn_extra::merge_extra_lr_into(
+                &mut ligands,
+                &mut receptors,
+                &mut lr_pairs,
+                extra_lr_pairs,
+                &target_gene_str,
+                &var_set,
+            );
+        }
+
         let mut regulators = modulators.regulators.clone();
         let mut tfl_ligands = modulators.tfl_ligands.clone();
         let mut tfl_regulators = modulators.tfl_regulators.clone();
@@ -1186,9 +1207,34 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             }
         }
 
+        let mut occupied: HashSet<String> = HashSet::new();
+        occupied.insert(target_gene_str.clone());
+        for g in regulators
+            .iter()
+            .chain(ligands.iter())
+            .chain(receptors.iter())
+            .chain(tfl_ligands.iter())
+            .chain(tfl_regulators.iter())
+        {
+            occupied.insert(g.clone());
+        }
+        let extra_modulators_accepted = crate::grn_extra::filter_extra_modulators(
+            extra_modulator_candidates,
+            &occupied,
+            &var_set,
+        );
+
+        crate::grn_extra::verify_modulator_invariants(
+            &target_gene_str,
+            &regulators,
+            &lr_pairs,
+            &extra_modulators_accepted,
+        )?;
+
         let mut modulators_genes_ordered = regulators.clone();
-        modulators_genes_ordered.extend(modulators.lr_pairs.clone());
-        modulators_genes_ordered.extend(tfl_pairs.clone());
+        modulators_genes_ordered.extend(lr_pairs.iter().cloned());
+        modulators_genes_ordered.extend(tfl_pairs.iter().cloned());
+        modulators_genes_ordered.extend(extra_modulators_accepted.iter().cloned());
 
         Ok(Self {
             adata,
@@ -1201,12 +1247,13 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             grn,
             tf_ligand_cutoff,
             regulators,
-            ligands: modulators.ligands,
-            receptors: modulators.receptors,
+            ligands,
+            receptors,
             tfl_ligands,
             tfl_regulators,
-            lr_pairs: modulators.lr_pairs,
+            lr_pairs,
             tfl_pairs,
+            extra_modulators: extra_modulators_accepted,
             modulators_genes: modulators_genes_ordered,
             max_lr_pairs,
             regulator_masks_by_cluster,
@@ -1255,6 +1302,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             1.0,
             None,
+            &[],
+            &[],
         )
     }
 }
@@ -1566,6 +1615,23 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     None
                 };
 
+            let cfg_parent = config_source_path.as_deref().and_then(Path::parent);
+            let (resolved_ex_mod, resolved_ex_lr) = spaceship_config
+                .grn
+                .resolve_extra_modulators_and_lr(cfg_parent)?;
+            if !resolved_ex_mod.is_empty() || !resolved_ex_lr.is_empty() {
+                log_line(
+                    &hud,
+                    format!(
+                        "GRN extras from config: {} extra modulator gene(s), {} extra L–R pair(s)",
+                        resolved_ex_mod.len(),
+                        resolved_ex_lr.len()
+                    ),
+                );
+            }
+            let extra_mod_arc = Arc::new(resolved_ex_mod);
+            let extra_lr_arc = Arc::new(resolved_ex_lr);
+
             let neighbors: Arc<Vec<Vec<usize>>> =
                 if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
                     let n_cells = xy.nrows();
@@ -1709,6 +1775,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let use_lr_modulators = use_lr_modulators;
                 let use_tfl_modulators = use_tfl_modulators;
                 let gene_mean_arc = gene_mean_arc.clone();
+                let extra_mod_arc_w = extra_mod_arc.clone();
+                let extra_lr_arc_w = extra_lr_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let (epochs, learning_rate, score_threshold, l1_reg, group_reg, n_iter, tol) = (
@@ -1884,6 +1952,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 ligand_grid_factor,
                                 weighted_ligand_scale_factor,
                                 obs_subset.clone(),
+                                extra_lr_arc_w.as_slice(),
+                                extra_mod_arc_w.as_slice(),
                             )
                             .map(Box::new)
                             {
@@ -2539,6 +2609,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         for g in &self.tfl_regulators {
             all_unique_genes.insert(g.clone());
         }
+        for g in &self.extra_modulators {
+            all_unique_genes.insert(g.clone());
+        }
 
         let unique_genes_vec: Vec<String> = all_unique_genes.into_iter().collect::<Vec<_>>();
         let expr_matrix = self.get_multiple_gene_expressions(&unique_genes_vec)?;
@@ -2610,7 +2683,10 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             Some(rows) => rows.len(),
             None => self.adata.n_obs(),
         };
-        let total_modulators = self.regulators.len() + self.lr_pairs.len() + self.tfl_pairs.len();
+        let total_modulators = self.regulators.len()
+            + self.lr_pairs.len()
+            + self.tfl_pairs.len()
+            + self.extra_modulators.len();
         let mut x_modulators = Array2::<f64>::zeros((n_obs, total_modulators));
 
         for (i, gene) in self.regulators.iter().enumerate() {
@@ -2640,6 +2716,14 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 interaction *= &expr_matrix.column(tf_idx);
                 x_modulators.column_mut(offset_tfl + i).assign(&interaction);
             }
+        }
+
+        let offset_extra = offset_tfl + self.tfl_pairs.len();
+        for (i, gene) in self.extra_modulators.iter().enumerate() {
+            let idx = gene_to_idx[gene];
+            x_modulators
+                .column_mut(offset_extra + i)
+                .assign(&expr_matrix.column(idx));
         }
 
         Ok((x_modulators, target_expr))
@@ -2675,6 +2759,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             }
             for _ in 0..self.tfl_pairs.len() {
                 groups.push(2);
+            }
+            for _ in 0..self.extra_modulators.len() {
+                groups.push(3);
             }
 
             let params = GroupLassoParams {

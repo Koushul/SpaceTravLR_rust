@@ -237,6 +237,18 @@ cargo run --release -- --plain \
 
 See `cargo run --release -- --help` (or `spacetravlr --help` after install). Options are defined with **clap**; config file path is `-c` / `--config`, dataset override is `--h5ad`.
 
+### Extra modulators and custom L–R pairs
+
+In `[grn]` (and matching CLI file overrides), you can mirror the Python `extra_modulators` / `extra_lr` API:
+
+- **`extra_modulators`** — list of gene symbols included as an additional **group-lasso group** (raw expression in \(X\), same role as TF columns in the design matrix). The current training target, and any gene already used as a TF or as an LR/TFL participant, is **excluded** to avoid tautological or double-counted features.
+- **`extra_modulators_file`** — one gene per line or comma-separated tokens; `#` starts a comment. Merged with the TOML list (deduped).
+- **`extra_lr`** — extra ligand–receptor pairs as strings `LIG$REC` or `LIG,REC`. These are appended **after** parquet-derived LR pairs, so `max_lr_pairs` / `top_lr_pairs_by_mean_expression` apply only to the database edges. Pairs touching the training target as ligand or receptor are skipped. When `use_lr_modulators = false`, user LR extras are not added. (NicheNet TF–ligand modulators are still derived from the database LR table only; extra pairs add **LR interaction columns** but do not re-query NicheNet for new ligands.)
+- **`extra_lr_file`** — one pair per line (`LIG$REC` or `LIG,REC`); `#` comments.
+
+CLI: **`--extra-modulators-file`** and **`--extra-lr-file`** set the same paths as the TOML fields (expanded paths; relative paths resolve from the config file’s directory when you load `-c`).
+
+Symbols almost perfectly correlated with the target are **not** filtered automatically; interpret \(\beta\) as associational unless you design features for a causal claim.
 
 ## Export CNN Weights (Compressed) + PyTorch Loading
 
