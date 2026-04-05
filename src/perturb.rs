@@ -265,12 +265,12 @@ pub fn perturb_with_targets(
         "GRN perturbation · building target δ…",
     );
 
-    for iter in 0..config.n_propagation {
+    for iter in 0..n_prop {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(());
         }
         if job_progress.is_none() && job_message.is_none() {
-            eprintln!("  perturb iteration {}/{}", iter + 1, config.n_propagation);
+            eprintln!("  perturb iteration {}/{}", iter + 1, n_prop);
         }
         let iter_u = iter as u32;
         let base = PROP_LO + iter_u * span;
@@ -302,7 +302,7 @@ pub fn perturb_with_targets(
                             config.min_expression,
                             gene_names,
                         );
-                        let map = compute_splash_all_progress(
+                        let Some(map) = compute_splash_all_progress(
                             bb,
                             &rw_lr_for_splash,
                             rw_tfligands_init,
@@ -310,7 +310,11 @@ pub fn perturb_with_targets(
                             config.beta_scale_factor as f32,
                             config.beta_cap.map(|c| c as f32),
                             job_progress.map(|p| p.as_ref()),
-                        );
+                            cancel,
+                        ) else {
+                            drop(guard);
+                            return Err(());
+                        };
                         let arc = Arc::new(map);
                         *guard = Some(CachedBaselineSplash {
                             key: splash_key,
@@ -324,7 +328,7 @@ pub fn perturb_with_targets(
                         config.min_expression,
                         gene_names,
                     );
-                    let map = compute_splash_all_progress(
+                    let Some(map) = compute_splash_all_progress(
                         bb,
                         &rw_lr_for_splash,
                         rw_tfligands_init,
@@ -332,7 +336,11 @@ pub fn perturb_with_targets(
                         config.beta_scale_factor as f32,
                         config.beta_cap.map(|c| c as f32),
                         job_progress.map(|p| p.as_ref()),
-                    );
+                        cancel,
+                    ) else {
+                        drop(guard);
+                        return Err(());
+                    };
                     let arc = Arc::new(map);
                     *guard = Some(CachedBaselineSplash {
                         key: splash_key,
@@ -346,32 +354,7 @@ pub fn perturb_with_targets(
                     config.min_expression,
                     gene_names,
                 );
-                if job_progress.is_some() {
-                    Arc::new(compute_splash_all_progress(
-                        bb,
-                        &rw_lr_for_splash,
-                        rw_tfligands_init,
-                        &gex_gm,
-                        config.beta_scale_factor as f32,
-                        config.beta_cap.map(|c| c as f32),
-                        job_progress.map(|p| p.as_ref()),
-                    ))
-                } else {
-                    Arc::new(compute_splash_all(
-                        bb,
-                        &rw_lr_for_splash,
-                        rw_tfligands_init,
-                        &gex_gm,
-                        config.beta_scale_factor as f32,
-                        config.beta_cap.map(|c| c as f32),
-                    ))
-                }
-            }
-        } else {
-            let gex_gm =
-                gene_matrix_masked_f32_from_expr(expr_for_splash, config.min_expression, gene_names);
-            if job_progress.is_some() {
-                Arc::new(compute_splash_all_progress(
+                let Some(map) = compute_splash_all_progress(
                     bb,
                     &rw_lr_for_splash,
                     rw_tfligands_init,
@@ -379,17 +362,28 @@ pub fn perturb_with_targets(
                     config.beta_scale_factor as f32,
                     config.beta_cap.map(|c| c as f32),
                     job_progress.map(|p| p.as_ref()),
-                ))
-            } else {
-                Arc::new(compute_splash_all(
-                    bb,
-                    &rw_lr_for_splash,
-                    rw_tfligands_init,
-                    &gex_gm,
-                    config.beta_scale_factor as f32,
-                    config.beta_cap.map(|c| c as f32),
-                ))
+                    cancel,
+                ) else {
+                    return Err(());
+                };
+                Arc::new(map)
             }
+        } else {
+            let gex_gm =
+                gene_matrix_masked_f32_from_expr(expr_for_splash, config.min_expression, gene_names);
+            let Some(map) = compute_splash_all_progress(
+                bb,
+                &rw_lr_for_splash,
+                rw_tfligands_init,
+                &gex_gm,
+                config.beta_scale_factor as f32,
+                config.beta_cap.map(|c| c as f32),
+                job_progress.map(|p| p.as_ref()),
+                cancel,
+            ) else {
+                return Err(());
+            };
+            Arc::new(map)
         };
         if let Some(t) = timings.as_mut() {
             t.record(format!("iter{}/splash", iter + 1), t_splash.elapsed());
@@ -410,7 +404,7 @@ pub fn perturb_with_targets(
         let gene_mtx_1 = gene_mtx_work.as_ref().expect("gene_mtx_work set above");
 
         // 3. Recompute weighted ligands
-        let w_lr_new = recompute_weighted_ligands(
+        let Some(w_lr_new) = recompute_weighted_ligands(
             gene_mtx_1,
             &gene_to_idx,
             &lr_ligands,
@@ -419,7 +413,10 @@ pub fn perturb_with_targets(
             config.scale_factor,
             config.min_expression,
             config.ligand_grid_factor,
-        );
+            cancel,
+        ) else {
+            return Err(());
+        };
         if let Some(t) = timings.as_mut() {
             t.record(
                 format!("iter{}/weighted_ligands_lr", iter + 1),
@@ -433,7 +430,7 @@ pub fn perturb_with_targets(
             &format!("{msg_prefix} · spatial ligands (TFL)"),
         );
         let t_tfl = Instant::now();
-        let w_tfl_new = recompute_weighted_ligands(
+        let Some(w_tfl_new) = recompute_weighted_ligands(
             gene_mtx_1,
             &gene_to_idx,
             &tfl_ligands,
@@ -442,7 +439,10 @@ pub fn perturb_with_targets(
             config.scale_factor,
             config.min_expression,
             config.ligand_grid_factor,
-        );
+            cancel,
+        ) else {
+            return Err(());
+        };
         if let Some(t) = timings.as_mut() {
             t.record(
                 format!("iter{}/weighted_ligands_tfl", iter + 1),
@@ -650,11 +650,15 @@ pub fn compute_splash_all(
         beta_scale_factor,
         beta_cap,
         None,
+        None,
     )
+    .expect("compute_splash_all_progress without cancel must return Some")
 }
 
 /// Like [`compute_splash_all`], optionally reporting coarse progress on `progress` (permille 0–1000).
 /// Updates are throttled (~≤30 calls) to avoid sync overhead on large target counts.
+///
+/// Returns `None` when `cancel` is set and becomes true during computation.
 pub fn compute_splash_all_progress(
     bb: &Betabase,
     rw_ligands: &GeneMatrix,
@@ -663,12 +667,16 @@ pub fn compute_splash_all_progress(
     beta_scale_factor: f32,
     beta_cap: Option<f32>,
     progress: Option<&std::sync::atomic::AtomicU32>,
-) -> HashMap<String, GeneMatrix> {
+    cancel: Option<&AtomicBool>,
+) -> Option<HashMap<String, GeneMatrix>> {
     use std::sync::atomic::Ordering;
     let n = bb.data.len().max(1);
     let step = (n / 28).max(1);
     let mut out = HashMap::with_capacity(bb.data.len());
     for (i, (gene_name, bf)) in bb.data.iter().enumerate() {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return None;
+        }
         let splash = bf.splash(
             rw_ligands,
             rw_tfligands,
@@ -684,7 +692,7 @@ pub fn compute_splash_all_progress(
             }
         }
     }
-    out
+    Some(out)
 }
 
 /// For each gene with a trained model:
@@ -756,10 +764,13 @@ fn recompute_weighted_ligands(
     scale_factor: f64,
     min_expression: f64,
     grid_factor: Option<f64>,
-) -> GeneMatrix {
+    cancel: Option<&AtomicBool>,
+) -> Option<GeneMatrix> {
+    use std::sync::atomic::Ordering;
+
     let n_cells = gene_mtx.nrows();
     if ligand_names.is_empty() {
-        return GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new());
+        return Some(GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new()));
     }
 
     let mut seen = HashSet::new();
@@ -785,7 +796,10 @@ fn recompute_weighted_ligands(
     }
 
     if lig_names.is_empty() {
-        return GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new());
+        return Some(GeneMatrix::new(
+            Array2::<f32>::zeros((n_cells, 0)),
+            Vec::new(),
+        ));
     }
 
     let n_lig = lig_names.len();
@@ -807,6 +821,9 @@ fn recompute_weighted_ligands(
     let mut result_data = Array2::<f32>::zeros((n_cells, n_lig));
 
     for (radius_bits, group_indices) in &radius_groups {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return None;
+        }
         let radius = f64::from_bits(*radius_bits);
         let mut sub = Array2::<f64>::zeros((n_cells, group_indices.len()));
         for (k, &j) in group_indices.iter().enumerate() {
@@ -824,5 +841,5 @@ fn recompute_weighted_ligands(
         }
     }
 
-    GeneMatrix::new(result_data, lig_names)
+    Some(GeneMatrix::new(result_data, lig_names))
 }

@@ -2913,7 +2913,9 @@ fn compute_splash_network(
         rt.perturb_cfg.beta_scale_factor as f32,
         rt.perturb_cfg.beta_cap.map(|c| c as f32),
         progress.as_deref(),
-    );
+        None,
+    )
+    .expect("compute_splash_all_progress without cancel must return Some");
     if let Some(p) = progress.as_ref() {
         p.store(760, Ordering::Relaxed);
     }

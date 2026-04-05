@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::stdout;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -135,7 +136,10 @@ enum Screen {
 }
 
 enum BgMsg {
-    Loaded(Result<PerturbRuntime, String>),
+    Loaded {
+        generation: u64,
+        result: Result<PerturbRuntime, String>,
+    },
     JobDone {
         id: u64,
         outcome: Result<PerturbOutcome, String>,
@@ -182,8 +186,17 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
         .map(|n| n.get().clamp(1, 8))
         .unwrap_or(2);
 
+    let pick_toml_path_draft = opts
+        .run_toml
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .or(opts.toml_path_hint_for_error.clone())
+        .unwrap_or_default();
+
     let mut app = App {
         screen: pick,
+        pending_load_generation: 0,
+        pick_toml_path_draft,
         runtime: None,
         desired_expr: opts.default_desired_expr,
         n_propagation: 0,
@@ -200,7 +213,6 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
         spinner_frame: 0u8,
         bg_rx: rx_bg,
         load_applied_n_prop: opts.n_propagation_initial,
-        toml_path_hint_for_error: opts.toml_path_hint_for_error.clone(),
         filtered_gene_indices: Vec::new(),
         load_progress_permille: load_progress_permille.clone(),
         load_progress_message: load_progress_message.clone(),
@@ -225,19 +237,24 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
     };
 
     if let Some(path) = opts.run_toml.clone() {
+        app.pending_load_generation = app.pending_load_generation.wrapping_add(1);
+        let load_gen = app.pending_load_generation;
         let tx = tx_bg.clone();
         let p = load_progress_permille.clone();
         let m = load_progress_message.clone();
         std::thread::spawn(move || {
             let dummy_ui = Arc::new(BetadataUiProgress::new());
-            let r = PerturbRuntime::from_run_toml_with_progress(
+            let result = PerturbRuntime::from_run_toml_with_progress(
                 path.as_path(),
                 Some(p),
                 Some(m),
                 Some(dummy_ui),
             )
             .map_err(|e| e.to_string());
-            let _ = tx.send(BgMsg::Loaded(r));
+            let _ = tx.send(BgMsg::Loaded {
+                generation: load_gen,
+                result,
+            });
         });
     }
 
@@ -252,25 +269,33 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
 
         while let Ok(msg) = app.bg_rx.try_recv() {
             match msg {
-                BgMsg::Loaded(r) => match r {
-                    Ok(mut rt) => {
-                        if let Some(n) = app.load_applied_n_prop {
-                            rt.perturb_cfg.n_propagation = n;
+                BgMsg::Loaded {
+                    generation,
+                    result,
+                } => {
+                    if generation != app.pending_load_generation {
+                        continue;
+                    }
+                    match result {
+                        Ok(mut rt) => {
+                            if let Some(n) = app.load_applied_n_prop {
+                                rt.perturb_cfg.n_propagation = n;
+                            }
+                            app.n_propagation = rt.perturb_cfg.n_propagation;
+                            let rt_arc = std::sync::Arc::new(rt);
+                            app.apply_cells_csv_after_load(rt_arc.as_ref());
+                            app.runtime = Some(rt_arc);
+                            app.screen = Screen::Main;
+                            app.rebuild_filter();
                         }
-                        app.n_propagation = rt.perturb_cfg.n_propagation;
-                        let rt_arc = std::sync::Arc::new(rt);
-                        app.apply_cells_csv_after_load(rt_arc.as_ref());
-                        app.runtime = Some(rt_arc);
-                        app.screen = Screen::Main;
-                        app.rebuild_filter();
+                        Err(e) => {
+                            app.screen = Screen::PickToml {
+                                path_input: app.pick_toml_path_draft.clone(),
+                                err: Some(e),
+                            };
+                        }
                     }
-                    Err(e) => {
-                        app.screen = Screen::PickToml {
-                            path_input: app.toml_path_hint_for_error.clone().unwrap_or_default(),
-                            err: Some(e),
-                        };
-                    }
-                },
+                }
                 BgMsg::JobDone { id, outcome } => {
                     app.active_jobs.retain(|j| j.id != id);
                     match outcome {
@@ -315,6 +340,8 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
 
 struct App {
     screen: Screen,
+    pending_load_generation: u64,
+    pick_toml_path_draft: String,
     runtime: Option<std::sync::Arc<PerturbRuntime>>,
     desired_expr: f64,
     n_propagation: usize,
@@ -332,7 +359,6 @@ struct App {
     bg_rx: mpsc::Receiver<BgMsg>,
     load_applied_n_prop: Option<usize>,
     filtered_gene_indices: Vec<usize>,
-    toml_path_hint_for_error: Option<String>,
     load_progress_permille: Arc<AtomicU32>,
     load_progress_message: Arc<Mutex<String>>,
     cells_csv_path: Option<PathBuf>,
@@ -431,66 +457,75 @@ impl App {
             let tx = tx_bg.clone();
             let rt_t = Arc::clone(&rt);
             std::thread::spawn(move || {
-                let t0 = Instant::now();
-                let mut timings = if spec.capture_timings {
-                    Some(PerturbTimings::default())
-                } else {
-                    None
-                };
-                let res = perturb_with_targets(
-                    &rt_t.bb,
-                    &rt_t.gene_mtx,
-                    &rt_t.gene_names,
-                    &rt_t.xy,
-                    &rt_t.rw_ligands_init,
-                    &rt_t.rw_tfligands_init,
-                    &spec.targets,
-                    &spec.config,
-                    &rt_t.lr_radii,
-                    Some(&job_p),
-                    Some(&job_m),
-                    Some(cancel.as_ref()),
-                    Some(&rt_t.baseline_splash_cache),
-                    &mut timings,
-                );
-                let elapsed = t0.elapsed();
-                let outcome = match res {
-                    Ok(result) => {
-                        let genes = spec.genes.clone();
-                        let joint_csv = spec.joint_csv_summary;
-                        let (export_dir, export_err) = match export_joint_perturb_result(
-                            rt_t.as_ref(),
-                            &result.simulated,
-                            &genes,
-                            spec.desired_expr,
-                            spec.n_propagation,
-                            &spec.scopes,
-                            joint_csv,
-                            Some(id),
-                        ) {
-                            Ok(p) => (Some(p), None),
-                            Err(e) => (None, Some(e.to_string())),
-                        };
-                        Ok(PerturbOutcome {
-                            job_id: id,
-                            genes,
-                            desired_expr: spec.desired_expr,
-                            n_propagation: spec.n_propagation,
-                            result,
-                            timings,
-                            elapsed,
-                            export_dir,
-                            export_err,
-                        })
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<
+                    PerturbOutcome,
+                    String,
+                > {
+                    let t0 = Instant::now();
+                    let mut timings = if spec.capture_timings {
+                        Some(PerturbTimings::default())
+                    } else {
+                        None
+                    };
+                    let res = perturb_with_targets(
+                        &rt_t.bb,
+                        &rt_t.gene_mtx,
+                        &rt_t.gene_names,
+                        &rt_t.xy,
+                        &rt_t.rw_ligands_init,
+                        &rt_t.rw_tfligands_init,
+                        &spec.targets,
+                        &spec.config,
+                        &rt_t.lr_radii,
+                        Some(&job_p),
+                        Some(&job_m),
+                        Some(cancel.as_ref()),
+                        Some(&rt_t.baseline_splash_cache),
+                        &mut timings,
+                    );
+                    let elapsed = t0.elapsed();
+                    match res {
+                        Ok(result) => {
+                            let genes = spec.genes.clone();
+                            let joint_csv = spec.joint_csv_summary;
+                            let (export_dir, export_err) = match export_joint_perturb_result(
+                                rt_t.as_ref(),
+                                &result.simulated,
+                                &genes,
+                                spec.desired_expr,
+                                spec.n_propagation,
+                                &spec.scopes,
+                                joint_csv,
+                                Some(id),
+                            ) {
+                                Ok(p) => (Some(p), None),
+                                Err(e) => (None, Some(e.to_string())),
+                            };
+                            Ok(PerturbOutcome {
+                                job_id: id,
+                                genes,
+                                desired_expr: spec.desired_expr,
+                                n_propagation: spec.n_propagation,
+                                result,
+                                timings,
+                                elapsed,
+                                export_dir,
+                                export_err,
+                            })
+                        }
+                        Err(()) => {
+                            let msg = if cancel.load(Ordering::Relaxed) {
+                                "canceled".into()
+                            } else {
+                                "perturb_with_targets failed".into()
+                            };
+                            Err(msg)
+                        }
                     }
-                    Err(()) => {
-                        let msg = if cancel.load(Ordering::Relaxed) {
-                            "canceled".into()
-                        } else {
-                            "perturb_with_targets failed".into()
-                        };
-                        Err(msg)
-                    }
+                }));
+                let outcome = match outcome {
+                    Ok(r) => r,
+                    Err(_) => Err("job panicked".into()),
                 };
                 let _ = tx.send(BgMsg::JobDone { id, outcome });
             });
@@ -502,18 +537,47 @@ impl App {
             self.filtered_gene_indices.clear();
             return;
         };
-        let q = self.gene_filter.to_ascii_lowercase();
+        const CAP: usize = 50_000;
+        let q = self.gene_filter.to_lowercase();
         if q.is_empty() {
             self.filtered_gene_indices = (0..rt.gene_names.len()).collect();
+            if self.filtered_gene_indices.len() > CAP {
+                self.filtered_gene_indices.truncate(CAP);
+                if !self.status_is_error {
+                    self.set_status(
+                        format!(
+                            "Listing first {CAP} genes only ({} total) — type to filter",
+                            rt.gene_names.len()
+                        ),
+                        false,
+                    );
+                }
+            } else if self.status_line.contains("Listing first") && !self.status_is_error {
+                self.clear_status();
+            }
         } else {
-            self.filtered_gene_indices = rt
+            let mut v: Vec<usize> = rt
                 .gene_names
                 .iter()
                 .enumerate()
-                .filter(|(_, g)| g.to_ascii_lowercase().contains(&q))
+                .filter(|(_, g)| g.to_lowercase().contains(&q))
                 .map(|(i, _)| i)
-                .take(50_000)
                 .collect();
+            let total_matched = v.len();
+            if total_matched > CAP {
+                v.truncate(CAP);
+                if !self.status_is_error {
+                    self.set_status(
+                        format!(
+                            "Filter matched {total_matched} genes; showing first {CAP} — narrow your filter"
+                        ),
+                        false,
+                    );
+                }
+            } else if self.status_line.contains("narrow your filter") && !self.status_is_error {
+                self.clear_status();
+            }
+            self.filtered_gene_indices = v;
         }
         let n = self.filtered_gene_indices.len();
         if n == 0 {
@@ -771,7 +835,7 @@ impl App {
                 );
                 f.render_widget(
                     Paragraph::new(Span::styled(
-                        "Esc — cancel load",
+                        "Esc — return to path entry (load continues in background; result ignored)",
                         Style::default().fg(MUTED),
                     ))
                     .alignment(Alignment::Center)
@@ -781,50 +845,72 @@ impl App {
             }
             Screen::Main => self.render_main(f, inner),
             Screen::EditDesired { buf } => {
-                f.render_widget(
-                    Paragraph::new(vec![
-                        Line::from(vec![
-                            Span::styled("Desired ", Style::default().fg(TITLE)),
-                            Span::styled("desired_expr", Style::default().fg(VALUE)),
-                            Span::styled(
-                                "  ·  Enter OK  ·  Esc cancel",
-                                Style::default().fg(MUTED),
-                            ),
-                        ]),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            buf.as_str(),
-                            Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
-                        )),
-                    ])
-                    .block(block_panel(
-                        Line::from(Span::styled(" desired_expr ", Style::default().fg(LABEL))),
-                        WORK_BORD,
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled("Desired ", Style::default().fg(TITLE)),
+                        Span::styled("desired_expr", Style::default().fg(VALUE)),
+                        Span::styled(
+                            "  ·  Enter OK  ·  Esc cancel",
+                            Style::default().fg(MUTED),
+                        ),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        buf.as_str(),
+                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
                     )),
+                ];
+                if !self.status_line.is_empty() {
+                    let st = if self.status_is_error {
+                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(C_WROTE)
+                    };
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(self.status_line.as_str(), st)));
+                }
+                f.render_widget(
+                    Paragraph::new(lines)
+                        .block(block_panel(
+                            Line::from(Span::styled(" desired_expr ", Style::default().fg(LABEL))),
+                            WORK_BORD,
+                        ))
+                        .style(Style::default().bg(BG)),
                     inner,
                 );
             }
             Screen::EditNPropagation { buf } => {
-                f.render_widget(
-                    Paragraph::new(vec![
-                        Line::from(vec![
-                            Span::styled("Integer ", Style::default().fg(TITLE)),
-                            Span::styled("n_propagation", Style::default().fg(VALUE)),
-                            Span::styled(
-                                "  ·  Enter OK  ·  Esc cancel",
-                                Style::default().fg(MUTED),
-                            ),
-                        ]),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            buf.as_str(),
-                            Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
-                        )),
-                    ])
-                    .block(block_panel(
-                        Line::from(Span::styled(" n_propagation ", Style::default().fg(LABEL))),
-                        ROCKET_BORD,
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled("Integer ", Style::default().fg(TITLE)),
+                        Span::styled("n_propagation", Style::default().fg(VALUE)),
+                        Span::styled(
+                            "  ·  Enter OK  ·  Esc cancel",
+                            Style::default().fg(MUTED),
+                        ),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        buf.as_str(),
+                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
                     )),
+                ];
+                if !self.status_line.is_empty() {
+                    let st = if self.status_is_error {
+                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(C_WROTE)
+                    };
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(self.status_line.as_str(), st)));
+                }
+                f.render_widget(
+                    Paragraph::new(lines)
+                        .block(block_panel(
+                            Line::from(Span::styled(" n_propagation ", Style::default().fg(LABEL))),
+                            ROCKET_BORD,
+                        ))
+                        .style(Style::default().bg(BG)),
                     inner,
                 );
             }
@@ -1004,7 +1090,7 @@ impl App {
         let title_line = if lines.len() > view_h.max(1) {
             Line::from(vec![
                 Span::styled(
-                    " Last run ",
+                    " Latest run ",
                     Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("·", Style::default().fg(MUTED)),
@@ -1018,7 +1104,7 @@ impl App {
         } else {
             Line::from(vec![
                 Span::styled(
-                    " Last run ",
+                    " Latest run ",
                     Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("· Ctrl+L clear ", Style::default().fg(MUTED)),
@@ -1088,7 +1174,27 @@ impl App {
             self.render_jobs_strip(f, jobs_rect);
         }
 
-        let rt = self.runtime.as_ref().unwrap();
+        let Some(rt) = self.runtime.as_ref() else {
+            let fill = Rect {
+                x: area.x,
+                y: area.y + summary_h + jobs_h,
+                width: area.width,
+                height: area.height.saturating_sub(summary_h + jobs_h),
+            };
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Internal error: PerturbRuntime missing on Main screen. Press Ctrl+Q to quit.",
+                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD),
+                    )),
+                ])
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(BG)),
+                fill,
+            );
+            return;
+        };
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
@@ -1364,6 +1470,9 @@ impl App {
                                 return Ok(None);
                             }
                             *err = None;
+                            self.pick_toml_path_draft = p.display().to_string();
+                            self.pending_load_generation = self.pending_load_generation.wrapping_add(1);
+                            let load_gen = self.pending_load_generation;
                             self.load_progress_permille.store(0, Ordering::Relaxed);
                             if let Ok(mut g) = self.load_progress_message.lock() {
                                 *g = "Starting…".to_string();
@@ -1374,14 +1483,17 @@ impl App {
                             let prog_m = self.load_progress_message.clone();
                             std::thread::spawn(move || {
                                 let dummy_ui = Arc::new(BetadataUiProgress::new());
-                                let r = PerturbRuntime::from_run_toml_with_progress(
+                                let result = PerturbRuntime::from_run_toml_with_progress(
                                     p.as_path(),
                                     Some(prog_p),
                                     Some(prog_m),
                                     Some(dummy_ui),
                                 )
                                 .map_err(|e| e.to_string());
-                                let _ = tx.send(BgMsg::Loaded(r));
+                                let _ = tx.send(BgMsg::Loaded {
+                                    generation: load_gen,
+                                    result,
+                                });
                             });
                         }
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1398,19 +1510,29 @@ impl App {
                 }
                 Screen::Loading => {
                     if key.code == KeyCode::Esc {
-                        return Ok(Some(()));
+                        self.pending_load_generation = self.pending_load_generation.wrapping_add(1);
+                        self.screen = Screen::PickToml {
+                            path_input: self.pick_toml_path_draft.clone(),
+                            err: None,
+                        };
                     }
                     return Ok(None);
                 }
                 Screen::EditDesired { buf } => match key.code {
-                    KeyCode::Esc => self.screen = Screen::Main,
-                    KeyCode::Enter => {
-                        if let Ok(v) = buf.parse::<f64>() {
-                            if v.is_finite() {
-                                self.desired_expr = v;
-                            }
-                        }
+                    KeyCode::Esc => {
+                        self.clear_status();
                         self.screen = Screen::Main;
+                    }
+                    KeyCode::Enter => {
+                        match buf.trim().parse::<f64>() {
+                            Ok(v) if v.is_finite() => {
+                                self.clear_status();
+                                self.desired_expr = v;
+                                self.screen = Screen::Main;
+                            }
+                            Ok(_) => self.set_status("desired_expr must be finite", true),
+                            Err(_) => self.set_status("desired_expr must be a number", true),
+                        }
                     }
                     KeyCode::Char(c) => buf.push(c),
                     KeyCode::Backspace => {
@@ -1419,14 +1541,20 @@ impl App {
                     _ => {}
                 },
                 Screen::EditNPropagation { buf } => match key.code {
-                    KeyCode::Esc => self.screen = Screen::Main,
-                    KeyCode::Enter => {
-                        if let Ok(v) = buf.parse::<usize>() {
-                            if v > 0 {
-                                self.n_propagation = v;
-                            }
-                        }
+                    KeyCode::Esc => {
+                        self.clear_status();
                         self.screen = Screen::Main;
+                    }
+                    KeyCode::Enter => {
+                        match buf.trim().parse::<usize>() {
+                            Ok(v) if v > 0 => {
+                                self.clear_status();
+                                self.n_propagation = v;
+                                self.screen = Screen::Main;
+                            }
+                            Ok(_) => self.set_status("n_propagation must be at least 1", true),
+                            Err(_) => self.set_status("n_propagation must be a positive integer", true),
+                        }
                     }
                     KeyCode::Char(c) => buf.push(c),
                     KeyCode::Backspace => {
@@ -1570,8 +1698,11 @@ impl App {
                                     );
                                     return Ok(None);
                                 }
-                                let rt = self.runtime.as_ref().unwrap().clone();
-                                self.open_cell_scope_editor(gene, rt.as_ref());
+                                let Some(rt_arc) = self.runtime.clone() else {
+                                    self.set_status("PerturbRuntime not available", true);
+                                    return Ok(None);
+                                };
+                                self.open_cell_scope_editor(gene, rt_arc.as_ref());
                                 self.clear_status();
                             }
                             KeyCode::Char('o') | KeyCode::Char('O') => {
@@ -1598,7 +1729,10 @@ impl App {
                                     );
                                     return Ok(None);
                                 }
-                                let rt = self.runtime.as_ref().unwrap();
+                                let Some(rt) = self.runtime.as_ref() else {
+                                    self.set_status("PerturbRuntime not available", true);
+                                    return Ok(None);
+                                };
                                 let mut targets: Vec<PerturbTarget> =
                                     Vec::with_capacity(self.perturb_targets.len());
                                 let csv_part = self.csv_indices_slice();
@@ -1781,7 +1915,6 @@ impl App {
     }
 
     fn format_outcome(&self, out: &PerturbOutcome) -> Vec<String> {
-        let rt = self.runtime.as_ref().unwrap();
         let genes_label = out.genes.join(", ");
         let mut lines = vec![
             format!("Job {} · Genes: {genes_label}", out.job_id),
@@ -1800,26 +1933,30 @@ impl App {
             lines.push(format!("Export error: {e}"));
         }
 
-        for gene in &out.genes {
-            if let Some(j) = rt.gene_names.iter().position(|g| g == gene) {
-                let col = out.result.delta.column(j);
-                let mut min: f64 = f64::INFINITY;
-                let mut max: f64 = f64::NEG_INFINITY;
-                let mut sum = 0.0;
-                let mut n = 0usize;
-                for &v in col.iter() {
-                    if v.is_finite() {
-                        min = min.min(v);
-                        max = max.max(v);
-                        sum += v;
-                        n += 1;
+        if let Some(rt) = self.runtime.as_ref() {
+            for gene in &out.genes {
+                if let Some(j) = rt.gene_names.iter().position(|g| g == gene) {
+                    let col = out.result.delta.column(j);
+                    let mut min: f64 = f64::INFINITY;
+                    let mut max: f64 = f64::NEG_INFINITY;
+                    let mut sum = 0.0;
+                    let mut n = 0usize;
+                    for &v in col.iter() {
+                        if v.is_finite() {
+                            min = min.min(v);
+                            max = max.max(v);
+                            sum += v;
+                            n += 1;
+                        }
                     }
+                    let mean = if n > 0 { sum / n as f64 } else { 0.0 };
+                    lines.push(format!(
+                        "Δ {gene}: min={min:.6} max={max:.6} mean={mean:.6} (n={n})"
+                    ));
                 }
-                let mean = if n > 0 { sum / n as f64 } else { 0.0 };
-                lines.push(format!(
-                    "Δ {gene}: min={min:.6} max={max:.6} mean={mean:.6} (n={n})"
-                ));
             }
+        } else {
+            lines.push("Δ per-gene summary skipped (runtime unavailable)".into());
         }
 
         if let Some(t) = out.timings.as_ref() {
