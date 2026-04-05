@@ -447,6 +447,18 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             );
         }
         let mut cfg = SpaceshipConfig::from_file(&repro)?;
+        if let Some(cli_k) = cli.max_ligands {
+            let expected = cli_k.max(1);
+            if cfg.grn.max_ligands != Some(expected) {
+                anyhow::bail!(
+                    "--join-output-dir: --max-ligands {} does not match [grn].max_ligands ({:?}) in {}.\n\
+                     Join training uses the repro TOML as the single source of truth; omit --max-ligands, or set [grn].max_ligands the same on the leader run.",
+                    expected,
+                    cfg.grn.max_ligands,
+                    repro.display()
+                );
+            }
+        }
         let repro_file_condition = cfg.data.condition.clone();
         if let Some(cli_raw) = cli.condition.as_deref() {
             let cli_c = cli_raw.trim();
@@ -482,7 +494,6 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             || cli.group_reg.is_some()
             || cli.n_iter.is_some()
             || cli.tol.is_some()
-            || cli.max_ligands.is_some()
             || cli.training_mode.is_some()
             || cli.output_dir.is_some()
             || cli.cnn_output_activation.is_some()

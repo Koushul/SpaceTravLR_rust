@@ -294,19 +294,20 @@ pub(crate) fn apply_max_ligands_filter(
     });
     let take_n = k.min(unique.len());
     let allowed: HashSet<String> = unique.into_iter().take(take_n).collect();
-    let mut new_l = Vec::new();
-    let mut new_r = Vec::new();
-    let mut new_p = Vec::new();
+    let mut triples: Vec<(String, String, String)> = Vec::new();
     for i in 0..n {
         if allowed.contains(&ligands[i]) {
-            new_l.push(ligands[i].clone());
-            new_r.push(receptors[i].clone());
-            new_p.push(lr_pairs[i].clone());
+            triples.push((
+                ligands[i].clone(),
+                receptors[i].clone(),
+                lr_pairs[i].clone(),
+            ));
         }
     }
-    *ligands = new_l;
-    *receptors = new_r;
-    *lr_pairs = new_p;
+    triples.sort_by(|a, b| a.2.cmp(&b.2));
+    *ligands = triples.iter().map(|t| t.0.clone()).collect();
+    *receptors = triples.iter().map(|t| t.1.clone()).collect();
+    *lr_pairs = triples.into_iter().map(|t| t.2).collect();
 }
 
 impl GeneNetwork {
@@ -674,5 +675,24 @@ mod tests {
         assert_eq!(lr_pairs.len(), 2);
         assert!(lr_pairs.contains(&"high$R2".into()));
         assert!(lr_pairs.contains(&"mid$R3".into()));
+        assert_eq!(lr_pairs, vec!["high$R2".to_string(), "mid$R3".to_string()]);
+    }
+
+    #[test]
+    fn max_ligands_filter_row_order_is_lexicographic_by_pair() {
+        let mut means = HashMap::new();
+        means.insert("a".into(), 2.0);
+        means.insert("b".into(), 2.0);
+        let mut ligands = vec!["b".into(), "a".into()];
+        let mut receptors = vec!["R1".into(), "R1".into()];
+        let mut lr_pairs = vec!["b$R1".into(), "a$R1".into()];
+        apply_max_ligands_filter(
+            &mut ligands,
+            &mut receptors,
+            &mut lr_pairs,
+            Some(2),
+            &means,
+        );
+        assert_eq!(lr_pairs, vec!["a$R1".to_string(), "b$R1".to_string()]);
     }
 }
