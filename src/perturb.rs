@@ -354,10 +354,7 @@ pub fn perturb_with_targets(
             }
         };
         if let Some(t) = timings.as_mut() {
-            t.record(
-                format!("iter{}/splash", iter + 1),
-                t_splash.elapsed(),
-            );
+            t.record(format!("iter{}/splash", iter + 1), t_splash.elapsed());
         }
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(());
@@ -441,10 +438,7 @@ pub fn perturb_with_targets(
         // 7. Perturb all cells: delta_y = splash_derivatives · delta_x
         delta_simulated = perturb_all_cells(gene_names, bb, splashed.as_ref(), &delta_simulated);
         if let Some(t) = timings.as_mut() {
-            t.record(
-                format!("iter{}/grn_propagate", iter + 1),
-                t_grn.elapsed(),
-            );
+            t.record(format!("iter{}/grn_propagate", iter + 1), t_grn.elapsed());
         }
 
         // 8. Pin target genes to their perturbed values (only target columns)
@@ -458,7 +452,9 @@ pub fn perturb_with_targets(
                         }
                     }
                 } else {
-                    delta_simulated.column_mut(gi).assign(&delta_input.column(gi));
+                    delta_simulated
+                        .column_mut(gi)
+                        .assign(&delta_input.column(gi));
                 }
             }
         }
@@ -483,10 +479,7 @@ pub fn perturb_with_targets(
                 }
             });
         if let Some(t) = timings.as_mut() {
-            t.record(
-                format!("iter{}/pin_clip", iter + 1),
-                t_clip.elapsed(),
-            );
+            t.record(format!("iter{}/pin_clip", iter + 1), t_clip.elapsed());
         }
         report_perturb_step(
             job_progress,
@@ -519,6 +512,13 @@ pub fn perturb_with_targets(
             }
         }
     }
+
+    report_perturb_step(
+        job_progress,
+        job_message,
+        1000,
+        "GRN perturbation · complete",
+    );
 
     Ok(PerturbResult {
         simulated,

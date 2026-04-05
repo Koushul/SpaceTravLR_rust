@@ -415,7 +415,94 @@ struct PerturbRunSummary {
     selected_cell_types_per_gene: HashMap<String, Option<Vec<usize>>>,
 }
 
-type GeneCellTypeScopes = HashMap<String, Option<HashSet<usize>>>;
+pub type GeneCellTypeScopes = HashMap<String, Option<HashSet<usize>>>;
+
+#[derive(Serialize)]
+struct JointPerturbExportSummary {
+    run_toml_path: String,
+    selected_genes: Vec<String>,
+    desired_expr: f64,
+    output_dir: String,
+    n_propagation: usize,
+    beta_scale_factor: f64,
+    beta_cap: Option<f64>,
+    ligand_grid_factor: Option<f64>,
+    export_kind: String,
+    outputs: Vec<String>,
+    selected_cell_types_per_gene: HashMap<String, Option<Vec<usize>>>,
+}
+
+/// Writes full **joint** `simulated` matrix (one `perturb_with_targets` call with all genes),
+/// unlike [`execute_marked_perturbations`] which runs separate jobs per gene.
+pub fn export_joint_perturb_result(
+    runtime: &PerturbRuntime,
+    simulated: &Array2<f64>,
+    selected_genes: &[String],
+    desired_expr: f64,
+    n_propagation: usize,
+    selected_cell_types_per_gene: &GeneCellTypeScopes,
+) -> anyhow::Result<PathBuf> {
+    if selected_genes.is_empty() {
+        anyhow::bail!("No selected genes to export.");
+    }
+    let mut selected: Vec<String> = selected_genes.to_vec();
+    selected.sort();
+    for g in &selected {
+        if !runtime.gene_names.iter().any(|x| x == g) {
+            anyhow::bail!("Gene '{}' is not present in AnnData var_names.", g);
+        }
+    }
+
+    let out_dir = request_output_dir(
+        runtime.run_dir.as_path(),
+        &selected,
+        desired_expr,
+        n_propagation,
+    );
+    std::fs::create_dir_all(&out_dir)?;
+
+    let feather_name = "joint_perturb_expr.feather";
+    let out_path = out_dir.join(feather_name);
+    write_betadata_feather(
+        out_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-utf8 output path"))?,
+        "CellID",
+        &runtime.obs_names,
+        &runtime.gene_names,
+        simulated,
+    )?;
+
+    let summary = JointPerturbExportSummary {
+        run_toml_path: runtime.run_toml_path.display().to_string(),
+        selected_genes: selected.clone(),
+        desired_expr,
+        output_dir: out_dir.display().to_string(),
+        n_propagation,
+        beta_scale_factor: runtime.perturb_cfg.beta_scale_factor,
+        beta_cap: runtime.perturb_cfg.beta_cap,
+        ligand_grid_factor: runtime.perturb_cfg.ligand_grid_factor,
+        export_kind: "joint".into(),
+        outputs: vec![feather_name.to_string()],
+        selected_cell_types_per_gene: selected
+            .iter()
+            .map(|g| {
+                let scope = selected_cell_types_per_gene
+                    .get(g)
+                    .and_then(|s| s.as_ref())
+                    .map(|set| {
+                        let mut v = set.iter().copied().collect::<Vec<_>>();
+                        v.sort_unstable();
+                        v
+                    });
+                (g.clone(), scope)
+            })
+            .collect(),
+    };
+    let summary_path = out_dir.join("perturbation_run_summary.json");
+    std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)?;
+    Ok(out_dir)
+}
 
 pub fn execute_marked_perturbations(
     runtime: &PerturbRuntime,

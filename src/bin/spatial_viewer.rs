@@ -35,11 +35,11 @@ use space_trav_lr_rust::betadata::{
 };
 use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_target_genes};
 use space_trav_lr_rust::config::{SpaceshipConfig, expand_user_path, normalize_ui_path};
-use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
-use space_trav_lr_rust::network::{GeneNetwork, infer_species};
 use space_trav_lr_rust::foyer_perturb_cache::{
     self, FoyerPerturbCaches, PerturbCacheKey, UmapGridBlob,
 };
+use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use space_trav_lr_rust::network::{GeneNetwork, infer_species};
 use space_trav_lr_rust::perturb::{
     PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, compute_splash_all_progress,
     perturb_with_targets,
@@ -765,14 +765,15 @@ fn transition_grid_to_blob(grid: &TransitionGrid) -> UmapGridBlob {
 
 fn transition_grid_from_blob(b: UmapGridBlob) -> anyhow::Result<TransitionGrid> {
     let n = b.nx * b.ny;
-    anyhow::ensure!(b.u.len() == n && b.v.len() == n, "quiver u/v length mismatch");
-    anyhow::ensure!(b.cell_u.len() == b.cell_v.len(), "cell quiver length mismatch");
-    let vectors: Vec<[f64; 2]> = b
-        .u
-        .iter()
-        .zip(&b.v)
-        .map(|(&u, &v)| [u, v])
-        .collect();
+    anyhow::ensure!(
+        b.u.len() == n && b.v.len() == n,
+        "quiver u/v length mismatch"
+    );
+    anyhow::ensure!(
+        b.cell_u.len() == b.cell_v.len(),
+        "cell quiver length mismatch"
+    );
+    let vectors: Vec<[f64; 2]> = b.u.iter().zip(&b.v).map(|(&u, &v)| [u, v]).collect();
     let cell_vectors: Vec<[f64; 2]> = b
         .cell_u
         .iter()
@@ -863,8 +864,8 @@ async fn cached_grn_perturb_result(
                 .await
                 .map_err(|e| anyhow!("{e}"))?
                 .map_err(|e| e)?;
-                let enc = foyer_perturb_cache::encode_perturb_result(&pr)
-                    .map_err(|e| anyhow!("{e}"))?;
+                let enc =
+                    foyer_perturb_cache::encode_perturb_result(&pr).map_err(|e| anyhow!("{e}"))?;
                 Ok::<Vec<u8>, anyhow::Error>(enc)
             }
         })
@@ -3102,49 +3103,61 @@ async fn api_perturb_preview(
     Json(body): Json<PerturbPreviewBody>,
 ) -> Result<Response, (StatusCode, String)> {
     let n_propagation = body.n_propagation;
-    let (n_obs, targets, gj, rt, job_p, job_active, job_msg, cancel, n_vars, adata_path, foyer, epoch) =
-        {
-            let st = state.read().await;
-            let ds = require_dataset(&st)?;
-            let rt = perturb_runtime_or_status(ds)?;
-            let n_obs = ds.obs_names.len();
-            let targets = build_perturb_targets(ds, &body, n_obs)?;
-            let gene = targets[0].gene.clone();
-            if !rt.gene_names.iter().any(|g| g == &gene) {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    format!("gene {:?} not in model var_names", gene),
-                ));
-            }
-            let gj = rt
-                .gene_names
-                .iter()
-                .position(|g| g == &gene)
-                .ok_or_else(|| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal: gene index missing".into(),
-                    )
-                })?;
-            let n_vars = ds.n_vars;
-            let adata_path = ds.adata_path.to_string_lossy().into_owned();
-            let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
-            let foyer = Arc::clone(&st.foyer_caches);
-            (
-                n_obs,
-                targets,
-                gj,
-                Arc::clone(rt),
-                Arc::clone(&st.perturb_job_progress_permille),
-                Arc::clone(&st.perturb_job_active),
-                Arc::clone(&st.perturb_progress_message),
-                Arc::clone(&st.perturb_job_cancel),
-                n_vars,
-                adata_path,
-                foyer,
-                epoch,
-            )
-        };
+    let (
+        n_obs,
+        targets,
+        gj,
+        rt,
+        job_p,
+        job_active,
+        job_msg,
+        cancel,
+        n_vars,
+        adata_path,
+        foyer,
+        epoch,
+    ) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = perturb_runtime_or_status(ds)?;
+        let n_obs = ds.obs_names.len();
+        let targets = build_perturb_targets(ds, &body, n_obs)?;
+        let gene = targets[0].gene.clone();
+        if !rt.gene_names.iter().any(|g| g == &gene) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene {:?} not in model var_names", gene),
+            ));
+        }
+        let gj = rt
+            .gene_names
+            .iter()
+            .position(|g| g == &gene)
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal: gene index missing".into(),
+                )
+            })?;
+        let n_vars = ds.n_vars;
+        let adata_path = ds.adata_path.to_string_lossy().into_owned();
+        let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+        let foyer = Arc::clone(&st.foyer_caches);
+        (
+            n_obs,
+            targets,
+            gj,
+            Arc::clone(rt),
+            Arc::clone(&st.perturb_job_progress_permille),
+            Arc::clone(&st.perturb_job_active),
+            Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
+            n_vars,
+            adata_path,
+            foyer,
+            epoch,
+        )
+    };
     cancel.store(false, Ordering::SeqCst);
     let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
@@ -3199,38 +3212,37 @@ async fn api_perturb_export_feather(
 ) -> Result<Response, (StatusCode, String)> {
     let n_propagation = body.n_propagation;
     let fname_gene = body.gene.trim().to_string();
-    let (targets, rt, job_p, job_active, job_msg, cancel, n_obs, n_vars, adata_path, foyer, epoch) =
-        {
-            let st = state.read().await;
-            let ds = require_dataset(&st)?;
-            let rt = perturb_runtime_or_status(ds)?;
-            let n_obs = ds.obs_names.len();
-            let targets = build_perturb_targets(ds, &body, n_obs)?;
-            let gene = targets[0].gene.clone();
-            if !rt.gene_names.iter().any(|g| g == &gene) {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    format!("gene {:?} not in model var_names", gene),
-                ));
-            }
-            let n_vars = ds.n_vars;
-            let adata_path = ds.adata_path.to_string_lossy().into_owned();
-            let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
-            let foyer = Arc::clone(&st.foyer_caches);
-            (
-                targets,
-                Arc::clone(rt),
-                Arc::clone(&st.perturb_job_progress_permille),
-                Arc::clone(&st.perturb_job_active),
-                Arc::clone(&st.perturb_progress_message),
-                Arc::clone(&st.perturb_job_cancel),
-                n_obs,
-                n_vars,
-                adata_path,
-                foyer,
-                epoch,
-            )
-        };
+    let (targets, rt, job_p, job_active, job_msg, cancel, n_obs, n_vars, adata_path, foyer, epoch) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = perturb_runtime_or_status(ds)?;
+        let n_obs = ds.obs_names.len();
+        let targets = build_perturb_targets(ds, &body, n_obs)?;
+        let gene = targets[0].gene.clone();
+        if !rt.gene_names.iter().any(|g| g == &gene) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene {:?} not in model var_names", gene),
+            ));
+        }
+        let n_vars = ds.n_vars;
+        let adata_path = ds.adata_path.to_string_lossy().into_owned();
+        let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+        let foyer = Arc::clone(&st.foyer_caches);
+        (
+            targets,
+            Arc::clone(rt),
+            Arc::clone(&st.perturb_job_progress_permille),
+            Arc::clone(&st.perturb_job_active),
+            Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
+            n_obs,
+            n_vars,
+            adata_path,
+            foyer,
+            epoch,
+        )
+    };
     cancel.store(false, Ordering::SeqCst);
     let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
@@ -4039,8 +4051,7 @@ async fn api_umap_signature_field(
         ));
     }
 
-    let (path, layer, vn, umap_pts, n_obs, sig_params, mask_pack, svg_label, foyer, epoch, n_vars) =
-        {
+    let (path, layer, vn, umap_pts, n_obs, sig_params, mask_pack, svg_label, foyer, epoch, n_vars) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let Some(umap_f32) = ds.umap_f32.as_ref() else {
@@ -4153,12 +4164,7 @@ async fn api_umap_signature_field(
                     cancel,
                 )
                 .await
-                .map_err(|_| {
-                    (
-                        StatusCode::REQUEST_TIMEOUT,
-                        "Perturbation cancelled".into(),
-                    )
-                })?;
+                .map_err(|_| (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into()))?;
                 Some(pr.delta)
             }
         } else {
@@ -4279,40 +4285,53 @@ async fn api_perturb_summary(
     Json(body): Json<PerturbPreviewBody>,
 ) -> Result<Json<PerturbSummaryResponse>, (StatusCode, String)> {
     let n_propagation = body.n_propagation;
-    let (n_obs, targets, gene, rt, gene_names, job_p, job_active, job_msg, cancel, n_vars, adata_path, foyer, epoch) =
-        {
-            let st = state.read().await;
-            let ds = require_dataset(&st)?;
-            let rt = perturb_runtime_or_status(ds)?;
-            let n_obs = ds.obs_names.len();
-            let targets = build_perturb_targets(ds, &body, n_obs)?;
-            let gene = targets[0].gene.clone();
-            if !rt.gene_names.iter().any(|g| g == &gene) {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    format!("gene {:?} not in model var_names", gene),
-                ));
-            }
-            let n_vars = ds.n_vars;
-            let adata_path = ds.adata_path.to_string_lossy().into_owned();
-            let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
-            let foyer = Arc::clone(&st.foyer_caches);
-            (
-                n_obs,
-                targets,
-                gene.clone(),
-                Arc::clone(rt),
-                rt.gene_names.clone(),
-                Arc::clone(&st.perturb_job_progress_permille),
-                Arc::clone(&st.perturb_job_active),
-                Arc::clone(&st.perturb_progress_message),
-                Arc::clone(&st.perturb_job_cancel),
-                n_vars,
-                adata_path,
-                foyer,
-                epoch,
-            )
-        };
+    let (
+        n_obs,
+        targets,
+        gene,
+        rt,
+        gene_names,
+        job_p,
+        job_active,
+        job_msg,
+        cancel,
+        n_vars,
+        adata_path,
+        foyer,
+        epoch,
+    ) = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        let rt = perturb_runtime_or_status(ds)?;
+        let n_obs = ds.obs_names.len();
+        let targets = build_perturb_targets(ds, &body, n_obs)?;
+        let gene = targets[0].gene.clone();
+        if !rt.gene_names.iter().any(|g| g == &gene) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("gene {:?} not in model var_names", gene),
+            ));
+        }
+        let n_vars = ds.n_vars;
+        let adata_path = ds.adata_path.to_string_lossy().into_owned();
+        let epoch = st.dataset_cache_epoch.load(Ordering::SeqCst);
+        let foyer = Arc::clone(&st.foyer_caches);
+        (
+            n_obs,
+            targets,
+            gene.clone(),
+            Arc::clone(rt),
+            rt.gene_names.clone(),
+            Arc::clone(&st.perturb_job_progress_permille),
+            Arc::clone(&st.perturb_job_active),
+            Arc::clone(&st.perturb_progress_message),
+            Arc::clone(&st.perturb_job_cancel),
+            n_vars,
+            adata_path,
+            foyer,
+            epoch,
+        )
+    };
     cancel.store(false, Ordering::SeqCst);
     let cfg = perturb_cfg_for_request(&rt.perturb_cfg, n_propagation);
     job_p.store(0, Ordering::Relaxed);
@@ -4577,10 +4596,7 @@ async fn api_perturb_reference_similarity(
     .await
     .map_err(|_| {
         job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::REQUEST_TIMEOUT,
-            "Perturbation cancelled".into(),
-        )
+        (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
     job_p.store(1000, Ordering::Relaxed);
 
@@ -4755,8 +4771,19 @@ async fn api_perturb_neighbor_sanity(
     if gene.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "gene is empty".into()));
     }
-    let (n_obs, cluster_at, rt, job_p, job_active, job_msg, cancel, n_vars, adata_path, foyer, epoch) =
-        {
+    let (
+        n_obs,
+        cluster_at,
+        rt,
+        job_p,
+        job_active,
+        job_msg,
+        cancel,
+        n_vars,
+        adata_path,
+        foyer,
+        epoch,
+    ) = {
         let st = state.read().await;
         let ds = require_dataset(&st)?;
         let rt = perturb_runtime_or_status(ds)?;
@@ -5176,7 +5203,10 @@ fn resolve_static_dir(path: &Path) -> anyhow::Result<PathBuf> {
 /// All HDF5 / Polars / GRN work runs here on a plain OS thread (no Tokio runtime). Starting Tokio
 /// only for `axum::serve` avoids nested-runtime panics when Polars or other code calls into async
 /// runtimes during `LazyFrame::collect()` etc.
-fn build_app(cli: Cli, foyer: FoyerPerturbCaches) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
+fn build_app(
+    cli: Cli,
+    foyer: FoyerPerturbCaches,
+) -> anyhow::Result<(SocketAddr, Router, SharedState)> {
     let allow_cors = cli.allow_cors
         || std::env::var("SPATIAL_VIEWER_ALLOW_CORS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -5312,10 +5342,11 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let foyer = rt.block_on(foyer_perturb_cache::open_foyer_perturb_caches(
-        cli.perturb_cache_dir.as_deref(),
-    ))
-    .map_err(|e| anyhow!("foyer hybrid cache: {e}"))?;
+    let foyer = rt
+        .block_on(foyer_perturb_cache::open_foyer_perturb_caches(
+            cli.perturb_cache_dir.as_deref(),
+        ))
+        .map_err(|e| anyhow!("foyer hybrid cache: {e}"))?;
     let (addr, app, state) = build_app(cli, foyer)?;
 
     rt.block_on(async move {

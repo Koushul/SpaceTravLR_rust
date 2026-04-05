@@ -6,15 +6,14 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use foyer::{
-    BlockEngineConfig, Compression, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
-    RecoverMode,
+    BlockEngineConfig, Compression, DeviceBuilder, FsDeviceBuilder, HybridCache,
+    HybridCacheBuilder, RecoverMode,
 };
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::perturb::{PerturbConfig, PerturbResult, PerturbTarget};
 use crate::transition_umap::TransitionUmapParams;
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct PerturbCacheKey {
@@ -106,15 +105,14 @@ pub fn encode_perturb_result(r: &PerturbResult) -> anyhow::Result<Vec<u8>> {
         delta: r.delta.iter().copied().collect(),
         simulated: r.simulated.iter().copied().collect(),
     };
-    bincode::serde::encode_to_vec(&blob, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{e}"))
+    bincode::serde::encode_to_vec(&blob, bincode::config::standard())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub fn decode_perturb_result(bytes: &[u8]) -> anyhow::Result<PerturbResult> {
-    let (blob, _): (PerturbResultBlob, _) = bincode::serde::decode_from_slice(
-        bytes,
-        bincode::config::standard(),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (blob, _): (PerturbResultBlob, _) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     let n = blob.nrows * blob.ncols;
     anyhow::ensure!(blob.delta.len() == n, "delta length mismatch");
     anyhow::ensure!(blob.simulated.len() == n, "simulated length mismatch");
@@ -166,15 +164,14 @@ pub fn umap_grid_cache_key(
 }
 
 pub fn encode_umap_grid_blob(b: &UmapGridBlob) -> anyhow::Result<Vec<u8>> {
-    bincode::serde::encode_to_vec(b, bincode::config::standard()).map_err(|e| anyhow::anyhow!("{e}"))
+    bincode::serde::encode_to_vec(b, bincode::config::standard())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub fn decode_umap_grid_blob(bytes: &[u8]) -> anyhow::Result<UmapGridBlob> {
-    let (b, _): (UmapGridBlob, _) = bincode::serde::decode_from_slice(
-        bytes,
-        bincode::config::standard(),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (b, _): (UmapGridBlob, _) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(b)
 }
 
@@ -186,7 +183,9 @@ pub struct FoyerPerturbCaches {
     pub grid: Arc<GridHybridCache>,
 }
 
-pub async fn open_foyer_perturb_caches(cache_dir: Option<&Path>) -> anyhow::Result<FoyerPerturbCaches> {
+pub async fn open_foyer_perturb_caches(
+    cache_dir: Option<&Path>,
+) -> anyhow::Result<FoyerPerturbCaches> {
     let dir = match cache_dir {
         Some(p) => p.to_path_buf(),
         None => std::env::temp_dir().join("spacetravlr_foyer_perturb"),
@@ -241,8 +240,8 @@ pub async fn close_foyer_caches(c: &FoyerPerturbCaches) -> anyhow::Result<()> {
 
 #[cfg(all(test, feature = "spatial-viewer"))]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use ndarray::Array2;
     use tempfile::TempDir;

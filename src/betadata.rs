@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
-use std::io::IsTerminal;
 
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2, ArrayView1};
@@ -302,13 +302,7 @@ impl BetaFrame {
         }
 
         let gene_name = Self::extract_gene_name(path);
-        Self::from_raw(
-            gene_name,
-            row_labels,
-            data_col_names,
-            raw,
-            join_by_obs_name,
-        )
+        Self::from_raw(gene_name, row_labels, data_col_names, raw, join_by_obs_name)
     }
 
     /// Construct directly from typed arrays (useful for tests and programmatic construction).
@@ -845,9 +839,7 @@ impl Betabase {
             let pb = indicatif::ProgressBar::new(paths.len() as u64);
             pb.set_style(
                 indicatif::ProgressStyle::default_bar()
-                    .template(
-                        "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} Reading betadata",
-                    )?
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} Reading betadata")?
                     .progress_chars("#>-"),
             );
             Some(pb)
@@ -929,11 +921,7 @@ impl Betabase {
                 let m = Arc::new(if frame.join_by_obs_name {
                     BetaFrame::compute_cell_mapping_cellid_rows(&frame.row_labels, obs_names)
                 } else {
-                    BetaFrame::compute_cell_mapping(
-                        &frame.row_labels,
-                        obs_names,
-                        cluster_keys,
-                    )
+                    BetaFrame::compute_cell_mapping(&frame.row_labels, obs_names, cluster_keys)
                 });
                 last_row_labels = Some(frame.row_labels.clone());
                 last_join_by_obs = Some(frame.join_by_obs_name);
@@ -979,7 +967,9 @@ pub(crate) fn betadata_feather_label_column_index(all_names: &[String]) -> Optio
             return Some(i);
         }
     }
-    all_names.iter().position(|c| c.starts_with("__index") || c == "index")
+    all_names
+        .iter()
+        .position(|c| c.starts_with("__index") || c == "index")
 }
 
 #[inline]
@@ -1108,13 +1098,8 @@ pub fn betadata_feather_per_cell_column(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = betadata_feather_cell_mapping(
-        &all_names,
-        label_idx,
-        &row_labels,
-        obs_names,
-        cluster_keys,
-    );
+    let mapping =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let series = df
         .column(column)
         .with_context(|| format!("column {:?}", column))?
@@ -1176,13 +1161,8 @@ pub fn betadata_feather_top_coefficients_for_selection(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = betadata_feather_cell_mapping(
-        &all_names,
-        label_idx,
-        &row_labels,
-        obs_names,
-        cluster_keys,
-    );
+    let mapping =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
     let mut columns: Vec<String> = Vec::new();
@@ -1284,13 +1264,8 @@ pub fn betadata_feather_modulator_beta_means_for_cells(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = betadata_feather_cell_mapping(
-        &all_names,
-        label_idx,
-        &row_labels,
-        obs_names,
-        cluster_keys,
-    );
+    let mapping =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
     let mut col_by_mod: HashMap<String, String> = HashMap::new();
@@ -1448,13 +1423,8 @@ pub fn betadata_collect_interactions_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = betadata_feather_cell_mapping(
-        &all_names,
-        label_idx,
-        &row_labels,
-        obs_names,
-        cluster_keys,
-    );
+    let mapping =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
     let mut out = Vec::new();
@@ -1591,13 +1561,8 @@ pub fn betadata_pair_lr_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping = betadata_feather_cell_mapping(
-        &all_names,
-        label_idx,
-        &row_labels,
-        obs_names,
-        cluster_keys,
-    );
+    let mapping =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let ra = mapping[cell_a];
     let rb = mapping[cell_b];
 
@@ -1682,11 +1647,7 @@ mod feather_label_tests {
 
     #[test]
     fn label_index_prefers_cellid_when_cluster_is_first_column() {
-        let names = vec![
-            "Cluster".into(),
-            "CellID".into(),
-            "beta0".into(),
-        ];
+        let names = vec!["Cluster".into(), "CellID".into(), "beta0".into()];
         assert_eq!(betadata_feather_label_column_index(&names), Some(1));
     }
 

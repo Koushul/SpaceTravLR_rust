@@ -47,8 +47,7 @@ use crate::lasso::subsampling::SubsamplingScheme;
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Controls how per-group regularisation is scaled by group size.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScaleReg {
     /// Multiply by √(group size)  — default in the original paper.
     #[default]
@@ -58,7 +57,6 @@ pub enum ScaleReg {
     /// Divide by √(group size).
     InverseGroupSize,
 }
-
 
 /// All hyper-parameters for `GroupLasso`.
 ///

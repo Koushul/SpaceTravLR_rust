@@ -1,7 +1,5 @@
 #[cfg(feature = "spatial-viewer")]
 pub mod adata_query;
-#[cfg(feature = "spatial-viewer")]
-pub mod foyer_perturb_cache;
 pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
@@ -9,6 +7,8 @@ pub mod cnn_gating;
 pub mod condition_split;
 pub mod config;
 pub mod estimator;
+#[cfg(feature = "spatial-viewer")]
+pub mod foyer_perturb_cache;
 pub mod grn_extra;
 pub mod lasso;
 pub mod ligand;

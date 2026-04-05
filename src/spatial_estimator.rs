@@ -209,16 +209,15 @@ fn ensure_expression_layer_readable<AnB: Backend>(
     layer: &str,
 ) -> anyhow::Result<()> {
     let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
-    if layer != "X" && !layer.is_empty()
-        && adata.layers().get(layer).is_none() {
-            let keys = adata.layers().keys();
-            let preview: Vec<String> = keys.into_iter().take(20).collect();
-            anyhow::bail!(
-                "Expression layer {:?} is missing from AnnData.layers. Known keys (first 20): {:?}. Fix [data].layer in spaceship_config.toml or use \"X\".",
-                layer,
-                preview
-            );
-        }
+    if layer != "X" && !layer.is_empty() && adata.layers().get(layer).is_none() {
+        let keys = adata.layers().keys();
+        let preview: Vec<String> = keys.into_iter().take(20).collect();
+        anyhow::bail!(
+            "Expression layer {:?} is missing from AnnData.layers. Known keys (first 20): {:?}. Fix [data].layer in spaceship_config.toml or use \"X\".",
+            layer,
+            preview
+        );
+    }
     let data = read_expression_matrix_dense_f64(adata, layer, &slice)?;
     if data.nrows() != adata.n_obs() {
         anyhow::bail!(
@@ -1419,10 +1418,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let mut target_genes =
                 crate::config::filter_training_var_names(&all_var_names, gene_filter.as_deref());
             if let Some(ref filter) = gene_filter {
-                log_line(
-                    &hud,
-                    format!("Filtering for specific genes: {:?}", filter),
-                );
+                log_line(&hud, format!("Filtering for specific genes: {:?}", filter));
                 log_line(
                     &hud,
                     format!("Retained {} genes for training", target_genes.len()),
@@ -1788,17 +1784,17 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let handle = thread::Builder::new()
                     .stack_size(8 * 1024 * 1024)
                     .spawn(move || {
-                        let thread_adata =
-                            match H5::open(&adata_path).and_then(AnnData::<H5>::open) {
-                                Ok(a) => Arc::new(a),
-                                Err(e) => {
-                                    log_line(
-                                        &hud,
-                                        format!("ERROR: worker failed to open adata: {}", e),
-                                    );
-                                    return;
-                                }
-                            };
+                        let thread_adata = match H5::open(&adata_path).and_then(AnnData::<H5>::open)
+                        {
+                            Ok(a) => Arc::new(a),
+                            Err(e) => {
+                                log_line(
+                                    &hud,
+                                    format!("ERROR: worker failed to open adata: {}", e),
+                                );
+                                return;
+                            }
+                        };
 
                         let n_samples = xy.nrows();
                         let n_lasso_total = (0..num_clusters)

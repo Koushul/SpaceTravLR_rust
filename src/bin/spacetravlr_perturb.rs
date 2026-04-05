@@ -62,10 +62,7 @@ fn main() -> anyhow::Result<()> {
                 default_desired_expr: cli.desired_expr,
                 n_propagation_initial: cli.n_propagation,
                 verbose: cli.verbose,
-                toml_path_hint_for_error: cli
-                    .run_toml
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                toml_path_hint_for_error: cli.run_toml.as_ref().map(|p| p.display().to_string()),
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -137,7 +134,13 @@ fn main() -> anyhow::Result<()> {
     let p = export_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("export path must be UTF-8"))?;
-    write_betadata_feather(p, "CellID", &runtime.obs_names, &runtime.gene_names, &result.simulated)?;
+    write_betadata_feather(
+        p,
+        "CellID",
+        &runtime.obs_names,
+        &runtime.gene_names,
+        &result.simulated,
+    )?;
     eprintln!(
         "Wrote {} ({} cells × {} genes, n_propagation={})",
         export_path.display(),
@@ -163,8 +166,14 @@ fn main() -> anyhow::Result<()> {
             };
             eprintln!("  sums over iterations:");
             eprintln!("    splash: {:?}", sum_suffix("/splash"));
-            eprintln!("    weighted_ligands_lr: {:?}", sum_suffix("/weighted_ligands_lr"));
-            eprintln!("    weighted_ligands_tfl: {:?}", sum_suffix("/weighted_ligands_tfl"));
+            eprintln!(
+                "    weighted_ligands_lr: {:?}",
+                sum_suffix("/weighted_ligands_lr")
+            );
+            eprintln!(
+                "    weighted_ligands_tfl: {:?}",
+                sum_suffix("/weighted_ligands_tfl")
+            );
             eprintln!("    grn_propagate: {:?}", sum_suffix("/grn_propagate"));
             eprintln!("    pin_clip: {:?}", sum_suffix("/pin_clip"));
         }

@@ -330,10 +330,9 @@ impl GeneNetwork {
         if let Ok(src) = grn_df.column("source")?.cast(&DataType::String)?.str() {
             let mut seen = HashSet::new();
             for v in src.into_no_null_iter() {
-                if v != target_gene
-                    && seen.insert(v.to_string()) {
-                        regulators.push(v.to_string());
-                    }
+                if v != target_gene && seen.insert(v.to_string()) {
+                    regulators.push(v.to_string());
+                }
             }
         }
 

@@ -49,12 +49,7 @@ stale_lock_secs = 0
     );
     assert_eq!(cfg.training.max_genes, Some(2));
 
-    let all_var = vec![
-        "z".into(),
-        "g3".into(),
-        "g1".into(),
-        "g2".into(),
-    ];
+    let all_var = vec!["z".into(), "g3".into(), "g1".into(), "g2".into()];
     let queue = resolve_training_target_genes(
         &all_var,
         cfg.training.genes.as_deref(),

@@ -348,10 +348,7 @@ fn workers_in_columns(
                     pad_left_trunc_display(gene.as_str(), GENE_DISP),
                     Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(
-                    GENE_STAT_SEP,
-                    Style::default().fg(MUTED),
-                ));
+                spans.push(Span::styled(GENE_STAT_SEP, Style::default().fg(MUTED)));
                 spans.push(Span::styled(
                     pad_or_trunc_display(&status_line, STAT_DISP),
                     Style::default().fg(pc),

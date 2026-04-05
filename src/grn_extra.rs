@@ -255,10 +255,7 @@ mod tests {
 
     #[test]
     fn parse_lr_dollar_and_comma() {
-        assert_eq!(
-            parse_extra_lr_token("A$B"),
-            Some(("A".into(), "B".into()))
-        );
+        assert_eq!(parse_extra_lr_token("A$B"), Some(("A".into(), "B".into())));
         assert_eq!(
             parse_extra_lr_token("gene1,gene2"),
             Some(("gene1".into(), "gene2".into()))
@@ -271,7 +268,10 @@ mod tests {
         let mut l = vec!["L0".into()];
         let mut r = vec!["R0".into()];
         let mut p = vec!["L0$R0".into()];
-        let var: HashSet<_> = ["L0", "R0", "A", "B", "T"].into_iter().map(String::from).collect();
+        let var: HashSet<_> = ["L0", "R0", "A", "B", "T"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let pairs = vec![
             ("A".into(), "B".into()),
             ("T".into(), "A".into()),
@@ -285,14 +285,8 @@ mod tests {
     #[test]
     fn filter_extra_respects_occupied() {
         let req = vec!["A".into(), "B".into(), "C".into()];
-        let occupied: HashSet<String> = ["A", "target"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let var: HashSet<String> = ["A", "B", "C"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let occupied: HashSet<String> = ["A", "target"].into_iter().map(String::from).collect();
+        let var: HashSet<String> = ["A", "B", "C"].into_iter().map(String::from).collect();
         let f = filter_extra_modulators(&req, &occupied, &var);
         assert_eq!(f, vec!["B", "C"]);
     }

@@ -40,7 +40,9 @@ fn find_condition_dir_matches_label_file_not_sanitized_name() {
     fs::create_dir_all(&cond).unwrap();
     fs::write(cond.join("condition_label.txt"), "Patient / 1\n").unwrap();
     let got = find_condition_dir_matching_label(tmp.to_str().unwrap(), "Patient / 1");
-    assert_eq!(got.as_ref().map(|p| p.file_name().unwrap()), Some("weird_Old_Name".as_ref()));
+    assert_eq!(
+        got.as_ref().map(|p| p.file_name().unwrap()),
+        Some("weird_Old_Name".as_ref())
+    );
     let _ = fs::remove_dir_all(&tmp);
 }
-

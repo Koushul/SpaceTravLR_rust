@@ -1,7 +1,7 @@
 use ndarray::{Array2, array};
 use space_trav_lr_rust::betadata::{
-    BetaFrame, Betabase, GeneMatrix, betadata_feather_per_cell_column,
-    betadata_pair_lr_parallel, write_betadata_feather,
+    BetaFrame, Betabase, GeneMatrix, betadata_feather_per_cell_column, betadata_pair_lr_parallel,
+    write_betadata_feather,
 };
 use std::collections::HashSet;
 use std::sync::Arc;

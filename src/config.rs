@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 /// Canonical per-run TOML in the training output directory (full `SpaceshipConfig` as executed).
 pub const RUN_REPRO_TOML_FILENAME: &str = "spacetravlr_run_repro.toml";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SpaceshipConfig {
     #[serde(default)]
     pub data: DataConfig,
@@ -479,7 +478,6 @@ impl Default for ModelExportConfig {
     }
 }
 
-
 /// Expand `~` / `~/` in a path string (HOME / USERPROFILE).
 pub fn expand_user_path(s: &str) -> String {
     let s = s.trim();
@@ -736,7 +734,10 @@ mod resolve_training_output_dir_tests {
         cfg.training.max_genes = Some(128);
         let s = cfg.to_toml_pretty().unwrap();
         let back: SpaceshipConfig = toml::from_str(&s).expect("deserialize repro TOML");
-        assert_eq!(back.training.genes, Some(vec!["Actb".into(), "Gapdh".into()]));
+        assert_eq!(
+            back.training.genes,
+            Some(vec!["Actb".into(), "Gapdh".into()])
+        );
         assert_eq!(back.training.max_genes, Some(128));
     }
 
@@ -765,13 +766,7 @@ mod training_target_genes_tests {
     use super::{filter_training_var_names, resolve_training_target_genes};
 
     fn vars() -> Vec<String> {
-        vec![
-            "a".into(),
-            "b".into(),
-            "c".into(),
-            "d".into(),
-            "e".into(),
-        ]
+        vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]
     }
 
     #[test]

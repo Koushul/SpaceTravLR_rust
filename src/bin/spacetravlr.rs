@@ -916,7 +916,8 @@ fn main() -> anyhow::Result<()> {
             if !join_training {
                 cfg.write_run_repro_toml_if_missing(Path::new(&output_dir))?;
             }
-            let splits = prepare_condition_splits(&path, &output_dir, condition_col, join_training)?;
+            let splits =
+                prepare_condition_splits(&path, &output_dir, condition_col, join_training)?;
             println!(
                 "Condition split: obs.{:?} -> {} groups (betadata under {}/conditions/<group>/)",
                 condition_col,
@@ -937,7 +938,12 @@ fn main() -> anyhow::Result<()> {
                         };
                         println!(
                             "  {}: {} done ({} feather + {} orphan), {} active locks [{}]",
-                            cs.label, cs.n_done(), cs.n_feathers, cs.n_orphans, cs.n_locks, status,
+                            cs.label,
+                            cs.n_done(),
+                            cs.n_feathers,
+                            cs.n_orphans,
+                            cs.n_locks,
+                            status,
                         );
                     }
                 }
