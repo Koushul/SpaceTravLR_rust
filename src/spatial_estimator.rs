@@ -1114,7 +1114,7 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// User-requested genes in the fourth Lasso group (raw expression), after filtering vs target/occupied.
     pub extra_modulators: Vec<String>,
     pub modulators_genes: Vec<String>,
-    pub max_lr_pairs: Option<usize>,
+    pub max_ligands: Option<usize>,
     pub regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>>,
     pub seed_only: bool,
     pub estimator: Option<ClusteredGCNNWR<AB>>,
@@ -1133,8 +1133,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         spatial_dim: usize,
         contact_distance: f64,
         tf_ligand_cutoff: f64,
-        max_lr_pairs: Option<usize>,
-        top_lr_pairs_by_mean_expression: Option<usize>,
+        max_ligands: Option<usize>,
         gene_mean_expression: Option<Arc<HashMap<String, f64>>>,
         use_tf_modulators: bool,
         use_lr_modulators: bool,
@@ -1158,8 +1157,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             .get_modulators(
                 &target_gene_str,
                 tf_ligand_cutoff,
-                max_lr_pairs,
-                top_lr_pairs_by_mean_expression,
+                max_ligands,
                 gene_mean_expression.as_deref(),
             )?
             .apply_modulator_mask(use_tf_modulators, use_lr_modulators, use_tfl_modulators);
@@ -1281,7 +1279,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             tfl_pairs,
             extra_modulators: extra_modulators_accepted,
             modulators_genes: modulators_genes_ordered,
-            max_lr_pairs,
+            max_ligands,
             regulator_masks_by_cluster,
             seed_only: false,
             estimator: None,
@@ -1299,7 +1297,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         spatial_dim: usize,
         contact_distance: f64,
         tf_ligand_cutoff: f64,
-        max_lr_pairs: Option<usize>,
+        max_ligands: Option<usize>,
     ) -> anyhow::Result<Self> {
         let adata_var_names = adata.var_names().into_vec();
         let species = crate::network::infer_species(&adata_var_names);
@@ -1315,8 +1313,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             spatial_dim,
             contact_distance,
             tf_ligand_cutoff,
-            max_lr_pairs,
-            None,
+            max_ligands,
             None,
             true,
             true,
@@ -1343,8 +1340,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         spatial_dim: usize,
         contact_distance: f64,
         tf_ligand_cutoff: f64,
-        max_lr_pairs: Option<usize>,
-        top_lr_pairs_by_mean_expression: Option<usize>,
+        max_ligands: Option<usize>,
         use_tf_modulators: bool,
         use_lr_modulators: bool,
         use_tfl_modulators: bool,
@@ -1630,7 +1626,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 && hybrid_gating.min_mean_target_expression_for_cnn.is_some();
 
             let gene_mean_arc: Option<Arc<HashMap<String, f64>>> =
-                if top_lr_pairs_by_mean_expression.is_some() || compute_mean_for_hybrid {
+                if max_ligands.map_or(false, |k| k > 0) || compute_mean_for_hybrid {
                     let t_m =
                         pipeline_step_begin(&hud, "per-gene mean expression (full matrix pass)");
                     let gm = compute_gene_mean_expression(
@@ -1947,8 +1943,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 spatial_dim,
                                 contact_distance,
                                 tf_ligand_cutoff,
-                                max_lr_pairs,
-                                top_lr_pairs_by_mean_expression,
+                                max_ligands,
                                 gene_mean_arc.clone(),
                                 use_tf_modulators,
                                 use_lr_modulators,
@@ -2511,8 +2506,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             spatial_dim,
                             contact_distance,
                             tf_ligand_cutoff,
-                            max_lr_pairs,
-                            top_lr_pairs_by_mean_expression,
+                            max_ligands,
                             use_tf_modulators,
                             use_lr_modulators,
                             use_tfl_modulators,

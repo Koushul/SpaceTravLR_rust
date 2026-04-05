@@ -1196,8 +1196,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         lbl("GRN  "),
                         val(
                             format!(
-                                "tf_lig≥{:.2}  max_lr={}  top_lr={}",
-                                rc.tf_ligand_cutoff, rc.max_lr_pairs, rc.top_lr_pairs
+                                "tf_lig≥{:.2}  max_ligands={}",
+                                rc.tf_ligand_cutoff, rc.max_ligands
                             ),
                             MUTED,
                         ),

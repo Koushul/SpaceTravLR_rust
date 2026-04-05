@@ -264,6 +264,51 @@ pub fn infer_species(var_names: &[String]) -> &'static str {
     }
 }
 
+/// Keep only L–R rows whose ligand ranks in the top `max_ligands` by `gene_mean_expression`
+/// (descending mean; tie-break lexicographic on ligand name). `max_ligands` must be `Some(k)` with `k > 0`.
+pub(crate) fn apply_max_ligands_filter(
+    ligands: &mut Vec<String>,
+    receptors: &mut Vec<String>,
+    lr_pairs: &mut Vec<String>,
+    max_ligands: Option<usize>,
+    gene_mean_expression: &HashMap<String, f64>,
+) {
+    let n = lr_pairs.len();
+    if n == 0 {
+        return;
+    }
+    let Some(k_raw) = max_ligands else {
+        return;
+    };
+    if k_raw == 0 {
+        return;
+    }
+    let k = k_raw.max(1);
+    let mut unique: Vec<String> = ligands.iter().cloned().collect::<HashSet<_>>().into_iter().collect();
+    unique.sort_by(|a, b| {
+        let ma = gene_mean_expression.get(a.as_str()).copied().unwrap_or(0.0);
+        let mb = gene_mean_expression.get(b.as_str()).copied().unwrap_or(0.0);
+        mb.partial_cmp(&ma)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+    let take_n = k.min(unique.len());
+    let allowed: HashSet<String> = unique.into_iter().take(take_n).collect();
+    let mut new_l = Vec::new();
+    let mut new_r = Vec::new();
+    let mut new_p = Vec::new();
+    for i in 0..n {
+        if allowed.contains(&ligands[i]) {
+            new_l.push(ligands[i].clone());
+            new_r.push(receptors[i].clone());
+            new_p.push(lr_pairs[i].clone());
+        }
+    }
+    *ligands = new_l;
+    *receptors = new_r;
+    *lr_pairs = new_p;
+}
+
 impl GeneNetwork {
     pub fn new(
         species: &str,
@@ -308,8 +353,7 @@ impl GeneNetwork {
         &self,
         target_gene: &str,
         tf_ligand_cutoff: f64,
-        max_lr_pairs: Option<usize>,
-        top_lr_pairs_by_mean_expression: Option<usize>,
+        max_ligands: Option<usize>,
         gene_mean_expression: Option<&HashMap<String, f64>>,
     ) -> Result<Modulators> {
         let lf = self.network_df.clone().lazy();
@@ -365,14 +409,18 @@ impl GeneNetwork {
             }
         }
 
-        Self::select_lr_pairs(
-            &mut ligands,
-            &mut receptors,
-            &mut lr_pairs,
-            max_lr_pairs,
-            top_lr_pairs_by_mean_expression,
-            gene_mean_expression,
-        );
+        if let Some(k) = max_ligands {
+            if k > 0 && gene_mean_expression.is_none() {
+                anyhow::bail!(
+                    "max_ligands={k} requires per-gene mean expression (from [data].layer); gene_mean_expression is missing"
+                );
+            }
+        }
+        if let (Some(means), Some(k)) = (gene_mean_expression, max_ligands) {
+            if k > 0 {
+                apply_max_ligands_filter(&mut ligands, &mut receptors, &mut lr_pairs, max_ligands, means);
+            }
+        }
 
         // --- 3. NicheNet Pairs (edge_type == "nichenet") ---
         let regs_len = regulators.len() as u32;
@@ -446,55 +494,6 @@ impl GeneNetwork {
             lr_pairs,
             tfl_pairs,
         })
-    }
-
-    fn lr_pair_mean_expr_score(ligand: &str, receptor: &str, means: &HashMap<String, f64>) -> f64 {
-        let ml = means.get(ligand).copied().unwrap_or(0.0);
-        let mr = means.get(receptor).copied().unwrap_or(0.0);
-        0.5 * (ml + mr)
-    }
-
-    fn select_lr_pairs(
-        ligands: &mut Vec<String>,
-        receptors: &mut Vec<String>,
-        lr_pairs: &mut Vec<String>,
-        max_lr_pairs: Option<usize>,
-        top_by_mean_expr: Option<usize>,
-        gene_mean_expression: Option<&HashMap<String, f64>>,
-    ) {
-        let n = lr_pairs.len();
-        if n == 0 {
-            return;
-        }
-
-        if let (Some(k), Some(means)) = (top_by_mean_expr, gene_mean_expression) {
-            let k = k.min(n);
-            let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by(|&a, &b| {
-                let sa = Self::lr_pair_mean_expr_score(&ligands[a], &receptors[a], means);
-                let sb = Self::lr_pair_mean_expr_score(&ligands[b], &receptors[b], means);
-                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let mut new_l = Vec::with_capacity(k);
-            let mut new_r = Vec::with_capacity(k);
-            let mut new_p = Vec::with_capacity(k);
-            for &i in order.iter().take(k) {
-                new_l.push(ligands[i].clone());
-                new_r.push(receptors[i].clone());
-                new_p.push(lr_pairs[i].clone());
-            }
-            *ligands = new_l;
-            *receptors = new_r;
-            *lr_pairs = new_p;
-            return;
-        }
-
-        if let Some(k) = max_lr_pairs {
-            let k = k.min(n);
-            ligands.truncate(k);
-            receptors.truncate(k);
-            lr_pairs.truncate(k);
-        }
     }
 
     /// Curated `ligand$receptor` keys for `edge_type == "lr"` (as in betadata column stems).
@@ -654,5 +653,26 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
         let net = GeneNetwork::new("mouse", &genes, Some(dir.to_str().unwrap())).unwrap();
         assert!(net.network_path.ends_with("mouse_network.parquet"));
+    }
+
+    #[test]
+    fn max_ligands_filter_keeps_top_ligands_by_mean() {
+        let mut ligands = vec!["low".into(), "high".into(), "mid".into()];
+        let mut receptors = vec!["R1".into(), "R2".into(), "R3".into()];
+        let mut lr_pairs = vec!["low$R1".into(), "high$R2".into(), "mid$R3".into()];
+        let mut means = HashMap::new();
+        means.insert("low".into(), 1.0);
+        means.insert("high".into(), 10.0);
+        means.insert("mid".into(), 5.0);
+        apply_max_ligands_filter(
+            &mut ligands,
+            &mut receptors,
+            &mut lr_pairs,
+            Some(2),
+            &means,
+        );
+        assert_eq!(lr_pairs.len(), 2);
+        assert!(lr_pairs.contains(&"high$R2".into()));
+        assert!(lr_pairs.contains(&"mid$R3".into()));
     }
 }

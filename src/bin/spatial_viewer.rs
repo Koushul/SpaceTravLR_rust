@@ -2365,7 +2365,6 @@ async fn api_network_cell_context(
         .get_modulators(
             focus_gene,
             body.tf_ligand_cutoff,
-            Some(800),
             Some(120),
             Some(&expr_map),
         )

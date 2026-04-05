@@ -170,12 +170,12 @@ struct Cli {
     max_genes: Option<usize>,
 
     #[arg(
-        long = "max-lr-pairs",
+        long = "max-ligands",
         value_name = "N",
         help_heading = "Gene list & GRN extras",
-        help = "Max ligand–receptor pairs from the reference GRN (database order)"
+        help = "Keep only DB L–R pairs whose ligand ranks in the top N by mean expression ([data].layer)"
     )]
-    max_lr_pairs: Option<usize>,
+    max_ligands: Option<usize>,
 
     #[arg(
         long = "extra-modulators",
@@ -370,8 +370,8 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     if let Some(v) = cli.parallel {
         cfg.execution.n_parallel = v.max(1);
     }
-    if let Some(v) = cli.max_lr_pairs {
-        cfg.grn.max_lr_pairs = Some(v.max(1));
+    if let Some(v) = cli.max_ligands {
+        cfg.grn.max_ligands = Some(v.max(1));
     }
     if let Some(p) = &cli.output_dir {
         cfg.execution.output_dir = p.display().to_string();
@@ -482,7 +482,7 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             || cli.group_reg.is_some()
             || cli.n_iter.is_some()
             || cli.tol.is_some()
-            || cli.max_lr_pairs.is_some()
+            || cli.max_ligands.is_some()
             || cli.training_mode.is_some()
             || cli.output_dir.is_some()
             || cli.cnn_output_activation.is_some()
@@ -601,10 +601,9 @@ fn print_plain_preamble(
         summary.cnn_training_mode, summary.learning_rate, summary.score_threshold
     );
     println!(
-        "GRN:         tf_lig≥{}  max_lr={}  top_lr={}  mods={}",
+        "GRN:         tf_lig≥{}  max_ligands={}  mods={}",
         summary.tf_ligand_cutoff,
-        summary.max_lr_pairs,
-        summary.top_lr_pairs,
+        summary.max_ligands,
         grn_modulator_label(cfg)
     );
     println!("Genes:       {}", summary.gene_selection);
@@ -962,8 +961,7 @@ fn main() -> anyhow::Result<()> {
                     spatial_dim: cfg.spatial.spatial_dim,
                     contact_distance: cfg.spatial.contact_distance,
                     tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
-                    max_lr_pairs: cfg.grn.max_lr_pairs,
-                    top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                    max_ligands: cfg.grn.max_ligands,
                     use_tf_modulators: cfg.grn.use_tf_modulators,
                     use_lr_modulators: cfg.grn.use_lr_modulators,
                     use_tfl_modulators: cfg.grn.use_tfl_modulators,
@@ -1004,8 +1002,7 @@ fn main() -> anyhow::Result<()> {
                 spatial_dim: cfg.spatial.spatial_dim,
                 contact_distance: cfg.spatial.contact_distance,
                 tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
-                max_lr_pairs: cfg.grn.max_lr_pairs,
-                top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                max_ligands: cfg.grn.max_ligands,
                 use_tf_modulators: cfg.grn.use_tf_modulators,
                 use_lr_modulators: cfg.grn.use_lr_modulators,
                 use_tfl_modulators: cfg.grn.use_tfl_modulators,
@@ -1088,8 +1085,7 @@ fn main() -> anyhow::Result<()> {
                         spatial_dim: cfg.spatial.spatial_dim,
                         contact_distance: cfg.spatial.contact_distance,
                         tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
-                        max_lr_pairs: cfg.grn.max_lr_pairs,
-                        top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                        max_ligands: cfg.grn.max_ligands,
                         use_tf_modulators: cfg.grn.use_tf_modulators,
                         use_lr_modulators: cfg.grn.use_lr_modulators,
                         use_tfl_modulators: cfg.grn.use_tfl_modulators,
@@ -1131,8 +1127,7 @@ fn main() -> anyhow::Result<()> {
                     spatial_dim: cfg.spatial.spatial_dim,
                     contact_distance: cfg.spatial.contact_distance,
                     tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
-                    max_lr_pairs: cfg.grn.max_lr_pairs,
-                    top_lr_pairs_by_mean_expression: cfg.grn.top_lr_pairs_by_mean_expression,
+                    max_ligands: cfg.grn.max_ligands,
                     use_tf_modulators: cfg.grn.use_tf_modulators,
                     use_lr_modulators: cfg.grn.use_lr_modulators,
                     use_tfl_modulators: cfg.grn.use_tfl_modulators,

@@ -19,8 +19,7 @@ pub struct RunConfigSummary {
     pub contact_distance: f64,
     pub weighted_ligand_scale_factor: f64,
     pub tf_ligand_cutoff: f64,
-    pub max_lr_pairs: String,
-    pub top_lr_pairs: String,
+    pub max_ligands: String,
     pub l1_reg: f64,
     pub group_reg: f64,
     pub n_iter: usize,
@@ -48,15 +47,10 @@ impl RunConfigSummary {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "spaceship_config.toml (search path)".to_string());
 
-        let max_lr_pairs = cfg
+        let max_ligands = cfg
             .grn
-            .max_lr_pairs
+            .max_ligands
             .map(|n| n.to_string())
-            .unwrap_or_else(|| "—".to_string());
-        let top_lr_pairs = cfg
-            .grn
-            .top_lr_pairs_by_mean_expression
-            .map(|n| format!("{}", n))
             .unwrap_or_else(|| "—".to_string());
 
         let cnn_training_mode = match cfg.resolved_cnn_mode() {
@@ -92,8 +86,7 @@ impl RunConfigSummary {
             contact_distance: cfg.spatial.contact_distance,
             weighted_ligand_scale_factor: cfg.spatial.weighted_ligand_scale_factor,
             tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
-            max_lr_pairs,
-            top_lr_pairs,
+            max_ligands,
             l1_reg: cfg.lasso.l1_reg,
             group_reg: cfg.lasso.group_reg,
             n_iter: cfg.lasso.n_iter,

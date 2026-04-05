@@ -33,11 +33,10 @@ weighted_ligand_scale_factor = 1.0
 # tf_priors_feather = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/SlideTagsKidney/xenium_skin_links.feather"
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.15
-# Cap LR pairs in database order when NOT using expression ranking (omit = no limit)
+# Optional: keep only DB L–R pairs whose ligand is in the top N by per-gene mean expression
+# using [data].layer (e.g. imputed_count). Omit = no cap. TOML may still use legacy key:
 # max_lr_pairs = 50
-# Keep only the top K LR pairs by mean expression: score = 0.5 * (mean_ligand + mean_receptor)
-# across all cells, using [data].layer. When set, max_lr_pairs is ignored.
-# top_lr_pairs_by_mean_expression = 100
+# Keys like top_lr_pairs_by_mean_expression are ignored if present (removed option).
 # Subset modulator groups (default all true). Set false to ablate TF / LR / TF–ligand (NicheNet) features.
 # use_tf_modulators = true
 # use_lr_modulators = true

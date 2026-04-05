@@ -61,13 +61,11 @@ pub struct GrnConfig {
     /// `source` (TF), `target` (gene), `cell_type` (obs.cell_type label).
     pub tf_priors_feather: Option<String>,
     pub tf_ligand_cutoff: f64,
-    /// Cap LR pairs in database order (no expression ranking).
-    pub max_lr_pairs: Option<usize>,
-    /// Keep only this many LR pairs with highest mean expression
-    /// (average of ligand and receptor means across cells). Requires a full
-    /// pass over the expression matrix at pipeline start. Ignores `max_lr_pairs`
-    /// when set.
-    pub top_lr_pairs_by_mean_expression: Option<usize>,
+    /// Keep only DB L–R pairs whose **ligand** is among the top `max_ligands` by mean expression
+    /// (uses `[data].layer`, e.g. `imputed_count`). Requires per-gene mean map when training.
+    /// Deserialize accepts legacy TOML key `max_lr_pairs`.
+    #[serde(alias = "max_lr_pairs")]
+    pub max_ligands: Option<usize>,
     #[serde(default = "default_true")]
     pub use_tf_modulators: bool,
     #[serde(default = "default_true")]
@@ -306,8 +304,7 @@ impl Default for GrnConfig {
             network_data_dir: None,
             tf_priors_feather: None,
             tf_ligand_cutoff: 0.2,
-            max_lr_pairs: None,
-            top_lr_pairs_by_mean_expression: None,
+            max_ligands: None,
             use_tf_modulators: true,
             use_lr_modulators: true,
             use_tfl_modulators: true,
