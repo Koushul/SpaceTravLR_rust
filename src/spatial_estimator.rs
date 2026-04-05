@@ -136,11 +136,11 @@ fn array_data_to_dense_f64(data: ArrayData) -> anyhow::Result<Array2<f64>> {
     }
 }
 
-pub(crate) fn read_expression_matrix_dense_f64<AnB: Backend>(
+fn expression_array_data_for_slice<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
     slice: &[SelectInfoElem],
-) -> anyhow::Result<Array2<f64>> {
+) -> anyhow::Result<ArrayData> {
     let data: ArrayData = if layer != "X" && !layer.is_empty() {
         if let Some(layer_elem) = adata.layers().get(layer) {
             layer_elem
@@ -167,7 +167,35 @@ pub(crate) fn read_expression_matrix_dense_f64<AnB: Backend>(
             .slice(slice)?
             .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
     };
+    Ok(data)
+}
+
+pub(crate) fn read_expression_matrix_dense_f64<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    layer: &str,
+    slice: &[SelectInfoElem],
+) -> anyhow::Result<Array2<f64>> {
+    let data = expression_array_data_for_slice(adata, layer, slice)?;
     array_data_to_dense_f64(data)
+}
+
+/// When the sliced `X`/layer is canonical CSR in AnnData, returns it without densifying (useful for
+/// future column-wise pipelines). Dense or CSC layouts return [`None`] — use [`read_expression_matrix_dense_f64`].
+#[allow(dead_code)]
+pub(crate) fn try_read_expression_csr_f64<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    layer: &str,
+    slice: &[SelectInfoElem],
+) -> anyhow::Result<Option<CsrMatrix<f64>>> {
+    let data = expression_array_data_for_slice(adata, layer, slice)?;
+    match data {
+        ArrayData::CsrMatrix(csr) => Ok(Some(csr.try_convert()?)),
+        ArrayData::CsrNonCanonical(non) => match non.canonicalize() {
+            Ok(csr) => Ok(Some(csr.try_convert()?)),
+            Err(_) => anyhow::bail!("Failed to canonicalize non-canonical CSR matrix."),
+        },
+        ArrayData::Array(_) | ArrayData::CscMatrix(_) | ArrayData::DataFrame(_) => Ok(None),
+    }
 }
 
 /// Read `obsm[key]` as a dense matrix in `f64`. HDF5 may store the same logical array as `f32` or

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ndarray::Array2;
+use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +70,38 @@ impl PerturbTimings {
 pub struct PerturbResult {
     pub simulated: Array2<f64>,
     pub delta: Array2<f64>,
+}
+
+/// Rebuild [`PerturbResult::simulated`] from baseline expression and final δ (matches the end of [`perturb_with_targets`]).
+pub fn perturb_result_from_delta(
+    gene_mtx: &Array2<f64>,
+    delta: Array2<f64>,
+    targets: &[PerturbTarget],
+    gene_names: &[String],
+) -> PerturbResult {
+    let n_cells = gene_mtx.nrows();
+    let gene_to_idx: HashMap<&str, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i))
+        .collect();
+    let mut simulated = gene_mtx + &delta;
+    for target in targets {
+        if let Some(&idx) = gene_to_idx.get(target.gene.as_str()) {
+            if let Some(cell_indices) = target.cell_indices.as_ref() {
+                for &cell in cell_indices {
+                    if cell < n_cells {
+                        simulated[[cell, idx]] = target.desired_expr;
+                    }
+                }
+            } else {
+                for cell in 0..n_cells {
+                    simulated[[cell, idx]] = target.desired_expr;
+                }
+            }
+        }
+    }
+    PerturbResult { simulated, delta }
 }
 
 /// Simulate gene perturbation and propagate effects through the spatial GRN.
@@ -210,7 +242,8 @@ pub fn perturb_with_targets(
         rw_ligands_init.col_names.clone(),
     );
 
-    let mut gene_mtx_1 = gene_mtx.clone();
+    let mut gene_mtx_work: Option<Array2<f64>> = None;
+    let mut perturb_scratch: Vec<f64> = vec![0.0f64; n_cells * n_genes];
 
     let max_per_gene: Vec<f64> = (0..n_genes)
         .map(|j| gene_mtx.column(j).iter().cloned().fold(0.0f64, f64::max))
@@ -256,6 +289,7 @@ pub fn perturb_with_targets(
             beta_cap: config.beta_cap.map(|c| c as f32),
             min_expression: config.min_expression,
         };
+        let expr_for_splash: &Array2<f64> = gene_mtx_work.as_ref().map_or(gene_mtx, |m| m);
         let splashed: Arc<HashMap<String, GeneMatrix>> = if iter == 0 {
             if let Some(slot) = baseline_splash_cache {
                 let mut guard = slot.lock().expect("baseline splash cache poisoned");
@@ -263,10 +297,11 @@ pub fn perturb_with_targets(
                     if cached.key == splash_key {
                         Arc::clone(&cached.splashed)
                     } else {
-                        let gex_filtered =
-                            gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-                        let gex_gm =
-                            GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+                        let gex_gm = gene_matrix_masked_f32_from_expr(
+                            expr_for_splash,
+                            config.min_expression,
+                            gene_names,
+                        );
                         let map = compute_splash_all_progress(
                             bb,
                             &rw_lr_for_splash,
@@ -284,10 +319,11 @@ pub fn perturb_with_targets(
                         arc
                     }
                 } else {
-                    let gex_filtered =
-                        gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-                    let gex_gm =
-                        GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+                    let gex_gm = gene_matrix_masked_f32_from_expr(
+                        expr_for_splash,
+                        config.min_expression,
+                        gene_names,
+                    );
                     let map = compute_splash_all_progress(
                         bb,
                         &rw_lr_for_splash,
@@ -305,9 +341,11 @@ pub fn perturb_with_targets(
                     arc
                 }
             } else {
-                let gex_filtered =
-                    gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-                let gex_gm = GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+                let gex_gm = gene_matrix_masked_f32_from_expr(
+                    expr_for_splash,
+                    config.min_expression,
+                    gene_names,
+                );
                 if job_progress.is_some() {
                     Arc::new(compute_splash_all_progress(
                         bb,
@@ -330,8 +368,8 @@ pub fn perturb_with_targets(
                 }
             }
         } else {
-            let gex_filtered = gene_mtx_1.mapv(|v| if v > config.min_expression { v } else { 0.0 });
-            let gex_gm = GeneMatrix::new(gex_filtered.mapv(|v| v as f32), gene_names.to_vec());
+            let gex_gm =
+                gene_matrix_masked_f32_from_expr(expr_for_splash, config.min_expression, gene_names);
             if job_progress.is_some() {
                 Arc::new(compute_splash_all_progress(
                     bb,
@@ -368,11 +406,12 @@ pub fn perturb_with_targets(
 
         // 2. Update gene expression
         let t_lr = Instant::now();
-        gene_mtx_1 = gene_mtx + &delta_simulated;
+        gene_mtx_work = Some(gene_mtx + &delta_simulated);
+        let gene_mtx_1 = gene_mtx_work.as_ref().expect("gene_mtx_work set above");
 
         // 3. Recompute weighted ligands
         let w_lr_new = recompute_weighted_ligands(
-            &gene_mtx_1,
+            gene_mtx_1,
             &gene_to_idx,
             &lr_ligands,
             xy,
@@ -395,7 +434,7 @@ pub fn perturb_with_targets(
         );
         let t_tfl = Instant::now();
         let w_tfl_new = recompute_weighted_ligands(
-            &gene_mtx_1,
+            gene_mtx_1,
             &gene_to_idx,
             &tfl_ligands,
             xy,
@@ -413,21 +452,28 @@ pub fn perturb_with_targets(
 
         // 4. Delta in received ligands
         let t_grn = Instant::now();
+        let lr_col_names = w_lr_new.col_names.clone();
         let rw_max_1 = scatter_max_to_full(&w_lr_new, &w_tfl_new, &gene_to_idx, n_cells, n_genes);
+        drop((w_lr_new, w_tfl_new));
+
         let delta_rw = &rw_max_1 - &rw_max_0;
+        rw_lr_for_splash = gene_matrix_narrow_lr_from_full(&rw_max_1, &gene_to_idx, &lr_col_names);
+        drop(rw_max_1);
 
-        // rw_lr_for_splash becomes max-combined for next iteration (Python behavior)
-        rw_lr_for_splash = GeneMatrix::new(rw_max_1.mapv(|v| v as f32), gene_names.to_vec());
-
-        // 5. Delta in ligand expression
-        let mut ligands_1 = Array2::zeros((n_cells, n_genes));
+        // 5–6. Replace direct ligand expression deltas with received-ligand deltas (Python parity):
+        // δ ← δ + (rw₁−rw₀) − (lig_expr₁−lig_expr₀); non-ligand genes: only +Δrw.
+        delta_simulated = &delta_simulated + &delta_rw;
         for &idx in &ligand_gene_indices {
-            ligands_1.column_mut(idx).assign(&gene_mtx_1.column(idx));
+            let l0 = ligands_0.column(idx);
+            let l1 = gene_mtx_1.column(idx);
+            let mut dcol = delta_simulated.column_mut(idx);
+            Zip::from(&mut dcol)
+                .and(&l1)
+                .and(&l0)
+                .for_each(|d, &v1, &v0| {
+                    *d -= v1 - v0;
+                });
         }
-        let delta_ligands = &ligands_1 - &ligands_0;
-
-        // 6. Replace ligand deltas with received-ligand deltas
-        delta_simulated = &delta_simulated + &delta_rw - &delta_ligands;
 
         report_perturb_step(
             job_progress,
@@ -436,7 +482,17 @@ pub fn perturb_with_targets(
             &format!("{msg_prefix} · GRN step (δ → Δexpr)"),
         );
         // 7. Perturb all cells: delta_y = splash_derivatives · delta_x
-        delta_simulated = perturb_all_cells(gene_names, bb, splashed.as_ref(), &delta_simulated);
+        perturb_all_cells_into(
+            gene_names,
+            bb,
+            splashed.as_ref(),
+            &delta_simulated,
+            &mut perturb_scratch,
+        );
+        delta_simulated
+            .as_slice_memory_order_mut()
+            .unwrap()
+            .copy_from_slice(&perturb_scratch);
         if let Some(t) = timings.as_mut() {
             t.record(format!("iter{}/grn_propagate", iter + 1), t_grn.elapsed());
         }
@@ -496,22 +552,7 @@ pub fn perturb_with_targets(
         "GRN perturbation · assembling result…",
     );
 
-    let mut simulated = gene_mtx + &delta_simulated;
-    for target in targets {
-        if let Some(&idx) = gene_to_idx.get(target.gene.as_str()) {
-            if let Some(cell_indices) = target.cell_indices.as_ref() {
-                for &cell in cell_indices {
-                    if cell < n_cells {
-                        simulated[[cell, idx]] = target.desired_expr;
-                    }
-                }
-            } else {
-                for cell in 0..n_cells {
-                    simulated[[cell, idx]] = target.desired_expr;
-                }
-            }
-        }
-    }
+    let out = perturb_result_from_delta(gene_mtx, delta_simulated, targets, gene_names);
 
     report_perturb_step(
         job_progress,
@@ -520,10 +561,34 @@ pub fn perturb_with_targets(
         "GRN perturbation · complete",
     );
 
-    Ok(PerturbResult {
-        simulated,
-        delta: delta_simulated,
-    })
+    Ok(out)
+}
+
+/// Copy **LR received-ligand** channels from a full `scatter_max` matrix into the narrow
+/// layout expected by [`BetaFrame::splash`] (column lookup by ligand gene name only).
+///
+/// Building splash input with all `n_genes` columns wasted ~`n_cells × n_genes × 4` bytes per
+/// propagation iteration and contributed to OOM on large atlases.
+fn gene_matrix_narrow_lr_from_full(
+    full: &Array2<f64>,
+    gene_to_idx: &HashMap<&str, usize>,
+    lr_col_names: &[String],
+) -> GeneMatrix {
+    let n_cells = full.nrows();
+    if lr_col_names.is_empty() {
+        return GeneMatrix::new(ndarray::Array2::<f32>::zeros((n_cells, 0)), Vec::new());
+    }
+    let mut data = ndarray::Array2::<f32>::zeros((n_cells, lr_col_names.len()));
+    for (j, name) in lr_col_names.iter().enumerate() {
+        if let Some(&gi) = gene_to_idx.get(name.as_str()) {
+            let src = full.column(gi);
+            let mut dst = data.column_mut(j);
+            for i in 0..n_cells {
+                dst[i] = src[i] as f32;
+            }
+        }
+    }
+    GeneMatrix::new(data, lr_col_names.to_vec())
 }
 
 /// max(rw_lr, rw_tfl) scattered into a (n_cells × n_genes) dense array.
@@ -550,6 +615,22 @@ fn scatter_max_to_full(
         }
     }
     result
+}
+
+fn gene_matrix_masked_f32_from_expr(
+    expr: &Array2<f64>,
+    min_expression: f64,
+    gene_names: &[String],
+) -> GeneMatrix {
+    let n_cells = expr.nrows();
+    let n_genes = expr.ncols();
+    let mut out = ndarray::Array2::<f32>::zeros((n_cells, n_genes));
+    Zip::from(&mut out)
+        .and(expr)
+        .for_each(|o, &v| {
+            *o = if v > min_expression { v as f32 } else { 0.0 };
+        });
+    GeneMatrix::new(out, gene_names.to_vec())
 }
 
 /// Partial derivatives ∂(target)/∂(modulator) for every trained target (baseline WL + expression).
@@ -607,15 +688,19 @@ pub fn compute_splash_all_progress(
 }
 
 /// For each gene with a trained model:
-///   result[cell, gene_idx] = Σ_k splash[cell, k] · delta[cell, mod_idx[k]]
-fn perturb_all_cells(
+///   out[cell, gene_idx] = Σ_k splash[cell, k] · delta[cell, mod_idx[k]]
+///
+/// `out_row_major` must have length `n_cells * n_genes` (row-major); it is zeroed then filled.
+fn perturb_all_cells_into(
     gene_names: &[String],
     bb: &Betabase,
     splashed: &HashMap<String, GeneMatrix>,
     delta_simulated: &Array2<f64>,
-) -> Array2<f64> {
+    out_row_major: &mut [f64],
+) {
     let n_cells = delta_simulated.nrows();
     let n_genes = gene_names.len();
+    assert_eq!(out_row_major.len(), n_cells * n_genes);
 
     struct GeneWork<'a> {
         gene_col: usize,
@@ -640,10 +725,9 @@ fn perturb_all_cells(
         })
         .collect();
 
-    let delta_flat = delta_simulated.as_slice().unwrap();
-    let mut result = vec![0.0f64; n_cells * n_genes];
-
-    result
+    let delta_flat = delta_simulated.as_slice_memory_order().unwrap();
+    out_row_major.fill(0.0);
+    out_row_major
         .par_chunks_mut(n_genes)
         .enumerate()
         .for_each(|(cell, r)| {
@@ -661,8 +745,6 @@ fn perturb_all_cells(
                 r[w.gene_col] = sum;
             }
         });
-
-    Array2::from_shape_vec((n_cells, n_genes), result).unwrap()
 }
 
 fn recompute_weighted_ligands(

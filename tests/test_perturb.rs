@@ -1575,3 +1575,24 @@ fn test_pin_clip_parity_and_perf() {
     }
     eprintln!();
 }
+
+#[test]
+fn perturb_obs_subset_file_maps_to_sorted_unique_indices() {
+    use space_trav_lr_rust::perturb_mode::perturb_obs_indices_from_file;
+    let obs: Vec<String> = (0..5).map(|i| format!("cell-{i}")).collect();
+    let path = std::env::temp_dir().join(format!(
+        "spacetravlr_obs_subset_{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(
+        &path,
+        "# header\ncell-3\ncell-1\ncell-3\ncell-0\n",
+    )
+    .unwrap();
+    let idx = perturb_obs_indices_from_file(&path, &obs).unwrap();
+    std::fs::remove_file(&path).ok();
+    assert_eq!(idx, vec![0, 1, 3]);
+}

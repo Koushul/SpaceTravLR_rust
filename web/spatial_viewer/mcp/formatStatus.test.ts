@@ -66,4 +66,19 @@ describe("formatStatus", () => {
     const m = baseMeta({ perturb_ready: true });
     expect(formatStatus(m)).toContain("Perturbation: ready");
   });
+
+  it("shows foyer cache and spatial ligand lines when spatial_model is present", () => {
+    const m = baseMeta({
+      perturb_ready: true,
+      spatial_model: {
+        grn_foyer_cache: "active",
+        spatial_ligand_mode: "grid_approx",
+        ligand_grid_factor: 2.5,
+      },
+    });
+    const s = formatStatus(m);
+    expect(s).toContain("Perturbation: ready");
+    expect(s).toContain("GRN foyer cache: on");
+    expect(s).toContain("grid approximation (grid factor 2.5)");
+  });
 });

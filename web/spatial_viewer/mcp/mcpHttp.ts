@@ -1,3 +1,14 @@
+import {
+  formatGrnFoyerCacheLine,
+  formatSpatialLigandLine,
+} from "../src/perturbRuntimeLabels.js";
+
+export interface SpatialModelMetaSnapshot {
+  grn_foyer_cache?: string;
+  spatial_ligand_mode?: string;
+  ligand_grid_factor?: number | null;
+}
+
 export interface MetaSnapshot {
   n_obs: number;
   n_vars: number;
@@ -16,6 +27,7 @@ export interface MetaSnapshot {
   network_loaded?: boolean;
   network_species?: string;
   betadata_row_id?: string;
+  spatial_model?: SpatialModelMetaSnapshot | null;
   [k: string]: unknown;
 }
 
@@ -119,6 +131,15 @@ export function formatStatus(m: MetaSnapshot): string {
     lines.push(`Perturbation: ERROR — ${m.perturb_error}`);
   } else if (m.perturb_ready) {
     lines.push("Perturbation: ready");
+    const sm = m.spatial_model;
+    if (sm?.grn_foyer_cache) {
+      lines.push(`  ${formatGrnFoyerCacheLine(sm.grn_foyer_cache)}`);
+    }
+    if (sm?.spatial_ligand_mode) {
+      lines.push(
+        `  ${formatSpatialLigandLine(sm.spatial_ligand_mode, sm.ligand_grid_factor)}`,
+      );
+    }
   } else {
     lines.push("Perturbation: not configured (no --run-toml)");
   }

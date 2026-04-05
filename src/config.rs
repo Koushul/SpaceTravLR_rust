@@ -35,6 +35,9 @@ pub struct DataConfig {
     pub layer: String,
     pub cluster_annot: String,
     pub condition: Option<String>,
+    /// Optional path (tilde-expanded like `adata_path`): one AnnData `obs_names` value per line (`#` comments, blanks skipped).
+    /// When set, perturbation loads only these rows (expression, spatial, betadata alignment). Results apply to this ROI only.
+    pub perturb_obs_subset_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +284,7 @@ impl Default for DataConfig {
             layer: "imputed_count".into(),
             cluster_annot: "cell_type_int".into(),
             condition: None,
+            perturb_obs_subset_file: None,
         }
     }
 }

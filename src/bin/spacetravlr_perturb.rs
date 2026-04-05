@@ -1,7 +1,7 @@
 use clap::Parser;
 use space_trav_lr_rust::betadata::write_betadata_feather;
 use space_trav_lr_rust::perturb::{PerturbTarget, PerturbTimings, perturb_with_targets};
-use space_trav_lr_rust::perturb_mode::PerturbRuntime;
+use space_trav_lr_rust::perturb_mode::{PerturbRuntime, parse_obs_columns_csv};
 #[cfg(not(feature = "tui"))]
 use space_trav_lr_rust::perturb_mode::{interactive_run_toml_prompt, run_interactive};
 use std::path::PathBuf;
@@ -49,6 +49,20 @@ struct Cli {
         help = "With --export: print load and perturb timings (stderr). In TUI: start with per-step timings enabled (toggle Ctrl+V)."
     )]
     verbose: bool,
+
+    #[arg(
+        long = "cells-csv",
+        value_name = "PATH",
+        help = "Optional CSV (header row); each column lists obs_names from AnnData. TUI: pick column with Ctrl+O. With --export requires --cells-csv-column."
+    )]
+    cells_csv: Option<PathBuf>,
+
+    #[arg(
+        long = "cells-csv-column",
+        value_name = "NAME",
+        help = "Column name in --cells-csv (required with --export when --cells-csv is set)."
+    )]
+    cells_csv_column: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -63,6 +77,8 @@ fn main() -> anyhow::Result<()> {
                 n_propagation_initial: cli.n_propagation,
                 verbose: cli.verbose,
                 toml_path_hint_for_error: cli.run_toml.as_ref().map(|p| p.display().to_string()),
+                cells_csv: cli.cells_csv.clone(),
+                cells_csv_column: cli.cells_csv_column.clone(),
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -88,6 +104,10 @@ fn main() -> anyhow::Result<()> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--run-toml is required with --export"))?;
 
+    if cli.cells_csv.is_some() && cli.cells_csv_column.is_none() {
+        anyhow::bail!("--cells-csv-column is required when --cells-csv is set (batch export).");
+    }
+
     let export_path = cli.export.as_ref().unwrap();
     let gene = cli
         .gene
@@ -102,10 +122,21 @@ fn main() -> anyhow::Result<()> {
     if !runtime.gene_names.iter().any(|g| g == gene) {
         anyhow::bail!("Gene '{}' is not present in AnnData var_names.", gene);
     }
+    let cell_indices_batch = match (&cli.cells_csv, &cli.cells_csv_column) {
+        (Some(csv_path), Some(col)) => {
+            let parsed = parse_obs_columns_csv(csv_path, &runtime.obs_names)?;
+            let sl = parsed.indices_for_column(col.as_str()).ok_or_else(|| {
+                anyhow::anyhow!("--cells-csv-column '{}' not found in CSV header", col)
+            })?;
+            Some(sl.to_vec())
+        }
+        (None, None) => None,
+        _ => unreachable!("validated above"),
+    };
     let targets = vec![PerturbTarget {
         gene: gene.to_string(),
         desired_expr: cli.desired_expr,
-        cell_indices: None,
+        cell_indices: cell_indices_batch,
     }];
     let mut timings: Option<PerturbTimings> = if cli.verbose {
         Some(PerturbTimings::default())

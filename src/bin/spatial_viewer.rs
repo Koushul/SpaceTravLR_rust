@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anndata::AnnData;
@@ -36,7 +36,7 @@ use space_trav_lr_rust::betadata::{
 use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_target_genes};
 use space_trav_lr_rust::config::{SpaceshipConfig, expand_user_path, normalize_ui_path};
 use space_trav_lr_rust::foyer_perturb_cache::{
-    self, FoyerPerturbCaches, PerturbCacheKey, UmapGridBlob,
+    self, FoyerCacheLimits, FoyerPerturbCaches, PerturbCacheKey, UmapGridBlob,
 };
 use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use space_trav_lr_rust::network::{GeneNetwork, infer_species};
@@ -62,6 +62,24 @@ const MAX_UMAP_TRANSITION_CELLS: usize = 40_000;
 const MAX_SIGNATURE_GENES: usize = 128;
 const MAX_LR_NEIGHBORS_RADIUS: usize = 500;
 const MAX_RECEIVED_LIGAND_GENES: usize = 96;
+
+fn foyer_cache_limits_from_cli(cli: &Cli) -> FoyerCacheLimits {
+    const MIB: usize = 1024 * 1024;
+    let mut l = FoyerCacheLimits::from_env();
+    if let Some(v) = cli.foyer_grn_memory_mb {
+        l.grn_memory = (v as usize).saturating_mul(MIB);
+    }
+    if let Some(v) = cli.foyer_grn_disk_mb {
+        l.grn_disk = (v as usize).saturating_mul(MIB);
+    }
+    if let Some(v) = cli.foyer_grid_memory_mb {
+        l.grid_memory = (v as usize).saturating_mul(MIB);
+    }
+    if let Some(v) = cli.foyer_grid_disk_mb {
+        l.grid_disk = (v as usize).saturating_mul(MIB);
+    }
+    l
+}
 
 fn deserialize_usize_flex<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
@@ -123,6 +141,18 @@ struct Cli {
     /// Directory for foyer hybrid disk cache (GRN perturbation + UMAP grid). Default: system temp `spacetravlr_foyer_perturb/`.
     #[arg(long)]
     perturb_cache_dir: Option<PathBuf>,
+    /// Override foyer GRN in-memory tier size (MiB). Default: env `SPACETRAVLR_FOYER_GRN_MEMORY_MB` or 256.
+    #[arg(long)]
+    foyer_grn_memory_mb: Option<u64>,
+    /// Override foyer GRN on-disk capacity (MiB). Default: env `SPACETRAVLR_FOYER_GRN_DISK_MB` or 512.
+    #[arg(long)]
+    foyer_grn_disk_mb: Option<u64>,
+    /// Override foyer UMAP grid in-memory tier (MiB). Default: env `SPACETRAVLR_FOYER_GRID_MEMORY_MB` or 64.
+    #[arg(long)]
+    foyer_grid_memory_mb: Option<u64>,
+    /// Override foyer UMAP grid on-disk capacity (MiB). Default: env `SPACETRAVLR_FOYER_GRID_DISK_MB` or 128.
+    #[arg(long)]
+    foyer_grid_disk_mb: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -156,7 +186,11 @@ struct AppDataset {
     perturb_load_error: Option<String>,
 }
 
-fn spatial_model_meta_from_runtime(rt: &PerturbRuntime) -> SpatialModelMeta {
+fn spatial_model_meta_from_runtime(
+    rt: &PerturbRuntime,
+    n_obs: usize,
+    n_vars: usize,
+) -> SpatialModelMeta {
     let sc = &rt.cfg.spatial;
     let sample: Vec<String> = rt
         .rw_ligands_init
@@ -165,6 +199,21 @@ fn spatial_model_meta_from_runtime(rt: &PerturbRuntime) -> SpatialModelMeta {
         .take(80)
         .cloned()
         .collect();
+    let est = perturb_matrix_payload_est_bytes(n_obs, n_vars);
+    let grn_foyer_cache = if should_use_foyer_perturb_cache(est) {
+        "active".to_string()
+    } else if est > MAX_GRN_PERTURB_CACHE_BYTES {
+        "skipped_large".to_string()
+    } else {
+        "skipped_small".to_string()
+    };
+    let (spatial_ligand_mode, ligand_grid_factor) =
+        match rt.perturb_cfg.ligand_grid_factor {
+            Some(gf) if gf.is_finite() && gf > 0.0 => {
+                ("grid_approx".to_string(), Some(gf))
+            }
+            _ => ("exact_pairwise".to_string(), None),
+        };
     SpatialModelMeta {
         weighted_ligand_scale_factor: sc.weighted_ligand_scale_factor,
         spatial_radius: sc.radius,
@@ -173,6 +222,9 @@ fn spatial_model_meta_from_runtime(rt: &PerturbRuntime) -> SpatialModelMeta {
         received_ligand_n_channels: rt.rw_ligands_init.col_names.len(),
         received_ligand_columns_sample: sample,
         tfl_ligand_n_channels: rt.rw_tfligands_init.col_names.len(),
+        grn_foyer_cache,
+        spatial_ligand_mode,
+        ligand_grid_factor,
     }
 }
 
@@ -326,6 +378,12 @@ struct SpatialModelMeta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     received_ligand_columns_sample: Vec<String>,
     tfl_ligand_n_channels: usize,
+    /// `active` | `skipped_small` | `skipped_large` — whether hybrid GRN δ cache is used for this matrix size.
+    grn_foyer_cache: String,
+    /// `grid_approx` | `exact_pairwise` — spatial received-ligand recomputation during GRN perturbation.
+    spatial_ligand_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ligand_grid_factor: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -746,7 +804,39 @@ fn schedule_perturb_progress_permille_clear(p: Arc<AtomicU32>) {
     });
 }
 
+/// Default floor for [`min_foyer_grn_payload_bytes`]: below this estimated δ payload (~`8 × n_cells × n_genes`), GRN and UMAP grid skip hybrid cache.
+const DEFAULT_MIN_FOYER_GRN_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+/// Skip foyer above this estimated δ payload (too large for practical cache entries / policy).
 const MAX_GRN_PERTURB_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+#[inline]
+fn perturb_matrix_payload_est_bytes(n_cells: usize, n_genes: usize) -> usize {
+    n_cells.saturating_mul(n_genes).saturating_mul(8)
+}
+
+/// Minimum serialized δ payload (bytes) before using foyer for GRN / UMAP grid.  
+/// Env: `SPACETRAVLR_FOYER_GRN_MIN_PAYLOAD_MB` (mebibytes, default 1). Set `0` to always use foyer up to [`MAX_GRN_PERTURB_CACHE_BYTES`].
+fn min_foyer_grn_payload_bytes() -> usize {
+    static MIN: OnceLock<usize> = OnceLock::new();
+    *MIN.get_or_init(|| {
+        const MIB: usize = 1024 * 1024;
+        match std::env::var("SPACETRAVLR_FOYER_GRN_MIN_PAYLOAD_MB") {
+            Ok(s) => s
+                .parse::<usize>()
+                .ok()
+                .map(|mb| mb.saturating_mul(MIB))
+                .unwrap_or(DEFAULT_MIN_FOYER_GRN_PAYLOAD_BYTES),
+            Err(_) => DEFAULT_MIN_FOYER_GRN_PAYLOAD_BYTES,
+        }
+    })
+}
+
+#[inline]
+fn should_use_foyer_perturb_cache(est_payload_bytes: usize) -> bool {
+    est_payload_bytes >= min_foyer_grn_payload_bytes()
+        && est_payload_bytes <= MAX_GRN_PERTURB_CACHE_BYTES
+}
 
 fn transition_grid_to_blob(grid: &TransitionGrid) -> UmapGridBlob {
     let nx = grid.grid_x.len();
@@ -788,6 +878,37 @@ fn transition_grid_from_blob(b: UmapGridBlob) -> anyhow::Result<TransitionGrid> 
     })
 }
 
+async fn direct_grn_perturb_result(
+    rt: Arc<PerturbRuntime>,
+    targets: Vec<PerturbTarget>,
+    cfg: PerturbConfig,
+    job_p: Arc<AtomicU32>,
+    job_msg: Arc<Mutex<String>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<PerturbResult, ()> {
+    tokio::task::spawn_blocking(move || {
+        let mut no_timings: Option<PerturbTimings> = None;
+        perturb_with_targets(
+            &rt.bb,
+            &rt.gene_mtx,
+            &rt.gene_names,
+            &rt.xy,
+            &rt.rw_ligands_init,
+            &rt.rw_tfligands_init,
+            &targets,
+            &cfg,
+            &rt.lr_radii,
+            Some(&job_p),
+            Some(&job_msg),
+            Some(&*cancel),
+            Some(&rt.baseline_splash_cache),
+            &mut no_timings,
+        )
+    })
+    .await
+    .unwrap_or(Err(()))
+}
+
 async fn cached_grn_perturb_result(
     foyer: &FoyerPerturbCaches,
     cache_key: PerturbCacheKey,
@@ -800,29 +921,12 @@ async fn cached_grn_perturb_result(
     job_msg: Arc<Mutex<String>>,
     cancel: Arc<AtomicBool>,
 ) -> Result<PerturbResult, ()> {
-    let est = n_cells.saturating_mul(n_genes).saturating_mul(16);
-    if est > MAX_GRN_PERTURB_CACHE_BYTES {
-        return tokio::task::spawn_blocking(move || {
-            let mut no_timings: Option<PerturbTimings> = None;
-            perturb_with_targets(
-                &rt.bb,
-                &rt.gene_mtx,
-                &rt.gene_names,
-                &rt.xy,
-                &rt.rw_ligands_init,
-                &rt.rw_tfligands_init,
-                &targets,
-                &cfg,
-                &rt.lr_radii,
-                Some(&job_p),
-                Some(&job_msg),
-                Some(&*cancel),
-                Some(&rt.baseline_splash_cache),
-                &mut no_timings,
-            )
-        })
-        .await
-        .unwrap_or(Err(()));
+    let est = perturb_matrix_payload_est_bytes(n_cells, n_genes);
+    if !should_use_foyer_perturb_cache(est) {
+        return direct_grn_perturb_result(
+            rt, targets, cfg, job_p, job_msg, cancel,
+        )
+        .await;
     }
 
     let grn = foyer.grn.clone();
@@ -871,7 +975,13 @@ async fn cached_grn_perturb_result(
         })
         .await
         .map_err(|_| ())?;
-    foyer_perturb_cache::decode_perturb_result(entry.value()).map_err(|_| ())
+    foyer_perturb_cache::decode_perturb_cache_entry(
+        entry.value(),
+        &rt.gene_mtx,
+        &rt.gene_names,
+        &targets,
+    )
+    .map_err(|_| ())
 }
 
 fn spawn_perturb_background_load(state: SharedState) {
@@ -1191,7 +1301,7 @@ fn meta_json(st: &AppState) -> MetaJson {
         spatial_model: ds
             .perturb_runtime
             .as_ref()
-            .map(|rt| spatial_model_meta_from_runtime(rt)),
+            .map(|rt| spatial_model_meta_from_runtime(rt, ds.obs_names.len(), ds.n_vars)),
     }
 }
 
@@ -3890,50 +4000,67 @@ async fn api_perturb_umap_field(
     }
     job_p.store(965, Ordering::Relaxed);
 
-    let grid_cache = foyer.grid.clone();
-    let rt_g = Arc::clone(&rt);
-    let umap_pts_g = umap_pts.clone();
-    let params_g = params.clone();
-    let delta_g = delta.clone();
-    let gentry = grid_cache
-        .get_or_fetch(&grid_key, move || {
-            let rt_g = Arc::clone(&rt_g);
-            let umap_pts_g = umap_pts_g.clone();
-            let params_g = params_g.clone();
-            let delta_g = delta_g.clone();
-            async move {
-                let g = tokio::task::spawn_blocking(move || {
-                    compute_umap_transition_grid(&rt_g.gene_mtx, &delta_g, &umap_pts_g, &params_g)
-                })
-                .await
-                .map_err(|e| anyhow!("{e}"))?;
-                let enc = foyer_perturb_cache::encode_umap_grid_blob(&transition_grid_to_blob(&g))
+    let grid_payload_est = perturb_matrix_payload_est_bytes(n_obs, rt.gene_mtx.ncols());
+    let grid = if should_use_foyer_perturb_cache(grid_payload_est) {
+        let grid_cache = foyer.grid.clone();
+        let rt_g = Arc::clone(&rt);
+        let umap_pts_g = umap_pts.clone();
+        let params_g = params.clone();
+        let delta_g = delta.clone();
+        let gentry = grid_cache
+            .get_or_fetch(&grid_key, move || {
+                let rt_g = Arc::clone(&rt_g);
+                let umap_pts_g = umap_pts_g.clone();
+                let params_g = params_g.clone();
+                let delta_g = delta_g.clone();
+                async move {
+                    let g = tokio::task::spawn_blocking(move || {
+                        compute_umap_transition_grid(&rt_g.gene_mtx, &delta_g, &umap_pts_g, &params_g)
+                    })
+                    .await
                     .map_err(|e| anyhow!("{e}"))?;
-                Ok::<Vec<u8>, anyhow::Error>(enc)
-            }
+                    let enc =
+                        foyer_perturb_cache::encode_umap_grid_blob(&transition_grid_to_blob(&g))
+                            .map_err(|e| anyhow!("{e}"))?;
+                    Ok::<Vec<u8>, anyhow::Error>(enc)
+                }
+            })
+            .await
+            .map_err(|e| {
+                job_p.store(0, Ordering::Relaxed);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
+            })?;
+
+        transition_grid_from_blob(
+            foyer_perturb_cache::decode_umap_grid_blob(gentry.value()).map_err(|e| {
+                job_p.store(0, Ordering::Relaxed);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("grid cache decode: {e}"),
+                )
+            })?,
+        )
+        .map_err(|e| {
+            job_p.store(0, Ordering::Relaxed);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("grid restore: {e}"),
+            )
+        })?
+    } else {
+        let rt_g = Arc::clone(&rt);
+        let umap_pts_g = umap_pts.clone();
+        let params_g = params.clone();
+        let delta_g = delta.clone();
+        tokio::task::spawn_blocking(move || {
+            compute_umap_transition_grid(&rt_g.gene_mtx, &delta_g, &umap_pts_g, &params_g)
         })
         .await
         .map_err(|e| {
             job_p.store(0, Ordering::Relaxed);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
-        })?;
-
-    let grid = transition_grid_from_blob(
-        foyer_perturb_cache::decode_umap_grid_blob(gentry.value()).map_err(|e| {
-            job_p.store(0, Ordering::Relaxed);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("grid cache decode: {e}"),
-            )
-        })?,
-    )
-    .map_err(|e| {
-        job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("grid restore: {e}"),
-        )
-    })?;
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?
+    };
 
     job_p.store(1000, Ordering::Relaxed);
     schedule_perturb_progress_permille_clear(Arc::clone(&job_p));
@@ -5343,8 +5470,9 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     let foyer = rt
-        .block_on(foyer_perturb_cache::open_foyer_perturb_caches(
+        .block_on(foyer_perturb_cache::open_foyer_perturb_caches_with_limits(
             cli.perturb_cache_dir.as_deref(),
+            foyer_cache_limits_from_cli(&cli),
         ))
         .map_err(|e| anyhow!("foyer hybrid cache: {e}"))?;
     let (addr, app, state) = build_app(cli, foyer)?;

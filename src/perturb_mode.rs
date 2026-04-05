@@ -8,7 +8,7 @@ use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid}
 use crate::perturb::{
     CachedBaselineSplash, PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets,
 };
-use crate::spatial_estimator::load_spatial_coords_f64;
+use crate::spatial_estimator::{load_spatial_coords_f64, read_expression_matrix_dense_f64};
 
 pub fn single_perturb_target(
     gene: &str,
@@ -24,17 +24,19 @@ pub fn single_perturb_target(
         cell_indices: None,
     })
 }
-use anndata::data::{ArrayConvert, SelectInfoElem};
-use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
+use anndata::data::SelectInfoElem;
+use anndata::{AnnData, AnnDataOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::Context;
 use ndarray::Array2;
+use polars::prelude::{CsvReadOptions, DataType, SerReader};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::fs;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -56,69 +58,45 @@ pub struct PerturbRuntime {
     pub baseline_splash_cache: Mutex<Option<CachedBaselineSplash>>,
 }
 
-fn array_data_to_dense_f64(data: ArrayData) -> anyhow::Result<Array2<f64>> {
-    match data {
-        ArrayData::Array(d) => d.try_convert(),
-        ArrayData::CsrMatrix(csr) => {
-            let csr_f64: nalgebra_sparse::csr::CsrMatrix<f64> = csr.try_convert()?;
-            let mut out = Array2::<f64>::zeros((csr_f64.nrows(), csr_f64.ncols()));
-            for (r, c, v) in csr_f64.triplet_iter() {
-                out[[r, c]] = *v;
-            }
-            Ok(out)
+/// Resolve `obs_names` line-list file into sorted unique row indices (AnnData order).
+pub fn perturb_obs_indices_from_file(path: &Path, obs_names_full: &[String]) -> anyhow::Result<Vec<usize>> {
+    let name_to_i: HashMap<&str, usize> = obs_names_full
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read perturb_obs_subset_file {}", path.display()))?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
         }
-        ArrayData::CscMatrix(csc) => {
-            let csc_f64: nalgebra_sparse::csc::CscMatrix<f64> = csc.try_convert()?;
-            let mut out = Array2::<f64>::zeros((csc_f64.nrows(), csc_f64.ncols()));
-            for (r, c, v) in csc_f64.triplet_iter() {
-                out[[r, c]] = *v;
-            }
-            Ok(out)
-        }
-        ArrayData::CsrNonCanonical(non) => match non.canonicalize() {
-            Ok(csr) => {
-                let csr_f64: nalgebra_sparse::csr::CsrMatrix<f64> = csr.try_convert()?;
-                let mut out = Array2::<f64>::zeros((csr_f64.nrows(), csr_f64.ncols()));
-                for (r, c, v) in csr_f64.triplet_iter() {
-                    out[[r, c]] = *v;
-                }
-                Ok(out)
-            }
-            Err(_) => anyhow::bail!("Failed to canonicalize non-canonical CSR matrix."),
-        },
-        ArrayData::DataFrame(_) => anyhow::bail!("Expected matrix array data, found dataframe."),
+        let idx = *name_to_i
+            .get(t)
+            .ok_or_else(|| anyhow::anyhow!("obs name {:?} not in AnnData obs_names", t))?;
+        out.push(idx);
     }
+    out.sort_unstable();
+    out.dedup();
+    anyhow::ensure!(
+        !out.is_empty(),
+        "perturb obs subset file {} produced no rows",
+        path.display()
+    );
+    Ok(out)
 }
 
-fn read_expression_matrix_dense_f64<AnB: Backend>(
-    adata: &AnnData<AnB>,
-    layer: &str,
-    slice: &[SelectInfoElem],
-) -> anyhow::Result<Array2<f64>> {
-    let data: ArrayData = if layer != "X" && !layer.is_empty() {
-        if let Some(layer_elem) = adata.layers().get(layer) {
-            layer_elem
-                .slice(slice)?
-                .ok_or_else(|| anyhow::anyhow!("Failed to slice layer {}", layer))?
-        } else {
-            let x_elem = adata.x();
-            if x_elem.is_none() {
-                anyhow::bail!("Layer '{}' not found and X is empty", layer);
-            }
-            x_elem
-                .slice(slice)?
-                .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
-        }
-    } else {
-        let x_elem = adata.x();
-        if x_elem.is_none() {
-            anyhow::bail!("X is empty");
-        }
-        x_elem
-            .slice(slice)?
-            .ok_or_else(|| anyhow::anyhow!("Failed to slice X"))?
-    };
-    array_data_to_dense_f64(data)
+fn subset_xy_rows(xy: &Array2<f64>, row_idx: &[usize]) -> anyhow::Result<Array2<f64>> {
+    let n = row_idx.len();
+    let g = xy.ncols();
+    let mut out = Array2::<f64>::zeros((n, g));
+    for (ni, &oi) in row_idx.iter().enumerate() {
+        anyhow::ensure!(oi < xy.nrows(), "row index {} out of bounds for xy", oi);
+        out.row_mut(ni).assign(&xy.row(oi));
+    }
+    Ok(out)
 }
 
 fn sanitize_float(v: f64) -> String {
@@ -130,12 +108,16 @@ fn request_output_dir(
     selected: &[String],
     value: f64,
     n_propagation: usize,
+    job_id: Option<u64>,
 ) -> PathBuf {
     let mut sorted = selected.to_vec();
     sorted.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sorted.hash(&mut hasher);
     n_propagation.hash(&mut hasher);
+    if let Some(j) = job_id {
+        j.hash(&mut hasher);
+    }
     let hash = hasher.finish();
     run_dir
         .join("perturbations")
@@ -268,15 +250,35 @@ impl PerturbRuntime {
         set_p(40);
         let adata = AnnData::<H5>::open(H5::open(adata_path.as_str())?)?;
         let gene_names = adata.var_names().into_vec();
-        let obs_names = adata.obs_names().into_vec();
+        let obs_names_full = adata.obs_names().into_vec();
+        let row_idx: Vec<usize> = if let Some(rel) = cfg.data.perturb_obs_subset_file.as_deref() {
+            let p = PathBuf::from(expand_user_path(rel));
+            perturb_obs_indices_from_file(p.as_path(), &obs_names_full)?
+        } else {
+            (0..obs_names_full.len()).collect()
+        };
         let obs_df = adata.read_obs()?;
         let betadata_key_col =
             resolve_betadata_cluster_key_column(&obs_df, cfg.data.cluster_annot.as_str());
-        let cluster_keys =
+        let cluster_keys_full =
             betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
-        let clusters = clusters_usize_from_obs_dataframe(&obs_df, cfg.data.cluster_annot.as_str())?;
-        let xy = load_spatial_coords_f64(&adata)?;
-        let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
+        let clusters_full =
+            clusters_usize_from_obs_dataframe(&obs_df, cfg.data.cluster_annot.as_str())?;
+        let obs_names: Vec<String> = row_idx
+            .iter()
+            .map(|&i| obs_names_full[i].clone())
+            .collect();
+        let cluster_keys: Vec<String> = row_idx
+            .iter()
+            .map(|&i| cluster_keys_full[i].clone())
+            .collect();
+        let clusters: Vec<usize> = row_idx.iter().map(|&i| clusters_full[i]).collect();
+        let xy_full = load_spatial_coords_f64(&adata)?;
+        let xy = subset_xy_rows(&xy_full, &row_idx)?;
+        let slice = [
+            SelectInfoElem::Index(row_idx.clone()),
+            SelectInfoElem::full(),
+        ];
         set_msg("Reading expression matrix…");
         set_p(80);
         let gene_mtx = read_expression_matrix_dense_f64(&adata, cfg.data.layer.as_str(), &slice)?;
@@ -417,6 +419,143 @@ struct PerturbRunSummary {
 
 pub type GeneCellTypeScopes = HashMap<String, Option<HashSet<usize>>>;
 
+/// CSV with header row; each column lists AnnData `obs_names` (one per row). Parsed once into cell indices.
+#[derive(Clone, Debug)]
+pub struct ObsColumnsCsv {
+    pub column_names: Vec<String>,
+    columns: HashMap<String, Vec<usize>>,
+}
+
+impl ObsColumnsCsv {
+    pub fn indices_for_column(&self, name: &str) -> Option<&[usize]> {
+        self.columns.get(name).map(|v| v.as_slice())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.column_names.is_empty()
+    }
+}
+
+pub fn build_obs_name_index_map(obs_names: &[String]) -> anyhow::Result<HashMap<String, usize>> {
+    let mut m = HashMap::with_capacity(obs_names.len());
+    for (i, name) in obs_names.iter().enumerate() {
+        if m.insert(name.clone(), i).is_some() {
+            anyhow::bail!(
+                "Duplicate obs_name in AnnData: '{}' (ambiguous indices).",
+                name
+            );
+        }
+    }
+    Ok(m)
+}
+
+fn parse_obs_column_values(
+    series: &polars::prelude::Series,
+    col_name: &str,
+    obs_to_idx: &HashMap<String, usize>,
+) -> anyhow::Result<Vec<usize>> {
+    let string_series = series.cast(&DataType::String).with_context(|| {
+        format!(
+            "CSV column '{}': could not cast to string for validation",
+            col_name
+        )
+    })?;
+    let ca = string_series
+        .str()
+        .map_err(|e| anyhow::anyhow!("CSV column '{}': {}", col_name, e))?;
+    let mut seen = HashSet::new();
+    for row in 0..ca.len() {
+        let Some(raw) = ca.get(row) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(&cell_idx) = obs_to_idx.get(trimmed) else {
+            anyhow::bail!(
+                "CSV column '{}', row {}: obs_name '{}' not found in AnnData obs",
+                col_name,
+                row + 2,
+                trimmed
+            );
+        };
+        seen.insert(cell_idx);
+    }
+    let mut v: Vec<usize> = seen.into_iter().collect();
+    v.sort_unstable();
+    Ok(v)
+}
+
+pub fn parse_obs_columns_csv(path: &Path, obs_names: &[String]) -> anyhow::Result<ObsColumnsCsv> {
+    let obs_to_idx = build_obs_name_index_map(obs_names)?;
+    let pb = path
+        .to_path_buf()
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
+    let df = CsvReadOptions::default()
+        .with_has_header(true)
+        .try_into_reader_with_file_path(Some(pb.clone()))
+        .with_context(|| format!("open CSV {}", path.display()))?
+        .finish()
+        .with_context(|| format!("parse CSV {}", path.display()))?;
+    if df.width() == 0 {
+        anyhow::bail!("CSV {} has no columns", path.display());
+    }
+    let column_names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let mut columns = HashMap::with_capacity(column_names.len());
+    for name in &column_names {
+        let col = df
+            .column(name)
+            .with_context(|| format!("CSV column '{}'", name))?;
+        let indices = parse_obs_column_values(col.as_materialized_series(), name, &obs_to_idx)?;
+        columns.insert(name.clone(), indices);
+    }
+    Ok(ObsColumnsCsv {
+        column_names,
+        columns,
+    })
+}
+
+/// Combines optional CSV column indices with optional per–cell-type row index lists (intersection when both).
+pub fn merge_csv_and_type_cell_indices(
+    csv_indices: Option<&[usize]>,
+    type_row_indices: Option<Vec<usize>>,
+) -> Option<Vec<usize>> {
+    match (csv_indices, type_row_indices) {
+        (None, None) => None,
+        (Some(c), None) => Some(c.to_vec()),
+        (None, Some(mut t)) => {
+            t.sort_unstable();
+            t.dedup();
+            Some(t)
+        }
+        (Some(c), Some(mut t)) => {
+            t.sort_unstable();
+            t.dedup();
+            if t.is_empty() {
+                return Some(Vec::new());
+            }
+            let tset: HashSet<usize> = t.iter().copied().collect();
+            let mut out: Vec<usize> = c.iter().copied().filter(|i| tset.contains(i)).collect();
+            out.sort_unstable();
+            out.dedup();
+            Some(out)
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct JointCellsCsvExportSummary {
+    pub path: String,
+    pub column: String,
+    pub n_cells_per_target_gene: HashMap<String, usize>,
+}
+
 #[derive(Serialize)]
 struct JointPerturbExportSummary {
     run_toml_path: String,
@@ -430,6 +569,10 @@ struct JointPerturbExportSummary {
     export_kind: String,
     outputs: Vec<String>,
     selected_cell_types_per_gene: HashMap<String, Option<Vec<usize>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cells_csv: Option<JointCellsCsvExportSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<u64>,
 }
 
 /// Writes full **joint** `simulated` matrix (one `perturb_with_targets` call with all genes),
@@ -441,6 +584,8 @@ pub fn export_joint_perturb_result(
     desired_expr: f64,
     n_propagation: usize,
     selected_cell_types_per_gene: &GeneCellTypeScopes,
+    cells_csv_summary: Option<JointCellsCsvExportSummary>,
+    job_id: Option<u64>,
 ) -> anyhow::Result<PathBuf> {
     if selected_genes.is_empty() {
         anyhow::bail!("No selected genes to export.");
@@ -458,6 +603,7 @@ pub fn export_joint_perturb_result(
         &selected,
         desired_expr,
         n_propagation,
+        job_id,
     );
     std::fs::create_dir_all(&out_dir)?;
 
@@ -498,6 +644,8 @@ pub fn export_joint_perturb_result(
                 (g.clone(), scope)
             })
             .collect(),
+        cells_csv: cells_csv_summary,
+        job_id,
     };
     let summary_path = out_dir.join("perturbation_run_summary.json");
     std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)?;
@@ -525,6 +673,7 @@ pub fn execute_marked_perturbations(
         &selected,
         value,
         runtime.perturb_cfg.n_propagation,
+        None,
     );
     std::fs::create_dir_all(&out_dir)?;
 
@@ -834,9 +983,11 @@ mod tests {
     fn output_dir_is_deterministic() {
         let run_dir = PathBuf::from("/tmp/example");
         let genes = vec!["GZMB".to_string(), "CD74".to_string()];
-        let a = request_output_dir(&run_dir, &genes, 0.0, 4);
-        let b = request_output_dir(&run_dir, &genes, 0.0, 4);
+        let a = request_output_dir(&run_dir, &genes, 0.0, 4, None);
+        let b = request_output_dir(&run_dir, &genes, 0.0, 4, None);
         assert_eq!(a, b);
+        let c = request_output_dir(&run_dir, &genes, 0.0, 4, Some(7));
+        assert_ne!(a, c);
     }
 
     #[test]
@@ -853,5 +1004,48 @@ mod tests {
         let df = polars::prelude::IpcReader::new(f).finish().unwrap();
         assert_eq!(df.height(), 2);
         assert_eq!(df.width(), 4);
+    }
+
+    #[test]
+    fn build_obs_name_index_map_rejects_duplicate() {
+        let obs = vec!["a".into(), "b".into(), "a".into()];
+        assert!(build_obs_name_index_map(&obs).is_err());
+    }
+
+    #[test]
+    fn merge_csv_and_type_cell_indices_cases() {
+        assert_eq!(merge_csv_and_type_cell_indices(None, None), None);
+        let c = [1usize, 3, 5];
+        assert_eq!(
+            merge_csv_and_type_cell_indices(Some(&c), None),
+            Some(vec![1, 3, 5])
+        );
+        assert_eq!(
+            merge_csv_and_type_cell_indices(None, Some(vec![3usize, 1])),
+            Some(vec![1, 3])
+        );
+        assert_eq!(
+            merge_csv_and_type_cell_indices(Some(&c), Some(vec![3usize, 10])),
+            Some(vec![3])
+        );
+        assert_eq!(
+            merge_csv_and_type_cell_indices(Some(&c), Some(vec![])),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn parse_obs_columns_csv_dedupe_and_unknown() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_csv_perturb_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("cells.csv");
+        std::fs::write(&p, "col_a,col_b\nalpha,beta\ngamma,alpha\n  alpha  ,\n").unwrap();
+        let obs = vec!["alpha".into(), "beta".into(), "gamma".into()];
+        let parsed = parse_obs_columns_csv(&p, &obs).unwrap();
+        assert_eq!(parsed.indices_for_column("col_a").unwrap(), &[0usize, 2]);
+        assert_eq!(parsed.indices_for_column("col_b").unwrap(), &[0usize, 1]);
+        std::fs::write(&p, "x\nunknown\n").unwrap();
+        assert!(parse_obs_columns_csv(&p, &obs).is_err());
     }
 }

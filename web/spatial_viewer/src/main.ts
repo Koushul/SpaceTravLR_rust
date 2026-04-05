@@ -31,6 +31,11 @@ import {
 } from "./mcpBridge";
 import { escapeHtml } from "./htmlEscape";
 import {
+  grnFoyerCacheStatusFragment,
+  perturbReadyTooltip,
+  spatialLigandStatusFragment,
+} from "./perturbRuntimeLabels.js";
+import {
   renderSplashNetwork,
   type SplashForceParams,
   type SplashNetworkJson,
@@ -143,7 +148,22 @@ interface Meta {
     received_ligand_n_channels: number;
     received_ligand_columns_sample: string[];
     tfl_ligand_n_channels: number;
+    grn_foyer_cache?: string;
+    spatial_ligand_mode?: string;
+    ligand_grid_factor?: number | null;
   } | null;
+}
+
+function perturbReadyStatusBarExtras(m: Meta): string[] {
+  if (!m.perturb_ready || !m.spatial_model) return [];
+  const sm = m.spatial_model;
+  return [
+    grnFoyerCacheStatusFragment(sm.grn_foyer_cache),
+    spatialLigandStatusFragment(
+      sm.spatial_ligand_mode,
+      sm.ligand_grid_factor ?? undefined,
+    ),
+  ];
 }
 
 interface SessionConfigureResponse {
@@ -1563,7 +1583,7 @@ async function main() {
       perturbReadyLamp.title = `Perturbation load failed: ${m.perturb_error}`;
     } else if (m.perturb_ready) {
       perturbReadyLamp.classList.add("perturb-ready-lamp--ready");
-      perturbReadyLamp.title = "Perturbation runtime ready";
+      perturbReadyLamp.title = perturbReadyTooltip(m.spatial_model);
     } else if (m.perturb_loading) {
       perturbReadyLamp.classList.add("perturb-ready-lamp--load");
       perturbReadyLamp.title = "Loading perturbation runtime…";
@@ -2959,7 +2979,12 @@ async function main() {
               /\s*·?\s*perturbation.*$/i,
               "",
             );
-            setStatus(`${base} · perturbation ready`);
+            const prExtra = perturbReadyStatusBarExtras(meta);
+            setStatus(
+              prExtra.length
+                ? `${base} · perturbation ready · ${prExtra.join(" · ")}`
+                : `${base} · perturbation ready`,
+            );
           }
         } catch {
           /* ignore */
@@ -3441,6 +3466,7 @@ async function main() {
       if (meta.perturb_loading) {
         parts.push("perturbation loading (may take minutes)…");
       }
+      parts.push(...perturbReadyStatusBarExtras(meta));
       setStatus(parts.join(" · "));
     }
     interactionPanel.classList.toggle("hidden", !meta.network_loaded);
