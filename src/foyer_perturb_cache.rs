@@ -427,6 +427,7 @@ mod tests {
             beta_cap: None,
             min_expression: 1e-9,
             ligand_grid_factor: Some(0.5),
+            contact_distance: None,
         };
         let a = grn_perturb_cache_key(1, false, "/data/x.h5ad", 100, 2000, &t, &cfg);
         let b = grn_perturb_cache_key(1, false, "/data/x.h5ad", 100, 2000, &t, &cfg);

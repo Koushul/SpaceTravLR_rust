@@ -8,7 +8,9 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::betadata::{Betabase, GeneMatrix};
-use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use crate::ligand::{
+    calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PerturbTarget {
@@ -28,6 +30,9 @@ pub struct PerturbConfig {
     /// Value is grid_spacing / radius (smaller = more accurate, larger = faster).
     /// 0.5 gives ~3% error; 0.3 gives ~1%. None = exact O(N²) computation.
     pub ligand_grid_factor: Option<f64>,
+    /// Hard cutoff on sender distance for received-ligand aggregation. None = full Gaussian support.
+    #[serde(default)]
+    pub contact_distance: Option<f64>,
 }
 
 impl Default for PerturbConfig {
@@ -39,6 +44,7 @@ impl Default for PerturbConfig {
             beta_cap: None,
             min_expression: 1e-9,
             ligand_grid_factor: None,
+            contact_distance: None,
         }
     }
 }
@@ -416,6 +422,7 @@ pub fn perturb_with_targets(
             config.scale_factor,
             config.min_expression,
             config.ligand_grid_factor,
+            config.contact_distance,
             cancel,
         ) else {
             return Err(());
@@ -442,6 +449,7 @@ pub fn perturb_with_targets(
             config.scale_factor,
             config.min_expression,
             config.ligand_grid_factor,
+            config.contact_distance,
             cancel,
         ) else {
             return Err(());
@@ -765,6 +773,7 @@ fn recompute_weighted_ligands(
     scale_factor: f64,
     min_expression: f64,
     grid_factor: Option<f64>,
+    contact_distance: Option<f64>,
     cancel: Option<&AtomicBool>,
 ) -> Option<GeneMatrix> {
     use std::sync::atomic::Ordering;
@@ -834,8 +843,23 @@ fn recompute_weighted_ligands(
             sub.column_mut(k).assign(&lig_data.column(j));
         }
         let weighted = match grid_factor {
-            Some(gf) => calculate_weighted_ligands_grid(xy, &sub, radius, scale_factor, gf),
-            None => calculate_weighted_ligands(xy, &sub, radius, scale_factor),
+            Some(gf) if gf.is_finite() && gf > 0.0 => {
+                calculate_weighted_ligands_grid_with_cutoff(
+                    xy,
+                    &sub,
+                    radius,
+                    scale_factor,
+                    gf,
+                    contact_distance,
+                )
+            }
+            _ => calculate_weighted_ligands_with_cutoff(
+                xy,
+                &sub,
+                radius,
+                scale_factor,
+                contact_distance,
+            ),
         };
         for (k, &j) in group_indices.iter().enumerate() {
             let col = weighted.column(k);

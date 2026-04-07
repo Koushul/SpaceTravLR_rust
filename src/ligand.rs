@@ -14,9 +14,24 @@ pub fn calculate_weighted_ligands(
     radius: f64,
     scale_factor: f64,
 ) -> Array2<f64> {
+    calculate_weighted_ligands_with_cutoff(xy, lig_values, radius, scale_factor, None)
+}
+
+/// Like [`calculate_weighted_ligands`], but if `max_neighbor_distance` is `Some(d)` with `d > 0`,
+/// pairs with Euclidean distance greater than `d` contribute zero weight (hard contact cutoff).
+pub fn calculate_weighted_ligands_with_cutoff(
+    xy: &Array2<f64>,
+    lig_values: &Array2<f64>,
+    radius: f64,
+    scale_factor: f64,
+    max_neighbor_distance: Option<f64>,
+) -> Array2<f64> {
     let n_cells = xy.nrows();
     let n_ligands = lig_values.ncols();
     let inv_2r2 = -1.0 / (2.0 * radius * radius);
+    let d2_cut = max_neighbor_distance
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .map(|m| m * m);
 
     let mut result = Array2::zeros((n_cells, n_ligands));
     if n_cells == 0 {
@@ -36,6 +51,9 @@ pub fn calculate_weighted_ligands(
                 let dx = xi - xy[[j, 0]];
                 let dy = yi - xy[[j, 1]];
                 let d2 = dx * dx + dy * dy;
+                if d2_cut.is_some_and(|c| d2 > c) {
+                    continue;
+                }
                 let w = scale_factor * (d2 * inv_2r2).exp();
 
                 for k in 0..n_ligands {
@@ -71,6 +89,25 @@ pub fn calculate_weighted_ligands_grid(
     scale_factor: f64,
     grid_factor: f64,
 ) -> Array2<f64> {
+    calculate_weighted_ligands_grid_with_cutoff(
+        xy,
+        lig_values,
+        radius,
+        scale_factor,
+        grid_factor,
+        None,
+    )
+}
+
+/// Grid-approximated received ligands with optional hard distance cutoff (see [`calculate_weighted_ligands_with_cutoff`]).
+pub fn calculate_weighted_ligands_grid_with_cutoff(
+    xy: &Array2<f64>,
+    lig_values: &Array2<f64>,
+    radius: f64,
+    scale_factor: f64,
+    grid_factor: f64,
+    max_neighbor_distance: Option<f64>,
+) -> Array2<f64> {
     let n_cells = xy.nrows();
     let n_ligands = lig_values.ncols();
     if n_cells == 0 {
@@ -78,6 +115,9 @@ pub fn calculate_weighted_ligands_grid(
     }
     let grid_spacing = radius * grid_factor;
     let inv_2r2 = -1.0 / (2.0 * radius * radius);
+    let d2_cut = max_neighbor_distance
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .map(|m| m * m);
 
     let mut x_min = f64::INFINITY;
     let mut x_max = f64::NEG_INFINITY;
@@ -110,7 +150,13 @@ pub fn calculate_weighted_ligands_grid(
     let n_anchors = nx * ny;
 
     if n_anchors >= n_cells {
-        return calculate_weighted_ligands(xy, lig_values, radius, scale_factor);
+        return calculate_weighted_ligands_with_cutoff(
+            xy,
+            lig_values,
+            radius,
+            scale_factor,
+            max_neighbor_distance,
+        );
     }
 
     let lig_flat = lig_values.as_slice().unwrap();
@@ -131,6 +177,9 @@ pub fn calculate_weighted_ligands_grid(
                 let dx = ax - xy[[j, 0]];
                 let dy = ay - xy[[j, 1]];
                 let d2 = dx * dx + dy * dy;
+                if d2_cut.is_some_and(|c| d2 > c) {
+                    continue;
+                }
                 let w = scale_factor * (d2 * inv_2r2).exp();
                 let base = j * n_ligands;
                 for k in 0..n_ligands {

@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
 use space_trav_lr_rust::ligand::calculate_weighted_ligands;
 use space_trav_lr_rust::perturb::{PerturbConfig, PerturbTarget, perturb, perturb_with_targets};
+use space_trav_lr_rust::perturb_mode::compute_initial_weighted_ligands;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -1384,6 +1385,7 @@ fn bench_perturb() {
             beta_cap: None,
             min_expression: 1e-9,
             ligand_grid_factor: None,
+            contact_distance: None,
         };
 
         let config_grid = PerturbConfig {
@@ -1393,6 +1395,7 @@ fn bench_perturb() {
             beta_cap: None,
             min_expression: 1e-9,
             ligand_grid_factor: Some(grid_factor),
+            contact_distance: None,
         };
 
         let targets = vec![(target.clone(), 0.0)];
@@ -1591,4 +1594,318 @@ fn perturb_obs_subset_file_maps_to_sorted_unique_indices() {
     let idx = perturb_obs_indices_from_file(&path, &obs).unwrap();
     std::fs::remove_file(&path).ok();
     assert_eq!(idx, vec![0, 1, 3]);
+}
+
+fn two_cell_tf_lr_perturb_bundle() -> (
+    Betabase,
+    Array2<f64>,
+    Vec<String>,
+    Array2<f64>,
+    GeneMatrix,
+    Vec<PerturbTarget>,
+) {
+    let gene_names: Vec<String> = vec!["TF1", "LIG", "REC", "TARGET"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let gene2index: HashMap<String, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.clone(), i))
+        .collect();
+
+    let row_labels = vec!["0".to_string()];
+    let mut bf_target = BetaFrame::from_parts(
+        "TARGET".to_string(),
+        row_labels.clone(),
+        array![0.0],
+        array![[0.1]],
+        vec!["TF1".to_string()],
+        array![[0.05]],
+        vec!["LIG".to_string()],
+        vec!["REC".to_string()],
+        ndarray::Array2::zeros((1, 0)),
+        vec![],
+        vec![],
+    );
+
+    let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
+    let cluster_keys = vec!["0".to_string(), "0".to_string()];
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(
+        &row_labels,
+        &obs_names,
+        &cluster_keys,
+    ));
+    bf_target.expand_to_cells(Arc::new(obs_names.clone()), mapping);
+    bf_target.modulator_gene_indices = Some(
+        bf_target
+            .modulator_genes
+            .iter()
+            .map(|g| {
+                let plain = g.strip_prefix("beta_").unwrap_or(g);
+                *gene2index.get(plain).unwrap()
+            })
+            .collect(),
+    );
+
+    let mut bb_data = HashMap::new();
+    bb_data.insert("TARGET".to_string(), bf_target);
+    let bb = Betabase {
+        data: bb_data,
+        ligands_set: ["LIG".to_string()].into_iter().collect(),
+        receptors_set: ["REC".to_string()].into_iter().collect(),
+        tfl_ligands_set: HashSet::new(),
+        tfs_set: ["TF1".to_string()].into_iter().collect(),
+    };
+
+    let gene_mtx = array![
+        [1.0, 10.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0, 1.0],
+    ];
+    let xy = array![[0.0, 0.0], [1.0, 0.0],];
+    let rw_tfligands = GeneMatrix::new(Array2::<f32>::zeros((2, 0)), vec![]);
+    let targets = vec![
+        PerturbTarget {
+            gene: "TF1".to_string(),
+            desired_expr: 0.0,
+            cell_indices: Some(vec![0]),
+        },
+        PerturbTarget {
+            gene: "LIG".to_string(),
+            desired_expr: 0.0,
+            cell_indices: Some(vec![0]),
+        },
+    ];
+    (
+        bb,
+        gene_mtx,
+        gene_names,
+        xy,
+        rw_tfligands,
+        targets,
+    )
+}
+
+#[test]
+fn perturb_spatial_knobs_change_simulated() {
+    fn sim_diff(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    let (bb, gene_mtx, gene_names, xy, rw_tfl, targets) = two_cell_tf_lr_perturb_bundle();
+    let lig_names = vec!["LIG".to_string()];
+    let scale = 1.0;
+    let min_e = 0.0;
+
+    let mut lr_close = HashMap::new();
+    lr_close.insert("LIG".to_string(), 1.0);
+    let rw_no_cut = compute_initial_weighted_ligands(
+        &gene_mtx,
+        &gene_names,
+        &lig_names,
+        &xy,
+        &lr_close,
+        scale,
+        min_e,
+        None,
+        None,
+    );
+    let rw_cut = compute_initial_weighted_ligands(
+        &gene_mtx,
+        &gene_names,
+        &lig_names,
+        &xy,
+        &lr_close,
+        scale,
+        min_e,
+        None,
+        Some(0.5),
+    );
+    let cfg_open = PerturbConfig {
+        n_propagation: 1,
+        contact_distance: None,
+        ..Default::default()
+    };
+    let cfg_contact = PerturbConfig {
+        n_propagation: 1,
+        contact_distance: Some(0.5),
+        ..Default::default()
+    };
+    let mut t0 = None;
+    let s_open = perturb_with_targets(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_no_cut,
+        &rw_tfl,
+        &targets,
+        &cfg_open,
+        &lr_close,
+        None,
+        None,
+        None,
+        None,
+        &mut t0,
+    )
+    .unwrap()
+    .simulated;
+    let mut t1 = None;
+    let s_contact = perturb_with_targets(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_cut,
+        &rw_tfl,
+        &targets,
+        &cfg_contact,
+        &lr_close,
+        None,
+        None,
+        None,
+        None,
+        &mut t1,
+    )
+    .unwrap()
+    .simulated;
+    assert!(
+        sim_diff(&s_open, &s_contact) > 1e-6,
+        "contact_distance should change received-ligand geometry and perturb output"
+    );
+
+    let mut lr_tight = HashMap::new();
+    lr_tight.insert("LIG".to_string(), 0.08);
+    let mut lr_wide = HashMap::new();
+    lr_wide.insert("LIG".to_string(), 8.0);
+    let rw_tight = compute_initial_weighted_ligands(
+        &gene_mtx,
+        &gene_names,
+        &lig_names,
+        &xy,
+        &lr_tight,
+        scale,
+        min_e,
+        None,
+        None,
+    );
+    let rw_wide = compute_initial_weighted_ligands(
+        &gene_mtx,
+        &gene_names,
+        &lig_names,
+        &xy,
+        &lr_wide,
+        scale,
+        min_e,
+        None,
+        None,
+    );
+    let cfg_r = PerturbConfig {
+        n_propagation: 1,
+        ..Default::default()
+    };
+    let mut t2 = None;
+    let s_tight = perturb_with_targets(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_tight,
+        &rw_tfl,
+        &targets,
+        &cfg_r,
+        &lr_tight,
+        None,
+        None,
+        None,
+        None,
+        &mut t2,
+    )
+    .unwrap()
+    .simulated;
+    let mut t3 = None;
+    let s_wide = perturb_with_targets(
+        &bb,
+        &gene_mtx,
+        &gene_names,
+        &xy,
+        &rw_wide,
+        &rw_tfl,
+        &targets,
+        &cfg_r,
+        &lr_wide,
+        None,
+        None,
+        None,
+        None,
+        &mut t3,
+    )
+    .unwrap()
+    .simulated;
+    assert!(
+        sim_diff(&s_tight, &s_wide) > 1e-6,
+        "LR radius should change weighted ligands and perturb output"
+    );
+
+    let n_cells = 200;
+    let (bb2, mut gene_mtx2, gene_names2, xy2, _, rw_tfl2, lr_radii2) =
+        make_synthetic_inputs(n_cells);
+    let b_idx = gene_names2.iter().position(|g| g == "B").unwrap();
+    for i in 0..n_cells {
+        gene_mtx2[[i, b_idx]] = 1.0 + (i as f64) * 0.02;
+    }
+    let lig_b = vec!["B".to_string()];
+    let rw_shared = compute_initial_weighted_ligands(
+        &gene_mtx2,
+        &gene_names2,
+        &lig_b,
+        &xy2,
+        &lr_radii2,
+        scale,
+        min_e,
+        None,
+        None,
+    );
+    let cfg_exact = PerturbConfig {
+        n_propagation: 6,
+        ligand_grid_factor: None,
+        ..Default::default()
+    };
+    let cfg_grid = PerturbConfig {
+        n_propagation: 6,
+        ligand_grid_factor: Some(0.3),
+        ..Default::default()
+    };
+    let ko = vec![("A".to_string(), 0.0)];
+    let g_exact = perturb(
+        &bb2,
+        &gene_mtx2,
+        &gene_names2,
+        &xy2,
+        &rw_shared,
+        &rw_tfl2,
+        &ko,
+        &cfg_exact,
+        &lr_radii2,
+    );
+    let g_grid = perturb(
+        &bb2,
+        &gene_mtx2,
+        &gene_names2,
+        &xy2,
+        &rw_shared,
+        &rw_tfl2,
+        &ko,
+        &cfg_grid,
+        &lr_radii2,
+    );
+    let g_diff = sim_diff(&g_exact.simulated, &g_grid.simulated);
+    assert!(
+        g_diff > 1e-6,
+        "ligand_grid_factor should change recomputed weighted ligands during propagation (L2 diff = {g_diff:e})"
+    );
 }

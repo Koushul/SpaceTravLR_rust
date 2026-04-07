@@ -126,6 +126,44 @@ If WebGPU/Burn tests misbehave on your machine, force CPU like training:
 SPACETRAVLR_FORCE_CPU=1 cargo llvm-cov --all-features
 ```
 
+### Synthetic training benchmark (Python reference vs Rust)
+
+This repo includes [`scripts/bench_synthetic_py_vs_rust.py`](scripts/bench_synthetic_py_vs_rust.py) to compare **seed-only** spatial GRN training on a **mock** dataset meant to be representative (not a correctness oracle):
+
+- **200** mouse genes chosen from the intersection of CellChat-expanded symbols and `mouse_network.parquet` nodes (mixed TF / ligand / receptor roles via the network and L–R database).
+- **2 000** cells on a 2D grid with **five** integer clusters; expression is log-normal with a **GRN-driven** component (each gene leans on its `grn` parents in the panel when available).
+- **Python** uses the reference implementation from [`jishnulab/SpaceTravLR`](https://github.com/jishnu-lab/SpaceTravLR) (`SpatialCellularProgramsEstimator`, group Lasso, `imputed_count`, radius `200`, contact `50`, `scale_factor` `1.0`, `n_iter` `100`, **no CNN epochs**). Runs use the project venv **[`.venv-bench`](.venv-bench)** (install deps as needed; the script imports `SpaceTravLR` with `SPACETRAVLR_PY_SRC` defaulting to `/Users/koush/Projects/jishnulab/SpaceTravLR/src`). A tiny **compat shim** adjusts the reference CNN class constructor when the optional low‑R² branch instantiates it with an `activation=` keyword not present in this checkout—this does not affect the timed **Lasso + `init_data`** hot path for the runs below.
+- **Rust** uses `target/release/spacetravlr` when present (`SPACETRAVLR_FORCE_CPU=1`, `--training-mode seed`, `--epochs 0`, `--parallel 1`, `--max-genes 200`, matching Lasso iterations and penalties via CLI). **Wall time** includes the full CLI run (AnnData load, shared preprocessing, and all targets).
+
+**One representative run** (Apple **M3 Pro**, **arm64**; **Rust** 1.94.0; **Python** 3.14.3; **Rust** CPU-only via `SPACETRAVLR_FORCE_CPU=1`; **Python** may use **MPS** if PyTorch enables it):
+
+| Implementation | Wall time (200 targets, 2 000 cells) |
+|----------------|--------------------------------------|
+| Python (reference) | **103.5 s** |
+| Rust (`spacetravlr`) | **17.4 s** |
+| Ratio (Python / Rust) | **≈ 5.96×** |
+
+Reproduce:
+
+```bash
+# One-shot (writes /tmp/stlr_fullbench/ and prints times)
+./.venv-bench/bin/python scripts/bench_synthetic_py_vs_rust.py --workdir /tmp/stlr_fullbench --genes 200 --n-targets 200 --cells 2000
+```
+
+Override data paths with `SPACETRAVLR_RUST_ROOT`, `SPACETRAVLR_DATA_DIR`, `SPACETRAVLR_PY_SRC`, `CELLCHAT_MOUSE` if your checkout layout differs.
+
+**Scaling sweep** (grid over cell counts and target counts; JSON summary + optional [YouPlot](https://github.com/red-data-tools/YouPlot) line charts under `--plot-dir`):
+
+```bash
+./.venv-bench/bin/python scripts/bench_synthetic_py_vs_rust.py sweep \
+  --workdir results/bench_scaling/runs \
+  --cell-grid "1000,2500,5000" --target-grid "50,125,200" --gene-panel 200 \
+  --json-out results/bench_scaling/bench_scaling.json \
+  --plot-dir results/bench_scaling/plots
+```
+
+Example artifact: [`results/bench_scaling/bench_scaling.json`](results/bench_scaling/bench_scaling.json).
+
 ### Spatial + betadata web viewer (optional)
 
 Interactive **deck.gl** UI for spatial coordinates from an `.h5ad` (`obsm["spatial"]`, then `X_spatial`, then `spatial_loc`) with coloring by **expression** (one gene from `X` or a layer), **betadata** (when a run TOML is supplied), or **cell type** when a standard `obs` cell-type column exists. Betadata is read from the **same directory as `spacetravlr_run_repro.toml`** (not a separate CLI path): **seed-only** models use a `Cluster` column (one β row per cluster; cells get values via `--cluster-annot`), while **spatial / full CNN** exports use `CellID` (per-cell β). `/api/meta` includes `betadata_row_id` (`Cluster` or `CellID`) when the first feather in that run directory can be probed.

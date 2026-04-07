@@ -4,7 +4,9 @@ use crate::betadata::{
     resolve_betadata_cluster_key_column, write_betadata_feather,
 };
 use crate::config::{SpaceshipConfig, expand_user_path};
-use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use crate::ligand::{
+    calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
+};
 use crate::perturb::{
     CachedBaselineSplash, PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets,
 };
@@ -127,7 +129,7 @@ fn request_output_dir(
         .join(format!("genes_{hash:016x}_value_{}", sanitize_float(value)))
 }
 
-fn compute_initial_wl(
+pub fn compute_initial_weighted_ligands(
     gene_mtx: &Array2<f64>,
     gene_names: &[String],
     ligand_names: &[String],
@@ -136,6 +138,7 @@ fn compute_initial_wl(
     weighted_ligand_scale: f64,
     min_expression: f64,
     grid_factor: Option<f64>,
+    contact_distance: Option<f64>,
 ) -> GeneMatrix {
     let n_cells = gene_mtx.nrows();
     let gene_to_idx: HashMap<&str, usize> = gene_names
@@ -192,10 +195,21 @@ fn compute_initial_wl(
             sub.column_mut(k).assign(&lig_data.column(j));
         }
         let weighted = match grid_factor {
-            Some(gf) if gf.is_finite() && gf > 0.0 => {
-                calculate_weighted_ligands_grid(xy, &sub, radius, weighted_ligand_scale, gf)
-            }
-            _ => calculate_weighted_ligands(xy, &sub, radius, weighted_ligand_scale),
+            Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid_with_cutoff(
+                xy,
+                &sub,
+                radius,
+                weighted_ligand_scale,
+                gf,
+                contact_distance,
+            ),
+            _ => calculate_weighted_ligands_with_cutoff(
+                xy,
+                &sub,
+                radius,
+                weighted_ligand_scale,
+                contact_distance,
+            ),
         };
         for (k, &j) in group.iter().enumerate() {
             let col = weighted.column(k);
@@ -349,7 +363,7 @@ impl PerturbRuntime {
         let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
         set_msg("Weighted ligand precomputation (LR)…");
         set_p(830);
-        let rw_ligands_init = compute_initial_wl(
+        let rw_ligands_init = compute_initial_weighted_ligands(
             &gene_mtx,
             &gene_names,
             &lr_ligands,
@@ -358,10 +372,11 @@ impl PerturbRuntime {
             wl_scale,
             min_expression,
             grid,
+            None,
         );
         set_msg("Weighted ligand precomputation (TFL)…");
         set_p(910);
-        let rw_tfligands_init = compute_initial_wl(
+        let rw_tfligands_init = compute_initial_weighted_ligands(
             &gene_mtx,
             &gene_names,
             &tfl_ligands,
@@ -370,6 +385,7 @@ impl PerturbRuntime {
             wl_scale,
             min_expression,
             grid,
+            None,
         );
 
         let perturb_cfg = PerturbConfig {
@@ -379,6 +395,7 @@ impl PerturbRuntime {
             beta_cap: cfg.perturbation.beta_cap,
             min_expression,
             ligand_grid_factor: cfg.perturbation.ligand_grid_factor,
+            contact_distance: None,
         };
 
         set_msg("Perturbation runtime ready.");
