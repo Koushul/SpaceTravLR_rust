@@ -39,7 +39,7 @@ Typical sections:
 - **`[grn]`** — `network_data_dir`, `tf_priors_feather`, `tf_ligand_cutoff`, `max_ligands` (serde alias `max_lr_pairs`), modulator toggles, `extra_modulators`, `extra_lr`, file variants
 - **`[cnn]`**, **`[lasso]`**, **`[training]`**, **`[training.hybrid]`** — CNN/Lasso/hybrid gating (hybrid only when `mode = "hybrid"`)
 - **`[execution]`** — `n_parallel`, `output_dir`, `write_minimal_repro_h5ad`, `stale_lock_secs` (join lock recovery)
-- **`[perturbation]`** — `beta_scale_factor`, optional `beta_cap`, **`n_propagation`**, **`ligand_grid_factor`** (grid vs exact received ligands)
+- **`[perturbation]`** — `beta_scale_factor`, optional `beta_cap`, **`n_propagation`**, **`ligand_grid_factor`** (grid vs exact received ligands), optional **`cells_csv`** / **`cells_csv_column`** (defaults for `spacetravlr-perturb` **`--export`** and TUI cell-scope CSV when CLI does not pass **`--cells-csv`**; paths relative to the run TOML’s directory unless absolute)
 - **`[model_export]`** — `save_cnn_weights`, `compressed_npz`, `output_subdir`
 
 CLI flags override many of these when **not** in `--join-output-dir` mode.
@@ -108,7 +108,7 @@ Loads **`PerturbRuntime::from_run_toml`**: same AnnData path, layer, cluster col
 
 ### TUI (default when no `--export` / `--out`)
 
-Ratatui UI: pick gene, **`desired_expr`**, **`n_propagation`**, optional cell column from CSV (**Ctrl+O**). Initial defaults can be set from CLI (`--desired-expr`, `--n-propagation`, `--verbose`, `--cells-csv`, `--cells-csv-column`, `--run-toml`).
+Ratatui UI: pick gene, **`desired_expr`**, **`n_propagation`**, optional cell column from CSV (**Ctrl+O**). Initial defaults can be set from CLI (`--desired-expr`, `--n-propagation`, `--verbose`, `--cells-csv`, `--cells-csv-column`, `--run-toml`). If **`--cells-csv`** is not passed, the TUI loads **`[perturbation].cells_csv`** / **`cells_csv_column`** from the run TOML after **`PerturbRuntime`** loads so **Ctrl+O** works without extra flags. The right panel shows **mean expression of the highlighted gene by betadata cluster key** (Unicode bar preview of the input **`[data].layer`** matrix).
 
 **Without `tui` feature:** legacy stdin flow / prompts (see `#[cfg(not(feature = "tui"))]` in [`spacetravlr_perturb.rs`](src/bin/spacetravlr_perturb.rs)).
 
@@ -120,8 +120,10 @@ Optional:
 
 - **`--desired-expr`** (default `0`)
 - **`--n-propagation`** (else `[perturbation].n_propagation` from TOML)
-- **`--cells-csv`** + **`--cells-csv-column`** — CSV must have a **header**; each column lists **`obs_names`** strings from the AnnData; chosen column = cells whose expression is pinned/perturbed; omit CSV → perturb **all** cells
+- **`--cells-csv`** + **`--cells-csv-column`** — CSV must have a **header**; each column lists **`obs_names`** strings from the AnnData; chosen column = cells whose expression is scoped for the perturbation; omit CSV → perturb **all** cells. If the CLI omits **`--cells-csv`**, the binary falls back to **`[perturbation].cells_csv`** / **`cells_csv_column`** in the run TOML when set (requires both in TOML for CSV scope); if only **`--cells-csv`** is passed, **`[perturbation].cells_csv_column`** can supply the column name.
 - **`--verbose`** — timings on stderr
+
+After a successful run, the export path validates output shape and, for near-zero **`desired_expr`** (KO), checks that the target gene’s simulated values are ~0 on the scoped rows (fails loudly on mismatch).
 
 Output: single Feather matrix (**`CellID`** + all genes), written via [`write_betadata_feather`](src/betadata.rs).
 
@@ -133,7 +135,8 @@ For many **single-gene** perturbations with one `PerturbRuntime::from_run_toml` 
 
 - **CLI:** `--run-toml` + `--batch-toml PATH`. Optional `--batch-parallelism` overrides the file’s `parallelism`. Optional `--n-propagation` sets the default `n_propagation` for every job before per-job values from the file. **`--gene`, `--out`/`--export`, `--cells-csv` are not allowed** (cell scope lives in the batch file if needed).
 - **Unifying shape:** `gene` *or* `genes` (string or list). `desired_expr` and `n_propagation` may be scalars (broadcast) or lists of length **N** (zip with genes) or length **1** (broadcast). **`out_dir`** → default `{gene}_perturb_expr.feather` per gene; **or** `out` as one path (only if **N = 1**) or an array of **N** paths. Relative paths resolve against the batch TOML’s parent directory.
-- Optional shared **`cells_csv`** + **`cells_csv_column`**, or **`cells_obs_file`** (same semantics as single-job batch).
+- Optional **`cells_csv`** with either **`cells_csv_column`** (default column for every job) **or** **`cells_csv_columns`** — a string or list of length **N** (zip with **`genes`**) or length **1** (broadcast). Each entry is a **CSV header name**; **`""`** or whitespace-only means **all cells** for that gene. Do not set both **`cells_csv_column`** and **`cells_csv_columns`**. **`cells_csv_columns` requires `cells_csv`**. Or use **`cells_obs_file`** (same line-list semantics as **`perturb_obs_subset_file`**, shared by all jobs; mutually exclusive with **`cells_csv`**).
+- Each written feather is validated (shape + KO target check when **`desired_expr`** ≈ 0), same as single-job export.
 - Optional spatial/received-ligand overrides (root keys, applied to every job in the file): **`radius`** (per-ligand Gaussian radius map is rebuilt with this single value for all ligands), **`ligand_grid_factor`** (grid vs exact received ligands during propagation; merges with the run’s `[perturbation]` default), **`contact_distance`** (hard neighbor cutoff in distance units; `None` when omitted). When any of these differ from the loaded `PerturbRuntime`, initial weighted-ligand matrices are recomputed and baseline splash cache is bypassed for that job so results stay consistent with the override.
 
 ### Perturbation physics (from TOML)

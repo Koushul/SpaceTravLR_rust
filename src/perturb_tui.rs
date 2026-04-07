@@ -20,6 +20,7 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
 use crate::betadata::BetadataUiProgress;
 use crate::config::expand_user_path;
+use std::path::Path;
 use crate::perturb::{
     PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, perturb_with_targets,
 };
@@ -279,6 +280,28 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                                 rt.perturb_cfg.n_propagation = n;
                             }
                             app.n_propagation = rt.perturb_cfg.n_propagation;
+                            let run_parent = rt
+                                .run_toml_path
+                                .parent()
+                                .filter(|p| !p.as_os_str().is_empty())
+                                .unwrap_or_else(|| Path::new("."));
+                            if app.cells_csv_path.is_none() {
+                                if let Some(ref rel) = rt.cfg.perturbation.cells_csv {
+                                    if !rel.trim().is_empty() {
+                                        let exp = expand_user_path(rel.trim());
+                                        let pb = Path::new(&exp);
+                                        app.cells_csv_path = Some(if pb.is_absolute() {
+                                            pb.to_path_buf()
+                                        } else {
+                                            run_parent.join(pb)
+                                        });
+                                    }
+                                }
+                            }
+                            if app.cells_csv_initial_column.is_none() {
+                                app.cells_csv_initial_column =
+                                    rt.cfg.perturbation.cells_csv_column.clone();
+                            }
                             let rt_arc = std::sync::Arc::new(rt);
                             app.apply_cells_csv_after_load(rt_arc.as_ref());
                             app.runtime = Some(rt_arc);
@@ -674,6 +697,127 @@ impl App {
         list_state.select(Some(sel));
         self.screen = Screen::PickCsvColumn { list_state };
         self.clear_status();
+    }
+
+    fn expression_preview_content(&self, inner_width: u16) -> (Line<'static>, Vec<Line<'static>>) {
+        use std::collections::HashMap;
+
+        let Some(rt) = self.runtime.as_ref() else {
+            return (
+                Line::from(Span::styled(
+                    " Expression preview ",
+                    Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+                )),
+                vec![Line::from(Span::styled(
+                    "Load a run to preview.",
+                    Style::default().fg(MUTED),
+                ))],
+            );
+        };
+        let title_layer = rt.cfg.data.layer.clone();
+        let Some(gene) = self.selected_gene_name() else {
+            return (
+                Line::from(vec![
+                    Span::styled(" Mean expr ", Style::default().fg(LABEL)),
+                    Span::styled(format!("· {} · ", title_layer), Style::default().fg(MUTED)),
+                ]),
+                vec![Line::from(Span::styled(
+                    "Select a gene (↑/↓) for cluster means (input layer).",
+                    Style::default().fg(MUTED),
+                ))],
+            );
+        };
+        let Some(gi) = rt.gene_names.iter().position(|g| g == &gene) else {
+            return (
+                Line::from(Span::styled(
+                    " Expression preview ",
+                    Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+                )),
+                vec![Line::from("Gene index error.")],
+            );
+        };
+        let n = rt.gene_mtx.nrows();
+        if rt.betadata_cluster_key.len() != n {
+            return (
+                Line::from(Span::styled(
+                    " Expression preview ",
+                    Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+                )),
+                vec![Line::from(Span::styled(
+                    "Cluster key length mismatch.",
+                    Style::default().fg(C_FAIL),
+                ))],
+            );
+        }
+        let mut acc: HashMap<String, (f64, usize)> = HashMap::new();
+        for r in 0..n {
+            let k = rt.betadata_cluster_key[r].clone();
+            let v = rt.gene_mtx[[r, gi]];
+            let e = acc.entry(k).or_insert((0.0, 0));
+            e.0 += v;
+            e.1 += 1;
+        }
+        let mut pairs: Vec<(String, f64)> = acc
+            .into_iter()
+            .map(|(k, (s, c))| (k, s / c as f64))
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        const CAP: usize = 15;
+        pairs.truncate(CAP);
+        let vmax = pairs
+            .first()
+            .map(|(_, m)| *m)
+            .filter(|m| m.is_finite())
+            .unwrap_or(0.0)
+            .abs()
+            .max(1e-12);
+
+        let inner_w = inner_width.max(8) as usize;
+        let label_w = (inner_w / 4).clamp(6, 18);
+        let bar_w = inner_w.saturating_sub(label_w + 8 + 3).max(4);
+
+        let trunc_label = |s: &str, max_c: usize| -> String {
+            let nch = s.chars().count();
+            if nch <= max_c {
+                return s.to_string();
+            }
+            let take = max_c.saturating_sub(1);
+            format!("{}…", s.chars().take(take).collect::<String>())
+        };
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (label, mean) in pairs {
+            let lab = trunc_label(&label, label_w);
+            let frac = (mean.abs() / vmax).clamp(0.0, 1.0);
+            let nf = (frac * bar_w as f64).round() as usize;
+            let bar: String = "█".repeat(nf) + &"░".repeat(bar_w.saturating_sub(nf));
+            let num = format!("{:>7.3}", mean);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{lab:<label_w$}"),
+                    Style::default().fg(TITLE),
+                ),
+                Span::raw(" "),
+                Span::styled(bar, Style::default().fg(SKY)),
+                Span::raw(" "),
+                Span::styled(num, Style::default().fg(MUTED)),
+            ]));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No rows to aggregate.",
+                Style::default().fg(MUTED),
+            )));
+        }
+        let block_title = Line::from(vec![
+            Span::styled(" Mean ", Style::default().fg(LABEL)),
+            Span::styled(gene.clone(), Style::default().fg(VALUE).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" · {} ", title_layer),
+                Style::default().fg(MUTED),
+            ),
+        ]);
+        (block_title, lines)
     }
 
     fn open_cell_scope_editor(&mut self, gene: String, rt: &PerturbRuntime) {
@@ -1405,7 +1549,11 @@ impl App {
         ]);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(hdr.len() as u16 + 1), Constraint::Min(3)])
+            .constraints([
+                Constraint::Length(hdr.len() as u16 + 1),
+                Constraint::Min(2),
+                Constraint::Min(5),
+            ])
             .split(chunks[1]);
 
         f.render_widget(Paragraph::new(hdr).style(Style::default().bg(BG)), right[0]);
@@ -1416,6 +1564,11 @@ impl App {
             ))
             .block(block_panel(filter_title, OUTER_BORD)),
             right[1],
+        );
+        let (preview_title, preview_lines) = self.expression_preview_content(right[2].width);
+        f.render_widget(
+            Paragraph::new(preview_lines).block(block_panel(preview_title, WORK_BORD)),
+            right[2],
         );
 
         let st_style = if self.status_is_error {

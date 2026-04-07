@@ -126,6 +126,9 @@ n_propagation     = 4
 #   0.3 → ~1% error, ~6x faster
 # Comment out or omit for exact O(N²) computation.
 ligand_grid_factor = 0.5
+# Optional defaults for `spacetravlr-perturb` (--export / TUI) when --cells-csv is omitted; paths relative to the run TOML’s directory unless absolute.
+# cells_csv = "cell_scope.csv"
+# cells_csv_column = "my_cells"
 
 [model_export]
 # Export CNN weights (.npz) for genes that run per-cell CNN refinement (omit or false = off).

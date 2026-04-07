@@ -9,7 +9,7 @@ use crate::betadata::{GeneMatrix, write_betadata_feather};
 use crate::perturb::{PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets};
 use crate::perturb_mode::{
     PerturbRuntime, compute_initial_weighted_ligands, parse_obs_columns_csv,
-    perturb_obs_indices_from_file,
+    perturb_obs_indices_from_file, validate_perturb_simulated_matrix,
 };
 use std::collections::HashMap;
 
@@ -42,6 +42,13 @@ pub enum OutSpec {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum StrOrVec {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PerturbBatchFile {
     #[serde(default)]
     pub gene: Option<String>,
@@ -61,6 +68,9 @@ pub struct PerturbBatchFile {
     pub cells_csv: Option<String>,
     #[serde(default)]
     pub cells_csv_column: Option<String>,
+    /// Per-gene CSV column names (same length as `genes`, or length 1 broadcast). Empty string = perturb all cells.
+    #[serde(default)]
+    pub cells_csv_columns: Option<StrOrVec>,
     #[serde(default)]
     pub cells_obs_file: Option<String>,
     /// Override Gaussian radius for received-ligand aggregation (default: `[spatial].radius` from run TOML).
@@ -83,6 +93,8 @@ pub struct PreparedPerturbJob {
     pub radius: Option<f64>,
     pub ligand_grid_factor: Option<f64>,
     pub contact_distance: Option<f64>,
+    /// Resolved cell row indices for scoped perturbation; `None` = all cells.
+    pub cell_indices: Option<Vec<usize>>,
 }
 
 pub fn default_worker_parallelism() -> usize {
@@ -148,6 +160,26 @@ fn broadcast_f64(spec: Option<&F64OrVec>, n: usize) -> anyhow::Result<Vec<f64>> 
             } else {
                 anyhow::bail!(
                     "batch TOML: `desired_expr` length {} must be 1, {}, or omit (default 0)",
+                    v.len(),
+                    n
+                )
+            }
+        }
+    }
+}
+
+fn broadcast_str_cols(spec: Option<&StrOrVec>, n: usize) -> anyhow::Result<Vec<String>> {
+    match spec {
+        None => anyhow::bail!("internal: cells_csv_columns missing"),
+        Some(StrOrVec::One(s)) => Ok(vec![s.clone(); n]),
+        Some(StrOrVec::Many(v)) => {
+            if v.len() == n {
+                Ok(v.clone())
+            } else if v.len() == 1 {
+                Ok(vec![v[0].clone(); n])
+            } else {
+                anyhow::bail!(
+                    "batch TOML: `cells_csv_columns` length {} must be 1 or {}",
                     v.len(),
                     n
                 )
@@ -252,15 +284,29 @@ pub fn expand_prepared_jobs(
             radius,
             ligand_grid_factor,
             contact_distance,
+            cell_indices: None,
         })
         .collect())
 }
 
-pub fn resolve_batch_cell_indices(
+/// Fills [`PreparedPerturbJob::cell_indices`] for each job (`None` = all cells).
+pub fn resolve_prepared_job_cell_indices(
     file: &PerturbBatchFile,
     batch_parent: &Path,
     obs_names: &[String],
-) -> anyhow::Result<Option<Vec<usize>>> {
+    jobs: &mut [PreparedPerturbJob],
+) -> anyhow::Result<()> {
+    if file.cells_csv_columns.is_some() {
+        let has_csv = file
+            .cells_csv
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_csv {
+            anyhow::bail!("batch TOML: `cells_csv_columns` requires `cells_csv`");
+        }
+    }
+    let n = jobs.len();
     let csv = file
         .cells_csv
         .as_ref()
@@ -271,32 +317,59 @@ pub fn resolve_batch_cell_indices(
         .as_ref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
+
     match (csv, obs_f) {
         (Some(_), Some(_)) => {
             anyhow::bail!("batch TOML: use either `cells_csv` or `cells_obs_file`, not both")
         }
-        (Some(_), None) => {
-            let col = file.cells_csv_column.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "batch TOML: `cells_csv_column` is required when `cells_csv` is set"
-                )
-            })?;
-            let path = resolve_relative_to(batch_parent, csv.unwrap());
-            let parsed = parse_obs_columns_csv(&path, obs_names)?;
-            let sl = parsed.indices_for_column(col).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "batch TOML: cells_csv column {:?} not found in CSV header",
-                    col
-                )
-            })?;
-            Ok(Some(sl.to_vec()))
-        }
         (None, Some(p)) => {
             let path = resolve_relative_to(batch_parent, p);
-            Ok(Some(perturb_obs_indices_from_file(&path, obs_names)?))
+            let idx = perturb_obs_indices_from_file(&path, obs_names)?;
+            for j in jobs.iter_mut() {
+                j.cell_indices = Some(idx.clone());
+            }
         }
-        (None, None) => Ok(None),
+        (Some(cs), None) => {
+            if file.cells_csv_columns.is_some() && file.cells_csv_column.is_some() {
+                anyhow::bail!(
+                    "batch TOML: set either `cells_csv_column` or `cells_csv_columns`, not both"
+                );
+            }
+            let path = resolve_relative_to(batch_parent, cs);
+            let parsed = parse_obs_columns_csv(&path, obs_names)?;
+
+            let col_per_job: Vec<String> = if let Some(ref spec) = file.cells_csv_columns {
+                broadcast_str_cols(Some(spec), n)?
+            } else if let Some(ref g) = file.cells_csv_column {
+                vec![g.clone(); n]
+            } else {
+                anyhow::bail!(
+                    "batch TOML: when `cells_csv` is set, provide `cells_csv_column` or `cells_csv_columns`"
+                );
+            };
+
+            for (job, col_raw) in jobs.iter_mut().zip(col_per_job.iter()) {
+                let col = col_raw.trim();
+                if col.is_empty() {
+                    job.cell_indices = None;
+                } else {
+                    let sl = parsed.indices_for_column(col).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "batch TOML: cells_csv column {:?} not found in CSV header",
+                            col
+                        )
+                    })?;
+                    job.cell_indices = Some(sl.to_vec());
+                }
+            }
+        }
+        (None, None) => {
+            for j in jobs.iter_mut() {
+                j.cell_indices = None;
+            }
+        }
     }
+    Ok(())
 }
 
 pub fn validate_jobs_genes(
@@ -314,12 +387,8 @@ pub fn validate_jobs_genes(
     Ok(())
 }
 
-fn run_one_job(
-    runtime: &PerturbRuntime,
-    job: PreparedPerturbJob,
-    cell_indices: Option<Vec<usize>>,
-    verbose: bool,
-) -> anyhow::Result<()> {
+fn run_one_job(runtime: &PerturbRuntime, job: PreparedPerturbJob, verbose: bool) -> anyhow::Result<()> {
+    let cell_indices = job.cell_indices.clone();
     let targets = vec![PerturbTarget {
         gene: job.gene.clone(),
         desired_expr: job.desired_expr,
@@ -416,6 +485,15 @@ fn run_one_job(
         &mut timings,
     )
     .map_err(|_| anyhow::anyhow!("perturbation failed for gene {}", job.gene))?;
+    let cell_scope = job.cell_indices.as_deref();
+    validate_perturb_simulated_matrix(
+        &runtime.gene_mtx,
+        &runtime.gene_names,
+        &result.simulated,
+        &job.gene,
+        job.desired_expr,
+        cell_scope,
+    )?;
     let p = job
         .out_path
         .to_str()
@@ -449,7 +527,6 @@ fn run_one_job(
 pub fn run_batch_jobs(
     runtime: Arc<PerturbRuntime>,
     jobs: Vec<PreparedPerturbJob>,
-    cell_indices: Option<Vec<usize>>,
     parallelism: usize,
     verbose: bool,
 ) -> anyhow::Result<()> {
@@ -462,14 +539,13 @@ pub fn run_batch_jobs(
     for _ in 0..n_workers {
         let q = Arc::clone(&queue);
         let rt = Arc::clone(&runtime);
-        let cells = cell_indices.clone();
         handles.push(thread::spawn(move || -> anyhow::Result<()> {
             loop {
                 let job = { q.lock().expect("batch queue poisoned").pop_front() };
                 let Some(job) = job else {
                     break;
                 };
-                run_one_job(rt.as_ref(), job, cells.clone(), verbose)?;
+                run_one_job(rt.as_ref(), job, verbose)?;
             }
             Ok(())
         }));
@@ -663,5 +739,86 @@ parallelism = 2
             effective_parallelism(None, None),
             default_worker_parallelism().max(1)
         );
+    }
+
+    #[test]
+    fn cells_csv_columns_zip_and_empty_all_cells() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_batch_cells_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("lists.csv");
+        std::fs::write(
+            &csv_path,
+            "col_a,col_b,col_c\nalpha,beta,gamma\n,,delta\n",
+        )
+        .unwrap();
+        let obs = vec!["alpha".into(), "beta".into(), "gamma".into(), "delta".into()];
+        let batch_toml = format!(
+            r#"
+genes = ["G1", "G2", "G3"]
+out_dir = "out"
+cells_csv = "{}"
+cells_csv_columns = ["col_a", "col_b", ""]
+"#,
+            csv_path.display()
+        );
+        let f: PerturbBatchFile = toml::from_str(&batch_toml).unwrap();
+        let parent = dir.as_path();
+        let mut jobs = expand_prepared_jobs(&f, parent, 4).unwrap();
+        assert_eq!(jobs.len(), 3);
+        resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
+        assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[0usize]);
+        assert_eq!(jobs[1].cell_indices.as_ref().unwrap().as_slice(), &[1usize]);
+        assert!(jobs[2].cell_indices.is_none());
+    }
+
+    #[test]
+    fn cells_csv_columns_broadcast_one() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_batch_cells2_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("x.csv");
+        std::fs::write(&csv_path, "only\nbeta\n").unwrap();
+        let obs = vec!["alpha".into(), "beta".into()];
+        let batch_toml = format!(
+            r#"
+genes = ["A", "B"]
+out_dir = "o"
+cells_csv = "{}"
+cells_csv_columns = ["only"]
+"#,
+            csv_path.display()
+        );
+        let f: PerturbBatchFile = toml::from_str(&batch_toml).unwrap();
+        let parent = dir.as_path();
+        let mut jobs = expand_prepared_jobs(&f, parent, 4).unwrap();
+        resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
+        assert_eq!(
+            jobs[0].cell_indices,
+            jobs[1].cell_indices
+        );
+        assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[1usize]);
+    }
+
+    #[test]
+    fn errors_cells_csv_column_and_columns_together() {
+        let dir = std::env::temp_dir().join(format!("spacetravlr_batch_e_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("c.csv");
+        std::fs::write(&csv_path, "a\nalpha\n").unwrap();
+        let s = format!(
+            r#"
+genes = ["A"]
+out_dir = "o"
+cells_csv = "{}"
+cells_csv_column = "a"
+cells_csv_columns = ["a"]
+"#,
+            csv_path.display()
+        );
+        let f: PerturbBatchFile = toml::from_str(&s).unwrap();
+        let obs = vec!["alpha".into()];
+        let mut jobs = expand_prepared_jobs(&f, dir.as_path(), 4).unwrap();
+        assert!(resolve_prepared_job_cell_indices(&f, dir.as_path(), &obs, &mut jobs).is_err());
     }
 }

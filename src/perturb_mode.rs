@@ -49,6 +49,8 @@ pub struct PerturbRuntime {
     pub gene_mtx: Array2<f64>,
     pub gene_names: Vec<String>,
     pub obs_names: Vec<String>,
+    /// Betadata cluster key string per cell (same order as `obs_names` / training feathers).
+    pub betadata_cluster_key: Vec<String>,
     pub cell_types: Vec<usize>,
     pub bb: Betabase,
     pub xy: Array2<f64>,
@@ -408,6 +410,7 @@ impl PerturbRuntime {
             gene_mtx,
             gene_names,
             obs_names,
+            betadata_cluster_key: cluster_keys.clone(),
             cell_types: clusters,
             bb,
             xy,
@@ -418,6 +421,59 @@ impl PerturbRuntime {
             baseline_splash_cache: Mutex::new(None),
         })
     }
+}
+
+/// After a successful perturbation, check output shape and (for near-zero targets) that the KO gene is ~0 on scoped rows.
+pub fn validate_perturb_simulated_matrix(
+    gene_mtx: &Array2<f64>,
+    gene_names: &[String],
+    simulated: &Array2<f64>,
+    target_gene: &str,
+    desired_expr: f64,
+    cell_indices: Option<&[usize]>,
+) -> anyhow::Result<()> {
+    let nrows = gene_mtx.nrows();
+    let ngenes = gene_names.len();
+    if simulated.nrows() != nrows || simulated.ncols() != ngenes {
+        anyhow::bail!(
+            "perturb output shape {:?} != expected ({nrows}, {ngenes})",
+            simulated.dim()
+        );
+    }
+    let g_col = gene_names
+        .iter()
+        .position(|g| g == target_gene)
+        .ok_or_else(|| anyhow::anyhow!("validate: gene {:?} not in var names", target_gene))?;
+    const KO_DESIRED_EPS: f64 = 1e-6;
+    const KO_VALUE_TOL: f64 = 1e-4;
+    if desired_expr.abs() <= KO_DESIRED_EPS {
+        let mut max_dev = 0.0f64;
+        let mut n_checked = 0usize;
+        match cell_indices {
+            None => {
+                for r in 0..nrows {
+                    max_dev = max_dev.max(simulated[[r, g_col]].abs());
+                    n_checked += 1;
+                }
+            }
+            Some(idxs) => {
+                for &r in idxs {
+                    if r >= nrows {
+                        anyhow::bail!("validate: cell index {r} >= nrows {nrows}");
+                    }
+                    max_dev = max_dev.max(simulated[[r, g_col]].abs());
+                    n_checked += 1;
+                }
+            }
+        }
+        if max_dev > KO_VALUE_TOL {
+            anyhow::bail!(
+                "KO check failed for gene {:?}: max |simulated| = {max_dev:.3e} over {n_checked} row(s) (tol {KO_VALUE_TOL:.1e})",
+                target_gene
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1064,5 +1120,37 @@ mod tests {
         assert_eq!(parsed.indices_for_column("col_b").unwrap(), &[0usize, 1]);
         std::fs::write(&p, "x\nunknown\n").unwrap();
         assert!(parse_obs_columns_csv(&p, &obs).is_err());
+    }
+
+    #[test]
+    fn validate_perturb_ko_passes() {
+        let g = array![[0.0, 1.0], [2.0, 3.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[1e-8, 1.0], [1e-9, 3.0]];
+        validate_perturb_simulated_matrix(&g, &names, &sim, "A", 0.0, None).unwrap();
+    }
+
+    #[test]
+    fn validate_perturb_ko_scoped_rows() {
+        let g = array![[0.0, 1.0], [2.0, 3.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[1.0, 1.0], [1e-8, 3.0]];
+        validate_perturb_simulated_matrix(&g, &names, &sim, "A", 0.0, Some(&[1])).unwrap();
+    }
+
+    #[test]
+    fn validate_perturb_ko_fails_residual() {
+        let g = array![[0.0, 1.0], [2.0, 3.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[0.2, 1.0], [2.0, 3.0]];
+        assert!(validate_perturb_simulated_matrix(&g, &names, &sim, "A", 0.0, None).is_err());
+    }
+
+    #[test]
+    fn validate_perturb_shape_mismatch() {
+        let g = array![[0.0], [1.0]];
+        let names = vec!["A".into()];
+        let sim = array![[0.0, 1.0]];
+        assert!(validate_perturb_simulated_matrix(&g, &names, &sim, "A", 0.0, None).is_err());
     }
 }

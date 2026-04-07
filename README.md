@@ -209,7 +209,7 @@ cargo run --bin spacetravlr-perturb -- --run-toml /path/to/spacetravlr_run_repro
 
 Omit **`--run-toml`** to type the TOML path on the first screen. **`--desired-expr`**, **`--n-propagation`**, and **`--verbose`** set initial TUI defaults. With **`cargo build --no-default-features`**, the same binary uses the legacy stdin **`perturb>`** REPL instead of the TUI.
 
-**Batch (fully CLI, no TUI):** pass **`--export PATH`** or **`--out PATH`** (same option) plus **`--run-toml`** and **`--gene`**. Optional: **`--desired-expr`** (default `0`), **`--n-propagation`** (else `[perturbation].n_propagation` from the TOML), **`--cells-csv`** with **`--cells-csv-column`** (CSV columns are lists of **`obs_names`** from the AnnData in the TOML; that column selects which cells receive the perturbation; omit CSV to perturb **all** cells), **`--verbose`**.
+**Batch (fully CLI, no TUI):** pass **`--export PATH`** or **`--out PATH`** (same option) plus **`--run-toml`** and **`--gene`**. Optional: **`--desired-expr`** (default `0`), **`--n-propagation`** (else `[perturbation].n_propagation` from the TOML), **`--cells-csv`** with **`--cells-csv-column`** (CSV columns are lists of **`obs_names`** from the AnnData in the TOML; that column selects which cells receive the perturbation; omit CSV to perturb **all** cells), or the same pair under **`[perturbation].cells_csv` / `cells_csv_column`** when CLI flags are omitted, **`--verbose`**. For many single-gene jobs, **`--batch-toml`** can set per-gene scopes via **`cells_csv_columns`** (empty string = all cells) alongside a shared **`cells_csv`** file; see the **spacetravlr-cli** skill.
 
 ```bash
 cargo run --bin spacetravlr-perturb -- \

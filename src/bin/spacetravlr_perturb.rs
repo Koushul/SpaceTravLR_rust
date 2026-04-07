@@ -2,13 +2,14 @@ use clap::Parser;
 use space_trav_lr_rust::betadata::write_betadata_feather;
 use space_trav_lr_rust::perturb::{PerturbTarget, PerturbTimings, perturb_with_targets};
 use space_trav_lr_rust::perturb_batch::{
-    effective_parallelism, expand_prepared_jobs, load_batch_file, resolve_batch_cell_indices,
-    run_batch_jobs, validate_jobs_genes,
+    effective_parallelism, expand_prepared_jobs, load_batch_file,
+    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
 };
-use space_trav_lr_rust::perturb_mode::{PerturbRuntime, parse_obs_columns_csv};
+use space_trav_lr_rust::config::expand_user_path;
+use space_trav_lr_rust::perturb_mode::{PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix};
 #[cfg(not(feature = "tui"))]
 use space_trav_lr_rust::perturb_mode::{interactive_run_toml_prompt, run_interactive};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -143,21 +144,19 @@ fn main() -> anyhow::Result<()> {
             runtime.perturb_cfg.n_propagation
         };
 
-        let jobs = expand_prepared_jobs(&batch_file, batch_parent, default_n_prop)?;
+        let mut jobs = expand_prepared_jobs(&batch_file, batch_parent, default_n_prop)?;
         validate_jobs_genes(&jobs, &runtime.gene_names)?;
-        let cell_indices =
-            resolve_batch_cell_indices(&batch_file, batch_parent, &runtime.obs_names)?;
+        resolve_prepared_job_cell_indices(
+            &batch_file,
+            batch_parent,
+            &runtime.obs_names,
+            &mut jobs,
+        )?;
 
         let parallelism = effective_parallelism(batch_file.parallelism, cli.batch_parallelism);
         let rt = Arc::new(runtime);
         let t_batch = Instant::now();
-        run_batch_jobs(
-            Arc::clone(&rt),
-            jobs,
-            cell_indices,
-            parallelism,
-            cli.verbose,
-        )?;
+        run_batch_jobs(Arc::clone(&rt), jobs, parallelism, cli.verbose)?;
         let batch_elapsed = t_batch.elapsed();
         if cli.verbose {
             eprintln!("--- spacetravlr-perturb batch timings ---");
@@ -203,10 +202,6 @@ fn main() -> anyhow::Result<()> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--run-toml is required with --export / --out"))?;
 
-    if cli.cells_csv.is_some() && cli.cells_csv_column.is_none() {
-        anyhow::bail!("--cells-csv-column is required when --cells-csv is set (batch export).");
-    }
-
     let export_path = cli.export.as_ref().unwrap();
     let gene = cli
         .gene
@@ -221,17 +216,49 @@ fn main() -> anyhow::Result<()> {
     if !runtime.gene_names.iter().any(|g| g == gene) {
         anyhow::bail!("Gene '{}' is not present in AnnData var_names.", gene);
     }
-    let cell_indices_batch = match (&cli.cells_csv, &cli.cells_csv_column) {
+
+    let run_parent = run_toml
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut csv_path = cli.cells_csv.clone();
+    let mut csv_column = cli.cells_csv_column.clone();
+    if csv_path.is_none() && csv_column.is_none() {
+        if let Some(ref rel) = runtime.cfg.perturbation.cells_csv {
+            if !rel.trim().is_empty() {
+                let exp = expand_user_path(rel.trim());
+                let pb = Path::new(&exp);
+                csv_path = Some(if pb.is_absolute() {
+                    pb.to_path_buf()
+                } else {
+                    run_parent.join(pb)
+                });
+                csv_column = runtime.cfg.perturbation.cells_csv_column.clone();
+            }
+        }
+    } else if csv_path.is_some() && csv_column.is_none() {
+        csv_column = runtime.cfg.perturbation.cells_csv_column.clone();
+    }
+
+    if csv_path.is_some() && csv_column.is_none() {
+        anyhow::bail!(
+            "cells CSV column missing: use --cells-csv-column or set [perturbation].cells_csv_column in the run TOML"
+        );
+    }
+
+    let cell_indices_batch = match (&csv_path, &csv_column) {
         (Some(csv_path), Some(col)) => {
-            let parsed = parse_obs_columns_csv(csv_path, &runtime.obs_names)?;
+            let parsed = parse_obs_columns_csv(csv_path.as_path(), &runtime.obs_names)?;
             let sl = parsed.indices_for_column(col.as_str()).ok_or_else(|| {
-                anyhow::anyhow!("--cells-csv-column '{}' not found in CSV header", col)
+                anyhow::anyhow!("cells_csv column {:?} not found in CSV header", col)
             })?;
             Some(sl.to_vec())
         }
         (None, None) => None,
-        _ => unreachable!("validated above"),
+        _ => anyhow::bail!("internal: inconsistent cells CSV path / column state"),
     };
+
     let targets = vec![PerturbTarget {
         gene: gene.to_string(),
         desired_expr: cli.desired_expr,
@@ -260,6 +287,14 @@ fn main() -> anyhow::Result<()> {
         &mut timings,
     )
     .map_err(|_| anyhow::anyhow!("perturbation failed"))?;
+    validate_perturb_simulated_matrix(
+        &runtime.gene_mtx,
+        &runtime.gene_names,
+        &result.simulated,
+        gene,
+        cli.desired_expr,
+        targets[0].cell_indices.as_deref(),
+    )?;
     let perturb_elapsed = t_perturb.elapsed();
     let p = export_path
         .to_str()

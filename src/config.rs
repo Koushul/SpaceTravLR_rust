@@ -262,6 +262,12 @@ pub struct PerturbationConfig {
     /// Smaller = more accurate, larger = faster.  Omit or comment out for
     /// exact O(N²) computation.
     pub ligand_grid_factor: Option<f64>,
+    /// Default cells CSV path for `spacetravlr-perturb` export / TUI (relative to run TOML directory unless absolute).
+    #[serde(default)]
+    pub cells_csv: Option<String>,
+    /// Default column in `cells_csv` (required in TOML when `cells_csv` is set).
+    #[serde(default)]
+    pub cells_csv_column: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,6 +471,8 @@ impl Default for PerturbationConfig {
             beta_cap: None,
             n_propagation: 4,
             ligand_grid_factor: None,
+            cells_csv: None,
+            cells_csv_column: None,
         }
     }
 }
