@@ -269,10 +269,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
 
         while let Ok(msg) = app.bg_rx.try_recv() {
             match msg {
-                BgMsg::Loaded {
-                    generation,
-                    result,
-                } => {
+                BgMsg::Loaded { generation, result } => {
                     if generation != app.pending_load_generation {
                         continue;
                     }
@@ -457,72 +454,71 @@ impl App {
             let tx = tx_bg.clone();
             let rt_t = Arc::clone(&rt);
             std::thread::spawn(move || {
-                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<
-                    PerturbOutcome,
-                    String,
-                > {
-                    let t0 = Instant::now();
-                    let mut timings = if spec.capture_timings {
-                        Some(PerturbTimings::default())
-                    } else {
-                        None
-                    };
-                    let res = perturb_with_targets(
-                        &rt_t.bb,
-                        &rt_t.gene_mtx,
-                        &rt_t.gene_names,
-                        &rt_t.xy,
-                        &rt_t.rw_ligands_init,
-                        &rt_t.rw_tfligands_init,
-                        &spec.targets,
-                        &spec.config,
-                        &rt_t.lr_radii,
-                        Some(&job_p),
-                        Some(&job_m),
-                        Some(cancel.as_ref()),
-                        Some(&rt_t.baseline_splash_cache),
-                        &mut timings,
-                    );
-                    let elapsed = t0.elapsed();
-                    match res {
-                        Ok(result) => {
-                            let genes = spec.genes.clone();
-                            let joint_csv = spec.joint_csv_summary;
-                            let (export_dir, export_err) = match export_joint_perturb_result(
-                                rt_t.as_ref(),
-                                &result.simulated,
-                                &genes,
-                                spec.desired_expr,
-                                spec.n_propagation,
-                                &spec.scopes,
-                                joint_csv,
-                                Some(id),
-                            ) {
-                                Ok(p) => (Some(p), None),
-                                Err(e) => (None, Some(e.to_string())),
-                            };
-                            Ok(PerturbOutcome {
-                                job_id: id,
-                                genes,
-                                desired_expr: spec.desired_expr,
-                                n_propagation: spec.n_propagation,
-                                result,
-                                timings,
-                                elapsed,
-                                export_dir,
-                                export_err,
-                            })
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(
+                    || -> Result<PerturbOutcome, String> {
+                        let t0 = Instant::now();
+                        let mut timings = if spec.capture_timings {
+                            Some(PerturbTimings::default())
+                        } else {
+                            None
+                        };
+                        let res = perturb_with_targets(
+                            &rt_t.bb,
+                            &rt_t.gene_mtx,
+                            &rt_t.gene_names,
+                            &rt_t.xy,
+                            &rt_t.rw_ligands_init,
+                            &rt_t.rw_tfligands_init,
+                            &spec.targets,
+                            &spec.config,
+                            &rt_t.lr_radii,
+                            Some(&job_p),
+                            Some(&job_m),
+                            Some(cancel.as_ref()),
+                            Some(&rt_t.baseline_splash_cache),
+                            &mut timings,
+                        );
+                        let elapsed = t0.elapsed();
+                        match res {
+                            Ok(result) => {
+                                let genes = spec.genes.clone();
+                                let joint_csv = spec.joint_csv_summary;
+                                let (export_dir, export_err) = match export_joint_perturb_result(
+                                    rt_t.as_ref(),
+                                    &result.simulated,
+                                    &genes,
+                                    spec.desired_expr,
+                                    spec.n_propagation,
+                                    &spec.scopes,
+                                    joint_csv,
+                                    Some(id),
+                                ) {
+                                    Ok(p) => (Some(p), None),
+                                    Err(e) => (None, Some(e.to_string())),
+                                };
+                                Ok(PerturbOutcome {
+                                    job_id: id,
+                                    genes,
+                                    desired_expr: spec.desired_expr,
+                                    n_propagation: spec.n_propagation,
+                                    result,
+                                    timings,
+                                    elapsed,
+                                    export_dir,
+                                    export_err,
+                                })
+                            }
+                            Err(()) => {
+                                let msg = if cancel.load(Ordering::Relaxed) {
+                                    "canceled".into()
+                                } else {
+                                    "perturb_with_targets failed".into()
+                                };
+                                Err(msg)
+                            }
                         }
-                        Err(()) => {
-                            let msg = if cancel.load(Ordering::Relaxed) {
-                                "canceled".into()
-                            } else {
-                                "perturb_with_targets failed".into()
-                            };
-                            Err(msg)
-                        }
-                    }
-                }));
+                    },
+                ));
                 let outcome = match outcome {
                     Ok(r) => r,
                     Err(_) => Err("job panicked".into()),
@@ -849,10 +845,7 @@ impl App {
                     Line::from(vec![
                         Span::styled("Desired ", Style::default().fg(TITLE)),
                         Span::styled("desired_expr", Style::default().fg(VALUE)),
-                        Span::styled(
-                            "  ·  Enter OK  ·  Esc cancel",
-                            Style::default().fg(MUTED),
-                        ),
+                        Span::styled("  ·  Enter OK  ·  Esc cancel", Style::default().fg(MUTED)),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
@@ -884,10 +877,7 @@ impl App {
                     Line::from(vec![
                         Span::styled("Integer ", Style::default().fg(TITLE)),
                         Span::styled("n_propagation", Style::default().fg(VALUE)),
-                        Span::styled(
-                            "  ·  Enter OK  ·  Esc cancel",
-                            Style::default().fg(MUTED),
-                        ),
+                        Span::styled("  ·  Enter OK  ·  Esc cancel", Style::default().fg(MUTED)),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
@@ -1471,7 +1461,8 @@ impl App {
                             }
                             *err = None;
                             self.pick_toml_path_draft = p.display().to_string();
-                            self.pending_load_generation = self.pending_load_generation.wrapping_add(1);
+                            self.pending_load_generation =
+                                self.pending_load_generation.wrapping_add(1);
                             let load_gen = self.pending_load_generation;
                             self.load_progress_permille.store(0, Ordering::Relaxed);
                             if let Ok(mut g) = self.load_progress_message.lock() {
@@ -1523,17 +1514,15 @@ impl App {
                         self.clear_status();
                         self.screen = Screen::Main;
                     }
-                    KeyCode::Enter => {
-                        match buf.trim().parse::<f64>() {
-                            Ok(v) if v.is_finite() => {
-                                self.clear_status();
-                                self.desired_expr = v;
-                                self.screen = Screen::Main;
-                            }
-                            Ok(_) => self.set_status("desired_expr must be finite", true),
-                            Err(_) => self.set_status("desired_expr must be a number", true),
+                    KeyCode::Enter => match buf.trim().parse::<f64>() {
+                        Ok(v) if v.is_finite() => {
+                            self.clear_status();
+                            self.desired_expr = v;
+                            self.screen = Screen::Main;
                         }
-                    }
+                        Ok(_) => self.set_status("desired_expr must be finite", true),
+                        Err(_) => self.set_status("desired_expr must be a number", true),
+                    },
                     KeyCode::Char(c) => buf.push(c),
                     KeyCode::Backspace => {
                         buf.pop();
@@ -1545,17 +1534,15 @@ impl App {
                         self.clear_status();
                         self.screen = Screen::Main;
                     }
-                    KeyCode::Enter => {
-                        match buf.trim().parse::<usize>() {
-                            Ok(v) if v > 0 => {
-                                self.clear_status();
-                                self.n_propagation = v;
-                                self.screen = Screen::Main;
-                            }
-                            Ok(_) => self.set_status("n_propagation must be at least 1", true),
-                            Err(_) => self.set_status("n_propagation must be a positive integer", true),
+                    KeyCode::Enter => match buf.trim().parse::<usize>() {
+                        Ok(v) if v > 0 => {
+                            self.clear_status();
+                            self.n_propagation = v;
+                            self.screen = Screen::Main;
                         }
-                    }
+                        Ok(_) => self.set_status("n_propagation must be at least 1", true),
+                        Err(_) => self.set_status("n_propagation must be a positive integer", true),
+                    },
                     KeyCode::Char(c) => buf.push(c),
                     KeyCode::Backspace => {
                         buf.pop();

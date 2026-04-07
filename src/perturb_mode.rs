@@ -33,10 +33,10 @@ use polars::prelude::{CsvReadOptions, DataType, SerReader};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::fs;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -59,7 +59,10 @@ pub struct PerturbRuntime {
 }
 
 /// Resolve `obs_names` line-list file into sorted unique row indices (AnnData order).
-pub fn perturb_obs_indices_from_file(path: &Path, obs_names_full: &[String]) -> anyhow::Result<Vec<usize>> {
+pub fn perturb_obs_indices_from_file(
+    path: &Path,
+    obs_names_full: &[String],
+) -> anyhow::Result<Vec<usize>> {
     let name_to_i: HashMap<&str, usize> = obs_names_full
         .iter()
         .enumerate()
@@ -264,10 +267,7 @@ impl PerturbRuntime {
             betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
         let clusters_full =
             clusters_usize_from_obs_dataframe(&obs_df, cfg.data.cluster_annot.as_str())?;
-        let obs_names: Vec<String> = row_idx
-            .iter()
-            .map(|&i| obs_names_full[i].clone())
-            .collect();
+        let obs_names: Vec<String> = row_idx.iter().map(|&i| obs_names_full[i].clone()).collect();
         let cluster_keys: Vec<String> = row_idx
             .iter()
             .map(|&i| cluster_keys_full[i].clone())

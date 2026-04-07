@@ -1587,11 +1587,7 @@ fn perturb_obs_subset_file_maps_to_sorted_unique_indices() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::write(
-        &path,
-        "# header\ncell-3\ncell-1\ncell-3\ncell-0\n",
-    )
-    .unwrap();
+    std::fs::write(&path, "# header\ncell-3\ncell-1\ncell-3\ncell-0\n").unwrap();
     let idx = perturb_obs_indices_from_file(&path, &obs).unwrap();
     std::fs::remove_file(&path).ok();
     assert_eq!(idx, vec![0, 1, 3]);

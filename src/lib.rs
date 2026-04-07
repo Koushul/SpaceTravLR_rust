@@ -15,6 +15,7 @@ pub mod ligand;
 pub mod model;
 pub mod network;
 pub mod perturb;
+pub mod perturb_batch;
 pub mod perturb_mode;
 #[cfg(feature = "tui")]
 pub mod perturb_tui;

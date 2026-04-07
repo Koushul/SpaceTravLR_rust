@@ -369,8 +369,11 @@ pub fn perturb_with_targets(
                 Arc::new(map)
             }
         } else {
-            let gex_gm =
-                gene_matrix_masked_f32_from_expr(expr_for_splash, config.min_expression, gene_names);
+            let gex_gm = gene_matrix_masked_f32_from_expr(
+                expr_for_splash,
+                config.min_expression,
+                gene_names,
+            );
             let Some(map) = compute_splash_all_progress(
                 bb,
                 &rw_lr_for_splash,
@@ -625,11 +628,9 @@ fn gene_matrix_masked_f32_from_expr(
     let n_cells = expr.nrows();
     let n_genes = expr.ncols();
     let mut out = ndarray::Array2::<f32>::zeros((n_cells, n_genes));
-    Zip::from(&mut out)
-        .and(expr)
-        .for_each(|o, &v| {
-            *o = if v > min_expression { v as f32 } else { 0.0 };
-        });
+    Zip::from(&mut out).and(expr).for_each(|o, &v| {
+        *o = if v > min_expression { v as f32 } else { 0.0 };
+    });
     GeneMatrix::new(out, gene_names.to_vec())
 }
 
@@ -770,7 +771,10 @@ fn recompute_weighted_ligands(
 
     let n_cells = gene_mtx.nrows();
     if ligand_names.is_empty() {
-        return Some(GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), Vec::new()));
+        return Some(GeneMatrix::new(
+            Array2::<f32>::zeros((n_cells, 0)),
+            Vec::new(),
+        ));
     }
 
     let mut seen = HashSet::new();

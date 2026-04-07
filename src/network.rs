@@ -284,7 +284,12 @@ pub(crate) fn apply_max_ligands_filter(
         return;
     }
     let k = k_raw.max(1);
-    let mut unique: Vec<String> = ligands.iter().cloned().collect::<HashSet<_>>().into_iter().collect();
+    let mut unique: Vec<String> = ligands
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     unique.sort_by(|a, b| {
         let ma = gene_mean_expression.get(a.as_str()).copied().unwrap_or(0.0);
         let mb = gene_mean_expression.get(b.as_str()).copied().unwrap_or(0.0);
@@ -419,7 +424,13 @@ impl GeneNetwork {
         }
         if let (Some(means), Some(k)) = (gene_mean_expression, max_ligands) {
             if k > 0 {
-                apply_max_ligands_filter(&mut ligands, &mut receptors, &mut lr_pairs, max_ligands, means);
+                apply_max_ligands_filter(
+                    &mut ligands,
+                    &mut receptors,
+                    &mut lr_pairs,
+                    max_ligands,
+                    means,
+                );
             }
         }
 
@@ -665,13 +676,7 @@ mod tests {
         means.insert("low".into(), 1.0);
         means.insert("high".into(), 10.0);
         means.insert("mid".into(), 5.0);
-        apply_max_ligands_filter(
-            &mut ligands,
-            &mut receptors,
-            &mut lr_pairs,
-            Some(2),
-            &means,
-        );
+        apply_max_ligands_filter(&mut ligands, &mut receptors, &mut lr_pairs, Some(2), &means);
         assert_eq!(lr_pairs.len(), 2);
         assert!(lr_pairs.contains(&"high$R2".into()));
         assert!(lr_pairs.contains(&"mid$R3".into()));
@@ -686,13 +691,7 @@ mod tests {
         let mut ligands = vec!["b".into(), "a".into()];
         let mut receptors = vec!["R1".into(), "R1".into()];
         let mut lr_pairs = vec!["b$R1".into(), "a$R1".into()];
-        apply_max_ligands_filter(
-            &mut ligands,
-            &mut receptors,
-            &mut lr_pairs,
-            Some(2),
-            &means,
-        );
+        apply_max_ligands_filter(&mut ligands, &mut receptors, &mut lr_pairs, Some(2), &means);
         assert_eq!(lr_pairs, vec!["a$R1".to_string(), "b$R1".to_string()]);
     }
 }

@@ -207,13 +207,10 @@ fn spatial_model_meta_from_runtime(
     } else {
         "skipped_small".to_string()
     };
-    let (spatial_ligand_mode, ligand_grid_factor) =
-        match rt.perturb_cfg.ligand_grid_factor {
-            Some(gf) if gf.is_finite() && gf > 0.0 => {
-                ("grid_approx".to_string(), Some(gf))
-            }
-            _ => ("exact_pairwise".to_string(), None),
-        };
+    let (spatial_ligand_mode, ligand_grid_factor) = match rt.perturb_cfg.ligand_grid_factor {
+        Some(gf) if gf.is_finite() && gf > 0.0 => ("grid_approx".to_string(), Some(gf)),
+        _ => ("exact_pairwise".to_string(), None),
+    };
     SpatialModelMeta {
         weighted_ligand_scale_factor: sc.weighted_ligand_scale_factor,
         spatial_radius: sc.radius,
@@ -923,10 +920,7 @@ async fn cached_grn_perturb_result(
 ) -> Result<PerturbResult, ()> {
     let est = perturb_matrix_payload_est_bytes(n_cells, n_genes);
     if !should_use_foyer_perturb_cache(est) {
-        return direct_grn_perturb_result(
-            rt, targets, cfg, job_p, job_msg, cancel,
-        )
-        .await;
+        return direct_grn_perturb_result(rt, targets, cfg, job_p, job_msg, cancel).await;
     }
 
     let grn = foyer.grn.clone();
@@ -4016,7 +4010,12 @@ async fn api_perturb_umap_field(
                 let delta_g = delta_g.clone();
                 async move {
                     let g = tokio::task::spawn_blocking(move || {
-                        compute_umap_transition_grid(&rt_g.gene_mtx, &delta_g, &umap_pts_g, &params_g)
+                        compute_umap_transition_grid(
+                            &rt_g.gene_mtx,
+                            &delta_g,
+                            &umap_pts_g,
+                            &params_g,
+                        )
                     })
                     .await
                     .map_err(|e| anyhow!("{e}"))?;

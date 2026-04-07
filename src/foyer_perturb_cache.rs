@@ -12,9 +12,7 @@ use foyer::{
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
-use crate::perturb::{
-    PerturbConfig, PerturbResult, PerturbTarget, perturb_result_from_delta,
-};
+use crate::perturb::{PerturbConfig, PerturbResult, PerturbTarget, perturb_result_from_delta};
 use crate::transition_umap::TransitionUmapParams;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -197,7 +195,9 @@ pub fn decode_perturb_cache_entry(
                         v.nrows,
                         v.ncols
                     );
-                    Ok(perturb_result_from_delta(gene_mtx, delta, targets, gene_names))
+                    Ok(perturb_result_from_delta(
+                        gene_mtx, delta, targets, gene_names,
+                    ))
                 }
             };
         }
@@ -473,8 +473,7 @@ mod tests {
     fn encode_decode_perturb_result_v2_roundtrip() {
         let (gene_mtx, gene_names, pr) = sample_perturb_result_consistent();
         let bytes = encode_perturb_result(&pr).unwrap();
-        let out =
-            decode_perturb_cache_entry(&bytes, &gene_mtx, &gene_names, &[]).unwrap();
+        let out = decode_perturb_cache_entry(&bytes, &gene_mtx, &gene_names, &[]).unwrap();
         assert_eq!(out.delta, pr.delta);
         assert_eq!(out.simulated, pr.simulated);
     }
@@ -483,8 +482,7 @@ mod tests {
     fn encode_decode_perturb_result_v1_enum_roundtrip() {
         let (gene_mtx, gene_names, pr) = sample_perturb_result_consistent();
         let bytes = encode_perturb_result_v1(&pr).unwrap();
-        let out =
-            decode_perturb_cache_entry(&bytes, &gene_mtx, &gene_names, &[]).unwrap();
+        let out = decode_perturb_cache_entry(&bytes, &gene_mtx, &gene_names, &[]).unwrap();
         assert_eq!(out.delta, pr.delta);
         assert_eq!(out.simulated, pr.simulated);
     }
@@ -509,9 +507,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hybrid_grn_get_or_fetch_invokes_fetch_only_once_sequential() {
         let dir = TempDir::new().unwrap();
-        let caches = open_foyer_perturb_caches_with_limits(Some(dir.path()), FoyerCacheLimits::default())
-            .await
-            .unwrap();
+        let caches =
+            open_foyer_perturb_caches_with_limits(Some(dir.path()), FoyerCacheLimits::default())
+                .await
+                .unwrap();
         let key = PerturbCacheKey {
             dataset_epoch: 42,
             fingerprint: [0xAB; 32],
