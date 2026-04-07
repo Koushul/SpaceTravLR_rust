@@ -43,7 +43,9 @@ out_dir = "o"
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("cannot be used with --batch-toml") || stderr.contains("--batch-toml"),
+        stderr.contains("cannot be used in batch mode")
+            || stderr.contains("cannot be used with --batch-toml")
+            || stderr.contains("--batch-toml"),
         "stderr: {stderr}"
     );
 }
