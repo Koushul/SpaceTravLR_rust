@@ -5,6 +5,7 @@ use std::thread;
 
 use serde::Deserialize;
 
+use crate::config::{SPACESHIP_MERGE_SECTIONS, expand_user_path};
 use crate::betadata::{GeneMatrix, write_betadata_feather};
 use crate::perturb::{PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets};
 use crate::perturb_mode::{
@@ -117,6 +118,94 @@ pub fn load_batch_file(path: &Path) -> anyhow::Result<PerturbBatchFile> {
     let s = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("read batch TOML {}: {e}", path.display()))?;
     toml::from_str(&s).map_err(|e| anyhow::anyhow!("parse batch TOML {}: {e}", path.display()))
+}
+
+pub struct ParsedPerturbToml {
+    /// From `run_toml` / `run_repro` / `spacetravlr_run_repro` in the file; omit when using `--run-toml` only.
+    pub run_toml: Option<PathBuf>,
+    pub overlay_source: toml::Value,
+    pub batch_table: Option<toml::value::Table>,
+}
+
+pub fn batch_from_perturb_table(tbl: &toml::value::Table) -> anyhow::Result<PerturbBatchFile> {
+    let v = toml::Value::Table(tbl.clone());
+    PerturbBatchFile::deserialize(v).map_err(|e| anyhow::anyhow!("parse batch/job fields: {e}"))
+}
+
+pub fn load_perturb_cli_toml(path: &Path) -> anyhow::Result<ParsedPerturbToml> {
+    let s = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("read perturb config {}: {e}", path.display()))?;
+    let root: toml::Value = toml::from_str(&s)
+        .map_err(|e| anyhow::anyhow!("parse perturb config {}: {e}", path.display()))?;
+    let table = root
+        .as_table()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "perturb config {}: document root must be a TOML table",
+                path.display()
+            )
+        })?
+        .clone();
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    let run_raw = table
+        .get("run_toml")
+        .or_else(|| table.get("run_repro"))
+        .or_else(|| table.get("spacetravlr_run_repro"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let run_toml = run_raw.map(|r| {
+        let exp = expand_user_path(r);
+        let p = std::path::Path::new(&exp);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            parent.join(p)
+        }
+    });
+
+    let mut batch_tbl = table;
+    for &sec in SPACESHIP_MERGE_SECTIONS {
+        batch_tbl.remove(sec);
+    }
+    for key in ["run_toml", "run_repro", "spacetravlr_run_repro"] {
+        batch_tbl.remove(key);
+    }
+    let batch_table = if batch_tbl.is_empty() {
+        None
+    } else {
+        Some(batch_tbl)
+    };
+
+    Ok(ParsedPerturbToml {
+        run_toml,
+        overlay_source: root,
+        batch_table,
+    })
+}
+
+/// Effective repro path when `--run-toml` and `--config` may each supply it (`--run-toml` wins).
+pub fn resolve_effective_run_toml(
+    cli_run_toml: Option<PathBuf>,
+    config_run_toml: Option<PathBuf>,
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(p) = cli_run_toml {
+        return Ok(p);
+    }
+    if let Some(p) = config_run_toml {
+        return Ok(p);
+    }
+    let hint = config_path
+        .map(|p| format!("{}", p.display()))
+        .unwrap_or_else(|| "config".into());
+    anyhow::bail!(
+        "need a run repro TOML: pass --run-toml, or set run_toml in {hint}"
+    )
 }
 
 pub fn resolve_relative_to(batch_parent: &Path, rel: impl AsRef<Path>) -> PathBuf {

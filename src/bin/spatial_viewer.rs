@@ -1044,6 +1044,7 @@ fn spawn_perturb_background_load(state: SharedState) {
                         Some(load_perm_block),
                         Some(prog_msg),
                         Some(betadata_ui_block),
+                        None,
                     )
                 })
                 .await;

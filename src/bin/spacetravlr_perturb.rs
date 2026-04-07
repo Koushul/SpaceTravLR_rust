@@ -2,7 +2,8 @@ use clap::Parser;
 use space_trav_lr_rust::betadata::write_betadata_feather;
 use space_trav_lr_rust::perturb::{PerturbTarget, PerturbTimings, perturb_with_targets};
 use space_trav_lr_rust::perturb_batch::{
-    effective_parallelism, expand_prepared_jobs, load_batch_file,
+    PerturbBatchFile, batch_from_perturb_table, effective_parallelism, expand_prepared_jobs,
+    load_batch_file, load_perturb_cli_toml, resolve_effective_run_toml,
     resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
 };
 use space_trav_lr_rust::config::expand_user_path;
@@ -18,11 +19,13 @@ use std::time::{Duration, Instant};
     name = "spacetravlr-perturb",
     version,
     about = "SpaceTravLR perturbation: Ratatui UI (default) or --export/--out batch mode or --batch-toml. Same run TOML + betadata loading model as spatial_viewer.",
-    after_long_help = r#"Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag), or --batch-toml PATH for many single-gene jobs.
+    after_long_help = r#"Use --config PATH (or pass PATH as the first argument) for a single TOML: `run_toml` (path to spacetravlr_run_repro.toml) plus optional `[data]` / `[perturbation]` / … sections that override the repro file. `--run-toml` overrides `run_toml` in that file when both are set.
 
-Single-job batch: requires --run-toml, --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --cells-csv + --cells-csv-column, --verbose.
+Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag), or --batch-toml PATH for many single-gene jobs. Batch keys can live in --config instead of a separate batch file.
 
-Batch TOML: requires --run-toml and --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Do not combine with --gene, --export/--out, or --cells-*.
+Single-job batch: requires a repro TOML (--run-toml or run_toml in --config), --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --cells-csv + --cells-csv-column, --verbose.
+
+Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Do not combine with --gene, --export/--out, or --cells-*.
 
 Example:
   spacetravlr-perturb \
@@ -39,9 +42,24 @@ If --cells-csv is set, --cells-csv-column is required in single-job batch mode."
 )]
 struct Cli {
     #[arg(
+        long = "config",
+        visible_alias = "perturb-toml",
+        value_name = "PATH",
+        help = "Perturbation TOML: `run_toml`, optional section overrides vs. repro, optional batch/job fields. See --help long help."
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        index = 1,
+        value_name = "CONFIG",
+        help = "Same as --config."
+    )]
+    config_positional: Option<PathBuf>,
+
+    #[arg(
         long = "run-toml",
         value_name = "PATH",
-        help = "Path to spacetravlr_run_repro.toml. If omitted: TUI prompts for a path; without TUI feature, stdin prompt is used."
+        help = "Path to spacetravlr_run_repro.toml. Overrides run_toml in --config. If omitted and not in --config: TUI prompts; without TUI, stdin prompt."
     )]
     run_toml: Option<PathBuf>,
 
@@ -49,13 +67,13 @@ struct Cli {
         long = "export",
         visible_alias = "out",
         value_name = "PATH",
-        help = "Write simulated expression as feather (rows = cells, columns = CellID + genes); exit. Same as --out. Requires --run-toml and --gene."
+        help = "Write simulated expression as feather (rows = cells, columns = CellID + genes); exit. Same as --out. Requires --gene and a repro path (--run-toml and/or run_toml in --config); not for multi-job batch."
     )]
     export: Option<PathBuf>,
 
     #[arg(
         long = "gene",
-        help = "Gene to perturb (use with batch: --export / --out)"
+        help = "Gene to perturb (single-job --export / --out). For multi-job output, use batch keys in --config or --batch-toml."
     )]
     gene: Option<String>,
 
@@ -95,7 +113,7 @@ struct Cli {
     #[arg(
         long = "batch-toml",
         value_name = "PATH",
-        help = "Batch perturbation spec (TOML): multiple single-gene runs with shared runtime load. Requires --run-toml. Incompatible with --gene, --export/--out, --cells-csv/--cells-csv-column."
+        help = "Batch perturbation spec (TOML): multiple single-gene runs with shared runtime load. Needs repro path (--run-toml or run_toml in --config). Incompatible with batch keys inside --config, --gene, --export/--out, --cells-csv/--cells-csv-column."
     )]
     batch_toml: Option<PathBuf>,
 
@@ -110,32 +128,34 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(batch_path) = cli.batch_toml.as_ref() {
-        let run_toml = cli
-            .run_toml
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--run-toml is required with --batch-toml"))?;
+    let perturb_config_path = cli.config.clone().or(cli.config_positional.clone());
+    let parsed_opt = if let Some(ref p) = perturb_config_path {
+        Some(load_perturb_cli_toml(p)?)
+    } else {
+        None
+    };
+    let overlay_ref: Option<&toml::Value> = parsed_opt.as_ref().map(|p| &p.overlay_source);
+
+    let run_batch_branch = |batch_file: PerturbBatchFile,
+                            batch_parent: &Path,
+                            run_toml_eff: PathBuf|
+     -> anyhow::Result<()> {
         if cli.export.is_some() {
             anyhow::bail!(
-                "--export/--out cannot be used with --batch-toml (outputs come from the batch file)."
+                "--export/--out cannot be used in multi-job batch mode (outputs come from the batch spec)."
             );
         }
         if cli.gene.is_some() {
-            anyhow::bail!("--gene cannot be used with --batch-toml.");
+            anyhow::bail!("--gene cannot be used in batch mode.");
         }
         if cli.cells_csv.is_some() || cli.cells_csv_column.is_some() {
             anyhow::bail!(
-                "--cells-csv / --cells-csv-column cannot be used with --batch-toml (set cells in the batch TOML if needed)."
+                "--cells-csv / --cells-csv-column cannot be used in batch mode (set cells in the batch TOML if needed)."
             );
         }
-        let batch_file = load_batch_file(batch_path.as_path())?;
-        let batch_parent = batch_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-
         let t_load = Instant::now();
-        let mut runtime = PerturbRuntime::from_run_toml(run_toml.as_path())?;
+        let mut runtime =
+            PerturbRuntime::from_run_toml_with_config_overlay(run_toml_eff.as_path(), overlay_ref)?;
         let load_elapsed = t_load.elapsed();
         let default_n_prop = if let Some(n) = cli.n_propagation {
             runtime.perturb_cfg.n_propagation = n;
@@ -163,20 +183,66 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  load_runtime: {load_elapsed:?}");
             eprintln!("  perturb_batch_total: {batch_elapsed:?}");
         }
-        return Ok(());
+        Ok(())
+    };
+
+    if let Some(batch_path) = cli.batch_toml.as_ref() {
+        if parsed_opt
+            .as_ref()
+            .and_then(|p| p.batch_table.as_ref())
+            .is_some()
+        {
+            anyhow::bail!("do not combine --batch-toml with batch/job keys (gene, out, …) inside --config");
+        }
+        let run_toml_eff = resolve_effective_run_toml(
+            cli.run_toml.clone(),
+            parsed_opt.as_ref().and_then(|p| p.run_toml.clone()),
+            perturb_config_path.as_deref(),
+        )?;
+        let batch_file = load_batch_file(batch_path.as_path())?;
+        let batch_parent = batch_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return run_batch_branch(batch_file, batch_parent, run_toml_eff);
     }
+
+    if let Some(tbl) = parsed_opt.as_ref().and_then(|p| p.batch_table.as_ref()) {
+        let run_toml_eff = resolve_effective_run_toml(
+            cli.run_toml.clone(),
+            parsed_opt.as_ref().and_then(|p| p.run_toml.clone()),
+            perturb_config_path.as_deref(),
+        )?;
+        let batch_file = batch_from_perturb_table(tbl)?;
+        let batch_parent = perturb_config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return run_batch_branch(batch_file, batch_parent, run_toml_eff);
+    }
+
+    let run_for_interactive = cli
+        .run_toml
+        .clone()
+        .or_else(|| parsed_opt.as_ref().and_then(|p| p.run_toml.clone()));
 
     if cli.export.is_none() {
         #[cfg(feature = "tui")]
         {
             let opts = space_trav_lr_rust::perturb_tui::PerturbTuiOptions {
-                run_toml: cli.run_toml.clone(),
+                run_toml: run_for_interactive.clone(),
                 default_desired_expr: cli.desired_expr,
                 n_propagation_initial: cli.n_propagation,
                 verbose: cli.verbose,
-                toml_path_hint_for_error: cli.run_toml.as_ref().map(|p| p.display().to_string()),
+                toml_path_hint_for_error: run_for_interactive
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
                 cells_csv: cli.cells_csv.clone(),
                 cells_csv_column: cli.cells_csv_column.clone(),
+                config_merge_overlay: parsed_opt
+                    .as_ref()
+                    .map(|p| p.overlay_source.clone()),
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -185,11 +251,14 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(not(feature = "tui"))]
         {
-            let run_toml = match &cli.run_toml {
-                Some(p) => p.clone(),
+            let run_toml = match run_for_interactive {
+                Some(p) => p,
                 None => interactive_run_toml_prompt()?,
             };
-            let mut runtime = PerturbRuntime::from_run_toml(run_toml.as_path())?;
+            let mut runtime = PerturbRuntime::from_run_toml_with_config_overlay(
+                run_toml.as_path(),
+                overlay_ref,
+            )?;
             if let Some(n) = cli.n_propagation {
                 runtime.perturb_cfg.n_propagation = n;
             }
@@ -197,10 +266,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let run_toml = cli
-        .run_toml
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--run-toml is required with --export / --out"))?;
+    let run_toml = resolve_effective_run_toml(
+        cli.run_toml.clone(),
+        parsed_opt.as_ref().and_then(|p| p.run_toml.clone()),
+        perturb_config_path.as_deref(),
+    )?;
 
     let export_path = cli.export.as_ref().unwrap();
     let gene = cli
@@ -208,7 +278,7 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--gene is required with --export / --out"))?;
     let t_load = Instant::now();
-    let mut runtime = PerturbRuntime::from_run_toml(run_toml.as_path())?;
+    let mut runtime = PerturbRuntime::from_run_toml_with_config_overlay(run_toml.as_path(), overlay_ref)?;
     let load_elapsed = t_load.elapsed();
     if let Some(n) = cli.n_propagation {
         runtime.perturb_cfg.n_propagation = n;

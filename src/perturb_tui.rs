@@ -110,6 +110,8 @@ pub struct PerturbTuiOptions {
     pub toml_path_hint_for_error: Option<String>,
     pub cells_csv: Option<PathBuf>,
     pub cells_csv_column: Option<String>,
+    /// When set, merged into the repro TOML for the initial auto-load path (not when picking a path manually).
+    pub config_merge_overlay: Option<toml::Value>,
 }
 
 enum Screen {
@@ -243,6 +245,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
         let tx = tx_bg.clone();
         let p = load_progress_permille.clone();
         let m = load_progress_message.clone();
+        let overlay = opts.config_merge_overlay.clone();
         std::thread::spawn(move || {
             let dummy_ui = Arc::new(BetadataUiProgress::new());
             let result = PerturbRuntime::from_run_toml_with_progress(
@@ -250,6 +253,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                 Some(p),
                 Some(m),
                 Some(dummy_ui),
+                overlay.as_ref(),
             )
             .map_err(|e| e.to_string());
             let _ = tx.send(BgMsg::Loaded {
@@ -1632,6 +1636,7 @@ impl App {
                                     Some(prog_p),
                                     Some(prog_m),
                                     Some(dummy_ui),
+                                    None,
                                 )
                                 .map_err(|e| e.to_string());
                                 let _ = tx.send(BgMsg::Loaded {

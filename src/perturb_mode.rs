@@ -226,12 +226,15 @@ pub fn compute_initial_weighted_ligands(
 
 impl PerturbRuntime {
     pub fn from_run_toml(run_toml: &Path) -> anyhow::Result<Self> {
-        // Use a dummy BetadataUiProgress so Betabase::from_directory receives an
-        // `on_subprogress` callback and suppresses the internal indicatif bar.
-        // The TUI shows its own spinner / status, so a second terminal bar is
-        // distracting and can remain stuck on screen after loading.
+        Self::from_run_toml_with_config_overlay(run_toml, None)
+    }
+
+    pub fn from_run_toml_with_config_overlay(
+        run_toml: &Path,
+        config_overlay: Option<&toml::Value>,
+    ) -> anyhow::Result<Self> {
         let dummy_ui = Arc::new(BetadataUiProgress::new());
-        Self::from_run_toml_with_progress(run_toml, None, None, Some(dummy_ui))
+        Self::from_run_toml_with_progress(run_toml, None, None, Some(dummy_ui), config_overlay)
     }
 
     /// Same as [`from_run_toml`], but reports coarse load progress in **permille** (0–1000) and
@@ -241,6 +244,7 @@ impl PerturbRuntime {
         progress_permille: Option<Arc<AtomicU32>>,
         progress_message: Option<Arc<Mutex<String>>>,
         betadata_progress: Option<Arc<BetadataUiProgress>>,
+        config_overlay: Option<&toml::Value>,
     ) -> anyhow::Result<Self> {
         let set_p = |v: u32| {
             if let Some(p) = &progress_permille {
@@ -258,7 +262,11 @@ impl PerturbRuntime {
         let run_toml_path = run_toml.to_path_buf();
         set_msg("Reading run configuration…");
         set_p(20);
-        let cfg = SpaceshipConfig::from_file(&run_toml_path)?;
+        let cfg = if let Some(ov) = config_overlay {
+            SpaceshipConfig::from_file_merged(&run_toml_path, Some(ov))?
+        } else {
+            SpaceshipConfig::from_file(&run_toml_path)?
+        };
         let run_dir = cfg.resolve_training_output_dir(run_toml);
 
         let adata_path = expand_user_path(cfg.resolve_adata_path().as_str());

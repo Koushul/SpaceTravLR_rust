@@ -3,6 +3,57 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+pub const SPACESHIP_MERGE_SECTIONS: &[&str] = &[
+    "data",
+    "spatial",
+    "grn",
+    "cnn",
+    "lasso",
+    "training",
+    "execution",
+    "perturbation",
+    "model_export",
+];
+
+fn merge_toml_table_maps(
+    base: &mut toml::map::Map<String, toml::Value>,
+    overlay: &toml::map::Map<String, toml::Value>,
+) {
+    for (k, v) in overlay {
+        match (base.get_mut(k), v) {
+            (Some(toml::Value::Table(base_sub)), toml::Value::Table(ov_sub)) => {
+                merge_toml_table_maps(base_sub, ov_sub);
+            }
+            _ => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// Merges `[data]`, `[spatial]`, … from `overlay_root` into a TOML document that will deserialize
+/// as [`SpaceshipConfig`]. Unknown top-level keys in `overlay_root` are ignored.
+pub fn merge_spaceship_overlay_into_toml(into: &mut toml::Value, overlay_root: &toml::Value) {
+    let Some(into_t) = into.as_table_mut() else {
+        return;
+    };
+    let Some(ov_t) = overlay_root.as_table() else {
+        return;
+    };
+    for &sec in SPACESHIP_MERGE_SECTIONS {
+        if let Some(ov_sec) = ov_t.get(sec).and_then(|x| x.as_table()) {
+            let entry = into_t
+                .entry(sec.to_string())
+                .or_insert(toml::Value::Table(Default::default()));
+            if let Some(bt) = entry.as_table_mut() {
+                merge_toml_table_maps(bt, ov_sec);
+            } else {
+                *entry = toml::Value::Table(ov_sec.clone());
+            }
+        }
+    }
+}
+
 /// Canonical per-run TOML in the training output directory (full `SpaceshipConfig` as executed).
 pub const RUN_REPRO_TOML_FILENAME: &str = "spacetravlr_run_repro.toml";
 
@@ -604,6 +655,30 @@ impl SpaceshipConfig {
         Ok(config)
     }
 
+    /// Load a run repro TOML and merge overlay fragments (`[data]`, `[perturbation]`, …) from
+    /// `overlay_root`. Scalar/array keys in overlay tables replace; nested tables merge recursively.
+    pub fn from_file_merged(
+        run_repro_path: impl AsRef<Path>,
+        overlay_root: Option<&toml::Value>,
+    ) -> anyhow::Result<Self> {
+        let path = run_repro_path.as_ref();
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let mut root: toml::Value = toml::from_str(&text)
+            .with_context(|| format!("parse SpaceshipConfig TOML {}", path.display()))?;
+        if let Some(ov) = overlay_root {
+            merge_spaceship_overlay_into_toml(&mut root, ov);
+        }
+        let merged_text = toml::to_string_pretty(&root)
+            .map_err(|e| anyhow::anyhow!("serialize merged SpaceshipConfig TOML: {e}"))?;
+        toml::from_str(&merged_text).with_context(|| {
+            format!(
+                "deserialize merged SpaceshipConfig from {} (after overlay)",
+                path.display()
+            )
+        })
+    }
+
     pub fn to_toml_pretty(&self) -> anyhow::Result<String> {
         toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("serialize config to TOML: {e}"))
     }
@@ -833,5 +908,104 @@ mod training_target_genes_tests {
         let resolved = resolve_training_target_genes(&v, Some(&f), Some(1));
         assert_eq!(resolved, manual);
         assert_eq!(resolved, vec!["b"]);
+    }
+}
+
+#[cfg(test)]
+mod merge_spaceship_overlay_tests {
+    use super::{SpaceshipConfig, merge_spaceship_overlay_into_toml};
+    use std::path::PathBuf;
+
+    fn tmp_run_dir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "stlr_cfg_merge_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn overlay_replaces_nested_perturbation_fields() {
+        let base = r#"
+[data]
+adata_path = "/data/a.h5ad"
+layer = "imputed_count"
+cluster_annot = "ct"
+
+[perturbation]
+n_propagation = 2
+beta_scale_factor = 1.0
+"#;
+        let overlay = r#"
+[perturbation]
+n_propagation = 9
+"#;
+        let mut root: toml::Value = toml::from_str(base).unwrap();
+        let ov: toml::Value = toml::from_str(overlay).unwrap();
+        merge_spaceship_overlay_into_toml(&mut root, &ov);
+        let cfg: SpaceshipConfig =
+            toml::from_str(&toml::to_string_pretty(&root).unwrap()).unwrap();
+        assert_eq!(cfg.perturbation.n_propagation, 9);
+        assert_eq!(cfg.perturbation.beta_scale_factor, 1.0);
+        assert_eq!(cfg.data.layer, "imputed_count");
+    }
+
+    #[test]
+    fn from_file_merged_matches_manual_merge() {
+        let tmp = tmp_run_dir();
+        let repro = tmp.join("spacetravlr_run_repro.toml");
+        let body = r#"
+[data]
+adata_path = "/x.h5ad"
+layer = "L0"
+cluster_annot = "c0"
+
+[perturbation]
+n_propagation = 3
+"#;
+        std::fs::write(&repro, body).unwrap();
+        let overlay: toml::Value = toml::from_str(
+            r#"
+[perturbation]
+n_propagation = 7
+[data]
+layer = "L1"
+"#,
+        )
+        .unwrap();
+        let merged = SpaceshipConfig::from_file_merged(&repro, Some(&overlay)).unwrap();
+        assert_eq!(merged.perturbation.n_propagation, 7);
+        assert_eq!(merged.data.layer, "L1");
+        assert_eq!(merged.data.cluster_annot, "c0");
+
+        let round = SpaceshipConfig::from_file_merged(&repro, None).unwrap();
+        assert_eq!(round.perturbation.n_propagation, 3);
+        assert_eq!(round.data.layer, "L0");
+    }
+
+    #[test]
+    fn resolve_training_output_dir_uses_merged_execution() {
+        let tmp = tmp_run_dir();
+        let repro = tmp.join("spacetravlr_run_repro.toml");
+        std::fs::write(
+            &repro,
+            r#"
+[data]
+adata_path = "/d.h5ad"
+
+[execution]
+output_dir = "out_a"
+"#,
+        )
+        .unwrap();
+        let overlay: toml::Value = toml::from_str("[execution]\noutput_dir = \"out_b\"\n").unwrap();
+        let cfg = SpaceshipConfig::from_file_merged(&repro, Some(&overlay)).unwrap();
+        let dir = cfg.resolve_training_output_dir(repro.as_path());
+        assert_eq!(dir, tmp.join("out_b"));
     }
 }
