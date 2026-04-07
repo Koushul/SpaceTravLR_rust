@@ -251,10 +251,6 @@ pub fn perturb_with_targets(
     let mut gene_mtx_work: Option<Array2<f64>> = None;
     let mut perturb_scratch: Vec<f64> = vec![0.0f64; n_cells * n_genes];
 
-    let max_per_gene: Vec<f64> = (0..n_genes)
-        .map(|j| gene_mtx.column(j).iter().cloned().fold(0.0f64, f64::max))
-        .collect();
-
     let lr_ligands: Vec<String> = bb.ligands_set.iter().cloned().collect();
     let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
 
@@ -509,7 +505,7 @@ pub fn perturb_with_targets(
         }
 
         // 8. Pin target genes to their perturbed values (only target columns)
-        let t_clip = Instant::now();
+        let t_pin_nonneg = Instant::now();
         for target in targets {
             if let Some(&gi) = gene_to_idx.get(target.gene.as_str()) {
                 if let Some(cell_indices) = target.cell_indices.as_ref() {
@@ -526,10 +522,9 @@ pub fn perturb_with_targets(
             }
         }
 
-        // 9. Clip to [0, max_observed] — zero-alloc, parallel
+        // 9. Enforce simulated expression ≥ 0 (zero-alloc, parallel)
         let delta_flat = delta_simulated.as_slice_memory_order_mut().unwrap();
         let gmtx_flat = gene_mtx.as_slice().unwrap();
-        let max_ref = &max_per_gene;
         delta_flat
             .par_chunks_mut(n_genes)
             .enumerate()
@@ -538,21 +533,19 @@ pub fn perturb_with_targets(
                 for gene in 0..n_genes {
                     unsafe {
                         let orig = *gmtx_flat.get_unchecked(base + gene);
-                        let val = (orig + *row.get_unchecked(gene))
-                            .max(0.0)
-                            .min(*max_ref.get_unchecked(gene));
+                        let val = (orig + *row.get_unchecked(gene)).max(0.0);
                         *row.get_unchecked_mut(gene) = val - orig;
                     }
                 }
             });
         if let Some(t) = timings.as_mut() {
-            t.record(format!("iter{}/pin_clip", iter + 1), t_clip.elapsed());
+            t.record(format!("iter{}/pin_nonneg", iter + 1), t_pin_nonneg.elapsed());
         }
         report_perturb_step(
             job_progress,
             job_message,
             (base + span).saturating_sub(1).min(PROP_HI),
-            &format!("{msg_prefix} · clip & sync"),
+            &format!("{msg_prefix} · nonneg & sync"),
         );
     }
 

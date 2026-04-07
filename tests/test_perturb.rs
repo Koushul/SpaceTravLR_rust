@@ -412,7 +412,7 @@ fn test_perturb_overexpression() {
     let n_cells = 25;
     let (bb, _, gene_names, xy, _, _, lr_radii) = make_synthetic_inputs(n_cells);
 
-    // Varying expression so max_per_gene > baseline, giving room for increase
+    // Varying baseline expression across cells/genes (downstream deltas still observable).
     let gene_mtx = Array2::from_shape_fn((n_cells, gene_names.len()), |(cell, gene)| {
         0.5 + 0.1 * (cell % 5) as f64 + 0.05 * gene as f64
     });
@@ -1470,14 +1470,14 @@ fn bench_perturb() {
 }
 
 #[test]
-fn test_pin_clip_parity_and_perf() {
+fn test_pin_nonneg_parity_and_perf() {
     use std::time::Instant;
 
     let n_genes = 2000;
     let target_genes: Vec<usize> = vec![0, 42, 999];
 
     eprintln!();
-    eprintln!("pin_clip parity & performance (n_genes={})", n_genes);
+    eprintln!("pin_nonneg parity & performance (n_genes={})", n_genes);
     eprintln!(
         "  {:>6}  {:>10}  {:>10}  {:>8}  {:>12}",
         "cells", "old(ms)", "new(ms)", "speedup", "max_diff"
@@ -1488,9 +1488,6 @@ fn test_pin_clip_parity_and_perf() {
         let gene_mtx = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
             0.5 + 0.1 * ((c * 7 + g * 13) % 17) as f64
         });
-        let max_per_gene: Vec<f64> = (0..n_genes)
-            .map(|j| gene_mtx.column(j).iter().cloned().fold(0.0f64, f64::max))
-            .collect();
 
         let delta_input = {
             let mut d = Array2::zeros((n_cells, n_genes));
@@ -1506,7 +1503,7 @@ fn test_pin_clip_parity_and_perf() {
             -0.1 + 0.02 * ((c * 3 + g * 11) % 23) as f64
         });
 
-        // ---- OLD implementation (full-matrix Zip + allocating clip) ----
+        // ---- OLD implementation (full-matrix Zip + allocating nonneg) ----
         let mut delta_old = delta_after_grn.clone();
         let t0 = Instant::now();
         Zip::from(&mut delta_old)
@@ -1524,13 +1521,13 @@ fn test_pin_clip_parity_and_perf() {
             let base = cell * n_genes;
             for gene in 0..n_genes {
                 let idx = base + gene;
-                let val = gem_flat[idx].max(0.0).min(max_per_gene[gene]);
+                let val = gem_flat[idx].max(0.0);
                 delta_flat_old[idx] = val - gmtx_flat_old[idx];
             }
         }
         let old_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-        // ---- NEW implementation (column pin + zero-alloc parallel clip) ----
+        // ---- NEW implementation (column pin + zero-alloc parallel nonneg) ----
         let mut delta_new = delta_after_grn.clone();
         let t0 = Instant::now();
         for &gi in &target_genes {
@@ -1538,7 +1535,6 @@ fn test_pin_clip_parity_and_perf() {
         }
         let delta_flat_new = delta_new.as_slice_memory_order_mut().unwrap();
         let gmtx_flat_new = gene_mtx.as_slice().unwrap();
-        let max_ref = &max_per_gene;
         delta_flat_new
             .par_chunks_mut(n_genes)
             .enumerate()
@@ -1547,9 +1543,7 @@ fn test_pin_clip_parity_and_perf() {
                 for gene in 0..n_genes {
                     unsafe {
                         let orig = *gmtx_flat_new.get_unchecked(base + gene);
-                        let val = (orig + *row.get_unchecked(gene))
-                            .max(0.0)
-                            .min(*max_ref.get_unchecked(gene));
+                        let val = (orig + *row.get_unchecked(gene)).max(0.0);
                         *row.get_unchecked_mut(gene) = val - orig;
                     }
                 }
@@ -1571,7 +1565,7 @@ fn test_pin_clip_parity_and_perf() {
 
         assert!(
             max_diff < 1e-14,
-            "pin_clip old vs new max_diff={:.2e} exceeds tolerance at n_cells={}",
+            "pin_nonneg old vs new max_diff={:.2e} exceeds tolerance at n_cells={}",
             max_diff,
             n_cells
         );
