@@ -20,6 +20,9 @@ exclude = [
     ".github/",
     ".vscode/",
     "results/",
+    "data/",
+    "web/",
+    "genes_human_mouse.csv.xz",
 ]
 default-run = "spacetravlr"
 autobins = false
