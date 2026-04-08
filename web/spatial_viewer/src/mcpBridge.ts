@@ -13,6 +13,7 @@ export type McpOpenSession = {
   cluster_annot: string;
   network_dir: string;
   run_toml: string;
+  perturb_overlay?: string;
 };
 
 export type McpCaptureRequest = {
@@ -441,6 +442,12 @@ function mergeOpenPayload(
         : typeof args.run_toml === "string"
           ? args.run_toml
           : "",
+    perturb_overlay:
+      typeof s.perturb_overlay === "string"
+        ? s.perturb_overlay
+        : typeof args.perturb_overlay === "string"
+          ? args.perturb_overlay
+          : "",
   };
 }
 
@@ -450,6 +457,7 @@ const STREAM_KEYS = [
   "cluster_annot",
   "network_dir",
   "run_toml",
+  "perturb_overlay",
   "api_base_url",
 ] as const;
 

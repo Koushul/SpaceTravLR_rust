@@ -45,7 +45,7 @@ Register in the MCP client with working directory `web/spatial_viewer` and args 
 ## Typical agent workflow
 
 1. Ensure the Rust server is up (`spatial_viewer_check_progress` or `spatial_viewer_get_meta`).
-2. **`show_spatial_viewer`**: pass `adata_path` (host-resolved path), optional `layer`, `cluster_annot`, `network_dir`, `run_toml`, and `api_base_url` if not default.
+2. **`show_spatial_viewer`**: pass `adata_path` (host-resolved path), optional `layer`, `cluster_annot`, `network_dir`, `run_toml`, **`perturb_overlay`** (optional TOML merged like `spacetravlr-perturb --config`), and `api_base_url` if not default.
 3. **`spatial_viewer_wait_ready`**: after opening the UI, wait for `dataset_ready` (and `perturb_ready` unless `require_perturb: false`). Loading often takes tens of seconds to a few minutes.
 4. Run analysis tools; for long perturbations, poll **`spatial_viewer_check_progress`** or use **`spatial_viewer_cancel_jobs`** if stuck.
 
@@ -69,6 +69,11 @@ Register in the MCP client with working directory `web/spatial_viewer` and args 
 | Tool | Role |
 | --- | --- |
 | `spatial_viewer_get_meta` | Full `/api/meta` + human summary |
+| `spatial_viewer_session_snapshot` | `/api/meta` + `/api/viewer_state` in one JSON (agent context) |
+| `spatial_viewer_search_genes` | GET `/api/genes?prefix=` — validate symbols |
+| `spatial_viewer_betadata_pair_lr` | POST `/api/betadata/pair_lr` — top L–R β for a cell pair |
+| `spatial_viewer_export_feather` | POST `/api/perturb/export_feather` — summarizes byte size + curl hint |
+| `spatial_viewer_run_perturb_plan` | Serial POST `/api/perturb/summary` for up to 20 jobs |
 | `spatial_viewer_check_progress` | Short status line |
 | `spatial_viewer_wait_ready` | Poll until ready or timeout |
 | `spatial_viewer_cluster_expression` | POST `/api/cluster/mean_expression` (≤200 genes) |
@@ -80,7 +85,11 @@ Register in the MCP client with working directory `web/spatial_viewer` and args 
 | `spatial_viewer_report_context` | Text from UI “Send context to chat” into the thread |
 | `spatial_viewer_splash_network_json` | POST `/api/perturb/splash_network` — raw JSON graph in chat (no iframe); same inputs as app tool; blocking like one perturb iteration |
 
-**Pairwise betadata (HTTP only):** `POST /api/betadata/pair_lr` with `{ "cell_a": i, "cell_b": j, "top_n": 25 }` returns top ligand–receptor β for that cell pair (same Cluster vs CellID row mapping as collect). The viewer section **Pair cells — top L–R β** calls this from **Spatial** layout with a neighbor-radius pick for cell B.
+**Viewer state (HTTP):** `GET`/`POST /api/viewer_state` — browser pushes debounced UI fields (color mode, genes, perturb form, `interaction_sender_index`, pair cells). MCP **`spatial_viewer_session_snapshot`** bundles this with **`/api/meta`**.
+
+**Perturb batch (HTTP):** `POST /api/perturb/batch` with `{ "batch_toml": "/path/on/host/batch.toml", "batch_parallelism"?, "verbose"? }` runs **`spacetravlr-perturb`-style** batch on the server (host-local path).
+
+**Pairwise betadata:** `POST /api/betadata/pair_lr` with `{ "cell_a": i, "cell_b": j, "top_n": 25 }` — MCP: **`spatial_viewer_betadata_pair_lr`**. The viewer section **Pair cells — top L–R β** uses this from **Spatial** layout with a neighbor-radius pick for cell B.
 
 **Received ligand (HTTP):** `POST /api/spatial/received_ligand` with JSON body `{ "source": "adata"|"model", "genes": [...], "matrix": "lr"|"tfl", "radius"?, "scale_factor"?, "use_grid"?, "grid_factor"?, "aggregate"? }` returns `application/octet-stream` of little-endian `f32` per cell (`n_obs` values). **adata**: recomputes Gaussian weighted ligand signal from expression + spatial (optional `aggregate` across multiple ligands). **model** / **runtime**: requires `perturb_ready`; `genes` must be a single column name present in the training received-ligand matrix. UI: Color source **Received ligand**; MCP: `spatial_viewer_received_ligand` or `spatial_viewer_control` with `color_source: "received_ligand"` and optional `received_ligand_*` fields.
 
@@ -94,7 +103,7 @@ Register in the MCP client with working directory `web/spatial_viewer` and args 
 
 - **`api_base_url`**: Optional on many tools; defaults to `SPATIAL_VIEWER_API_BASE` or `http://127.0.0.1:8080`. Keep Rust, MCP env, and any `show_spatial_viewer` argument aligned.
 - **Paths** (`adata_path`, `network_dir`, `run_toml`) are read by the **machine running `spatial_viewer`**, not the chat client.
-- **`spatial_viewer_run_perturb`** supports `scope`: `all`, `selection`, `cell_type`, `cluster` (see Zod schema in `server.ts`). **`spatial_viewer_perturb_summary`** only supports `all`, `cell_type`, `cluster`.
+- **`spatial_viewer_run_perturb`** supports `scope`: `all`, `selection`, `cell_type`, `cluster` (see Zod schema in `server.ts`). **`spatial_viewer_perturb_summary`** and **`spatial_viewer_perturb_reference_similarity`** also support **`selection`** via optional **`cell_indices`** or **`GET /api/viewer_state`** (`interaction_sender_index` from the Interaction lens).
 - Perturbation UI/API requires `--run-toml` and successful load (`perturb_ready`).
 - Do not enable `--allow-cors` on internet-facing deployments without additional controls.
 

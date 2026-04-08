@@ -44,7 +44,11 @@ use space_trav_lr_rust::perturb::{
     PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, compute_splash_all_progress,
     perturb_with_targets,
 };
-use space_trav_lr_rust::perturb_mode::PerturbRuntime;
+use space_trav_lr_rust::perturb_batch::{
+    effective_parallelism, expand_prepared_jobs, load_batch_file,
+    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
+};
+use space_trav_lr_rust::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
 use space_trav_lr_rust::transition_umap::{
     SignatureUmapParams, TransitionGrid, TransitionUmapParams, compute_signature_umap_grid,
     compute_umap_transition_grid, signature_sum_per_cell,
@@ -135,6 +139,9 @@ struct Cli {
     /// `spacetravlr_run_repro.toml`: enables perturbation + betadata from `[execution].output_dir` (or the TOML’s directory if that field is empty). The loaded AnnData path is taken from `data.adata_path` in the TOML (overrides `--h5ad` when both are set). You may pass only `--run-toml` with no `--h5ad`.
     #[arg(long)]
     run_toml: Option<PathBuf>,
+    /// Optional TOML merged into the run TOML when loading `PerturbRuntime` (same as `spacetravlr-perturb --config`).
+    #[arg(long)]
+    perturb_overlay: Option<PathBuf>,
     /// Allow permissive CORS on `/api/*` (needed for MCP App iframe → local API). Also set `SPATIAL_VIEWER_ALLOW_CORS=1`.
     #[arg(long)]
     allow_cors: bool,
@@ -164,6 +171,7 @@ struct AppDataset {
     betadata_dir: Option<PathBuf>,
     network_dir: Option<PathBuf>,
     run_toml: Option<PathBuf>,
+    perturb_overlay: Option<PathBuf>,
     obs_names: Arc<Vec<String>>,
     clusters: Arc<Vec<usize>>,
     /// Feather `Cluster` join strings (category names, not codes).
@@ -329,6 +337,21 @@ fn cell_type_label_for_obs(ds: &AppDataset, obs_i: usize) -> Option<String> {
     )
 }
 
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ViewerUiStateJson {
+    color_source: Option<String>,
+    expr_gene: Option<String>,
+    perturb_gene: Option<String>,
+    perturb_expr: Option<f64>,
+    perturb_scope: Option<String>,
+    perturb_cell_type: Option<String>,
+    perturb_cluster_id: Option<f64>,
+    interaction_sender_index: Option<usize>,
+    pair_cell_a: Option<usize>,
+    pair_cell_b: Option<usize>,
+}
+
 #[derive(Clone)]
 struct AppState {
     dataset: Option<AppDataset>,
@@ -336,6 +359,8 @@ struct AppState {
     default_cluster_annot: String,
     default_network_dir: Option<PathBuf>,
     default_run_toml: Option<PathBuf>,
+    default_perturb_overlay: Option<PathBuf>,
+    viewer_ui_state: Arc<RwLock<ViewerUiStateJson>>,
     perturb_bg_gen: Arc<AtomicU64>,
     perturb_bg_in_flight: Arc<AtomicBool>,
     /// Another `spawn_perturb_background_load` ran while a load was active; run one more pass after it finishes.
@@ -430,6 +455,8 @@ struct MetaJson {
     network_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_toml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    perturb_overlay: Option<String>,
     #[serde(default)]
     dataset_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -739,6 +766,7 @@ struct ViewerLoadInputs {
     cluster_annot: String,
     network_dir: Option<PathBuf>,
     run_toml: Option<PathBuf>,
+    perturb_overlay: Option<PathBuf>,
 }
 
 fn attach_perturb_runtime_to_dataset(
@@ -981,7 +1009,7 @@ async fn cached_grn_perturb_result(
 fn spawn_perturb_background_load(state: SharedState) {
     tokio::spawn(async move {
         loop {
-            let (run_toml, committed_gen) = {
+            let (run_toml, perturb_overlay_cap, committed_gen) = {
                 let g = state.read().await;
                 let Some(ds) = g.dataset.as_ref() else {
                     return;
@@ -995,7 +1023,11 @@ fn spawn_perturb_background_load(state: SharedState) {
                 let Some(p) = ds.run_toml.clone() else {
                     return;
                 };
-                (p, g.perturb_bg_gen.load(Ordering::SeqCst))
+                (
+                    p,
+                    ds.perturb_overlay.clone(),
+                    g.perturb_bg_gen.load(Ordering::SeqCst),
+                )
             };
 
             let in_flight_flag = Arc::clone(&state.read().await.perturb_bg_in_flight);
@@ -1036,15 +1068,29 @@ fn spawn_perturb_background_load(state: SharedState) {
                     *m = "Starting perturbation runtime load…".into();
                 }
                 let run_toml_for_blocking = run_toml.clone();
+                let overlay_path = perturb_overlay_cap.clone();
                 let load_perm_block = Arc::clone(&load_perm);
                 let betadata_ui_block = Arc::clone(&betadata_ui);
                 let pr_result = tokio::task::spawn_blocking(move || {
+                    let overlay_toml: Option<toml::Value> = match &overlay_path {
+                        Some(p) => {
+                            let s = std::fs::read_to_string(p).map_err(|e| {
+                                anyhow::anyhow!("read perturb overlay {}: {e}", p.display())
+                            })?;
+                            let v: toml::Value = s.parse().map_err(|e| {
+                                anyhow::anyhow!("parse perturb overlay {}: {e}", p.display())
+                            })?;
+                            Some(v)
+                        }
+                        None => None,
+                    };
+                    let overlay_ref = overlay_toml.as_ref();
                     PerturbRuntime::from_run_toml_with_progress(
                         run_toml_for_blocking.as_path(),
                         Some(load_perm_block),
                         Some(prog_msg),
                         Some(betadata_ui_block),
-                        None,
+                        overlay_ref,
                     )
                 })
                 .await;
@@ -1052,7 +1098,9 @@ fn spawn_perturb_background_load(state: SharedState) {
                 if w.perturb_bg_gen.load(Ordering::SeqCst) != committed_gen {
                     load_perm.store(0, Ordering::Relaxed);
                 } else if let Some(ds) = w.dataset.as_mut() {
-                    if ds.run_toml.as_ref() != Some(&run_toml) {
+                    if ds.run_toml.as_ref() != Some(&run_toml)
+                        || ds.perturb_overlay != perturb_overlay_cap
+                    {
                         load_perm.store(0, Ordering::Relaxed);
                     } else if ds.perturb_runtime.is_some() {
                         load_perm.store(0, Ordering::Relaxed);
@@ -1178,6 +1226,10 @@ fn meta_json(st: &AppState) -> MetaJson {
                 .default_run_toml
                 .as_ref()
                 .map(|p| p.display().to_string()),
+            perturb_overlay: st
+                .default_perturb_overlay
+                .as_ref()
+                .map(|p| p.display().to_string()),
             dataset_ready: false,
             spatial_model: None,
         };
@@ -1292,6 +1344,10 @@ fn meta_json(st: &AppState) -> MetaJson {
             .unwrap_or_default(),
         network_dir: ds.network_dir.as_ref().map(|p| p.display().to_string()),
         run_toml: ds.run_toml.as_ref().map(|p| p.display().to_string()),
+        perturb_overlay: ds
+            .perturb_overlay
+            .as_ref()
+            .map(|p| p.display().to_string()),
         dataset_ready: true,
         spatial_model: ds
             .perturb_runtime
@@ -1333,6 +1389,7 @@ fn dataset_matches_resolved_inputs(ds: &AppDataset, inputs: &ViewerLoadInputs) -
         && ds.cluster_annot == inputs.cluster_annot
         && ds.network_dir == inputs.network_dir
         && ds.run_toml == inputs.run_toml
+        && ds.perturb_overlay == inputs.perturb_overlay
 }
 
 fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
@@ -1477,6 +1534,7 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         betadata_dir,
         network_dir: inputs.network_dir,
         run_toml: inputs.run_toml,
+        perturb_overlay: inputs.perturb_overlay,
         obs_names: onames,
         clusters,
         betadata_cluster_keys,
@@ -1515,6 +1573,8 @@ struct SessionConfigureBody {
     network_dir: String,
     #[serde(default)]
     run_toml: String,
+    #[serde(default)]
+    perturb_overlay: String,
 }
 
 #[derive(Serialize)]
@@ -1547,6 +1607,7 @@ async fn api_session_configure(
     Json(body): Json<SessionConfigureBody>,
 ) -> Result<Json<SessionConfigureResponse>, (StatusCode, String)> {
     let run_toml = session_path_field(&body.run_toml);
+    let perturb_overlay = session_path_field(&body.perturb_overlay);
     let h5ad = PathBuf::from(normalize_ui_path(&body.adata_path));
     if h5ad.as_os_str().is_empty() && run_toml.is_none() {
         return Err((
@@ -1564,6 +1625,7 @@ async fn api_session_configure(
         cluster_annot: cluster_annot.clone(),
         network_dir: network_dir.clone(),
         run_toml: run_toml.clone(),
+        perturb_overlay: perturb_overlay.clone(),
     };
     let resolved = resolve_load_inputs(inputs.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{:#}", e)))?;
@@ -1634,6 +1696,7 @@ async fn api_session_configure(
     w.default_cluster_annot = cluster_annot;
     w.default_network_dir = network_dir;
     w.default_run_toml = run_toml;
+    w.default_perturb_overlay = perturb_overlay;
     let meta = meta_json(&*w);
     drop(w);
     spawn_perturb_background_load(state.clone());
@@ -1647,6 +1710,86 @@ async fn api_session_configure(
 async fn api_meta(State(state): State<SharedState>) -> impl IntoResponse {
     let st = state.read().await;
     axum::Json(meta_json(&st))
+}
+
+async fn api_get_viewer_state(State(state): State<SharedState>) -> Json<ViewerUiStateJson> {
+    let ui = {
+        let st = state.read().await;
+        Arc::clone(&st.viewer_ui_state)
+    };
+    Json(ui.read().await.clone())
+}
+
+async fn api_post_viewer_state(
+    State(state): State<SharedState>,
+    Json(body): Json<ViewerUiStateJson>,
+) -> Json<serde_json::Value> {
+    let ui = {
+        let st = state.read().await;
+        Arc::clone(&st.viewer_ui_state)
+    };
+    *ui.write().await = body;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct PerturbBatchApiBody {
+    batch_toml: String,
+    #[serde(default)]
+    batch_parallelism: Option<usize>,
+    #[serde(default)]
+    verbose: bool,
+}
+
+async fn api_perturb_batch(
+    State(state): State<SharedState>,
+    Json(body): Json<PerturbBatchApiBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let path = normalize_ui_path(body.batch_toml.trim());
+    if path.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "batch_toml is required".into()));
+    }
+    let batch_path = PathBuf::from(path);
+    let rt = {
+        let st = state.read().await;
+        let ds = require_dataset(&st)?;
+        Arc::clone(perturb_runtime_or_status(ds)?)
+    };
+    let verbose = body.verbose;
+    let par_override = body.batch_parallelism;
+    let batch_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let batch_file =
+            load_batch_file(batch_path.as_path()).map_err(|e| format!("{e:#}"))?;
+        let batch_parent = batch_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let default_n_prop = rt.perturb_cfg.n_propagation;
+        let mut jobs = expand_prepared_jobs(&batch_file, batch_parent, default_n_prop)
+            .map_err(|e| format!("{e:#}"))?;
+        validate_jobs_genes(&jobs, &rt.gene_names).map_err(|e| format!("{e:#}"))?;
+        resolve_prepared_job_cell_indices(
+            &batch_file,
+            batch_parent,
+            &rt.obs_names,
+            &mut jobs,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+        let parallelism = effective_parallelism(batch_file.parallelism, par_override);
+        run_batch_jobs(rt, jobs, parallelism, verbose).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("batch task join: {e}"),
+        )
+    })?;
+    batch_result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": "batch perturbation completed",
+    })))
 }
 
 async fn api_cancel(State(state): State<SharedState>) -> impl IntoResponse {
@@ -3367,6 +3510,10 @@ async fn api_perturb_export_feather(
         &targets,
         &cfg,
     );
+    let v_gene = targets[0].gene.clone();
+    let v_desired = targets[0].desired_expr;
+    let v_cells = targets[0].cell_indices.clone();
+    let gene_mtx_validate = rt.gene_mtx.clone();
     let pr = cached_grn_perturb_result(
         foyer.as_ref(),
         cache_key,
@@ -3388,7 +3535,16 @@ async fn api_perturb_export_feather(
     let obs_names = rt.obs_names.clone();
     let gene_names = rt.gene_names.clone();
     let simulated = pr.simulated;
-    let bytes_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ()> {
+    let bytes_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        validate_perturb_simulated_matrix(
+            &gene_mtx_validate,
+            &gene_names,
+            &simulated,
+            &v_gene,
+            v_desired,
+            v_cells.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         space_trav_lr_rust::betadata::write_betadata_feather_to_writer(
             &mut buf,
@@ -3397,7 +3553,7 @@ async fn api_perturb_export_feather(
             &gene_names,
             &simulated,
         )
-        .map_err(|_| ())?;
+        .map_err(|e| e.to_string())?;
         Ok(buf)
     })
     .await
@@ -3405,12 +3561,9 @@ async fn api_perturb_export_feather(
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
-    let bytes = bytes_result.map_err(|_| {
+    let bytes = bytes_result.map_err(|e| {
         job_p.store(0, Ordering::Relaxed);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "feather export failed".into(),
-        )
+        (StatusCode::INTERNAL_SERVER_ERROR, e)
     })?;
     if bytes.is_empty() {
         job_p.store(0, Ordering::Relaxed);
@@ -5352,6 +5505,7 @@ fn build_app(
             cluster_annot: cli.cluster_annot.clone(),
             network_dir: cli.network_dir.clone(),
             run_toml: cli.run_toml.clone(),
+            perturb_overlay: cli.perturb_overlay.clone(),
         })?)
     } else {
         None
@@ -5363,6 +5517,8 @@ fn build_app(
         default_cluster_annot: cli.cluster_annot.clone(),
         default_network_dir: cli.network_dir.clone(),
         default_run_toml: cli.run_toml.clone(),
+        default_perturb_overlay: cli.perturb_overlay.clone(),
+        viewer_ui_state: Arc::new(RwLock::new(ViewerUiStateJson::default())),
         perturb_bg_gen: Arc::new(AtomicU64::new(0)),
         perturb_bg_in_flight: Arc::new(AtomicBool::new(false)),
         perturb_bg_pending: Arc::new(AtomicBool::new(false)),
@@ -5382,6 +5538,7 @@ fn build_app(
     let api = Router::new()
         .route("/meta", get(api_meta))
         .route("/cancel", post(api_cancel))
+        .route("/viewer_state", get(api_get_viewer_state).post(api_post_viewer_state))
         .route("/session/configure", post(api_session_configure))
         .route("/spatial", get(api_spatial))
         .route("/umap", get(api_umap))
@@ -5402,6 +5559,7 @@ fn build_app(
         .route("/betadata/pair_lr", post(api_betadata_pair_lr))
         .route("/network/cell-context", post(api_network_cell_context))
         .route("/perturb/preview", post(api_perturb_preview))
+        .route("/perturb/batch", post(api_perturb_batch))
         .route("/perturb/export_feather", post(api_perturb_export_feather))
         .route("/perturb/splash_network", post(api_perturb_splash_network))
         .route("/perturb/splash_progress", get(api_splash_progress))

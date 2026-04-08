@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildPerturbScopeApiBody,
   buildPerturbScopeBody,
   buildReferenceCentroidScopeBody,
   fetchMetaWith,
@@ -161,5 +162,56 @@ describe("HTTP contract snapshots vs Rust structs", () => {
       require_cluster_id: 7,
     };
     expect(JSON.parse(JSON.stringify(body))).toEqual(body);
+  });
+});
+
+describe("buildPerturbScopeApiBody", () => {
+  it("uses explicit indices for selection", async () => {
+    const fetchImpl = vi.fn() as typeof fetch;
+    const r = await buildPerturbScopeApiBody(
+      fetchImpl,
+      "http://127.0.0.1:8080",
+      "selection",
+      undefined,
+      undefined,
+      [3, 3, 5],
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.scope).toEqual({ type: "indices", indices: [3, 5] });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("fetches viewer_state for selection when indices omitted", async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain("/api/viewer_state");
+      return new Response(JSON.stringify({ interaction_sender_index: 99 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const r = await buildPerturbScopeApiBody(
+      fetchImpl,
+      "http://127.0.0.1:8080",
+      "selection",
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.scope).toEqual({ type: "indices", indices: [99] });
+  });
+
+  it("errors when selection has no indices and no viewer sender", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })) as unknown as typeof fetch;
+    const r = await buildPerturbScopeApiBody(
+      fetchImpl,
+      "http://127.0.0.1:8080",
+      "selection",
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(r.error).toMatch(/scope=selection/);
+    expect(r.scope).toEqual({ type: "all" });
   });
 });

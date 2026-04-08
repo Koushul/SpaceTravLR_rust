@@ -41,15 +41,27 @@ import {
   type SplashNetworkJson,
   type SplashNetworkLayout,
 } from "./splashNetwork";
-
-let globalApiBase = "";
-
-function apiUrl(path: string): string {
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  const p = path.startsWith("/") ? path : `/${path}`;
-  const b = globalApiBase.replace(/\/$/, "");
-  return b ? `${b}${p}` : p;
-}
+import {
+  apiUrl,
+  fetchF32,
+  fetchU32,
+  postF32,
+  postViewerUiState,
+  setGlobalApiBase,
+} from "./apiClient";
+import { withMetaProgressPoll } from "./metaProgressPoll";
+import type {
+  CellContextResponse,
+  CollectInteractionsApiResponse,
+  InteractionLineDatum,
+  Meta,
+  PairLrApiResponse,
+  PairLrRow,
+  QuiverSegDatum,
+  SessionConfigureResponse,
+  UmapFieldResponse,
+  UmapSignatureFieldResponse,
+} from "./viewerTypes";
 
 const CT_UNKNOWN = 65535;
 
@@ -68,92 +80,6 @@ const ORTHO_CONTROLLER = {
   keyboard: true,
 } as const;
 
-async function fetchF32(path: string): Promise<Float32Array> {
-  const r = await fetch(apiUrl(path));
-  if (!r.ok) {
-    throw new Error(`${r.status} ${r.statusText}`);
-  }
-  const buf = await r.arrayBuffer();
-  return new Float32Array(buf);
-}
-
-async function postF32(path: string, body: unknown): Promise<Float32Array> {
-  const r = await fetch(apiUrl(path), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`${r.status} ${r.statusText}: ${t}`);
-  }
-  const buf = await r.arrayBuffer();
-  return new Float32Array(buf);
-}
-
-async function fetchU32(path: string): Promise<Uint32Array> {
-  const r = await fetch(apiUrl(path));
-  if (!r.ok) {
-    throw new Error(`${r.status} ${r.statusText}`);
-  }
-  const buf = await r.arrayBuffer();
-  return new Uint32Array(buf);
-}
-
-interface Meta {
-  n_obs: number;
-  n_vars: number;
-  spatial_obsm_key: string;
-  layer: string;
-  cluster_annot: string;
-  bounds: { min_x: number; max_x: number; min_y: number; max_y: number };
-  umap_obsm_key?: string | null;
-  umap_bounds?: {
-    min_x: number;
-    max_x: number;
-    min_y: number;
-    max_y: number;
-  } | null;
-  cell_type_column?: string | null;
-  cell_type_categories?: string[];
-  network_loaded?: boolean;
-  network_species?: string | null;
-  /** `Cluster` = seed-only lasso; `CellID` = spatial CNN per-cell β */
-  betadata_row_id?: string | null;
-  perturb_ready?: boolean;
-  /** True while betabase / PerturbRuntime is loading in the server background. */
-  perturb_loading?: boolean;
-  perturb_error?: string | null;
-  /** 0–100 while loading betabase or running a perturb job (see /api/meta). */
-  perturb_progress_percent?: number | null;
-  /** 0–1000 permille; prefer over `perturb_progress_percent` for progress bar / label when set. */
-  perturb_progress_permille?: number | null;
-  perturb_progress_label?: string | null;
-  /** Present while reading / expanding betadata feathers during perturb runtime load. */
-  perturb_betadata_phase?: "reading" | "expanding" | null;
-  perturb_betadata_done?: number | null;
-  perturb_betadata_total?: number | null;
-  adata_path: string;
-  betadata_dir: string;
-  network_dir?: string | null;
-  run_toml?: string | null;
-  /** False until a .h5ad is loaded (CLI or Dataset paths). */
-  dataset_ready?: boolean;
-  /** Training spatial config + received-ligand channel names when perturb runtime is loaded. */
-  spatial_model?: {
-    weighted_ligand_scale_factor: number;
-    spatial_radius: number;
-    contact_distance: number;
-    spatial_dim: number;
-    received_ligand_n_channels: number;
-    received_ligand_columns_sample: string[];
-    tfl_ligand_n_channels: number;
-    grn_foyer_cache?: string;
-    spatial_ligand_mode?: string;
-    ligand_grid_factor?: number | null;
-  } | null;
-}
-
 function perturbReadyStatusBarExtras(m: Meta): string[] {
   if (!m.perturb_ready || !m.spatial_model) return [];
   const sm = m.spatial_model;
@@ -166,42 +92,6 @@ function perturbReadyStatusBarExtras(m: Meta): string[] {
   ];
 }
 
-interface SessionConfigureResponse {
-  ok: boolean;
-  message: string;
-  meta: Meta;
-}
-
-interface CollectedInteractionRow {
-  interaction: string;
-  gene: string;
-  beta: number;
-  interaction_type: string;
-}
-
-interface CollectInteractionsApiResponse {
-  interactions: CollectedInteractionRow[];
-  n_reported: number;
-  n_total: number;
-  capped: boolean;
-}
-
-interface PairLrRow {
-  target_gene: string;
-  interaction: string;
-  beta_cell_a: number;
-  beta_cell_b: number;
-  score: number;
-}
-
-interface PairLrApiResponse {
-  cell_a: number;
-  cell_b: number;
-  betadata_row_id?: string | null;
-  rows: PairLrRow[];
-  n_genes_scanned: number;
-}
-
 function metaDatasetSignature(m: Meta): string {
   return [
     m.dataset_ready === false ? "0" : "1",
@@ -212,6 +102,7 @@ function metaDatasetSignature(m: Meta): string {
     m.cluster_annot,
     m.network_dir ?? "",
     m.run_toml ?? "",
+    m.perturb_overlay ?? "",
   ].join("\u001f");
 }
 
@@ -220,69 +111,6 @@ function cellTypeSignature(m: Meta): string {
     m.cell_type_column ?? "",
     ...(m.cell_type_categories ?? []),
   ].join("\u001f");
-}
-
-interface UmapFieldResponse {
-  nx: number;
-  ny: number;
-  grid_x: number[];
-  grid_y: number[];
-  u: number[];
-  v: number[];
-  cell_u?: number[];
-  cell_v?: number[];
-  /** Server wrote quiver lines to this path when `export_svg` was true (e.g. under `/tmp` on Unix). */
-  svg_export_path?: string | null;
-}
-
-/** POST /api/umap/signature_field — gene-set sum on cells, KNN + gradient quiver (VirtualTissue-style). */
-interface UmapSignatureFieldResponse extends UmapFieldResponse {
-  signature_per_cell: number[];
-}
-
-interface CellContextResponse {
-  focus_gene: string;
-  cell_index: number;
-  modulators: {
-    regulators: string[];
-    ligands: string[];
-    receptors: string[];
-    tfl_ligands: string[];
-    tfl_regulators: string[];
-    lr_pairs: string[];
-    tfl_pairs: string[];
-  };
-  neighbors: {
-    index: number;
-    distance_sq: number;
-    distance?: number;
-    cell_type?: string | null;
-    max_support_score?: number | null;
-    lr_edges: {
-      ligand: string;
-      receptor: string;
-      lig_expr_sender: number;
-      rec_expr_neighbor: number;
-      support_score: number;
-      linked_tf?: string;
-      linked_tf_expr?: number;
-    }[];
-  }[];
-  sender_regulator_exprs: { gene: string; expr: number }[];
-  sender_ligand_exprs: { gene: string; expr: number }[];
-  neighbor_query?: string | null;
-  radius_used?: number | null;
-  neighbors_in_query?: number | null;
-}
-
-interface InteractionLineDatum {
-  sourcePosition: [number, number, number];
-  targetPosition: [number, number, number];
-  color?: [number, number, number, number];
-}
-
-interface QuiverSegDatum extends InteractionLineDatum {
-  width?: number;
 }
 
 function fitOrthographic(
@@ -341,7 +169,7 @@ function globalMean(values: Float32Array | null): string {
 
 async function main() {
   const mcp = await bootstrapMcp();
-  globalApiBase = mcp.apiBase;
+  setGlobalApiBase(mcp.apiBase);
 
   const root = document.querySelector<HTMLDivElement>("#app")!;
   root.innerHTML = `
@@ -396,6 +224,15 @@ async function main() {
               spellcheck="false"
               autocomplete="off"
               placeholder="…/run_dir/spacetravlr_run_repro.toml — enables perturbation + betadata from that directory"
+          /></label>
+          <label class="session-field session-field-span2"
+            ><span class="session-label">Perturb overlay TOML (optional)</span>
+            <input
+              type="text"
+              id="sessionPerturbOverlay"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Same as spacetravlr-perturb --config: merges into run TOML for [perturbation] / [data] overrides"
           /></label>
           <div class="session-actions session-field-span2">
             <button type="button" class="primary" id="sessionApply">
@@ -1381,6 +1218,8 @@ async function main() {
   const sessionNetworkDir =
     root.querySelector<HTMLInputElement>("#sessionNetworkDir")!;
   const sessionRunToml = root.querySelector<HTMLInputElement>("#sessionRunToml")!;
+  const sessionPerturbOverlay =
+    root.querySelector<HTMLInputElement>("#sessionPerturbOverlay")!;
   const sessionApplyBtn =
     root.querySelector<HTMLButtonElement>("#sessionApply")!;
   const sessionBusyEl = root.querySelector<HTMLSpanElement>("#sessionBusy")!;
@@ -1795,49 +1634,6 @@ async function main() {
     syncPerturbRuntimeDock(m);
   }
 
-  async function withMetaProgressPoll<T>(work: Promise<T>): Promise<T> {
-    let pollInFlight = false;
-    const id = window.setInterval(() => {
-      if (pollInFlight) return;
-      pollInFlight = true;
-      void (async () => {
-        try {
-          const mr = await fetch(apiUrl("/api/meta"));
-          if (!mr.ok) return;
-          const m = (await mr.json()) as Meta;
-          applyMetaProgressToUi(m);
-        } catch {
-          /* ignore */
-        } finally {
-          pollInFlight = false;
-        }
-      })();
-    }, 150);
-    try {
-      return await work;
-    } finally {
-      clearInterval(id);
-      try {
-        const mr = await fetch(apiUrl("/api/meta"));
-        if (mr.ok) {
-          const m = (await mr.json()) as Meta;
-          applyMetaProgressToUi(m);
-          const pm = m.perturb_progress_permille;
-          const pct = m.perturb_progress_percent;
-          if (
-            (pm != null && Number.isFinite(pm)) ||
-            (pct != null && Number.isFinite(pct))
-          ) {
-            await new Promise((r) => setTimeout(r, 200));
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-      syncProgressBar(null);
-    }
-  }
-
   let meta: Meta = {
     n_obs: 0,
     n_vars: 0,
@@ -1873,6 +1669,7 @@ async function main() {
   let cellSizeDebounce: ReturnType<typeof setTimeout> | null = null;
   let quiverDisplayDebounce: ReturnType<typeof setTimeout> | null = null;
   let umapTransitionRefetchDebounce: ReturnType<typeof setTimeout> | null = null;
+  let viewerStatePushTimer = 0;
   let pairLrRows: PairLrRow[] = [];
   let interactionLineData: InteractionLineDatum[] = [];
   let quiverFieldCache: UmapFieldResponse | null = null;
@@ -2655,7 +2452,30 @@ async function main() {
     rebuildLayer();
     updateStats();
     updateCellTypeLegend();
+    schedulePushViewerUiState();
   };
+
+  function schedulePushViewerUiState() {
+    if (meta.dataset_ready === false) return;
+    window.clearTimeout(viewerStatePushTimer);
+    viewerStatePushTimer = window.setTimeout(() => {
+      const pid = Number(perturbClusterId.value);
+      void postViewerUiState({
+        color_source: lastColorSource,
+        expr_gene: exprGene.value.trim() || null,
+        perturb_gene: perturbGene.value.trim() || null,
+        perturb_expr: Number.isFinite(Number(perturbExpr.value))
+          ? Number(perturbExpr.value)
+          : null,
+        perturb_scope: perturbScope.value || null,
+        perturb_cell_type: perturbCellType.value || null,
+        perturb_cluster_id: Number.isFinite(pid) ? pid : null,
+        interaction_sender_index: interactionSenderIndex,
+        pair_cell_a: pairCellA,
+        pair_cell_b: pairCellB,
+      });
+    }, 400);
+  }
 
   function pairLrRadiusValue(): number {
     const r = Number(pairLrRadius.value);
@@ -3201,6 +3021,7 @@ async function main() {
     setStatus("Running perturbation (may take a while)…");
     try {
       const res = await withMetaProgressPoll(
+        applyMetaProgressToUi,
         fetch(apiUrl("/api/perturb/preview"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3214,6 +3035,7 @@ async function main() {
           if (!rr.ok) throw new Error(await rr.text());
           return rr;
         }),
+        () => syncProgressBar(null),
       );
       const buf = await res.arrayBuffer();
       activeValues = new Float32Array(buf);
@@ -3269,6 +3091,7 @@ async function main() {
     setStatus("Exporting simulated expression (.feather)…");
     try {
       const res = await withMetaProgressPoll(
+        applyMetaProgressToUi,
         fetch(apiUrl("/api/perturb/export_feather"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3282,6 +3105,7 @@ async function main() {
           if (!rr.ok) throw new Error(await rr.text());
           return rr;
         }),
+        () => syncProgressBar(null),
       );
       const blob = await res.blob();
       const fn =
@@ -3368,6 +3192,7 @@ async function main() {
     sessionClusterAnnot.value = meta.cluster_annot;
     sessionNetworkDir.value = meta.network_dir ?? "";
     sessionRunToml.value = meta.run_toml ?? "";
+    sessionPerturbOverlay.value = meta.perturb_overlay ?? "";
     applyRecvLigDefaultsFromMeta();
 
     cellCategories = meta.cell_type_categories ?? [];
@@ -3863,6 +3688,7 @@ async function main() {
           cluster_annot: sessionClusterAnnot.value.trim(),
           network_dir: sessionNetworkDir.value.trim(),
           run_toml: sessionRunToml.value.trim(),
+          perturb_overlay: sessionPerturbOverlay.value.trim(),
         }),
       });
       const text = await r.text();
@@ -4380,6 +4206,9 @@ async function main() {
     sessionClusterAnnot.value = mcp.openSession.cluster_annot;
     sessionNetworkDir.value = mcp.openSession.network_dir;
     sessionRunToml.value = mcp.openSession.run_toml;
+    sessionPerturbOverlay.value =
+      (mcp.openSession as { perturb_overlay?: string }).perturb_overlay ??
+      "";
     sessionBusyEl.classList.remove("hidden");
     try {
       const r = await fetch(apiUrl("/api/session/configure"), {
@@ -4392,6 +4221,8 @@ async function main() {
             mcp.openSession.cluster_annot.trim() || "cell_type",
           network_dir: mcp.openSession.network_dir.trim(),
           run_toml: mcp.openSession.run_toml.trim(),
+          perturb_overlay: (mcp.openSession as { perturb_overlay?: string })
+            .perturb_overlay?.trim() ?? "",
         }),
       });
       const text = await r.text();
@@ -4730,6 +4561,7 @@ async function main() {
     setStatus(statusBusy);
     try {
       const r = await withMetaProgressPoll(
+        applyMetaProgressToUi,
         fetch(apiUrl("/api/perturb/umap-field"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -4738,6 +4570,7 @@ async function main() {
           if (!res.ok) throw new Error(await res.text());
           return res;
         }),
+        () => syncProgressBar(null),
       );
       const data = (await r.json()) as UmapFieldResponse;
       const nx = data.nx;
@@ -5360,6 +5193,7 @@ async function main() {
     setStatus("Perturbation summary…");
     try {
       const r = await withMetaProgressPoll(
+        applyMetaProgressToUi,
         fetch(apiUrl("/api/perturb/summary"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -5373,6 +5207,7 @@ async function main() {
           if (!res.ok) throw new Error(await res.text());
           return res;
         }),
+        () => syncProgressBar(null),
       );
       const d = await r.json();
       const geneRows = (d.top_affected_genes ?? [])

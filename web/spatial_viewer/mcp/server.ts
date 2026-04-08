@@ -12,6 +12,7 @@ import {
 import { z } from "zod";
 
 import {
+  buildPerturbScopeApiBody,
   buildPerturbScopeBody,
   buildReferenceCentroidScopeBody,
   fetchMetaWith,
@@ -52,6 +53,12 @@ const openInputSchema = {
     .string()
     .optional()
     .describe("spacetravlr_run_repro.toml for betadata/perturb (optional)"),
+  perturb_overlay: z
+    .string()
+    .optional()
+    .describe(
+      "Optional TOML merged into the run TOML when loading perturb runtime (same idea as spacetravlr-perturb --config).",
+    ),
   api_base_url: z
     .string()
     .optional()
@@ -341,6 +348,7 @@ registerAppTool(
       cluster_annot: args.cluster_annot ?? "",
       network_dir: args.network_dir ?? "",
       run_toml: args.run_toml ?? "",
+      perturb_overlay: args.perturb_overlay ?? "",
       _spatialTool: "open" as const,
     };
     return {
@@ -718,16 +726,38 @@ server.registerTool(
     inputSchema: {
       gene: z.string().describe("Gene symbol to KO"),
       desired_expr: z.number().optional().describe("Target expression (default 0 for KO)"),
-      scope: z.enum(["all", "cell_type", "cluster"]).optional().describe("Perturbation scope"),
+      scope: z
+        .enum(["all", "selection", "cell_type", "cluster"])
+        .optional()
+        .describe("Perturbation scope (selection = viewer sender cell or cell_indices)"),
       cell_type_label: z.string().optional().describe("Cell type category when scope=cell_type"),
       cluster_id: z.number().int().optional().describe("Cluster ID when scope=cluster"),
+      cell_indices: z
+        .array(z.number().int().nonnegative())
+        .optional()
+        .describe("Explicit cell row indices when scope=selection"),
       n_propagation: z.number().int().min(1).max(32).optional().describe("GRN propagation depth"),
       api_base_url: z.string().optional().describe("API base URL"),
     },
   },
-  async ({ gene, desired_expr, scope, cell_type_label, cluster_id, n_propagation, api_base_url }: {
-    gene: string; desired_expr?: number; scope?: string; cell_type_label?: string;
-    cluster_id?: number; n_propagation?: number; api_base_url?: string;
+  async ({
+    gene,
+    desired_expr,
+    scope,
+    cell_type_label,
+    cluster_id,
+    cell_indices,
+    n_propagation,
+    api_base_url,
+  }: {
+    gene: string;
+    desired_expr?: number;
+    scope?: string;
+    cell_type_label?: string;
+    cluster_id?: number;
+    cell_indices?: number[];
+    n_propagation?: number;
+    api_base_url?: string;
   }) => {
     const api = normalizeApiBase(api_base_url, defaultApiBase);
 
@@ -745,11 +775,21 @@ server.registerTool(
       }
     } catch { /* server may not have /api/meta yet — try the summary anyway */ }
 
-    const scopeObj = buildPerturbScopeBody(scope, cell_type_label, cluster_id);
+    const built = await buildPerturbScopeApiBody(
+      fetchImpl,
+      api,
+      scope,
+      cell_type_label,
+      cluster_id,
+      cell_indices,
+    );
+    if (built.error) {
+      return { content: [{ type: "text" as const, text: `BAD SCOPE: ${built.error}` }] };
+    }
     const reqBody: Record<string, unknown> = {
       gene,
       desired_expr: desired_expr ?? 0,
-      scope: scopeObj,
+      scope: built.scope,
     };
     if (n_propagation != null) reqBody.n_propagation = n_propagation;
     const t0 = Date.now();
@@ -785,9 +825,13 @@ server.registerTool(
     inputSchema: {
       gene: z.string().describe("Perturbed gene symbol"),
       desired_expr: z.number().optional().describe("Target expression level"),
-      scope: z.enum(["all", "cell_type", "cluster"]).optional().describe("Which cells receive the perturbation"),
+      scope: z
+        .enum(["all", "selection", "cell_type", "cluster"])
+        .optional()
+        .describe("Which cells receive the perturbation"),
       cell_type_label: z.string().optional().describe("Perturbation scope when scope=cell_type"),
       cluster_id: z.number().int().optional().describe("Perturbation scope when scope=cluster"),
+      cell_indices: z.array(z.number().int().nonnegative()).optional().describe("When scope=selection"),
       n_propagation: z.number().int().min(1).max(32).optional().describe("GRN propagation depth"),
       reference_scope: z.enum(["all", "cell_type", "cluster"]).describe("Cell set for centroid: all, one cell_type, or one cluster"),
       reference_cell_type_label: z.string().optional().describe("Reference cell type name when reference_scope=cell_type"),
@@ -821,11 +865,21 @@ server.registerTool(
     } catch {
       /* continue */
     }
-    const scopeObj = buildPerturbScopeBody(
+    const cellIdx =
+      Array.isArray(args.cell_indices) && args.cell_indices.length > 0
+        ? args.cell_indices.filter((x: unknown): x is number => typeof x === "number")
+        : undefined;
+    const built = await buildPerturbScopeApiBody(
+      fetchImpl,
+      api,
       typeof args.scope === "string" ? args.scope : undefined,
       typeof args.cell_type_label === "string" ? args.cell_type_label : undefined,
       typeof args.cluster_id === "number" ? args.cluster_id : undefined,
+      cellIdx,
     );
+    if (built.error) {
+      return { content: [{ type: "text" as const, text: `BAD SCOPE: ${built.error}` }] };
+    }
     const reference = buildReferenceCentroidScopeBody(
       typeof args.reference_scope === "string" ? args.reference_scope : undefined,
       typeof args.reference_cell_type_label === "string"
@@ -836,7 +890,7 @@ server.registerTool(
     const reqBody: Record<string, unknown> = {
       gene,
       desired_expr: typeof args.desired_expr === "number" ? args.desired_expr : 0,
-      scope: scopeObj,
+      scope: built.scope,
       reference,
       exclude_perturb_cells_from_reference:
         args.exclude_perturb_cells_from_reference === false ? false : true,
@@ -1209,6 +1263,287 @@ server.registerTool(
             text: `Cancel requested: ${data.message ?? "ok"}${statusLine}\n\nNote: background loading was suppressed. To reload perturbation runtime, use show_spatial_viewer or reload the dataset.`,
           },
         ],
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Fetch error: ${e.message}` }] };
+    }
+  },
+);
+
+server.registerTool(
+  "spatial_viewer_session_snapshot",
+  {
+    description:
+      "Fetches GET /api/meta and GET /api/viewer_state together (dataset + UI-reported color/perturb/sender cell). Use for agent-in-the-loop context.",
+    inputSchema: {
+      api_base_url: z.string().optional().describe("API base URL"),
+    },
+  },
+  async ({ api_base_url }: { api_base_url?: string }) => {
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
+    try {
+      const [mr, vr] = await Promise.all([
+        fetchImpl(`${api}/api/meta`),
+        fetchImpl(`${api}/api/viewer_state`),
+      ]);
+      const meta = mr.ok ? ((await mr.json()) as Record<string, unknown>) : { error: await mr.text() };
+      const viewer_state = vr.ok
+        ? ((await vr.json()) as Record<string, unknown>)
+        : { error: await vr.text() };
+      const snap = { meta, viewer_state };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(snap, null, 2) }],
+        structuredContent: snap,
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Fetch error: ${e.message}` }] };
+    }
+  },
+);
+
+server.registerTool(
+  "spatial_viewer_betadata_pair_lr",
+  {
+    description:
+      "POST /api/betadata/pair_lr — top ligand–receptor β explaining communication between two cell indices (AnnData row order).",
+    inputSchema: {
+      cell_a: z.number().int().min(0).describe("Cell index A (0-based)"),
+      cell_b: z.number().int().min(0).describe("Cell index B (0-based)"),
+      top_n: z.number().int().min(1).max(200).optional(),
+      max_genes: z.number().int().min(1).max(4096).optional(),
+      api_base_url: z.string().optional(),
+    },
+  },
+  async (args: Record<string, unknown> & { api_base_url?: string }) => {
+    const api = normalizeApiBase(String(args.api_base_url ?? "").trim() || undefined, defaultApiBase);
+    const cell_a = Number(args.cell_a);
+    const cell_b = Number(args.cell_b);
+    try {
+      const res = await fetchImpl(`${api}/api/betadata/pair_lr`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cell_a,
+          cell_b,
+          top_n: args.top_n ?? 25,
+          max_genes: args.max_genes ?? 2048,
+        }),
+      });
+      if (!res.ok) {
+        return { content: [{ type: "text" as const, text: `Error ${res.status}: ${await res.text()}` }] };
+      }
+      const data = await res.json();
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Fetch error: ${e.message}` }] };
+    }
+  },
+);
+
+server.registerTool(
+  "spatial_viewer_search_genes",
+  {
+    description:
+      "GET /api/genes?prefix= — validates gene symbols exist in the dataset before expensive perturb calls.",
+    inputSchema: {
+      prefix: z.string().min(1).describe("Gene symbol prefix"),
+      limit: z.number().int().min(1).max(2000).optional(),
+      api_base_url: z.string().optional(),
+    },
+  },
+  async ({
+    prefix,
+    limit,
+    api_base_url,
+  }: {
+    prefix: string;
+    limit?: number;
+    api_base_url?: string;
+  }) => {
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
+    const lim = limit ?? 40;
+    try {
+      const res = await fetchImpl(
+        `${api}/api/genes?prefix=${encodeURIComponent(prefix.trim())}&limit=${lim}`,
+      );
+      if (!res.ok) {
+        return { content: [{ type: "text" as const, text: `Error ${res.status}: ${await res.text()}` }] };
+      }
+      const list = (await res.json()) as string[];
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ prefix, genes: list }, null, 2) }],
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Fetch error: ${e.message}` }] };
+    }
+  },
+);
+
+const perturbPlanJobSchema = z.object({
+  gene: z.string(),
+  desired_expr: z.number().optional(),
+  scope: z.enum(["all", "selection", "cell_type", "cluster"]).optional(),
+  cell_type_label: z.string().optional(),
+  cluster_id: z.number().int().optional(),
+  cell_indices: z.array(z.number().int().nonnegative()).optional(),
+  n_propagation: z.number().int().min(1).max(32).optional(),
+});
+
+server.registerTool(
+  "spatial_viewer_run_perturb_plan",
+  {
+    description:
+      "Runs POST /api/perturb/summary serially for each job (max 20). BLOCKING total time ≈ sum of individual summaries. Use for multi-gene screening from the agent.",
+    inputSchema: {
+      jobs: z.array(perturbPlanJobSchema).min(1).max(20),
+      api_base_url: z.string().optional(),
+    },
+  },
+  async ({
+    jobs,
+    api_base_url,
+  }: {
+    jobs: z.infer<typeof perturbPlanJobSchema>[];
+    api_base_url?: string;
+  }) => {
+    const api = normalizeApiBase(api_base_url, defaultApiBase);
+    try {
+      const meta = await fetchMeta(api);
+      if (!meta.perturb_ready) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "NOT READY: use spatial_viewer_wait_ready(require_perturb=true).",
+            },
+          ],
+        };
+      }
+    } catch {
+      /* continue */
+    }
+    const parts: string[] = [];
+    let i = 0;
+    for (const job of jobs) {
+      i += 1;
+      const built = await buildPerturbScopeApiBody(
+        fetchImpl,
+        api,
+        job.scope,
+        job.cell_type_label,
+        job.cluster_id,
+        job.cell_indices,
+      );
+      if (built.error) {
+        parts.push(`Job ${i} (${job.gene}): SKIP — ${built.error}`);
+        continue;
+      }
+      const reqBody: Record<string, unknown> = {
+        gene: job.gene.trim(),
+        desired_expr: job.desired_expr ?? 0,
+        scope: built.scope,
+      };
+      if (job.n_propagation != null) reqBody.n_propagation = job.n_propagation;
+      const t0 = Date.now();
+      try {
+        const res = await fetchImpl(`${api}/api/perturb/summary`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(reqBody),
+        });
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+        if (!res.ok) {
+          parts.push(`Job ${i} (${job.gene}): Error ${res.status} (${elapsed}s) ${await res.text()}`);
+          continue;
+        }
+        const data = await res.json();
+        parts.push(`Job ${i} (${job.gene}) ${elapsed}s:\n${JSON.stringify(data, null, 2)}`);
+      } catch (e: any) {
+        parts.push(`Job ${i} (${job.gene}): ${e.message}`);
+      }
+    }
+    return { content: [{ type: "text" as const, text: parts.join("\n\n---\n\n") }] };
+  },
+);
+
+server.registerTool(
+  "spatial_viewer_export_feather",
+  {
+    description:
+      "POST /api/perturb/export_feather — returns Feather bytes (simulated expression). Response is summarized (byte length); use curl against the same endpoint to save a file locally.",
+    inputSchema: {
+      gene: z.string(),
+      desired_expr: z.number().optional(),
+      scope: z.enum(["all", "selection", "cell_type", "cluster"]).optional(),
+      cell_type_label: z.string().optional(),
+      cluster_id: z.number().int().optional(),
+      cell_indices: z.array(z.number().int().nonnegative()).optional(),
+      n_propagation: z.number().int().min(1).max(32).optional(),
+      api_base_url: z.string().optional(),
+    },
+  },
+  async (args: Record<string, unknown> & { api_base_url?: string }) => {
+    const api = normalizeApiBase(String(args.api_base_url ?? "").trim() || undefined, defaultApiBase);
+    const gene = String(args.gene ?? "").trim();
+    if (!gene) return { content: [{ type: "text" as const, text: "gene is required." }] };
+    try {
+      const meta = await fetchMeta(api);
+      if (!meta.perturb_ready) {
+        return {
+          content: [
+            { type: "text" as const, text: "perturb_ready is false — use spatial_viewer_wait_ready(require_perturb=true)." },
+          ],
+        };
+      }
+    } catch {
+      /* continue */
+    }
+    const cellIdx =
+      Array.isArray(args.cell_indices) && args.cell_indices.length > 0
+        ? args.cell_indices.filter((x: unknown): x is number => typeof x === "number")
+        : undefined;
+    const built = await buildPerturbScopeApiBody(
+      fetchImpl,
+      api,
+      typeof args.scope === "string" ? args.scope : undefined,
+      typeof args.cell_type_label === "string" ? args.cell_type_label : undefined,
+      typeof args.cluster_id === "number" ? args.cluster_id : undefined,
+      cellIdx,
+    );
+    if (built.error) {
+      return { content: [{ type: "text" as const, text: `BAD SCOPE: ${built.error}` }] };
+    }
+    const reqBody: Record<string, unknown> = {
+      gene,
+      desired_expr: typeof args.desired_expr === "number" ? args.desired_expr : 0,
+      scope: built.scope,
+    };
+    if (args.n_propagation != null) reqBody.n_propagation = args.n_propagation;
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(`${api}/api/perturb/export_feather`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody),
+      });
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!res.ok) {
+        return {
+          content: [{ type: "text" as const, text: `Error ${res.status} (${elapsed}s): ${await res.text()}` }],
+        };
+      }
+      const buf = await res.arrayBuffer();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `Feather export OK (${elapsed}s): ${buf.byteLength} bytes for gene ${gene}. ` +
+              `Save with: curl -sS -X POST ${api}/api/perturb/export_feather -H 'Content-Type: application/json' ` +
+              `-d '${JSON.stringify(reqBody).replace(/'/g, "'\\''")}' -o simulated.feather`,
+          },
+        ],
+        structuredContent: { gene, bytes: buf.byteLength, elapsed_s: Number(elapsed) },
       };
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Fetch error: ${e.message}` }] };

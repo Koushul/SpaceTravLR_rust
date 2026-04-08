@@ -83,6 +83,57 @@ export function buildPerturbScopeBody(
   return { type: "all" };
 }
 
+/** Scope object for POST /api/perturb/summary and related endpoints (Rust `PerturbScopeBody`). */
+export type PerturbScopeApiBody =
+  | { type: "all" }
+  | { type: "indices"; indices: number[] }
+  | { type: "cell_type"; category: number }
+  | { type: "cell_type_name"; name: string }
+  | { type: "cluster"; cluster_id: number };
+
+export async function buildPerturbScopeApiBody(
+  fetchImpl: typeof fetch,
+  apiBase: string,
+  scope: string | undefined,
+  cell_type_label: string | undefined,
+  cluster_id: number | undefined,
+  explicit_indices?: number[],
+): Promise<{ scope: PerturbScopeApiBody; error?: string }> {
+  const s = scope ?? "all";
+  if (s === "selection") {
+    let indices = explicit_indices?.filter((i) => Number.isFinite(i) && i >= 0).map((i) => Math.trunc(i));
+    if (!indices?.length) {
+      try {
+        const r = await fetchImpl(`${apiBase.replace(/\/$/, "")}/api/viewer_state`);
+        if (r.ok) {
+          const v = (await r.json()) as { interaction_sender_index?: number | null };
+          const ix = v.interaction_sender_index;
+          if (ix != null && Number.isFinite(ix) && ix >= 0) {
+            indices = [Math.trunc(ix)];
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!indices?.length) {
+      return {
+        scope: { type: "all" },
+        error:
+          "scope=selection needs cell_indices or viewer_state.interaction_sender_index (pick a sender cell with Interaction lens).",
+      };
+    }
+    return { scope: { type: "indices", indices: [...new Set(indices)] } };
+  }
+  if (s === "cell_type" && cell_type_label != null && String(cell_type_label).trim() !== "") {
+    return { scope: { type: "cell_type_name", name: String(cell_type_label).trim() } };
+  }
+  if (s === "cluster" && cluster_id != null) {
+    return { scope: { type: "cluster", cluster_id } };
+  }
+  return { scope: { type: "all" } };
+}
+
 export function buildReferenceCentroidScopeBody(
   reference_scope: string | undefined,
   reference_cell_type_label: string | undefined,
