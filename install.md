@@ -9,7 +9,7 @@ GitHub Releases publish tarballs for:
 | Target triple | Typical systems |
 |---------------|-----------------|
 | `x86_64-unknown-linux-gnu` | 64-bit Linux (glibc) |
-| `aarch64-unknown-linux-gnu` | Linux ARM64 (e.g. Ubuntu ARM runners / cloud ARM) |
+| `aarch64-unknown-linux-gnu` | Linux ARM64 — **not** in default release matrix (needs public repo + `ubuntu-24.04-arm` in workflow or build from source) |
 | `x86_64-apple-darwin` | Intel Mac |
 | `aarch64-apple-darwin` | Apple Silicon Mac |
 

@@ -21,11 +21,14 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+          # ubuntu-24.04-arm is only available on public repos for GitHub-hosted ARM runners;
+          # uncomment when the repo is public (see install.md).
+          # - os: ubuntu-24.04-arm
+          #   target: aarch64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          # macos-13 was retired; use Intel macOS 15 image for x86_64-apple-darwin.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
