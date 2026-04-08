@@ -6,7 +6,27 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
 
 ## Installation
 
-  Quick setup:
+**Binary install (recommended for most users):** see **[install.md](install.md)** for supported platforms, PATH, and troubleshooting.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | sh
+```
+
+This installs **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** into `$HOME/.local/bin` by default. **Updates are opt-in:** run `spacetravlr --update` when you want to refresh those binaries (release builds with the `self-update` feature only).
+
+**From crates.io ([Rust CLI packaging / `cargo publish`](https://rust-cli.github.io/book/tutorial/packaging.html#quickest-cargo-publish)):** after the crate is published, Rust users can install from the registry (compiles on your machine; ensure `~/.cargo/bin` is on `PATH`):
+
+```bash
+cargo install space_trav_lr_rust --locked
+# Full CLI set + opt-in GitHub self-update (same features as binary releases):
+cargo install space_trav_lr_rust --locked --features "spatial-viewer,self-update"
+```
+
+The **crate name** is `space_trav_lr_rust`; installed **binaries** stay `spacetravlr`, `spacetravlr-perturb`, and optionally `spatial_viewer`.
+
+---
+
+**Cluster / shared paths — quick setup:**
 
   ```bash
   echo 'export PATH="$PATH:/ix/djishnu/shared/djishnu_kor11/rust/SpaceTravLR_rust/bin"' >> ~/.bashrc
@@ -28,7 +48,7 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   rustup update stable
-  rustc --version   # should be >= 1.85
+   rustc --version   # should be >= 1.86
   ```
 
 ### Install the training CLI (recommended)
@@ -62,7 +82,7 @@ spacetravlr --help
 | `... --no-default-features` | Always plain progress (same as always using `--plain`); skips Ratatui, crossterm, and sysinfo. |
 
 
-1. **Rust toolchain (1.85 or newer)** — this crate uses **edition 2024**. Install or update via [rustup](https://rustup.rs/):
+1. **Rust toolchain (1.86 or newer)** — this crate uses **edition 2024**. Install or update via [rustup](https://rustup.rs/):
 
 2. **Compute backend** — **`spacetravlr`** uses **WebGPU** (Burn’s WGPU backend via [wgpu](https://github.com/gfx-rs/wgpu)) when an adapter is available; otherwise it uses **NdArray (CPU)** — no other auto path. Set **`SPACETRAVLR_FORCE_CPU=1`** (or `true`) to force CPU, or **`SPACETRAVLR_DISABLE_WGPU=1`** to skip probing the GPU stack entirely.
 
@@ -72,7 +92,7 @@ spacetravlr --help
 
 
 
-`cargo install` only installs **`spacetravlr`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
+`cargo install --path .` installs **`spacetravlr`** and **`spacetravlr-perturb`** by default. To also install **`spatial_viewer`**, use **`--features spatial-viewer`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
 
 ### Build without installing
 

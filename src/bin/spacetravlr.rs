@@ -31,6 +31,15 @@ use std::sync::atomic::AtomicBool;
 #[cfg(feature = "tui")]
 use std::thread;
 
+const SPACETRAVLR_LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (target ",
+    env!("SPACETRAVLR_TARGET_TRIPLE"),
+    ", git ",
+    env!("SPACETRAVLR_GIT_SHA"),
+    ")"
+);
+
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum TrainingModeArg {
     Full,
@@ -120,13 +129,30 @@ struct RunSummaryCli {
 #[derive(Parser, Debug)]
 #[command(
     name = "spacetravlr",
-    version,
+    version = env!("CARGO_PKG_VERSION"),
+    long_version = SPACETRAVLR_LONG_VERSION,
     about = "SpaceTravLR — spatial GRN training from single-cell spatial AnnData (.h5ad).",
-    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training. For multiple machines on one shared output directory, start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine. With --condition, --join-output-dir points to the parent output directory (conditions/<group>/ subdirectories are auto-discovered from the repro TOML)."
+    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training. For multiple machines on one shared output directory, start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine. With --condition, --join-output-dir points to the parent output directory (conditions/<group>/ subdirectories are auto-discovered from the repro TOML."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help_heading = "Install",
+        help = "Download the latest release and replace spacetravlr, spacetravlr-perturb, and spatial_viewer next to this executable (opt-in; uses the network only when you pass this flag). Requires build with `self-update`."
+    )]
+    update: bool,
+
+    #[arg(
+        long = "update-version",
+        value_name = "TAG",
+        help_heading = "Install",
+        help = "With --update: install a specific release tag (e.g. v0.2.0) instead of latest"
+    )]
+    update_version: Option<String>,
 
     #[arg(
         short = 'c',
@@ -767,6 +793,17 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.update {
+        #[cfg(feature = "self-update")]
+        return space_trav_lr_rust::self_update::run(cli.update_version.as_deref());
+        #[cfg(not(feature = "self-update"))]
+        anyhow::bail!(
+            "This binary was built without the `self-update` feature. Upgrade with:\n\
+             curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | sh\n\
+             See https://github.com/Koushul/SpaceTravLR_rust/blob/main/install.md"
+        );
+    }
 
     if let Some(Commands::RunSummary(rs)) = &cli.command {
         return run_run_summary(&cli, rs);

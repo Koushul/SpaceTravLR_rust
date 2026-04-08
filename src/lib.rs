@@ -19,6 +19,8 @@ pub mod perturb_batch;
 pub mod perturb_mode;
 #[cfg(feature = "tui")]
 pub mod perturb_tui;
+#[cfg(feature = "self-update")]
+pub mod self_update;
 pub mod run_summary_html;
 pub mod spatial_estimator;
 #[cfg(feature = "tui")]

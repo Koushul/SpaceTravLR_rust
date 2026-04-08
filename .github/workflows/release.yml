@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Match tag and Cargo.toml version
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME#v}"
+          VER=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$REF" != "$VER" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match package version in Cargo.toml ($VER)"
+            exit 1
+          fi
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev vulkan-tools build-essential pkg-config
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build metadata for spacetravlr --version
+        shell: bash
+        run: |
+          echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Cargo build
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+        run: cargo build --release --locked --features spatial-viewer,self-update
+
+      - name: Package tarball and checksum
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          TAR="spacetravlr-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p pack
+          cp target/release/spacetravlr target/release/spacetravlr-perturb target/release/spatial_viewer pack/
+          tar -czvf "$TAR" -C pack spacetravlr spacetravlr-perturb spatial_viewer
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${TARGET}.txt"
+          else
+            sha256sum "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${TARGET}.txt"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: |
+            spacetravlr-*.tar.gz
+            checksum-*.txt
+
+  publish:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: bundle-*
+          merge-multiple: true
+
+      - name: Merge SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat artifacts/checksum-*.txt > SHA256SUMS
+          cp SHA256SUMS artifacts/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

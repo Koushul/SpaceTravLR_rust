@@ -32,7 +32,27 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo build
 
       - name: Run tests
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo test
+
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/install.sh
+
+      - name: bats
+        run: |
+          sudo apt-get install -y bats
+          bats scripts/install.bats
