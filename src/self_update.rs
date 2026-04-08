@@ -56,11 +56,19 @@ fn gh_api_get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T> {
 
 fn fetch_release(tag: Option<&str>) -> Result<GhRelease> {
     let base = format!("https://api.github.com/repos/{GITHUB_REPO}/releases");
-    let url = match tag {
-        Some(t) => format!("{base}/tags/{t}"),
-        None => format!("{base}/latest"),
-    };
-    gh_api_get_json(&url)
+    match tag {
+        Some(t) => {
+            let url = format!("{base}/tags/{t}");
+            gh_api_get_json(&url)
+        }
+        None => {
+            let url = format!("{base}?per_page=1");
+            let list: Vec<GhRelease> = gh_api_get_json(&url)?;
+            list.into_iter()
+                .next()
+                .context("no GitHub releases found (publish a release or pass a tag to --update-version)")
+        }
+    }
 }
 
 fn normalize_tag_version(tag: &str) -> Result<Version> {

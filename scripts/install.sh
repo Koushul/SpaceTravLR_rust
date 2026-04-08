@@ -2,7 +2,7 @@
 # SpaceTravLR CLI installer — keep tarball names / target triples in sync with
 # src/self_update.rs (GITHUB_REPO, tarball pattern, host_target_triple).
 # Quick install (use -o then sh — piping | sh can truncate under some terminals/proxies):
-#   curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
+#   curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/tags/v0.1.0/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 set -e
 
 REPO="${SPACETRAVLR_GITHUB_REPO:-Koushul/SpaceTravLR_rust}"
@@ -110,8 +110,8 @@ get_target() {
     fi
 }
 
-api_latest_json() {
-    API_URL="${SPACETRAVLR_GH_API:-https://api.github.com}/repos/${REPO}/releases/latest"
+api_newest_release_json() {
+    API_URL="${SPACETRAVLR_GH_API:-https://api.github.com}/repos/${REPO}/releases?per_page=1"
     curl -fsSL \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -120,11 +120,11 @@ api_latest_json() {
 }
 
 get_latest_version() {
-    step "Resolving latest release (GitHub)…"
-    _json="$(api_latest_json)" || error "Failed to fetch release metadata"
+    step "Resolving newest GitHub release (includes pre-releases)…"
+    _json="$(api_newest_release_json)" || error "Failed to fetch release metadata"
 
     if command -v jq >/dev/null 2>&1; then
-        VERSION="$(printf '%s' "$_json" | jq -r '.tag_name // empty')"
+        VERSION="$(printf '%s' "$_json" | jq -r '.[0].tag_name // empty')"
     else
         VERSION="$(printf '%s' "$_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
     fi

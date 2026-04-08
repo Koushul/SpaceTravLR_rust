@@ -9,8 +9,10 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
 **Binary install (recommended for most users):** see **[install.md](install.md)** for supported platforms, PATH, and troubleshooting.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
+curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/tags/v0.1.0/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 ```
+
+Release: [v0.1.0](https://github.com/Koushul/SpaceTravLR_rust/releases/tag/v0.1.0). For `main`, swap `refs/tags/v0.1.0` for `refs/heads/main`.
 
 Avoid `curl … | sh`: some environments truncate piped downloads, which yields a broken script.
 
