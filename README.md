@@ -9,8 +9,10 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
 **Binary install (recommended for most users):** see **[install.md](install.md)** for supported platforms, PATH, and troubleshooting.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 ```
+
+Avoid `curl … | sh`: some environments truncate piped downloads, which yields a broken script.
 
 This installs **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** into `$HOME/.local/bin` by default. **Updates are opt-in:** run `spacetravlr --update` when you want to refresh those binaries (release builds with the `self-update` feature only).
 

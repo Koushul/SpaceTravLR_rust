@@ -800,7 +800,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(not(feature = "self-update"))]
         anyhow::bail!(
             "This binary was built without the `self-update` feature. Upgrade with:\n\
-             curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | sh\n\
+             curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh\n\
              See https://github.com/Koushul/SpaceTravLR_rust/blob/main/install.md"
         );
     }

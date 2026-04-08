@@ -17,10 +17,10 @@ Anything else: use **WSL2** on Windows, or **build from source** (see below).
 
 ## Quick install (macOS / Linux)
 
-One-liner (always points at `main`; for a pinned tag after your first release, replace `refs/heads/main` with e.g. `refs/tags/v0.1.0`):
+Recommended one-liner (always points at `main`; for a pinned tag after your first release, replace `refs/heads/main` with e.g. `refs/tags/v0.1.0`). **Use `-o` then `sh`** — `curl … | sh` can fail if piped output is truncated (some IDEs, proxies, or buffer limits).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 ```
 
 - **Install location:** `$HOME/.local/bin` by default. Override with `SPACETRAVLR_INSTALL_DIR`.
@@ -29,13 +29,13 @@ curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads
 Preview what would happen (no download):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | env INSTALL_DRY_RUN=1 sh
+curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && env INSTALL_DRY_RUN=1 sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 ```
 
 Quiet logs (errors still print):
 
 ```bash
-curl -fsSL …/install.sh | sh -s -- --quiet
+curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh --quiet && rm -f install-spacetravlr.sh
 ```
 
 ## Manual install from a release

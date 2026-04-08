@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # SpaceTravLR CLI installer — keep tarball names / target triples in sync with
 # src/self_update.rs (GITHUB_REPO, tarball pattern, host_target_triple).
-# Quick install:
-#   curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh | sh
+# Quick install (use -o then sh — piping | sh can truncate under some terminals/proxies):
+#   curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/heads/main/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 set -e
 
 REPO="${SPACETRAVLR_GITHUB_REPO:-Koushul/SpaceTravLR_rust}"
@@ -29,9 +29,9 @@ is_tty() {
     [ -t 2 ]
 }
 
-color_ok=1
-if ! is_tty || [ "$QUIET" -eq 1 ]; then
-    color_ok=0
+color_ok=0
+if is_tty && [ "$QUIET" -eq 0 ]; then
+    color_ok=1
 fi
 
 info() {
