@@ -1,6 +1,6 @@
 [package]
 name = "space_trav_lr_rust"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "Spatial gene regulatory network inference and in-silico perturbation (Rust port of SpaceTravLR)"
 readme = "README.md"
