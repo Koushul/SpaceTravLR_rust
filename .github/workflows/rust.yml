@@ -12,8 +12,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: sccache
 
 jobs:
   build:
@@ -25,13 +23,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Build
-        run: cargo build
+        run: cargo --config 'build.rustc-wrapper=""' build
 
       - name: Run tests
-        run: cargo test
+        run: cargo --config 'build.rustc-wrapper=""' test
 
   install-script:
     runs-on: ubuntu-latest

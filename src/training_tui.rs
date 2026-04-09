@@ -94,10 +94,13 @@ const STARFIELD: [&str; 8] = [
 ];
 
 const ROCKET_BODY_FIRE_LINES: usize = 8 + 2;
+const SHEEP: &str = "🐑\u{FE0F}";
 const ROCKET_HEADER_LINES: usize = 2;
 const ROCKET_MIN_TOP_MARGIN: usize = 1;
 const ROCKET_MIN_BOTTOM_MARGIN: usize = 1;
 const ROCKET_MIN_STARS: usize = 3;
+const SHEEP_MAX_SIMULTANEOUS: usize = 12;
+const SHEEP_RETAIN: Duration = Duration::from_secs(4);
 
 fn rocket_line_centered(spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
     let w: usize = spans.iter().map(Span::width).sum();
@@ -125,6 +128,8 @@ fn rocket_lines(
     gene_pct: u32,
     inner_w: usize,
     inner_h: usize,
+    now: Instant,
+    falling_sheep: &[Instant],
 ) -> Vec<Line<'static>> {
     let f = frame % 4;
     let shimmer = (frame / 3) % BODY.len();
@@ -218,7 +223,65 @@ fn rocket_lines(
         ));
     }
 
+    apply_rocket_sheep_overlays(
+        &mut lines,
+        inner_w,
+        top_pad,
+        frame,
+        now,
+        falling_sheep,
+    );
+
     lines
+}
+
+fn apply_rocket_sheep_overlays(
+    lines: &mut Vec<Line<'static>>,
+    inner_w: usize,
+    top_pad: usize,
+    frame: usize,
+    now: Instant,
+    falling_sheep: &[Instant],
+) {
+    if falling_sheep.is_empty() || lines.is_empty() {
+        return;
+    }
+    let sheep_w = SHEEP.width();
+    if sheep_w == 0 || inner_w <= sheep_w {
+        return;
+    }
+    let first_row_below_rocket = ROCKET_HEADER_LINES + top_pad + ROCKET_BODY_FIRE_LINES;
+
+    for (si, &started) in falling_sheep.iter().enumerate() {
+        let age = now.checked_duration_since(started).unwrap_or(Duration::ZERO);
+        let t = age.as_secs_f64();
+        let fall_rows = ((t * 10.0).powf(1.35)).floor() as usize;
+        let line_idx = first_row_below_rocket + fall_rows;
+        if line_idx >= lines.len() {
+            continue;
+        }
+        let wobble = (((frame + si * 3) / 2) % 3) as i32 - 1;
+        let lane = (si as i32 * 5).rem_euclid(9) - 4;
+        let off = wobble + lane;
+        let center = (inner_w / 2) as i32;
+        let half = (sheep_w / 2) as i32;
+        let max_col = inner_w.saturating_sub(sheep_w) as i32;
+        let col = (center - half + off).clamp(0, max_col) as usize;
+
+        let mut style = Style::default().fg(LILAC).add_modifier(Modifier::BOLD);
+        if t > 0.9 {
+            style = Style::default().fg(VALUE).add_modifier(Modifier::DIM);
+        }
+        if t > 1.5 {
+            style = Style::default().fg(MUTED).add_modifier(Modifier::DIM);
+        }
+
+        lines[line_idx] = Line::from(vec![
+            Span::raw(" ".repeat(col)),
+            Span::styled(SHEEP, style),
+            Span::raw(" ".repeat(inner_w.saturating_sub(col + sheep_w))),
+        ]);
+    }
 }
 
 fn brighten(c: Color, amt: u8) -> Color {
@@ -946,6 +1009,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
     let mut prev_genes_rounds_heartbeat = 0usize;
     let mut heart_beat_until: Option<Instant> = None;
+    let mut prev_genes_rounds_sheep = 0usize;
+    let mut falling_sheep: Vec<Instant> = Vec::new();
 
     loop {
         if last_sys.elapsed() > HARDWARE_POLL_INTERVAL {
@@ -990,9 +1055,22 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             } else if rounds < prev_genes_rounds_heartbeat {
                 prev_genes_rounds_heartbeat = rounds;
             }
+            if rounds > prev_genes_rounds_sheep {
+                for _ in 0..(rounds - prev_genes_rounds_sheep) {
+                    if falling_sheep.len() < SHEEP_MAX_SIMULTANEOUS {
+                        falling_sheep.push(now_heartbeat);
+                    }
+                }
+                prev_genes_rounds_sheep = rounds;
+            } else if rounds < prev_genes_rounds_sheep {
+                prev_genes_rounds_sheep = rounds;
+            }
         }
+        falling_sheep.retain(|t| now_heartbeat.saturating_duration_since(*t) < SHEEP_RETAIN);
         let heart_peak = heart_beat_until.is_some_and(|deadline| now_heartbeat < deadline);
 
+        let now_rocket = now_heartbeat;
+        let sheep_snapshot: Vec<Instant> = falling_sheep.clone();
         terminal.draw(|f| {
             let area = f.area();
             let bg = Style::default().bg(BG);
@@ -1507,6 +1585,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     gene_pct,
                     rocket_inner_w,
                     rocket_inner_h,
+                    now_rocket,
+                    &sheep_snapshot,
                 ))
                 .block(
                     Block::default()

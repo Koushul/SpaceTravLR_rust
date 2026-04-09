@@ -16,14 +16,12 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pin 22.04 so gnu-linked binaries need ~glibc 2.35, not 2.38+ from ubuntu-latest (24.04).
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           # ubuntu-24.04-arm is only available on public repos for GitHub-hosted ARM runners;
           # uncomment when the repo is public (see install.md).
@@ -57,15 +55,13 @@ jobs:
         with:
           prefix-key: release-${{ matrix.target }}
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Build metadata for spacetravlr --version
         shell: bash
         run: |
           echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
 
       - name: Cargo build
-        run: cargo build --release --locked --features spatial-viewer,self-update
+        run: cargo --config 'build.rustc-wrapper=""' build --release --locked --features spatial-viewer,self-update
 
       - name: Package tarball and checksum
         shell: bash
