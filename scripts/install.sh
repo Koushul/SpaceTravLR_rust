@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# SpaceTravLR CLI installer — keep tarball names / target triples in sync with
-# src/self_update.rs (GITHUB_REPO, tarball pattern, host_target_triple).
+# SpaceTravLR CLI installer — keep tarball names / target slugs in sync with
+# src/self_update.rs (GITHUB_REPO, tarball_name, LINUX_GNU_* , prebuilt_tarball_target).
 # Quick install (use -o then sh — piping | sh can truncate under some terminals/proxies):
 #   curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/tags/v1.1.0/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 set -e
@@ -98,7 +98,9 @@ get_target() {
         linux)
             case "$ARCH" in
                 x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
-                aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+                aarch64)
+                    error "No prebuilt Linux ARM64 binaries. Build from source: cargo install spacetravlr --locked --features spatial-viewer"
+                    ;;
             esac
             ;;
         darwin)
@@ -107,6 +109,43 @@ get_target() {
     esac
     if [ -z "$TARGET" ]; then
         error "Unsupported combination $OS $ARCH"
+    fi
+}
+
+linux_gnu_triple="x86_64-unknown-linux-gnu"
+linux_gnu_compat_suffix="-glibc2.31"
+
+linux_set_tarball_target_for_glibc() {
+    [ "$OS" = linux ] && [ "$ARCH" = x86_64 ] || return 0
+    base="$linux_gnu_triple"
+    if [ -n "${SPACETRAVLR_LINUX_VARIANT:-}" ]; then
+        case "$SPACETRAVLR_LINUX_VARIANT" in
+            standard) TARGET="$base" ;;
+            compat) TARGET="${base}${linux_gnu_compat_suffix}" ;;
+            *) error "Invalid SPACETRAVLR_LINUX_VARIANT; use standard or compat" ;;
+        esac
+        return 0
+    fi
+    if ! command -v ldd >/dev/null 2>&1; then
+        error "ldd not found (need GNU libc). Set SPACETRAVLR_LINUX_VARIANT=standard or compat to skip detection."
+    fi
+    _line="$(ldd --version 2>/dev/null | head -1)" || error "ldd --version failed"
+    _ver="$(printf '%s' "$_line" | awk '{
+        for (i = 1; i <= NF; i++) {
+            if (match($i, /^[0-9]+\.[0-9]+/)) v = substr($i, RSTART, RLENGTH)
+        }
+        print v
+    }')"
+    if [ -z "$_ver" ]; then
+        error "Could not parse glibc from: $_line — set SPACETRAVLR_LINUX_VARIANT=standard or compat"
+    fi
+    _maj="${_ver%%.*}"
+    _rest="${_ver#*.}"
+    _min="${_rest%%[^0-9]*}"
+    if [ "$_maj" -gt 2 ] 2>/dev/null || { [ "$_maj" -eq 2 ] && [ "${_min:-0}" -ge 35 ] 2>/dev/null; }; then
+        TARGET="$base"
+    else
+        TARGET="${base}${linux_gnu_compat_suffix}"
     fi
 }
 
@@ -233,6 +272,7 @@ Environment:
   INSTALL_DRY_RUN=1         print plan only
   INSTALL_TEST_VERSION=v…    skip API; use this tag (for tests / air-gapped preview)
   INSTALL_VERIFY_CHECKSUM=0 skip SHA256SUMS check (not recommended)
+  SPACETRAVLR_LINUX_VARIANT standard|compat  override glibc-based tarball on Linux x86_64
   UNAME_S / UNAME_M         override platform (tests)
 "
             exit 0
@@ -245,6 +285,7 @@ Environment:
     detect_os
     detect_arch
     get_target
+    linux_set_tarball_target_for_glibc
     info "Detected: $OS $ARCH → $TARGET"
 
     if [ -n "${INSTALL_TEST_VERSION:-}" ]; then

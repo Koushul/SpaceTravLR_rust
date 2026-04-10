@@ -6,12 +6,16 @@ Prebuilt binaries include **`spacetravlr`** (training), **`spacetravlr-perturb`*
 
 GitHub Releases publish tarballs for:
 
-| Target triple | Typical systems |
-|---------------|-----------------|
-| `x86_64-unknown-linux-gnu` | 64-bit Linux (glibc) |
-| `aarch64-unknown-linux-gnu` | Linux ARM64 — **not** in default release matrix (needs public repo + `ubuntu-24.04-arm` in workflow or build from source) |
-| `x86_64-apple-darwin` | Intel Mac |
-| `aarch64-apple-darwin` | Apple Silicon Mac |
+| Asset name (after `spacetravlr-<tag>-`) | Typical systems |
+|----------------------------------------|-----------------|
+| `x86_64-unknown-linux-gnu.tar.gz` | 64-bit Linux (glibc **≥ 2.35**, e.g. Ubuntu 22.04+) |
+| `x86_64-unknown-linux-gnu-glibc2.31.tar.gz` | Older glibc (**≥ ~2.31**, e.g. RHEL 9 / glibc **2.34**) |
+| `x86_64-apple-darwin.tar.gz` | Intel Mac |
+| `aarch64-apple-darwin.tar.gz` | Apple Silicon Mac |
+
+On **Linux x86_64**, the **[install script](scripts/install.sh)** runs **`ldd --version`**, picks the **standard** tarball when glibc is **2.35+**, otherwise the **compat** tarball. Override with **`SPACETRAVLR_LINUX_VARIANT=standard`** or **`SPACETRAVLR_LINUX_VARIANT=compat`**.
+
+**Linux ARM64** has **no** prebuilt tarballs — install [from source](#install-from-source-developers) on that platform.
 
 Anything else: use **WSL2** on Windows, or **build from source** (see below).
 
@@ -41,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/tags/
 ## Manual install from a release
 
 1. Open **[Releases](https://github.com/Koushul/SpaceTravLR_rust/releases)** (current: **[v1.1.0](https://github.com/Koushul/SpaceTravLR_rust/releases/tag/v1.1.0)**).
-2. Download **`spacetravlr-<tag>-<target>.tar.gz`** for your machine (triple from the table above).
+2. Download **`spacetravlr-<tag>-<target>.tar.gz`** for your machine (see the table above; Linux x86_64 has two glibc variants).
 3. Verify **`SHA256SUMS`** from the same release (recommended).
 4. Extract and move the three binaries to a directory on your `PATH`, then `chmod +x` each.
 

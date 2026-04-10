@@ -1,5 +1,5 @@
 //! Opt-in self-update: only used when the user runs `spacetravlr --update`.
-//! Naming matches `scripts/install.sh` (see `GITHUB_REPO`, `tarball_name`, `host_target_triple`).
+//! Naming matches `scripts/install.sh` (see `GITHUB_REPO`, `tarball_name`, `prebuilt_tarball_target`).
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -14,17 +14,91 @@ pub const GITHUB_REPO: &str = "Koushul/SpaceTravLR_rust";
 
 pub const DISTRIBUTION_BINARIES: [&str; 3] = ["spacetravlr", "spacetravlr-perturb", "spatial_viewer"];
 
+pub const LINUX_GNU_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+
+pub const LINUX_GNU_COMPAT_SUFFIX: &str = "-glibc2.31";
+
 pub fn tarball_name(version_tag: &str, target: &str) -> String {
     format!("spacetravlr-{version_tag}-{target}.tar.gz")
 }
 
 pub fn host_target_triple() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
-        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Some(LINUX_GNU_TRIPLE),
         ("macos", "x86_64") => Some("x86_64-apple-darwin"),
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
         _ => None,
+    }
+}
+
+fn parse_two_part_version_token(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim_matches(|c: char| c == '(' || c == ')' || c == ',');
+    let mut parts = s.splitn(2, '.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let rest = parts.next()?;
+    let minor_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let minor: u32 = minor_str.parse().ok()?;
+    Some((major, minor))
+}
+
+fn glibc_version_from_ldd_first_line(line: &str) -> Option<(u32, u32)> {
+    let mut last = None;
+    for w in line.split_whitespace() {
+        if let Some(v) = parse_two_part_version_token(w) {
+            last = Some(v);
+        }
+    }
+    last
+}
+
+fn host_glibc_major_minor() -> Result<(u32, u32)> {
+    let out = std::process::Command::new("ldd")
+        .arg("--version")
+        .output()
+        .context("run `ldd --version` to detect GNU libc (required for self-update on Linux x86_64)")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim();
+    glibc_version_from_ldd_first_line(first).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not parse glibc version from `ldd --version` first line: {first:?}"
+        )
+    })
+}
+
+fn linux_x86_64_prebuilt_tarball_target() -> Result<String> {
+    if let Ok(v) = std::env::var("SPACETRAVLR_LINUX_VARIANT") {
+        return match v.as_str() {
+            "standard" => Ok(LINUX_GNU_TRIPLE.to_string()),
+            "compat" => Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT_SUFFIX}")),
+            _ => bail!(
+                "invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard or compat"
+            ),
+        };
+    }
+    let (maj, min) = host_glibc_major_minor()?;
+    let use_standard = maj > 2 || (maj == 2 && min >= 35);
+    if use_standard {
+        Ok(LINUX_GNU_TRIPLE.to_string())
+    } else {
+        Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT_SUFFIX}"))
+    }
+}
+
+pub fn prebuilt_tarball_target() -> Result<String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => linux_x86_64_prebuilt_tarball_target(),
+        ("linux", "aarch64") => {
+            bail!(
+                "no prebuilt Linux ARM64 binaries; build from source (e.g. cargo install spacetravlr --locked --features spatial-viewer)"
+            )
+        }
+        _ => host_target_triple()
+            .map(|s| s.to_string())
+            .context("unsupported OS/arch for prebuilt binaries"),
     }
 }
 
@@ -157,7 +231,7 @@ fn extract_tar_gz(archive_path: &Path, out_dir: &Path) -> Result<()> {
 }
 
 pub fn run(update_version: Option<&str>) -> Result<()> {
-    let target = host_target_triple()
+    let target = prebuilt_tarball_target()
         .with_context(|| format!("unsupported OS/arch for prebuilt binaries: {} {}", std::env::consts::OS, std::env::consts::ARCH))?;
     let exe = std::env::current_exe().context("current_exe")?;
     let install_dir = exe
@@ -179,7 +253,7 @@ pub fn run(update_version: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let tar_name = tarball_name(remote_tag, target);
+    let tar_name = tarball_name(remote_tag, &target);
     let tarball_url = release
         .assets
         .iter()
@@ -248,4 +322,27 @@ pub fn run(update_version: Option<&str>) -> Result<()> {
         remote_ver, local_ver, DISTRIBUTION_BINARIES[0]
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glibc_from_ldd_ubuntu() {
+        assert_eq!(
+            glibc_version_from_ldd_first_line(
+                "ldd (Ubuntu GLIBC 2.35-0ubuntu3.8) 2.35"
+            ),
+            Some((2, 35))
+        );
+    }
+
+    #[test]
+    fn glibc_from_ldd_gnu() {
+        assert_eq!(
+            glibc_version_from_ldd_first_line("ldd (GNU libc) 2.34"),
+            Some((2, 34))
+        );
+    }
 }

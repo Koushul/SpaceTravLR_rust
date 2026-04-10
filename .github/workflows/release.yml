@@ -13,25 +13,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Pin 22.04 so gnu-linked binaries need ~glibc 2.35, not 2.38+ from ubuntu-latest (24.04).
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          # ubuntu-24.04-arm is only available on public repos for GitHub-hosted ARM runners;
-          # uncomment when the repo is public (see install.md).
-          # - os: ubuntu-24.04-arm
-          #   target: aarch64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          # macos-13 was retired; use Intel macOS 15 image for x86_64-apple-darwin.
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
+  build-linux-standard:
+    name: x86_64-unknown-linux-gnu
+    runs-on: ubuntu-22.04
+    env:
+      BUNDLE_ID: x86_64-unknown-linux-gnu
+      TARBALL_SUFFIX: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -46,8 +33,122 @@ jobs:
           fi
 
       - name: Linux build dependencies
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libvulkan-dev vulkan-tools build-essential pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-${{ env.BUNDLE_ID }}
+
+      - name: Build metadata for spacetravlr --version
+        shell: bash
+        run: |
+          echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Cargo build
+        run: cargo --config 'build.rustc-wrapper=""' build --release --locked --features spatial-viewer
+
+      - name: Package tarball and checksum
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          TAR="spacetravlr-${VERSION}-${TARGET}${TARBALL_SUFFIX}.tar.gz"
+          mkdir -p pack
+          cp target/release/spacetravlr target/release/spacetravlr-perturb target/release/spatial_viewer pack/
+          tar -czvf "$TAR" -C pack spacetravlr spacetravlr-perturb spatial_viewer
+          sha256sum "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${BUNDLE_ID}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ env.BUNDLE_ID }}
+          path: |
+            spacetravlr-*.tar.gz
+            checksum-*.txt
+
+  build-linux-compat:
+    name: x86_64-unknown-linux-gnu-glibc2.31
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    env:
+      BUNDLE_ID: x86_64-unknown-linux-gnu-glibc2.31
+      TARBALL_SUFFIX: "-glibc2.31"
+    steps:
+      - name: Container OS packages
+        run: apt-get update && apt-get install -y ca-certificates curl git build-essential pkg-config libvulkan-dev vulkan-tools
+
+      - uses: actions/checkout@v4
+
+      - name: Match tag and Cargo.toml version
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME#v}"
+          VER=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$REF" != "$VER" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match package version in Cargo.toml ($VER)"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-${{ env.BUNDLE_ID }}
+
+      - name: Build metadata for spacetravlr --version
+        shell: bash
+        run: |
+          echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Cargo build
+        run: cargo --config 'build.rustc-wrapper=""' build --release --locked --features spatial-viewer
+
+      - name: Package tarball and checksum
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          TAR="spacetravlr-${VERSION}-${TARGET}${TARBALL_SUFFIX}.tar.gz"
+          mkdir -p pack
+          cp target/release/spacetravlr target/release/spacetravlr-perturb target/release/spatial_viewer pack/
+          tar -czvf "$TAR" -C pack spacetravlr spacetravlr-perturb spatial_viewer
+          sha256sum "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${BUNDLE_ID}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ env.BUNDLE_ID }}
+          path: |
+            spacetravlr-*.tar.gz
+            checksum-*.txt
+
+  build-macos:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Match tag and Cargo.toml version
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME#v}"
+          VER=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$REF" != "$VER" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match package version in Cargo.toml ($VER)"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -74,11 +175,7 @@ jobs:
           mkdir -p pack
           cp target/release/spacetravlr target/release/spacetravlr-perturb target/release/spatial_viewer pack/
           tar -czvf "$TAR" -C pack spacetravlr spacetravlr-perturb spatial_viewer
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            shasum -a 256 "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${TARGET}.txt"
-          else
-            sha256sum "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${TARGET}.txt"
-          fi
+          shasum -a 256 "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${TARGET}.txt"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -89,7 +186,10 @@ jobs:
 
   publish:
     name: GitHub Release
-    needs: build
+    needs:
+      - build-linux-standard
+      - build-linux-compat
+      - build-macos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

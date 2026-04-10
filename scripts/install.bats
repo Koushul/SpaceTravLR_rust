@@ -12,17 +12,23 @@ setup() {
     [[ "$output" == *"INSTALL_DRY_RUN"* ]]
 }
 
-@test "dry-run linux x86_64 resolves gnu triple" {
-    run env UNAME_S=Linux UNAME_M=x86_64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v9.8.7 sh "$INSTALL_SH"
+@test "dry-run linux x86_64 standard tarball" {
+    run env UNAME_S=Linux UNAME_M=x86_64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v9.8.7 SPACETRAVLR_LINUX_VARIANT=standard sh "$INSTALL_SH"
     [ "$status" -eq 0 ]
     [[ "$output" == *"x86_64-unknown-linux-gnu"* ]]
     [[ "$output" == *"spacetravlr-v9.8.7-x86_64-unknown-linux-gnu.tar.gz"* ]]
 }
 
-@test "dry-run linux aarch64" {
-    run env UNAME_S=Linux UNAME_M=aarch64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH"
+@test "dry-run linux x86_64 compat tarball" {
+    run env UNAME_S=Linux UNAME_M=x86_64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v9.8.7 SPACETRAVLR_LINUX_VARIANT=compat sh "$INSTALL_SH"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"aarch64-unknown-linux-gnu"* ]]
+    [[ "$output" == *"spacetravlr-v9.8.7-x86_64-unknown-linux-gnu-glibc2.31.tar.gz"* ]]
+}
+
+@test "linux aarch64 has no prebuilt installer path" {
+    run env UNAME_S=Linux UNAME_M=aarch64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"prebuilt Linux ARM64"* ]]
 }
 
 @test "dry-run darwin arm64" {
