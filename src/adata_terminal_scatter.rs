@@ -111,6 +111,14 @@ fn chart_size_square_pixels(max_chart_w: usize, max_chart_h: usize) -> (usize, u
     (cw, ch)
 }
 
+/// Largest square braille chart that fits in a terminal `inner_w × inner_h` cell rect (equal data aspect; see `chart_size_square_pixels`).
+/// `inner_w` / `inner_h` are terminal columns / rows; termplot uses one terminal column per braille cell.
+pub fn optimal_square_chart_dims(inner_w: usize, inner_h: usize) -> (usize, usize) {
+    let max_chart_w = inner_w.max(1);
+    let max_chart_h = inner_h.max(1);
+    chart_size_square_pixels(max_chart_w, max_chart_h)
+}
+
 fn map_to_pixel_equal_aspect(
     w_px: usize,
     h_px: usize,
@@ -140,11 +148,11 @@ fn map_to_pixel_equal_aspect(
     }
 }
 
-pub fn build_spatial_scatter_canvas(
+fn build_spatial_scatter_canvas_fixed_dims(
     path: &Path,
     color_by: &str,
-    max_chart_w: usize,
-    max_chart_h: usize,
+    chart_w: usize,
+    chart_h: usize,
     obsm_key: Option<&str>,
 ) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
     let file = H5::open(path)?;
@@ -170,7 +178,6 @@ pub fn build_spatial_scatter_canvas(
         points.push((slice[[i, 0]], slice[[i, 1]]));
     }
     let (xr, yr) = ChartContext::get_auto_range(&points, 0.04);
-    let (chart_w, chart_h) = chart_size_square_pixels(max_chart_w, max_chart_h);
     let (legend_map, colors) = assign_colors(&labels);
 
     let mut chart = ChartContext::new(chart_w, chart_h);
@@ -188,6 +195,17 @@ pub fn build_spatial_scatter_canvas(
     let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
     legend.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((n_obs, key, canvas_no_border, canvas_with_border, legend))
+}
+
+pub fn build_spatial_scatter_canvas(
+    path: &Path,
+    color_by: &str,
+    max_chart_w: usize,
+    max_chart_h: usize,
+    obsm_key: Option<&str>,
+) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
+    let (cw, ch) = chart_size_square_pixels(max_chart_w, max_chart_h);
+    build_spatial_scatter_canvas_fixed_dims(path, color_by, cw, ch, obsm_key)
 }
 
 #[cfg(feature = "tui")]
@@ -281,11 +299,12 @@ fn apply_ansi_seq(
 pub fn spatial_scatter_lines_for_tui(
     path: &Path,
     color_by: &str,
-    max_chart_w: usize,
-    max_chart_h: usize,
+    chart_w: usize,
+    chart_h: usize,
     obsm_key: Option<&str>,
 ) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
-    let (_n, _key, canvas, _, _) = build_spatial_scatter_canvas(path, color_by, max_chart_w, max_chart_h, obsm_key)?;
+    let (_n, _key, canvas, _, _) =
+        build_spatial_scatter_canvas_fixed_dims(path, color_by, chart_w, chart_h, obsm_key)?;
     Ok(ansi_braille_to_lines(&canvas))
 }
 

@@ -1124,7 +1124,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Constraint::Length(2),
                     Constraint::Min(20),
                     Constraint::Length(3),
-                    Constraint::Length(1),
+                    Constraint::Length(2),
                 ])
                 .split(inner);
 
@@ -1348,109 +1348,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 top_panels[0],
             );
 
-            {
-                let scatter_area = top_panels[1];
-                let inner_w = scatter_area.width.saturating_sub(2);
-                let inner_h = scatter_area.height.saturating_sub(2);
-                let max_chart_w = (inner_w as usize / 2).max(1);
-                let max_chart_h = (inner_h as usize).max(1);
-                let cache_key = (
-                    st.dataset_path.clone(),
-                    scatter_area.width,
-                    scatter_area.height,
-                    st.n_cells,
-                );
-                let mut borrow = scatter_panel_cache.borrow_mut();
-                let reload = match borrow.as_ref() {
-                    None => true,
-                    Some((p, w, h, n, _)) => {
-                        p != &cache_key.0
-                            || *w != cache_key.1
-                            || *h != cache_key.2
-                            || *n != cache_key.3
-                    }
-                };
-                if reload {
-                    if st.is_demo || st.dataset_path.contains("(demo)") {
-                        *borrow = Some((
-                            cache_key.0,
-                            cache_key.1,
-                            cache_key.2,
-                            cache_key.3,
-                            vec![Line::from(Span::styled(
-                                "  ·  demo — no spatial map  ·",
-                                Style::default().fg(pal.muted),
-                            ))],
-                        ));
-                    } else if st.n_cells == 0 {
-                        *borrow = Some((
-                            cache_key.0,
-                            cache_key.1,
-                            cache_key.2,
-                            cache_key.3,
-                            vec![Line::from(Span::styled(
-                                "  ·  loading…  ·",
-                                Style::default().fg(pal.muted),
-                            ))],
-                        ));
-                    } else {
-                        match adata_scatter::spatial_scatter_lines_for_tui(
-                            Path::new(&st.dataset_path),
-                            st.run_config.cluster_annot.as_str(),
-                            max_chart_w,
-                            max_chart_h,
-                            None,
-                        ) {
-                            Ok(mut v) => {
-                                let max_lines = inner_h as usize;
-                                if v.len() > max_lines {
-                                    v.truncate(max_lines);
-                                }
-                                *borrow = Some((
-                                    cache_key.0,
-                                    cache_key.1,
-                                    cache_key.2,
-                                    cache_key.3,
-                                    v,
-                                ));
-                            }
-                            Err(e) => {
-                                *borrow = Some((
-                                    cache_key.0,
-                                    cache_key.1,
-                                    cache_key.2,
-                                    cache_key.3,
-                                    vec![Line::from(Span::styled(
-                                        format!("  ·  {}  ·", e),
-                                        Style::default().fg(pal.c_fail),
-                                    ))],
-                                ));
-                            }
-                        }
-                    }
-                }
-                let scatter_lines = borrow
-                    .as_ref()
-                    .map(|(_, _, _, _, lines)| lines.clone())
-                    .unwrap_or_default();
-                drop(borrow);
-                f.render_widget(
-                    Paragraph::new(Text::from(scatter_lines))
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(pal.tel_bord))
-                                .title(Span::styled(
-                                    " Spatial (obsm) ",
-                                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
-                                )),
-                        )
-                        .style(bg),
-                    scatter_area,
-                );
-            }
-
-            let tel_inner_w = top_panels[2].width.saturating_sub(2) as usize;
+            let tel_inner_w = top_panels[1].width.saturating_sub(2) as usize;
             let path_wrap_w = tel_inner_w.saturating_sub(PATH_LABEL_COLS).max(12);
 
             let mut mission_lines: Vec<Line> = Vec::new();
@@ -1559,8 +1457,135 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             )),
                     )
                     .style(bg),
-                top_panels[2],
+                top_panels[1],
             );
+
+            {
+                let scatter_area = top_panels[2];
+                let scatter_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(pal.tel_bord))
+                    .title(Span::styled(
+                        " Spatial (obsm) ",
+                        Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                    ))
+                    .style(bg);
+                let inner = scatter_block.inner(scatter_area);
+                let iw = inner.width as usize;
+                let ih = inner.height as usize;
+                let (cw, ch) = adata_scatter::optimal_square_chart_dims(iw, ih);
+                let content_w = cw as u16;
+                let content_h = ch as u16;
+                let tb = inner.height.saturating_sub(content_h);
+                let top_pad = tb / 2;
+                let bottom_pad = tb - top_pad;
+                let lr = inner.width.saturating_sub(content_w);
+                let left_pad = lr / 2;
+                let right_pad = lr - left_pad;
+                let cache_key = (
+                    st.dataset_path.clone(),
+                    scatter_area.width,
+                    scatter_area.height,
+                    st.n_cells,
+                );
+                let mut borrow = scatter_panel_cache.borrow_mut();
+                let reload = match borrow.as_ref() {
+                    None => true,
+                    Some((p, w, h, n, _)) => {
+                        p != &cache_key.0
+                            || *w != cache_key.1
+                            || *h != cache_key.2
+                            || *n != cache_key.3
+                    }
+                };
+                if reload {
+                    if st.is_demo || st.dataset_path.contains("(demo)") {
+                        *borrow = Some((
+                            cache_key.0,
+                            cache_key.1,
+                            cache_key.2,
+                            cache_key.3,
+                            vec![Line::from(Span::styled(
+                                "  ·  demo — no spatial map  ·",
+                                Style::default().fg(pal.muted),
+                            ))],
+                        ));
+                    } else if st.n_cells == 0 {
+                        *borrow = Some((
+                            cache_key.0,
+                            cache_key.1,
+                            cache_key.2,
+                            cache_key.3,
+                            vec![Line::from(Span::styled(
+                                "  ·  loading…  ·",
+                                Style::default().fg(pal.muted),
+                            ))],
+                        ));
+                    } else {
+                        match adata_scatter::spatial_scatter_lines_for_tui(
+                            Path::new(&st.dataset_path),
+                            st.run_config.cluster_annot.as_str(),
+                            cw,
+                            ch,
+                            None,
+                        ) {
+                            Ok(mut v) => {
+                                if v.len() > ch {
+                                    v.truncate(ch);
+                                }
+                                *borrow = Some((
+                                    cache_key.0,
+                                    cache_key.1,
+                                    cache_key.2,
+                                    cache_key.3,
+                                    v,
+                                ));
+                            }
+                            Err(e) => {
+                                *borrow = Some((
+                                    cache_key.0,
+                                    cache_key.1,
+                                    cache_key.2,
+                                    cache_key.3,
+                                    vec![Line::from(Span::styled(
+                                        format!("  ·  {}  ·", e),
+                                        Style::default().fg(pal.c_fail),
+                                    ))],
+                                ));
+                            }
+                        }
+                    }
+                }
+                let scatter_lines = borrow
+                    .as_ref()
+                    .map(|(_, _, _, _, lines)| lines.clone())
+                    .unwrap_or_default();
+                drop(borrow);
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(top_pad),
+                        Constraint::Length(content_h),
+                        Constraint::Length(bottom_pad),
+                    ])
+                    .split(inner);
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Length(left_pad),
+                        Constraint::Length(content_w),
+                        Constraint::Length(right_pad),
+                    ])
+                    .split(rows[1]);
+                f.render_widget(scatter_block, scatter_area);
+                f.render_widget(
+                    Paragraph::new(Text::from(scatter_lines))
+                        .style(bg)
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: false }),
+                    cols[1],
+                );
+            }
 
             // ── Workers ───────────────────────────────────────────────────────
             let mut active: Vec<(&String, &String)> = st.active_genes.iter().collect();
@@ -1773,11 +1798,18 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Footer ────────────────────────────────────────────────────────
             let theme_hint = TuiColors::theme_label(theme_slot);
+            let credit = Line::from(Span::styled(
+                "© 2026, Koushul & Ally @ jishnulab.org",
+                Style::default().fg(pal.muted).add_modifier(Modifier::DIM),
+            ));
             let footer = if st.should_cancel() {
-                Line::from(Span::styled(
-                    " Stopping after in-flight genes finish… ",
-                    Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
-                ))
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        " Stopping after in-flight genes finish… ",
+                        Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
+                    )),
+                    credit.clone(),
+                ])
             } else {
                 let mut hint = format!(
                     " q: graceful exit   shift+q: french leave   t: theme ({theme_hint})"
@@ -1787,9 +1819,12 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 } else {
                     hint.push(' ');
                 }
-                Line::from(Span::styled(hint, Style::default().fg(pal.muted)))
+                Paragraph::new(vec![
+                    Line::from(Span::styled(hint, Style::default().fg(pal.muted))),
+                    credit,
+                ])
             };
-            f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: true }), vchunks[3]);
+            f.render_widget(footer.wrap(Wrap { trim: true }), vchunks[3]);
         })?;
 
         if done {
