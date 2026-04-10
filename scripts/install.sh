@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
-# SpaceTravLR CLI installer — keep tarball names / target slugs in sync with
-# src/self_update.rs (GITHUB_REPO, tarball_name, LINUX_GNU_* , prebuilt_tarball_target).
-# Quick install (use -o then sh — piping | sh can truncate under some terminals/proxies):
-#   curl -fsSL https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/refs/tags/v1.1.0/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
+# SpaceTravLR CLI installer — keep tarball names in sync with src/self_update.rs
+# (GITHUB_REPO, tarball_name, LINUX_GNU_*, prebuilt_tarball_target).
+# curl -fsSL …/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
 set -e
 
 REPO="${SPACETRAVLR_GITHUB_REPO:-Koushul/SpaceTravLR_rust}"
@@ -11,11 +10,13 @@ INSTALL_DIR="${SPACETRAVLR_INSTALL_DIR:-$HOME/.local/bin}"
 UNAME_S="${UNAME_S:-$(uname -s)}"
 UNAME_M="${UNAME_M:-$(uname -m)}"
 
-RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
 BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
 
 QUIET=0
@@ -35,44 +36,86 @@ if is_tty && [ "$QUIET" -eq 0 ]; then
 fi
 
 info() {
-    if [ "$QUIET" -eq 1 ]; then
-        return 0
-    fi
+    [ "$QUIET" -eq 1 ] && return 0
     if [ "$color_ok" -eq 1 ]; then
-        printf "${GREEN}[INFO]${NC} %s\n" "$1"
+        printf '%s%s%s\n' "$GREEN" "$1" "$NC"
     else
-        printf "[INFO] %s\n" "$1"
+        printf '%s\n' "$1"
     fi
 }
 
 warn() {
-    if [ "$QUIET" -eq 1 ]; then
-        return 0
-    fi
+    [ "$QUIET" -eq 1 ] && return 0
     if [ "$color_ok" -eq 1 ]; then
-        printf "${YELLOW}[WARN]${NC} %s\n" "$1"
+        printf '%s%s%s\n' "$YELLOW" "$1" "$NC" >&2
     else
-        printf "[WARN] %s\n" "$1"
+        printf '%s\n' "$1" >&2
     fi
 }
 
 error() {
     if [ "$color_ok" -eq 1 ]; then
-        printf "${RED}[ERROR]${NC} %s\n" "$1" >&2
+        printf '%s[ERROR] %s%s\n' "$RED" "$1" "$NC" >&2
     else
-        printf "[ERROR] %s\n" "$1" >&2
+        printf '[ERROR] %s\n' "$1" >&2
     fi
     exit 1
 }
 
-step() {
-    if [ "$QUIET" -eq 1 ]; then
-        return 0
-    fi
+# $1 = percent 0-100, $2 = label
+progress_line() {
+    [ "$QUIET" -eq 1 ] && return 0
+    _pct="$1"
+    _label="$2"
+    _w=28
+    _fill=$((_pct * _w / 100))
+    if [ "$_fill" -lt 0 ]; then _fill=0; fi
+    if [ "$_fill" -gt "$_w" ]; then _fill="$_w"; fi
     if [ "$color_ok" -eq 1 ]; then
-        printf "${BLUE}${BOLD}=>${NC} %s\n" "$1"
+        printf '  %s[%s' "$DIM" "$NC"
     else
-        printf "=> %s\n" "$1"
+        printf '  ['
+    fi
+    _i=0
+    while [ "$_i" -lt "$_w" ]; do
+        if [ "$_i" -lt "$_fill" ]; then
+            if [ "$color_ok" -eq 1 ]; then printf '%s=%s' "$CYAN" "$NC"; else printf '='; fi
+        else
+            if [ "$color_ok" -eq 1 ]; then printf '%s.%s' "$DIM" "$NC"; else printf '.'; fi
+        fi
+        _i=$((_i + 1))
+    done
+    if [ "$color_ok" -eq 1 ]; then
+        printf '%s]%s %3d%%  %s\n' "$DIM" "$NC" "$_pct" "$_label"
+    else
+        printf '] %3d%%  %s\n' "$_pct" "$_label"
+    fi
+}
+
+show_banner() {
+    [ "$QUIET" -eq 1 ] && return 0
+    if [ "$color_ok" -eq 1 ]; then
+        printf '%s\n' "${BLUE}${BOLD}"
+    fi
+    printf '%s\n' '  ___  ___  ___ ___ ___  _   _   _'
+    printf '%s\n' ' / __|/ _ \| _ \ _ \_ _|| |_| | | |'
+    printf '%s\n' ' \__ \ (_) |  _/  _/| | | | |_| |_|'
+    printf '%s\n' ' |___/\___/|_| |_| |___|_|___|___(_)'
+    printf '%s\n' '              \>'
+    printf '%s\n' '               \>>'
+    printf '%s\n' '                \|   SpaceTravLR'
+    if [ "$color_ok" -eq 1 ]; then
+        printf '%s\n' "${NC}"
+    fi
+}
+
+show_release_version() {
+    _v="$1"
+    [ "$QUIET" -eq 1 ] && return 0
+    if [ "$color_ok" -eq 1 ]; then
+        printf '\n  %sRelease%s  %s%s%s%s\n\n' "$BOLD" "$NC" "$CYAN" "$BOLD" "$_v" "$NC"
+    else
+        printf '\n  Release  %s\n\n' "$_v"
     fi
 }
 
@@ -164,7 +207,7 @@ api_newest_release_json() {
 }
 
 get_latest_version() {
-    step "Resolving newest GitHub release (includes pre-releases)…"
+    progress_line 15 "Contacting GitHub…"
     _json="$(api_newest_release_json)" || error "Failed to fetch release metadata"
 
     if command -v jq >/dev/null 2>&1; then
@@ -175,6 +218,7 @@ get_latest_version() {
     if [ -z "$VERSION" ]; then
         error "Failed to parse tag_name from GitHub API"
     fi
+    progress_line 35 "Release resolved"
 }
 
 tarball_basename() {
@@ -207,15 +251,16 @@ install_release() {
     TAR="$(tarball_basename)"
     DOWNLOAD_URL="${BASE}${TAR}"
 
-    step "Downloading ${TAR}…"
+    progress_line 45 "Downloading ${TAR}"
     TEMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TEMP_DIR"' EXIT INT HUP
     ARCHIVE="${TEMP_DIR}/${TAR}"
 
     download_url_to "$DOWNLOAD_URL" "$ARCHIVE" || error "Failed to download binary archive"
+    progress_line 65 "Archive downloaded"
 
     if [ "${INSTALL_VERIFY_CHECKSUM:-1}" != "0" ]; then
         SUMS_URL="${BASE}SHA256SUMS"
-        step "Verifying SHA256 checksum…"
         _sums="$(curl -fsSL "$SUMS_URL")" || error "Failed to download SHA256SUMS"
         _expect="$(checksum_for_tarball "$_sums" "$TAR")"
         if [ -z "$_expect" ]; then
@@ -223,18 +268,21 @@ install_release() {
         fi
         if command -v shasum >/dev/null 2>&1; then
             _got="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
-        else
+        elif command -v sha256sum >/dev/null 2>&1; then
             _got="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+        else
+            error "Need shasum or sha256sum to verify checksums"
         fi
         if [ "$_expect" != "$_got" ]; then
             error "Checksum mismatch (expected $_expect, got $_got)"
         fi
+        progress_line 78 "Checksum OK"
     fi
 
-    step "Extracting…"
+    progress_line 85 "Extracting"
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
 
-    step "Installing to ${INSTALL_DIR}…"
+    progress_line 92 "Installing to ${INSTALL_DIR}"
     mkdir -p "$INSTALL_DIR"
     for b in $BINARY_NAMES; do
         if [ ! -f "${TEMP_DIR}/${b}" ]; then
@@ -245,61 +293,135 @@ install_release() {
     done
 
     rm -rf "$TEMP_DIR"
+    trap - EXIT INT HUP
+    progress_line 100 "Complete"
+}
+
+add_install_dir_to_path() {
+    export PATH="${INSTALL_DIR}:${PATH}"
+
+    if [ -z "${HOME:-}" ]; then
+        warn "HOME is unset; cannot update ~/.bashrc. Add manually: export PATH=\"${INSTALL_DIR}:\$PATH\""
+        return 0
+    fi
+
+    _rc="${HOME}/.bashrc"
+    _marker='# SpaceTravLR: add install dir to PATH (install.sh)'
+
+    if [ -f "$_rc" ] && grep -qF "$_marker" "$_rc" 2>/dev/null; then
+        [ "$QUIET" -eq 0 ] && info "  PATH already configured in ${_rc}"
+        return 0
+    fi
+
+    {
+        printf '\n%s\n' "$_marker"
+        printf '%s\n' "export PATH=\"${INSTALL_DIR}:\$PATH\""
+    } >> "$_rc" || warn "Could not append to ${_rc}; add manually: export PATH=\"${INSTALL_DIR}:\$PATH\""
+
+    [ "$QUIET" -eq 0 ] && info "  Added ${INSTALL_DIR} to PATH for this session and appended to ${_rc}"
 }
 
 verify_install() {
-    step "Verifying install…"
     if command -v spacetravlr >/dev/null 2>&1; then
-        info "spacetravlr: $(spacetravlr --version 2>&1 | head -1)"
+        _ver_out="$(spacetravlr --version 2>&1 | head -n 1)"
+        info "  Installed binary: ${_ver_out}"
+    elif [ -x "${INSTALL_DIR}/spacetravlr" ]; then
+        _ver_out="$("${INSTALL_DIR}/spacetravlr" --version 2>&1 | head -n 1)"
+        info "  Installed binary: ${_ver_out}"
     else
-        warn "Installed to ${INSTALL_DIR} but spacetravlr is not on PATH."
-        warn "Add to your shell profile: export PATH=\"${INSTALL_DIR}:\$PATH\""
+        warn "Expected ${INSTALL_DIR}/spacetravlr missing after install."
     fi
 }
 
 dry_run() {
-    step "Dry run (no download) — resolved:"
-    printf '  REPO=%s\n' "$REPO"
-    printf '  VERSION=%s\n' "$VERSION"
-    printf '  TARGET=%s\n' "$TARGET"
-    printf '  TAR=%s\n' "$(tarball_basename)"
-    printf '  INSTALL_DIR=%s\n' "$INSTALL_DIR"
-    info "Unset INSTALL_DRY_RUN to perform install."
+    progress_line 100 "Dry run"
+    printf '  REPO=%s\n  VERSION=%s\n  TARGET=%s\n  TAR=%s\n  INSTALL_DIR=%s\n' \
+        "$REPO" "$VERSION" "$TARGET" "$(tarball_basename)" "$INSTALL_DIR"
+    info "Unset INSTALL_DRY_RUN to install."
+}
+
+# Two-column help; colors when stdout is a tty (piping disables them).
+show_help() {
+    _c=0
+    [ -t 1 ] && _c=1
+
+    _section() {
+        if [ "$_c" -eq 1 ]; then
+            printf '\n  %s%s%s\n' "$BOLD" "$1" "$NC"
+        else
+            printf '\n  %s\n' "$1"
+        fi
+    }
+
+    _row() {
+        _k="$1"
+        _d="$2"
+        if [ "$_c" -eq 1 ]; then
+            printf '    %s%-28s%s  %s%s%s\n' "$CYAN" "$_k" "$NC" "$DIM" "$_d" "$NC"
+        else
+            printf '    %-28s  %s\n' "$_k" "$_d"
+        fi
+    }
+
+    if [ "$_c" -eq 1 ]; then
+        printf '\n  %s%sSpaceTravLR%s %sinstaller%s\n' "$BLUE" "$BOLD" "$NC" "$BOLD" "$NC"
+    else
+        printf '\n  SpaceTravLR installer\n'
+    fi
+
+    _section "Usage"
+    if [ "$_c" -eq 1 ]; then
+        printf '    %s%s%s\n' "$GREEN" "install.sh [--quiet]" "$NC"
+    else
+        printf '    install.sh [--quiet]\n'
+    fi
+
+    _section "Options"
+    _row "--quiet" "Suppress progress and status output"
+    _row "-h, --help" "Show this help and exit"
+
+    _section "Environment"
+    if [ "$_c" -eq 1 ]; then
+        printf '    %s%-28s%s  %s%s%s\n' "$YELLOW" "Variable" "$NC" "$YELLOW" "Description" "$NC"
+        printf '    %s%s%s\n' "$DIM" "──────────────────────────────  ───────────────────────────────────────────" "$NC"
+    else
+        printf '    %-28s  %s\n' "Variable" "Description"
+        printf '    %s\n' "──────────────────────────────  ───────────────────────────────────────────"
+    fi
+    _row "SPACETRAVLR_INSTALL_DIR" "Install dir; default \$HOME/.local/bin (export + ~/.bashrc)"
+    _row "SPACETRAVLR_GITHUB_REPO" "GitHub owner/repo for releases"
+    _row "SPACETRAVLR_GH_API" "GitHub API base URL (default https://api.github.com)"
+    _row "INSTALL_DRY_RUN=1" "Print plan only; no download or install"
+    _row "INSTALL_TEST_VERSION=v..." "Pin release tag (e.g. tests)"
+    _row "INSTALL_VERIFY_CHECKSUM=0" "Skip SHA256 verification (unsafe)"
+    _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat (Linux x86_64; overrides glibc probe)"
+    _row "UNAME_S / UNAME_M" "Override platform detection (tests)"
+    printf '\n'
 }
 
 main() {
     case "${1:-}" in
         -h | --help)
-            printf '%s\n' "Usage: install.sh [--quiet]
-Environment:
-  SPACETRAVLR_INSTALL_DIR   install prefix (default: \$HOME/.local/bin)
-  SPACETRAVLR_GITHUB_REPO   owner/repo override
-  INSTALL_DRY_RUN=1         print plan only
-  INSTALL_TEST_VERSION=v…    skip API; use this tag (for tests / air-gapped preview)
-  INSTALL_VERIFY_CHECKSUM=0 skip SHA256SUMS check (not recommended)
-  SPACETRAVLR_LINUX_VARIANT standard|compat  override glibc-based tarball on Linux x86_64
-  UNAME_S / UNAME_M         override platform (tests)
-"
+            show_help
             exit 0
             ;;
     esac
 
-    info "Installing SpaceTravLR CLIs (${REPO})…"
+    show_banner
 
-    step "Detecting platform…"
     detect_os
     detect_arch
     get_target
     linux_set_tarball_target_for_glibc
-    info "Detected: $OS $ARCH → $TARGET"
+    progress_line 8 "Platform: ${OS} ${ARCH}  ${TARGET}"
 
     if [ -n "${INSTALL_TEST_VERSION:-}" ]; then
         VERSION="$INSTALL_TEST_VERSION"
-        info "Using INSTALL_TEST_VERSION=$VERSION (-- dry-run / test hook)"
     else
         get_latest_version
     fi
-    info "Selected release: $VERSION"
+
+    show_release_version "$VERSION"
 
     if [ "${INSTALL_DRY_RUN:-}" = "1" ]; then
         dry_run
@@ -307,14 +429,13 @@ Environment:
     fi
 
     install_release
-
-    info "Successfully installed: $BINARY_NAMES"
-    verify_install
-
     echo ""
-    info "Done. Run 'spacetravlr --help' to get started."
-    info "Run 'spacetravlr --demo' to see the demo training."
-
+    add_install_dir_to_path
+    echo ""
+    verify_install
+    echo ""
+    [ "$QUIET" -eq 0 ] && info "  This terminal may need: source ~/.bashrc   (new shells load PATH from there)"
+    info "  Try: spacetravlr --help   ·   spacetravlr --demo"
 }
 
 main "$@"

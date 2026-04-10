@@ -111,7 +111,7 @@ polars = { version = "0.51", default-features = false, features = [
     "zip_with",
 ] }
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive", "wrap_help"] }
+clap = { version = "4.5", features = ["color", "derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 ndarray-npy = "0.9"
@@ -159,3 +159,6 @@ ureq = { version = "2.12", optional = true, default-features = true, features = 
 tar = { version = "0.4", optional = true }
 sha2 = { version = "0.10", optional = true }
 semver = { version = "1", optional = true }
+colored = "2.2"
+termplot-rs = "0.3.0"
+terminal_size = "0.3"

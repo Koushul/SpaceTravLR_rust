@@ -4,7 +4,11 @@ lcov.info
 .cache/
 .claude/
 .DS_Store
-scripts/
 benchmarks/
 web/spatial_viewer/node_modules/
 web/spatial_viewer/dist/
+
+
+results/
+.vscode/
+.cursor/

@@ -1,3 +1,6 @@
+use crate::adata_terminal_scatter::{
+    self as adata_scatter, ratatui_color_for_cell_type_label, sorted_unique_labels_from_counts,
+};
 use crate::training_hud::{TrainingHud, TrainingHudState};
 use crate::tui_theme::TuiColors;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -9,7 +12,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, LineGauge, List, ListItem, Paragraph, Wrap};
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -957,6 +960,14 @@ fn is_shift_q(key: &event::KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('q' | 'Q'))
 }
 
+fn is_theme_cycle_key(key: &event::KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && matches!(key.code, KeyCode::Char('t' | 'T'))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
 pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashboardExit> {
     enable_raw_mode()?;
     let mut out = stdout();
@@ -1009,6 +1020,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         "—".to_string(),
         "—".to_string(),
     ));
+    let scatter_panel_cache: RefCell<Option<(String, u16, u16, usize, Vec<Line<'static>>)>> =
+        RefCell::new(None);
 
     let mut prev_genes_rounds_heartbeat = 0usize;
     let mut heart_beat_until: Option<Instant> = None;
@@ -1016,7 +1029,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
     let mut falling_sheep: Vec<Instant> = Vec::new();
     let mut theme_slot = 0usize;
 
-    loop {
+    'dashboard: loop {
         if last_sys.elapsed() > HARDWARE_POLL_INTERVAL {
             sys.refresh_cpu_all();
             sys.refresh_memory();
@@ -1031,26 +1044,26 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             last_dir_scan = Instant::now();
         }
         if event::poll(Duration::from_millis(40))? {
-            if let Event::Key(key) = event::read()? {
-                if is_shift_q(&key) {
-                    if let Ok(st) = hud.lock() {
-                        st.cancel_requested.store(true, Ordering::Relaxed);
+            loop {
+                if let Event::Key(key) = event::read()? {
+                    if is_shift_q(&key) {
+                        if let Ok(st) = hud.lock() {
+                            st.cancel_requested.store(true, Ordering::Relaxed);
+                        }
+                        dashboard_exit = TrainingDashboardExit::ForceQuit;
+                        break 'dashboard;
                     }
-                    dashboard_exit = TrainingDashboardExit::ForceQuit;
+                    if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
+                        if let Ok(st) = hud.lock() {
+                            st.cancel_requested.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    if is_theme_cycle_key(&key) {
+                        theme_slot = TuiColors::advance_slot(theme_slot);
+                    }
+                }
+                if !event::poll(Duration::ZERO)? {
                     break;
-                }
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                    if let Ok(st) = hud.lock() {
-                        st.cancel_requested.store(true, Ordering::Relaxed);
-                    }
-                }
-                if key.kind == KeyEventKind::Press
-                    && matches!(key.code, KeyCode::Char('t' | 'T'))
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
-                    theme_slot = TuiColors::advance_slot(theme_slot);
                 }
             }
         }
@@ -1183,7 +1196,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .split(hchunks[0]);
             let top_panels = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                    Constraint::Percentage(33),
+                ])
                 .split(left[0]);
 
             let now_er = Instant::now();
@@ -1331,7 +1348,109 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 top_panels[0],
             );
 
-            let tel_inner_w = top_panels[1].width.saturating_sub(2) as usize;
+            {
+                let scatter_area = top_panels[1];
+                let inner_w = scatter_area.width.saturating_sub(2);
+                let inner_h = scatter_area.height.saturating_sub(2);
+                let max_chart_w = (inner_w as usize / 2).max(1);
+                let max_chart_h = (inner_h as usize).max(1);
+                let cache_key = (
+                    st.dataset_path.clone(),
+                    scatter_area.width,
+                    scatter_area.height,
+                    st.n_cells,
+                );
+                let mut borrow = scatter_panel_cache.borrow_mut();
+                let reload = match borrow.as_ref() {
+                    None => true,
+                    Some((p, w, h, n, _)) => {
+                        p != &cache_key.0
+                            || *w != cache_key.1
+                            || *h != cache_key.2
+                            || *n != cache_key.3
+                    }
+                };
+                if reload {
+                    if st.is_demo || st.dataset_path.contains("(demo)") {
+                        *borrow = Some((
+                            cache_key.0,
+                            cache_key.1,
+                            cache_key.2,
+                            cache_key.3,
+                            vec![Line::from(Span::styled(
+                                "  ·  demo — no spatial map  ·",
+                                Style::default().fg(pal.muted),
+                            ))],
+                        ));
+                    } else if st.n_cells == 0 {
+                        *borrow = Some((
+                            cache_key.0,
+                            cache_key.1,
+                            cache_key.2,
+                            cache_key.3,
+                            vec![Line::from(Span::styled(
+                                "  ·  loading…  ·",
+                                Style::default().fg(pal.muted),
+                            ))],
+                        ));
+                    } else {
+                        match adata_scatter::spatial_scatter_lines_for_tui(
+                            Path::new(&st.dataset_path),
+                            st.run_config.cluster_annot.as_str(),
+                            max_chart_w,
+                            max_chart_h,
+                            None,
+                        ) {
+                            Ok(mut v) => {
+                                let max_lines = inner_h as usize;
+                                if v.len() > max_lines {
+                                    v.truncate(max_lines);
+                                }
+                                *borrow = Some((
+                                    cache_key.0,
+                                    cache_key.1,
+                                    cache_key.2,
+                                    cache_key.3,
+                                    v,
+                                ));
+                            }
+                            Err(e) => {
+                                *borrow = Some((
+                                    cache_key.0,
+                                    cache_key.1,
+                                    cache_key.2,
+                                    cache_key.3,
+                                    vec![Line::from(Span::styled(
+                                        format!("  ·  {}  ·", e),
+                                        Style::default().fg(pal.c_fail),
+                                    ))],
+                                ));
+                            }
+                        }
+                    }
+                }
+                let scatter_lines = borrow
+                    .as_ref()
+                    .map(|(_, _, _, _, lines)| lines.clone())
+                    .unwrap_or_default();
+                drop(borrow);
+                f.render_widget(
+                    Paragraph::new(Text::from(scatter_lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(pal.tel_bord))
+                                .title(Span::styled(
+                                    " Spatial (obsm) ",
+                                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                                )),
+                        )
+                        .style(bg),
+                    scatter_area,
+                );
+            }
+
+            let tel_inner_w = top_panels[2].width.saturating_sub(2) as usize;
             let path_wrap_w = tel_inner_w.saturating_sub(PATH_LABEL_COLS).max(12);
 
             let mut mission_lines: Vec<Line> = Vec::new();
@@ -1440,7 +1559,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             )),
                     )
                     .style(bg),
-                top_panels[1],
+                top_panels[2],
             );
 
             // ── Workers ───────────────────────────────────────────────────────
@@ -1525,6 +1644,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             let mut cell_counts = st.cell_type_counts.clone();
             cell_counts.sort_by(|a, b| b.1.cmp(&a.1));
+            let sorted_type_labels = sorted_unique_labels_from_counts(&cell_counts);
 
             let label_w = cell_panel_w.saturating_sub(10).max(3);
             let count_w = cell_panel_w.saturating_sub(label_w).max(1);
@@ -1545,10 +1665,13 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     let ct_disp = truncate_label(ct, label_w);
                     let left = format!("{:<lw$}", ct_disp, lw = label_w);
                     let right = format!("{:>cw$}", count, cw = count_w);
+                    let ct_c = ratatui_color_for_cell_type_label(ct, &sorted_type_labels);
                     cell_lines.push(Line::from(vec![
                         Span::styled(
                             left,
-                            Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(ct_c)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             right,
@@ -1656,12 +1779,15 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
                 ))
             } else {
-                Line::from(Span::styled(
-                    format!(
-                        " q: graceful exit   shift+q: french leave   t: theme ({theme_hint}) "
-                    ),
-                    Style::default().fg(pal.muted),
-                ))
+                let mut hint = format!(
+                    " q: graceful exit   shift+q: french leave   t: theme ({theme_hint})"
+                );
+                if st.is_demo {
+                    hint.push_str("   ·   demo: sheep on each gene finish ");
+                } else {
+                    hint.push(' ');
+                }
+                Line::from(Span::styled(hint, Style::default().fg(pal.muted)))
             };
             f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: true }), vchunks[3]);
         })?;

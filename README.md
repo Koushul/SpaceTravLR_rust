@@ -1,5 +1,9 @@
 # SpaceTravLR (Rust 🦀️🚀️)
 
+[![Release Status](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/release.yml)
+[![Rust CI](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/rust.yml)
+
+
 ```bash
 curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 ```

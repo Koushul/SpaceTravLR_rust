@@ -1,6 +1,8 @@
 mod compute_backend;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::builder::styling::AnsiColor;
+use clap::builder::Styles;
+use clap::{ArgAction, ColorChoice, Parser, Subcommand};
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
@@ -40,6 +42,29 @@ const SPACETRAVLR_LONG_VERSION: &str = concat!(
     ")"
 );
 
+const SPACETRAVLR_HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Blue.on_default().bold())
+    .usage(AnsiColor::Cyan.on_default().bold())
+    .literal(AnsiColor::Green.on_default().bold())
+    .placeholder(AnsiColor::BrightCyan.on_default())
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Yellow.on_default())
+    .error(AnsiColor::Red.on_default().bold());
+
+const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) training from Visium-style spatial AnnData (.h5ad).
+
+• Load spaceship_config.toml (or pass --config), then apply CLI overrides.
+• Use --plain for line-oriented logs instead of the full-screen dashboard (when built with `tui`).
+• Subcommand run-summary writes the HTML report without training."#;
+
+const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
+
+Multi-host / shared storage
+  Start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine.
+
+Condition splits
+  With --condition, --join-output-dir points to the parent output directory; conditions/<group>/ subdirectories are auto-discovered from the repro TOML."#;
+
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum TrainingModeArg {
     Full,
@@ -78,7 +103,7 @@ impl From<CnnOutputActivationArg> for CnnOutputActivation {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
-    /// Write spacetravlr_run_summary.html (AnnData summary + config / optional manifest).
+    /// Generate spacetravlr_run_summary.html (AnnData summary, config, optional manifest).
     RunSummary(RunSummaryCli),
 }
 
@@ -131,8 +156,13 @@ struct RunSummaryCli {
     name = "spacetravlr",
     version = env!("CARGO_PKG_VERSION"),
     long_version = SPACETRAVLR_LONG_VERSION,
-    about = "SpaceTravLR — spatial GRN training from single-cell spatial AnnData (.h5ad).",
-    after_long_help = "Load spaceship_config.toml (or pass --config), then apply CLI overrides. Use --plain for line-oriented logs instead of the dashboard. Subcommand `run-summary` writes the HTML report without training. For multiple machines on one shared output directory, start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine. With --condition, --join-output-dir points to the parent output directory (conditions/<group>/ subdirectories are auto-discovered from the repro TOML."
+    about = "Spatial GRN training from spatial AnnData (.h5ad).",
+    long_about = SPACETRAVLR_LONG_ABOUT,
+    after_long_help = SPACETRAVLR_AFTER_LONG_HELP,
+    styles = SPACETRAVLR_HELP_STYLES,
+    color = ColorChoice::Auto,
+    next_line_help = true,
+    propagate_version = true,
 )]
 struct Cli {
     #[command(subcommand)]
@@ -354,6 +384,14 @@ struct Cli {
         help = "Fake training dashboard only — no AnnData, no disk exports, no accelerator"
     )]
     demo: bool,
+
+    #[arg(
+        long = "plot-h5ad",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Print terminal spatial scatter (obsm spatial, obs colored by cluster column) and exit"
+    )]
+    plot_h5ad: bool,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
@@ -859,6 +897,15 @@ fn main() -> anyhow::Result<()> {
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
     let compute = select_compute_backend();
 
+    if cli.plot_h5ad && cfg.resolve_adata_path().is_empty() {
+        let can_prompt = cfg!(feature = "tui") && !cli.plain;
+        if !can_prompt {
+            anyhow::bail!(
+                "--plot-h5ad requires --h5ad or data.adata_path in spaceship_config.toml."
+            );
+        }
+    }
+
     if cfg.resolve_adata_path().is_empty() {
         #[cfg(feature = "tui")]
         {
@@ -907,6 +954,13 @@ fn main() -> anyhow::Result<()> {
 
     if !Path::new(&path).exists() {
         anyhow::bail!("Dataset not found at {}.", path);
+    }
+
+    if cli.plot_h5ad {
+        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(
+            Path::new(&path),
+            cfg.data.cluster_annot.as_str(),
+        );
     }
 
     if cfg.execution.output_dir.trim().is_empty() {
