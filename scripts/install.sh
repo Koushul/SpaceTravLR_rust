@@ -308,6 +308,8 @@ Environment:
 
     echo ""
     info "Done. Run 'spacetravlr --help' to get started."
+    info "Run 'spacetravlr --demo' to see the demo training."
+
 }
 
 main "$@"
