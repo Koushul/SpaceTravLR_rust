@@ -25,28 +25,6 @@ pub struct TuiColors {
 }
 
 impl TuiColors {
-    pub const LEGACY: Self = Self {
-        bg: Color::Rgb(40, 40, 40),
-        outer_bord: Color::Rgb(60, 56, 54),
-        tel_bord: Color::Rgb(69, 133, 136),
-        work_bord: Color::Rgb(215, 153, 33),
-        rocket_bord: Color::Rgb(131, 165, 152),
-        gauge_empty: Color::Rgb(60, 56, 54),
-        label: Color::Rgb(215, 153, 33),
-        value: Color::Rgb(142, 192, 124),
-        lilac: Color::Rgb(184, 187, 38),
-        sky: Color::Rgb(69, 133, 136),
-        grape: Color::Rgb(211, 134, 155),
-        muted: Color::Rgb(146, 131, 116),
-        title: Color::Rgb(235, 219, 178),
-        c_wrote: Color::Rgb(142, 192, 124),
-        c_fail: Color::Rgb(204, 36, 29),
-        c_skip: Color::Rgb(146, 131, 116),
-        c_topr2: Color::Rgb(69, 133, 136),
-        c_botr2: Color::Rgb(146, 131, 116),
-        perf_bord: Color::Rgb(215, 153, 33),
-    };
-
     pub fn from_ratatui_palette(p: ThemePalette) -> Self {
         Self {
             bg: p.bg,
@@ -71,21 +49,29 @@ impl TuiColors {
         }
     }
 
+    /// Initial **t** theme index: **Gruvbox Dark** ([`ThemeName::GruvboxDark`]).
+    pub fn default_theme_slot() -> usize {
+        ThemeName::all()
+            .iter()
+            .position(|&t| t == ThemeName::GruvboxDark)
+            .unwrap_or(0)
+    }
+
+    pub fn default_palette() -> Self {
+        Self::resolve(Self::default_theme_slot())
+    }
+
     pub fn resolve(slot: usize) -> Self {
-        if slot == 0 {
-            Self::LEGACY
-        } else {
-            let all = ThemeName::all();
-            let idx = slot - 1;
-            if idx >= all.len() {
-                return Self::LEGACY;
-            }
-            Self::from_ratatui_palette(all[idx].palette())
+        let all = ThemeName::all();
+        if all.is_empty() {
+            return Self::from_ratatui_palette(ThemeName::Dracula.palette());
         }
+        let idx = slot % all.len();
+        Self::from_ratatui_palette(all[idx].palette())
     }
 
     pub fn theme_count() -> usize {
-        1 + ThemeName::all().len()
+        ThemeName::all().len().max(1)
     }
 
     pub fn advance_slot(slot: usize) -> usize {
@@ -93,10 +79,10 @@ impl TuiColors {
     }
 
     pub fn theme_label(slot: usize) -> String {
-        if slot == 0 {
-            "default".to_string()
-        } else {
-            ThemeName::all()[slot - 1].display_name().to_string()
+        let all = ThemeName::all();
+        if all.is_empty() {
+            return "Dracula".to_string();
         }
+        all[slot % all.len()].display_name().to_string()
     }
 }

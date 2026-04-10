@@ -119,6 +119,38 @@ pub fn optimal_square_chart_dims(inner_w: usize, inner_h: usize) -> (usize, usiz
     chart_size_square_pixels(max_chart_w, max_chart_h)
 }
 
+fn draw_spatial_scatter_canvas_from_points(
+    points: &[(f64, f64)],
+    labels: &[String],
+    chart_w: usize,
+    chart_h: usize,
+) -> anyhow::Result<(String, String, HashMap<String, Color>)> {
+    anyhow::ensure!(
+        points.len() == labels.len(),
+        "points (len {}) != labels (len {})",
+        points.len(),
+        labels.len()
+    );
+    let n_obs = points.len();
+    let (xr, yr) = ChartContext::get_auto_range(&points.to_vec(), 0.04);
+    let (legend_map, colors) = assign_colors(labels);
+
+    let mut chart = ChartContext::new(chart_w, chart_h);
+    let w_px = chart.canvas.pixel_width();
+    let h_px = chart.canvas.pixel_height();
+    for i in 0..n_obs {
+        if let Some((px, py)) =
+            map_to_pixel_equal_aspect(w_px, h_px, points[i].0, points[i].1, xr, yr)
+        {
+            chart.canvas.set_pixel(px, py, Some(colors[i]));
+        }
+    }
+
+    let canvas_no_border = chart.canvas.render_with_options(false, None);
+    let canvas_with_border = chart.canvas.render();
+    Ok((canvas_no_border, canvas_with_border, legend_map))
+}
+
 fn map_to_pixel_equal_aspect(
     w_px: usize,
     h_px: usize,
@@ -177,21 +209,8 @@ fn build_spatial_scatter_canvas_fixed_dims(
     for i in 0..n_obs {
         points.push((slice[[i, 0]], slice[[i, 1]]));
     }
-    let (xr, yr) = ChartContext::get_auto_range(&points, 0.04);
-    let (legend_map, colors) = assign_colors(&labels);
-
-    let mut chart = ChartContext::new(chart_w, chart_h);
-    let w_px = chart.canvas.pixel_width();
-    let h_px = chart.canvas.pixel_height();
-    for i in 0..n_obs {
-        if let Some((px, py)) = map_to_pixel_equal_aspect(w_px, h_px, points[i].0, points[i].1, xr, yr)
-        {
-            chart.canvas.set_pixel(px, py, Some(colors[i]));
-        }
-    }
-
-    let canvas_no_border = chart.canvas.render_with_options(false, None);
-    let canvas_with_border = chart.canvas.render();
+    let (canvas_no_border, canvas_with_border, legend_map) =
+        draw_spatial_scatter_canvas_from_points(&points, &labels, chart_w, chart_h)?;
     let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
     legend.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((n_obs, key, canvas_no_border, canvas_with_border, legend))
@@ -306,6 +325,18 @@ pub fn spatial_scatter_lines_for_tui(
     let (_n, _key, canvas, _, _) =
         build_spatial_scatter_canvas_fixed_dims(path, color_by, chart_w, chart_h, obsm_key)?;
     Ok(ansi_braille_to_lines(&canvas))
+}
+
+#[cfg(feature = "tui")]
+pub fn spatial_scatter_lines_from_xy_labels(
+    points: &[(f64, f64)],
+    labels: &[String],
+    chart_w: usize,
+    chart_h: usize,
+) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
+    let (canvas_no_border, _, _) =
+        draw_spatial_scatter_canvas_from_points(points, labels, chart_w, chart_h)?;
+    Ok(ansi_braille_to_lines(&canvas_no_border))
 }
 
 /// Prefer string cell-type label columns for terminal spatial plots (`cell_type`, …);

@@ -5,6 +5,89 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Shown in the `--demo` dashboard as the dataset path (not opened). Spatial coordinates are embedded (`demo_kidney_obsm_cache.bin`) and can be regenerated from this path with `scripts/export_demo_kidney_obsm_cache.py`.
+pub const DEMO_KIDNEY_SLIDETAGS_H5AD: &str = "/Volumes/SSD/training_data/kidney_slidetags.h5ad";
+
+/// Embedded `obsm['spatial']` rows for [`DEMO_KIDNEY_N_CELLS`] cells (see `scripts/export_demo_kidney_obsm_cache.py`).
+pub const DEMO_KIDNEY_N_CELLS: usize = 5785;
+
+pub const DEMO_KIDNEY_N_CLUSTERS: usize = 12;
+
+pub const DEMO_OUTPUT_DIR_LABEL: &str = "(demo — no disk writes)";
+
+const DEMO_KIDNEY_OBSM_MAGIC: &[u8; 4] = b"SPXY";
+
+/// H5AD `obs['cell_type']` categorical code 0..12 → kidney-style label (rank-matched to cluster size).
+const DEMO_KIDNEY_CELL_TYPE_BY_CODE: [&str; 12] = [
+    "Proximal tubule",
+    "Macrophage",
+    "Distal convoluted tubule",
+    "Collecting duct principal",
+    "Loop of Henle",
+    "Peritubular endothelial",
+    "Collecting duct intercalated",
+    "Lymphocyte",
+    "Interstitial fibroblast",
+    "Mesangial cell",
+    "Glomerular endothelial",
+    "Podocyte",
+];
+
+pub fn parse_demo_kidney_obsm_cache() -> anyhow::Result<(Vec<(f64, f64)>, Vec<String>)> {
+    let data: &[u8] = include_bytes!("demo_kidney_obsm_cache.bin");
+    anyhow::ensure!(data.len() >= 12, "demo kidney spatial cache: truncated header");
+    anyhow::ensure!(
+        data.get(..4) == Some(DEMO_KIDNEY_OBSM_MAGIC.as_slice()),
+        "demo kidney spatial cache: bad magic"
+    );
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    anyhow::ensure!(version == 1, "demo kidney spatial cache: unsupported version {version}");
+    let n = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+    anyhow::ensure!(
+        n == DEMO_KIDNEY_N_CELLS,
+        "demo kidney spatial cache: n {n} != expected {}",
+        DEMO_KIDNEY_N_CELLS
+    );
+    let row = 8usize + 8 + 1;
+    anyhow::ensure!(
+        data.len() == 12 + n * row,
+        "demo kidney spatial cache: length {} != {}",
+        data.len(),
+        12 + n * row
+    );
+    let mut points = Vec::with_capacity(n);
+    let mut labels = Vec::with_capacity(n);
+    let mut i = 12usize;
+    for _ in 0..n {
+        let x = f64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+        i += 8;
+        let y = f64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+        i += 8;
+        let code = data[i] as usize;
+        i += 1;
+        anyhow::ensure!(
+            code < DEMO_KIDNEY_CELL_TYPE_BY_CODE.len(),
+            "demo kidney spatial cache: bad cluster code {code}"
+        );
+        points.push((x, y));
+        labels.push(DEMO_KIDNEY_CELL_TYPE_BY_CODE[code].to_string());
+    }
+    Ok((points, labels))
+}
+
+pub fn demo_kidney_spatial_scatter_lines_for_tui(
+    chart_w: usize,
+    chart_h: usize,
+) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
+    let (points, labels) = parse_demo_kidney_obsm_cache()?;
+    crate::adata_terminal_scatter::spatial_scatter_lines_from_xy_labels(
+        &points,
+        &labels,
+        chart_w,
+        chart_h,
+    )
+}
+
 const DEMO_LATENCY_SCALE: u64 = 25;
 
 fn demo_delay_ms(base_plus_jitter: u64) -> Duration {
@@ -255,17 +338,21 @@ pub fn prepare_demo_hud(
 fn apply_demo_hud_baseline(g: &mut TrainingHudState, total_genes: usize) {
     g.is_demo = true;
     g.total_genes = total_genes;
-    g.n_cells = 18_432;
-    g.n_clusters = 14;
+    g.n_cells = DEMO_KIDNEY_N_CELLS;
+    g.n_clusters = DEMO_KIDNEY_N_CLUSTERS;
     g.cell_type_counts = vec![
-        ("T cells".to_string(), 4_820usize),
-        ("B cells".to_string(), 3_450usize),
-        ("Monocytes".to_string(), 2_610usize),
-        ("DCs".to_string(), 1_920usize),
-        ("NK cells".to_string(), 1_280usize),
-        ("Plasma cells".to_string(), 840usize),
-        ("Epithelial cells".to_string(), 1_620usize),
-        ("Stromal cells".to_string(), 1_892usize),
+        ("Proximal tubule".to_string(), 1107usize),
+        ("Distal convoluted tubule".to_string(), 967usize),
+        ("Collecting duct principal".to_string(), 886usize),
+        ("Macrophage".to_string(), 841usize),
+        ("Loop of Henle".to_string(), 443usize),
+        ("Peritubular endothelial".to_string(), 372usize),
+        ("Interstitial fibroblast".to_string(), 288usize),
+        ("Lymphocyte".to_string(), 272usize),
+        ("Collecting duct intercalated".to_string(), 255usize),
+        ("Glomerular endothelial".to_string(), 166usize),
+        ("Mesangial cell".to_string(), 134usize),
+        ("Podocyte".to_string(), 54usize),
     ];
     g.genes_done = 0;
     g.genes_skipped = 0;

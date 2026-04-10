@@ -753,7 +753,7 @@ pub fn run_dataset_paths_prompt(
 
     let result = loop {
         terminal.draw(|f| {
-            let pal = TuiColors::LEGACY;
+            let pal = TuiColors::default_palette();
             let area = f.area();
             f.render_widget(
                 Block::default().style(Style::default().bg(pal.bg)),
@@ -1007,7 +1007,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         0,
         vec![Line::from(Span::styled(
             "  ·  no R² yet  ·",
-            Style::default().fg(TuiColors::LEGACY.muted),
+            Style::default().fg(TuiColors::default_palette().muted),
         ))],
     ));
 
@@ -1027,7 +1027,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
     let mut heart_beat_until: Option<Instant> = None;
     let mut prev_genes_rounds_sheep = 0usize;
     let mut falling_sheep: Vec<Instant> = Vec::new();
-    let mut theme_slot = 0usize;
+    let mut theme_slot = TuiColors::default_theme_slot();
 
     'dashboard: loop {
         if last_sys.elapsed() > HARDWARE_POLL_INTERVAL {
@@ -1192,7 +1192,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             let left = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(14), Constraint::Min(4)])
+                .constraints([Constraint::Min(22), Constraint::Min(4)])
                 .split(hchunks[0]);
             let top_panels = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1247,105 +1247,131 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let sep = || Span::styled("  ·  ", Style::default().fg(pal.muted));
             let lbl = |s: &'static str| Span::styled(s, Style::default().fg(pal.label));
             let val = |s: String, c: Color| Span::styled(s, Style::default().fg(c));
+            let sub = || Span::raw("  ");
 
             let rc = &st.run_config;
-            let cfg_disp = truncate_label(
-                &rc.config_source,
-                (top_panels[0].width as usize).saturating_sub(24),
-            );
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(vec![lbl("CONFIG  "), val(cfg_disp, pal.muted)]),
-                    Line::from(vec![
-                        lbl("BACKEND  "),
-                        val(rc.compute_backend.clone(), pal.value),
-                        sep(),
-                        lbl("LAYER  "),
-                        val(rc.layer.clone(), pal.sky),
-                    ]),
-                    Line::from(vec![
-                        lbl("OBS  "),
-                        val(rc.cluster_annot.clone(), pal.lilac),
-                        sep(),
-                        lbl("SPATIAL  "),
-                        val(
-                            format!(
-                                "r={:.1}  dim={}  contact={:.1}  wl_scale={:.3}",
-                                rc.spatial_radius,
-                                rc.spatial_dim,
-                                rc.contact_distance,
-                                rc.weighted_ligand_scale_factor
-                            ),
-                            pal.value,
-                        ),
-                    ]),
-                    Line::from(vec![
-                        lbl("LASSO  "),
-                        val(
-                            format!(
-                                "l1={}  group={}  n_iter={}  tol={:.1e}",
-                                fmt_lasso_float(rc.l1_reg),
-                                fmt_lasso_float(rc.group_reg),
-                                rc.n_iter,
-                                rc.tol
-                            ),
-                            pal.grape,
-                        ),
-                    ]),
-                    Line::from(vec![
-                        lbl("TRAIN  "),
-                        val(
-                            format!(
-                                "lr={}  score≥{:.2}  epochs={}/gene",
-                                fmt_lasso_float(rc.learning_rate),
-                                rc.score_threshold,
-                                rc.epochs_per_gene
-                            ),
-                            pal.sky,
-                        ),
-                    ]),
-                    Line::from(vec![
-                        lbl("GRN  "),
-                        val(
-                            format!(
-                                "tf_lig≥{:.2}  max_ligands={}",
-                                rc.tf_ligand_cutoff, rc.max_ligands
-                            ),
-                            pal.muted,
-                        ),
-                    ]),
-                    Line::from(vec![lbl("GENES  "), val(rc.gene_selection.clone(), pal.title)]),
-                    Line::from(vec![
-                        lbl("TRAIN_MODE  "),
-                        val(rc.cnn_training_mode.clone(), pal.sky),
-                    ]),
-                    Line::from(vec![
-                        lbl("CONDITION  "),
-                        val(
-                            if rc.condition_split == "—" {
+            let cfg_panel = top_panels[0];
+            let cfg_inner_w = cfg_panel.width.saturating_sub(2) as usize;
+            let cfg_col_w = (cfg_inner_w / 2).max(8);
+            let cfg_src_max = cfg_col_w.saturating_sub(10);
+            let cfg_disp = truncate_label(&rc.config_source, cfg_src_max);
+
+            let cfg_left_lines = vec![
+                Line::from(vec![lbl("CONFIG  "), val(cfg_disp, pal.muted)]),
+                Line::from(vec![lbl("BACKEND  "), val(rc.compute_backend.clone(), pal.value)]),
+                Line::from(vec![lbl("DEVICE  "), val(rc.compute_device_detail.clone(), pal.value)]),
+                Line::from(vec![lbl("LAYER  "), val(rc.layer.clone(), pal.sky)]),
+                Line::from(vec![lbl("OBS  "), val(rc.cluster_annot.clone(), pal.lilac)]),
+                Line::from(vec![
+                    lbl("SPATIAL  "),
+                    val(format!("r={:.1}", rc.spatial_radius), pal.value),
+                ]),
+                Line::from(vec![
+                    sub(),
+                    val(format!("dim={}", rc.spatial_dim), pal.value),
+                ]),
+                Line::from(vec![
+                    sub(),
+                    val(format!("contact={:.1}", rc.contact_distance), pal.value),
+                ]),
+                Line::from(vec![
+                    sub(),
+                    val(
+                        format!("wl_scale={:.3}", rc.weighted_ligand_scale_factor),
+                        pal.value,
+                    ),
+                ]),
+            ];
+            let cfg_right_lines = vec![
+                Line::from(vec![
+                    lbl("LASSO  "),
+                    val(format!("l1={}", fmt_lasso_float(rc.l1_reg)), pal.grape),
+                ]),
+                Line::from(vec![
+                    sub(),
+                    val(format!("group={}", fmt_lasso_float(rc.group_reg)), pal.grape),
+                ]),
+                Line::from(vec![sub(), val(format!("n_iter={}", rc.n_iter), pal.grape)]),
+                Line::from(vec![sub(), val(format!("tol={:.1e}", rc.tol), pal.grape)]),
+                Line::from(vec![
+                    lbl("TRAIN  "),
+                    val(format!("lr={}", fmt_lasso_float(rc.learning_rate)), pal.sky),
+                ]),
+                Line::from(vec![sub(), val(format!("score≥{:.2}", rc.score_threshold), pal.sky)]),
+                Line::from(vec![
+                    sub(),
+                    val(format!("epochs={}/gene", rc.epochs_per_gene), pal.sky),
+                ]),
+                Line::from(vec![
+                    lbl("GRN  "),
+                    val(format!("tf_lig≥{:.2}", rc.tf_ligand_cutoff), pal.muted),
+                ]),
+                Line::from(vec![
+                    sub(),
+                    val(format!("max_ligands={}", rc.max_ligands), pal.muted),
+                ]),
+                Line::from(vec![lbl("GENES  "), val(
+                    truncate_label(&rc.gene_selection, cfg_col_w.saturating_sub(10)),
+                    pal.title,
+                )]),
+                Line::from(vec![
+                    lbl("TRAIN_MODE  "),
+                    val(
+                        truncate_label(&rc.cnn_training_mode, cfg_col_w.saturating_sub(14)),
+                        pal.sky,
+                    ),
+                ]),
+                Line::from(vec![
+                    lbl("CONDITION  "),
+                    val(
+                        truncate_label(
+                            &(if rc.condition_split == "—" {
                                 "—  ·  single run".to_string()
                             } else {
                                 format!("obs.{}  ·  multi-run (--condition)", rc.condition_split)
-                            },
-                            if rc.condition_split == "—" {
-                                pal.muted
-                            } else {
-                                pal.lilac
-                            },
+                            }),
+                            cfg_col_w.saturating_sub(14),
                         ),
-                    ]),
-                ])
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(pal.tel_bord))
-                        .title(Span::styled(
-                            " Run configuration ",
-                            Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
-                        )),
-                )
-                .style(bg),
-                top_panels[0],
+                        if rc.condition_split == "—" {
+                            pal.muted
+                        } else {
+                            pal.lilac
+                        },
+                    ),
+                ]),
+            ];
+            let cfg_rows = cfg_left_lines.len().max(cfg_right_lines.len());
+            let mut cfg_left_padded = cfg_left_lines;
+            let mut cfg_right_padded = cfg_right_lines;
+            while cfg_left_padded.len() < cfg_rows {
+                cfg_left_padded.push(Line::default());
+            }
+            while cfg_right_padded.len() < cfg_rows {
+                cfg_right_padded.push(Line::default());
+            }
+
+            let cfg_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(pal.tel_bord))
+                .title(Span::styled(
+                    " Run configuration ",
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                ))
+                .style(bg);
+            let cfg_inner = cfg_block.inner(cfg_panel);
+            let cfg_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(cfg_inner);
+
+            f.render_widget(cfg_block, cfg_panel);
+            f.render_widget(
+                Paragraph::new(cfg_left_padded).style(bg),
+                cfg_cols[0],
+            );
+            f.render_widget(
+                Paragraph::new(cfg_right_padded).style(bg),
+                cfg_cols[1],
             );
 
             let tel_inner_w = top_panels[1].width.saturating_sub(2) as usize;
@@ -1466,7 +1492,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(pal.tel_bord))
                     .title(Span::styled(
-                        " Spatial (obsm) ",
+                        if st.is_demo {
+                            " Spatial (obsm spatial · cached) "
+                        } else {
+                            " Spatial (obsm) "
+                        },
                         Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                     ))
                     .style(bg);
@@ -1499,17 +1529,33 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     }
                 };
                 if reload {
-                    if st.is_demo || st.dataset_path.contains("(demo)") {
-                        *borrow = Some((
-                            cache_key.0,
-                            cache_key.1,
-                            cache_key.2,
-                            cache_key.3,
-                            vec![Line::from(Span::styled(
-                                "  ·  demo — no spatial map  ·",
-                                Style::default().fg(pal.muted),
-                            ))],
-                        ));
+                    if st.is_demo {
+                        match crate::training_demo::demo_kidney_spatial_scatter_lines_for_tui(cw, ch) {
+                            Ok(mut v) => {
+                                if v.len() > ch {
+                                    v.truncate(ch);
+                                }
+                                *borrow = Some((
+                                    cache_key.0,
+                                    cache_key.1,
+                                    cache_key.2,
+                                    cache_key.3,
+                                    v,
+                                ));
+                            }
+                            Err(e) => {
+                                *borrow = Some((
+                                    cache_key.0,
+                                    cache_key.1,
+                                    cache_key.2,
+                                    cache_key.3,
+                                    vec![Line::from(Span::styled(
+                                        format!("  ·  demo spatial: {}  ·", e),
+                                        Style::default().fg(pal.c_fail),
+                                    ))],
+                                ));
+                            }
+                        }
                     } else if st.n_cells == 0 {
                         *borrow = Some((
                             cache_key.0,

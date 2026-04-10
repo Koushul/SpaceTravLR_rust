@@ -15,7 +15,9 @@ use spacetravlr::config::{
 };
 use spacetravlr::grn_extra;
 #[cfg(feature = "tui")]
-use spacetravlr::training_demo::{prepare_demo_hud, run_demo_training};
+use spacetravlr::training_demo::{
+    prepare_demo_hud, run_demo_training, DEMO_KIDNEY_SLIDETAGS_H5AD, DEMO_OUTPUT_DIR_LABEL,
+};
 use spacetravlr::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
 use spacetravlr::training_hud::TrainingHudState;
@@ -785,7 +787,7 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         config_path_ref,
         "demo",
         "— (demo; no accelerator)",
-        "Demo mode — simulated genes/workers only; no AnnData load, no betadata export, no training backend.",
+        "Demo mode — kidney slide-tags path is display-only; obsm['spatial'] from embedded cache; simulated genes/workers; no AnnData load, no betadata export, no training backend.",
         &cfg,
         Some(demo_total),
         gene_filter.as_deref(),
@@ -797,8 +799,8 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     let n_parallel = cfg.execution.n_parallel;
     let cancel = Arc::new(AtomicBool::new(false));
     let hud = Arc::new(Mutex::new(TrainingHudState::new(
-        "(demo) simulated_visium.h5ad".to_string(),
-        "(demo — no disk writes)".to_string(),
+        DEMO_KIDNEY_SLIDETAGS_H5AD.to_string(),
+        DEMO_OUTPUT_DIR_LABEL.to_string(),
         run_summary,
         full_cnn,
         epochs,
@@ -809,7 +811,7 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     prepare_demo_hud(&hud, demo_total, gene_filter.as_deref())?;
 
     println!(
-        "SpaceTravLR --demo: opening dashboard (Shift+Q exit · t cycles theme · sheep fall each gene finish)."
+        "SpaceTravLR --demo: opening dashboard (Shift+Q exit · t cycles theme · sheep fall each gene finish). Dataset path is display-only; spatial panel uses embedded kidney obsm cache (no .h5ad read)."
     );
 
     let hud_worker = hud.clone();

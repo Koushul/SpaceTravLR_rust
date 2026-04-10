@@ -219,7 +219,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
         last_sys_refresh: Instant::now()
             .checked_sub(SYS_REFRESH_INTERVAL)
             .unwrap_or_else(Instant::now),
-        theme_slot: 0,
+        theme_slot: TuiColors::default_theme_slot(),
     };
 
     if let Some(path) = opts.run_toml.clone() {
