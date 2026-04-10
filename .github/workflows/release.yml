@@ -85,7 +85,16 @@ jobs:
           set -euo pipefail
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates cmake curl git build-essential pkg-config libvulkan-dev vulkan-tools zlib1g-dev
+            ca-certificates curl git build-essential pkg-config libvulkan-dev vulkan-tools zlib1g-dev
+
+      - name: Install CMake 3.28+ (focal ships 3.16; libz-sys / zlib build scripts require ≥3.18)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMAKE_VER=3.28.6
+          curl -sSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-x86_64.tar.gz" -o /tmp/cmake.tgz
+          tar -xzf /tmp/cmake.tgz -C /opt
+          echo "/opt/cmake-${CMAKE_VER}-linux-x86_64/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@v4
 
