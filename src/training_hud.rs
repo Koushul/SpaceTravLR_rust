@@ -136,6 +136,8 @@ pub struct TrainingHudState {
     pub current_condition_value: Option<String>,
     /// `(1-based index, total splits)` for the active subset.
     pub condition_split_progress: Option<(usize, usize)>,
+    /// `spacetravlr --demo`: synthetic run; TUI uses `genes_rounds` for progress (no output dir scan).
+    pub is_demo: bool,
 }
 
 impl TrainingHudState {
@@ -176,6 +178,7 @@ impl TrainingHudState {
             gene_train_times: VecDeque::new(),
             current_condition_value: None,
             condition_split_progress: None,
+            is_demo: false,
         }
     }
 
@@ -215,6 +218,7 @@ impl TrainingHudState {
         self.gene_r2_mean.clear();
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
         self.gene_train_times.clear();
+        self.is_demo = false;
     }
 
     pub fn record_gene_time(&mut self, gene: &str, secs: f64) {

@@ -90,13 +90,13 @@ If the crate is [published on crates.io](https://rust-cli.github.io/book/tutoria
 cargo install space_trav_lr_rust --locked
 ```
 
-Optional **`spatial_viewer`** and **`self-update`** (for `spacetravlr --update`):
+Default **`cargo install`** includes the training/perturb TUIs and **`self-update`** (so **`spacetravlr --update`** works). Add **`spatial_viewer`** to match release tarballs:
 
 ```bash
-cargo install space_trav_lr_rust --locked --features "spatial-viewer,self-update"
+cargo install space_trav_lr_rust --locked --features spatial-viewer
 ```
 
-The package name is **`space_trav_lr_rust`**; binaries are still **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** when that feature is enabled.
+The package name is **`space_trav_lr_rust`**; binaries are **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** when **`spatial-viewer`** is enabled.
 
 ## Install from source (developers)
 
@@ -113,25 +113,25 @@ Training + perturb TUI (default):
 cargo install --path . --locked
 ```
 
-That installs **`spacetravlr`** and **`spacetravlr-perturb`**. To also install **`spatial_viewer`**:
+That installs **`spacetravlr`** and **`spacetravlr-perturb`** with TUIs and **`self-update`**. To also install **`spatial_viewer`**:
 
 ```bash
 cargo install --path . --locked --features spatial-viewer
 ```
 
-Lean build (no Ratatui dashboard deps):
+Lean build (no Ratatui dashboard or self-update):
 
 ```bash
 cargo install --path . --locked --no-default-features
 ```
 
-Self-update in a local build:
+To add **`self-update`** back on a lean build:
 
 ```bash
-cargo install --path . --locked --features self-update
+cargo install --path . --locked --no-default-features --features self-update
 ```
 
-(Full parity with release tarballs: `--features "spatial-viewer,self-update"`.)
+(Full parity with release tarballs: default features plus **`spatial-viewer`** — the line above with **`--features spatial-viewer`**.)
 
 ## Troubleshooting
 

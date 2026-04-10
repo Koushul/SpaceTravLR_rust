@@ -29,6 +29,8 @@ pub mod training_hud;
 pub mod training_log;
 #[cfg(feature = "tui")]
 pub mod training_tui;
+#[cfg(feature = "tui")]
+pub mod tui_theme;
 pub mod transition_umap;
 pub use betadata::{
     BetaFrame, Betabase, BetadataCollectAggregate, CollectedInteraction, GeneMatrix,

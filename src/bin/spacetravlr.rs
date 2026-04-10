@@ -13,7 +13,7 @@ use space_trav_lr_rust::config::{
 };
 use space_trav_lr_rust::grn_extra;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_demo::run_demo_training;
+use space_trav_lr_rust::training_demo::{prepare_demo_hud, run_demo_training};
 use space_trav_lr_rust::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
 use space_trav_lr_rust::training_hud::TrainingHudState;
@@ -768,7 +768,11 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         cancel.clone(),
     )));
 
-    println!("SpaceTravLR --demo: opening dashboard (Shift+Q to exit immediately).");
+    prepare_demo_hud(&hud, demo_total, gene_filter.as_deref())?;
+
+    println!(
+        "SpaceTravLR --demo: opening dashboard (Shift+Q exit · t cycles theme · sheep fall each gene finish)."
+    );
 
     let hud_worker = hud.clone();
     let filter_for_demo = gene_filter.clone();

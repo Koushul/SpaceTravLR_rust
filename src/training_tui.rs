@@ -1,4 +1,5 @@
 use crate::training_hud::{TrainingHud, TrainingHudState};
+use crate::tui_theme::TuiColors;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -18,29 +19,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-// ── Palette ───────────────────────────────────────────────────────────────────
-const BG: Color = Color::Rgb(40, 40, 40); // gruvbox dark0
-const OUTER_BORD: Color = Color::Rgb(60, 56, 54); // provided neutral
-const TEL_BORD: Color = Color::Rgb(69, 133, 136); // provided aqua
-const WORK_BORD: Color = Color::Rgb(215, 153, 33); // provided yellow
-const ROCKET_BORD: Color = Color::Rgb(131, 165, 152); // gruvbox dark aqua soft
-const GAUGE_EMPTY: Color = Color::Rgb(60, 56, 54); // provided neutral
-
-const LABEL: Color = Color::Rgb(215, 153, 33); // provided yellow
-const VALUE: Color = Color::Rgb(142, 192, 124); // provided green
-const LILAC: Color = Color::Rgb(184, 187, 38); // gruvbox green bright
-const SKY: Color = Color::Rgb(69, 133, 136); // provided aqua
-const GRAPE: Color = Color::Rgb(211, 134, 155); // gruvbox purple
-const MUTED: Color = Color::Rgb(146, 131, 116); // gruvbox gray/brown
-const TITLE: Color = Color::Rgb(235, 219, 178); // gruvbox light text
-
-const C_WROTE: Color = Color::Rgb(142, 192, 124); // success
-const C_FAIL: Color = Color::Rgb(204, 36, 29); // provided red
-const C_SKIP: Color = Color::Rgb(146, 131, 116); // muted
-const C_TOPR2: Color = Color::Rgb(69, 133, 136); // aqua
-const C_BOTR2: Color = MUTED;
-const PERF_BORD: Color = Color::Rgb(215, 153, 33); // yellow
-
 /// Best / worst gene counts in the LASSO R² perf panel (paired columns).
 const PERF_R2_LEADERBOARD_LEN: usize = 10;
 
@@ -57,15 +35,15 @@ const HARDWARE_POLL_INTERVAL: Duration = Duration::from_secs(3 * 60);
 const ROCKET_PANEL_W: u16 = 20;
 const WINDOW_IDX: usize = 2;
 
-const BODY: [(&str, Color); 8] = [
-    ("      /\\      ", SKY),
-    ("     /  \\     ", SKY),
-    ("    / ** \\    ", SKY), // window — rendered with colored ◆◆ spans
-    ("    |    |    ", TITLE),
-    ("    |    |    ", TITLE),
-    ("   /| || |\\   ", LILAC),
-    ("  / |____| \\  ", LILAC),
-    ("      ||      ", GRAPE),
+const BODY_TEXT: [&str; 8] = [
+    "      /\\      ",
+    "     /  \\     ",
+    "    / ** \\    ",
+    "    |    |    ",
+    "    |    |    ",
+    "   /| || |\\   ",
+    "  / |____| \\  ",
+    "      ||      ",
 ];
 
 const FIRE: [[&str; 2]; 4] = [
@@ -130,14 +108,25 @@ fn rocket_lines(
     inner_h: usize,
     now: Instant,
     falling_sheep: &[Instant],
+    pal: TuiColors,
 ) -> Vec<Line<'static>> {
     let f = frame % 4;
-    let shimmer = (frame / 3) % BODY.len();
+    let shimmer = (frame / 3) % BODY_TEXT.len();
     let win_c = if frame % 8 < 4 {
-        GRAPE
+        pal.grape
     } else {
         Color::Rgb(180, 150, 230)
     };
+    let body_line_fg = [
+        pal.sky,
+        pal.sky,
+        pal.sky,
+        pal.title,
+        pal.title,
+        pal.lilac,
+        pal.lilac,
+        pal.grape,
+    ];
 
     let canvas_h = inner_h.saturating_sub(ROCKET_HEADER_LINES);
     let canvas_h =
@@ -155,14 +144,14 @@ fn rocket_lines(
     lines.push(rocket_line_centered(
         vec![Span::styled(
             "Status",
-            Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal.grape).add_modifier(Modifier::BOLD),
         )],
         inner_w,
     ));
     lines.push(rocket_line_centered(
         vec![Span::styled(
             format!("{gene_pct}%"),
-            Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
         )],
         inner_w,
     ));
@@ -171,24 +160,26 @@ fn rocket_lines(
         lines.push(Line::from(Span::raw(" ".repeat(inner_w))));
     }
 
-    for (i, (text, base)) in BODY.iter().enumerate() {
+    for (i, text) in BODY_TEXT.iter().enumerate() {
         if i == WINDOW_IDX {
+            let base = body_line_fg[i];
             lines.push(rocket_line_centered(
                 vec![
-                    Span::styled("    / ", Style::default().fg(*base)),
+                    Span::styled("    / ", Style::default().fg(base)),
                     Span::styled(
                         "◆◆",
                         Style::default().fg(win_c).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(" \\    ", Style::default().fg(*base)),
+                    Span::styled(" \\    ", Style::default().fg(base)),
                 ],
                 inner_w,
             ));
         } else {
+            let base = body_line_fg[i];
             let c = if i == shimmer {
-                brighten(*base, 35)
+                brighten(base, 35)
             } else {
-                *base
+                base
             };
             let mut s = Style::default().fg(c);
             if i == shimmer {
@@ -230,6 +221,7 @@ fn rocket_lines(
         frame,
         now,
         falling_sheep,
+        pal,
     );
 
     lines
@@ -242,6 +234,7 @@ fn apply_rocket_sheep_overlays(
     frame: usize,
     now: Instant,
     falling_sheep: &[Instant],
+    pal: TuiColors,
 ) {
     if falling_sheep.is_empty() || lines.is_empty() {
         return;
@@ -268,12 +261,12 @@ fn apply_rocket_sheep_overlays(
         let max_col = inner_w.saturating_sub(sheep_w) as i32;
         let col = (center - half + off).clamp(0, max_col) as usize;
 
-        let mut style = Style::default().fg(LILAC).add_modifier(Modifier::BOLD);
+        let mut style = Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD);
         if t > 0.9 {
-            style = Style::default().fg(VALUE).add_modifier(Modifier::DIM);
+            style = Style::default().fg(pal.value).add_modifier(Modifier::DIM);
         }
         if t > 1.5 {
-            style = Style::default().fg(MUTED).add_modifier(Modifier::DIM);
+            style = Style::default().fg(pal.muted).add_modifier(Modifier::DIM);
         }
 
         lines[line_idx] = Line::from(vec![
@@ -365,11 +358,12 @@ fn workers_in_columns(
     active: &[(&String, &String)],
     content_w: usize,
     lasso_ct: &std::collections::HashMap<String, (usize, usize)>,
+    pal: TuiColors,
 ) -> Vec<ListItem<'static>> {
     if active.is_empty() {
         return vec![ListItem::new(Line::from(Span::styled(
             "  ·  idle  ·",
-            Style::default().fg(MUTED),
+            Style::default().fg(pal.muted),
         )))];
     }
     let prefix_w = "✿ ".width();
@@ -383,18 +377,18 @@ fn workers_in_columns(
             let mut spans: Vec<Span<'static>> = Vec::new();
             for (i, (gene, status)) in chunk.iter().enumerate() {
                 if i > 0 {
-                    spans.push(Span::styled(" │ ", Style::default().fg(MUTED)));
+                    spans.push(Span::styled(" │ ", Style::default().fg(pal.muted)));
                 }
                 let pc = if status.contains("export") {
-                    C_WROTE
+                    pal.c_wrote
                 } else if status.contains("lasso") || status.contains("cnn") {
-                    GRAPE
+                    pal.grape
                 } else if status.contains("fail") {
-                    C_FAIL
+                    pal.c_fail
                 } else if status.contains("skip") {
-                    C_SKIP
+                    pal.c_skip
                 } else {
-                    LILAC
+                    pal.lilac
                 };
                 let status_line: String = if let Some(&(done, total)) = lasso_ct.get(gene.as_str())
                 {
@@ -406,12 +400,12 @@ fn workers_in_columns(
                 } else {
                     (*status).clone()
                 };
-                spans.push(Span::styled("✿ ", Style::default().fg(LABEL)));
+                spans.push(Span::styled("✿ ", Style::default().fg(pal.label)));
                 spans.push(Span::styled(
                     pad_left_trunc_display(gene.as_str(), GENE_DISP),
-                    Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(GENE_STAT_SEP, Style::default().fg(MUTED)));
+                spans.push(Span::styled(GENE_STAT_SEP, Style::default().fg(pal.muted)));
                 spans.push(Span::styled(
                     pad_or_trunc_display(&status_line, STAT_DISP),
                     Style::default().fg(pc),
@@ -636,17 +630,17 @@ fn fmt_n_mod(n: usize) -> String {
     format!("{:>5}", n)
 }
 
-fn rule_line(inner_w: usize) -> Line<'static> {
+fn rule_line(inner_w: usize, pal: TuiColors) -> Line<'static> {
     let n = inner_w.clamp(8, 128);
-    Line::from(Span::styled("─".repeat(n), Style::default().fg(MUTED)))
+    Line::from(Span::styled("─".repeat(n), Style::default().fg(pal.muted)))
 }
 
-fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'static>> {
+fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize, pal: TuiColors) -> Vec<Line<'static>> {
     let n_genes = st.gene_r2_mean.len();
     if n_genes == 0 {
         return vec![Line::from(Span::styled(
             "  ·  no R² yet  ·",
-            Style::default().fg(MUTED),
+            Style::default().fg(pal.muted),
         ))];
     }
 
@@ -665,37 +659,37 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize) -> Vec<Line<'st
     lines.push(Line::from(vec![
         Span::styled(
             format!("{:<hw$}", "▲ best R²", hw = half),
-            Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal.c_topr2).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default().fg(MUTED)),
+        Span::styled("  ", Style::default().fg(pal.muted)),
         Span::styled(
             format!("{:<hw$}", "▼ worst R²", hw = half),
-            Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal.c_botr2).add_modifier(Modifier::BOLD),
         ),
     ]));
-    lines.push(rule_line(inner_w));
+    lines.push(rule_line(inner_w, pal));
     for ((g_hi, r_hi, m_hi), (g_lo, r_lo, m_lo)) in top_n.into_iter().zip(bot_n.into_iter()) {
         let g_hi_s = truncate_label(&g_hi, gene_w);
         let g_lo_s = truncate_label(&g_lo, gene_w);
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<gw$}", g_hi_s, gw = gene_w),
-                Style::default().fg(TITLE),
+                Style::default().fg(pal.title),
             ),
-            Span::styled(fmt_n_mod(m_hi), Style::default().fg(MUTED)),
+            Span::styled(fmt_n_mod(m_hi), Style::default().fg(pal.muted)),
             Span::styled(
                 fmt_r2_fixed(r_hi),
-                Style::default().fg(C_TOPR2).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal.c_topr2).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ", Style::default().fg(MUTED)),
+            Span::styled("  ", Style::default().fg(pal.muted)),
             Span::styled(
                 format!("{:<gw$}", g_lo_s, gw = gene_w),
-                Style::default().fg(TITLE),
+                Style::default().fg(pal.title),
             ),
-            Span::styled(fmt_n_mod(m_lo), Style::default().fg(MUTED)),
+            Span::styled(fmt_n_mod(m_lo), Style::default().fg(pal.muted)),
             Span::styled(
                 fmt_r2_fixed(r_lo),
-                Style::default().fg(C_BOTR2).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal.c_botr2).add_modifier(Modifier::BOLD),
             ),
         ]));
     }
@@ -756,8 +750,12 @@ pub fn run_dataset_paths_prompt(
 
     let result = loop {
         terminal.draw(|f| {
+            let pal = TuiColors::LEGACY;
             let area = f.area();
-            f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+            f.render_widget(
+                Block::default().style(Style::default().bg(pal.bg)),
+                area,
+            );
 
             let popup_w = ((area.width * 55) / 100)
                 .clamp(48, 72)
@@ -771,11 +769,11 @@ pub fn run_dataset_paths_prompt(
                     vec![
                         Line::from(Span::styled(
                             "Make sure `cell_type` is in .obs and `spatial` is in .obsm",
-                            Style::default().fg(MUTED),
+                            Style::default().fg(pal.muted),
                         )),
                         Line::from(Span::styled(
                             "Enter path to .h5ad. Press shift+q to quit",
-                            Style::default().fg(VALUE),
+                            Style::default().fg(pal.value),
                         )),
                     ],
                 )
@@ -790,15 +788,15 @@ pub fn run_dataset_paths_prompt(
                     vec![
                         Line::from(Span::styled(
                             format!("AnnData: {adata_disp}"),
-                            Style::default().fg(MUTED),
+                            Style::default().fg(pal.muted),
                         )),
                         Line::from(Span::styled(
                             "Directory for *_betadata.feather (created if missing).",
-                            Style::default().fg(VALUE),
+                            Style::default().fg(pal.value),
                         )),
                         Line::from(Span::styled(
                             "Press shift+q to quit · Enter confirm",
-                            Style::default().fg(MUTED),
+                            Style::default().fg(pal.muted),
                         )),
                     ],
                 )
@@ -812,10 +810,10 @@ pub fn run_dataset_paths_prompt(
 
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(TEL_BORD))
+                .border_style(Style::default().fg(pal.tel_bord))
                 .title(Span::styled(
                     title,
-                    Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                 ));
             let inner = block.inner(popup_area);
             f.render_widget(block, popup_area);
@@ -833,27 +831,31 @@ pub fn run_dataset_paths_prompt(
             let help_w = Paragraph::new(help).wrap(Wrap { trim: true }).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(OUTER_BORD)),
+                    .border_style(Style::default().fg(pal.outer_bord)),
             );
             f.render_widget(help_w, chunks[0]);
 
             let path_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(SKY))
-                .title(Span::styled(" path ", Style::default().fg(LABEL)));
+                .border_style(Style::default().fg(pal.sky))
+                .title(Span::styled(" path ", Style::default().fg(pal.label)));
             let path_para = Paragraph::new(Line::from(vec![Span::styled(
                 if input_ref.is_empty() {
                     " "
                 } else {
                     input_ref.as_str()
                 },
-                Style::default().fg(TITLE),
+                Style::default().fg(pal.title),
             )]))
             .block(path_block);
             f.render_widget(path_para, chunks[1]);
 
             let msg = err_line.as_deref().unwrap_or(" ");
-            let err_c = if err_line.is_some() { C_FAIL } else { MUTED };
+            let err_c = if err_line.is_some() {
+                pal.c_fail
+            } else {
+                pal.muted
+            };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(err_c))))
                     .wrap(Wrap { trim: true }),
@@ -987,13 +989,14 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "operator".to_string());
 
-    let perf_cell: RefCell<(u64, Instant, usize, Vec<Line<'static>>)> = RefCell::new((
+    let perf_cell: RefCell<(u64, Instant, usize, usize, Vec<Line<'static>>)> = RefCell::new((
         0,
         Instant::now() - Duration::from_secs(3600),
         0,
+        0,
         vec![Line::from(Span::styled(
             "  ·  no R² yet  ·",
-            Style::default().fg(MUTED),
+            Style::default().fg(TuiColors::LEGACY.muted),
         ))],
     ));
 
@@ -1011,6 +1014,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
     let mut heart_beat_until: Option<Instant> = None;
     let mut prev_genes_rounds_sheep = 0usize;
     let mut falling_sheep: Vec<Instant> = Vec::new();
+    let mut theme_slot = 0usize;
 
     loop {
         if last_sys.elapsed() > HARDWARE_POLL_INTERVAL {
@@ -1039,6 +1043,14 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     if let Ok(st) = hud.lock() {
                         st.cancel_requested.store(true, Ordering::Relaxed);
                     }
+                }
+                if key.kind == KeyEventKind::Press
+                    && matches!(key.code, KeyCode::Char('t' | 'T'))
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    theme_slot = TuiColors::advance_slot(theme_slot);
                 }
             }
         }
@@ -1073,7 +1085,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         let sheep_snapshot: Vec<Instant> = falling_sheep.clone();
         terminal.draw(|f| {
             let area = f.area();
-            let bg = Style::default().bg(BG);
+            let pal = TuiColors::resolve(theme_slot);
+            let bg = Style::default().bg(pal.bg);
             f.render_widget(Block::default().style(bg), area);
 
             let Ok(st) = hud.lock() else { return };
@@ -1086,7 +1099,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             let outer = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(OUTER_BORD).add_modifier(Modifier::DIM))
+                .border_style(Style::default().fg(pal.outer_bord).add_modifier(Modifier::DIM))
                 .style(bg);
             let inner = outer.inner(area);
             f.render_widget(outer, area);
@@ -1113,7 +1126,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             } else {
                 "Running"
             };
-            let status_c = if st.should_cancel() { C_FAIL } else { VALUE };
+            let status_c = if st.should_cancel() {
+                pal.c_fail
+            } else {
+                pal.value
+            };
             let hw_w = vchunks[0].width.saturating_sub(2) as usize;
             let hw_line = build_machine_hardware_line(
                 &sys,
@@ -1127,29 +1144,29 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Line::from(vec![
                         Span::styled(
                             " ✿ ",
-                            Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.grape).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             "SpaceTravLR",
-                            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled("  ·  ", Style::default().fg(pal.muted)),
                         Span::styled(
                             format!("@{}", username),
-                            Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled("  ·  ", Style::default().fg(pal.muted)),
                         Span::styled(
                             format_t(elapsed),
-                            Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.value).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled("  ·  ", Style::default().fg(MUTED)),
-                        Span::styled(mode, Style::default().fg(SKY)),
-                        Span::styled("  ·  ", Style::default().fg(MUTED)),
+                        Span::styled("  ·  ", Style::default().fg(pal.muted)),
+                        Span::styled(mode, Style::default().fg(pal.sky)),
+                        Span::styled("  ·  ", Style::default().fg(pal.muted)),
                         Span::styled(status_txt, Style::default().fg(status_c)),
-                        Span::styled(" ✿", Style::default().fg(GRAPE)),
+                        Span::styled(" ✿", Style::default().fg(pal.grape)),
                     ]),
-                    Line::from(Span::styled(hw_line, Style::default().fg(MUTED))),
+                    Line::from(Span::styled(hw_line, Style::default().fg(pal.muted))),
                 ]),
                 vchunks[0],
             );
@@ -1210,8 +1227,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 ])
                 .split(work_area);
 
-            let sep = || Span::styled("  ·  ", Style::default().fg(MUTED));
-            let lbl = |s: &'static str| Span::styled(s, Style::default().fg(LABEL));
+            let sep = || Span::styled("  ·  ", Style::default().fg(pal.muted));
+            let lbl = |s: &'static str| Span::styled(s, Style::default().fg(pal.label));
             let val = |s: String, c: Color| Span::styled(s, Style::default().fg(c));
 
             let rc = &st.run_config;
@@ -1221,17 +1238,17 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             );
             f.render_widget(
                 Paragraph::new(vec![
-                    Line::from(vec![lbl("CONFIG  "), val(cfg_disp, MUTED)]),
+                    Line::from(vec![lbl("CONFIG  "), val(cfg_disp, pal.muted)]),
                     Line::from(vec![
                         lbl("BACKEND  "),
-                        val(rc.compute_backend.clone(), VALUE),
+                        val(rc.compute_backend.clone(), pal.value),
                         sep(),
                         lbl("LAYER  "),
-                        val(rc.layer.clone(), SKY),
+                        val(rc.layer.clone(), pal.sky),
                     ]),
                     Line::from(vec![
                         lbl("OBS  "),
-                        val(rc.cluster_annot.clone(), LILAC),
+                        val(rc.cluster_annot.clone(), pal.lilac),
                         sep(),
                         lbl("SPATIAL  "),
                         val(
@@ -1242,7 +1259,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                                 rc.contact_distance,
                                 rc.weighted_ligand_scale_factor
                             ),
-                            VALUE,
+                            pal.value,
                         ),
                     ]),
                     Line::from(vec![
@@ -1255,7 +1272,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                                 rc.n_iter,
                                 rc.tol
                             ),
-                            GRAPE,
+                            pal.grape,
                         ),
                     ]),
                     Line::from(vec![
@@ -1267,7 +1284,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                                 rc.score_threshold,
                                 rc.epochs_per_gene
                             ),
-                            SKY,
+                            pal.sky,
                         ),
                     ]),
                     Line::from(vec![
@@ -1277,13 +1294,13 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                                 "tf_lig≥{:.2}  max_ligands={}",
                                 rc.tf_ligand_cutoff, rc.max_ligands
                             ),
-                            MUTED,
+                            pal.muted,
                         ),
                     ]),
-                    Line::from(vec![lbl("GENES  "), val(rc.gene_selection.clone(), TITLE)]),
+                    Line::from(vec![lbl("GENES  "), val(rc.gene_selection.clone(), pal.title)]),
                     Line::from(vec![
                         lbl("TRAIN_MODE  "),
-                        val(rc.cnn_training_mode.clone(), SKY),
+                        val(rc.cnn_training_mode.clone(), pal.sky),
                     ]),
                     Line::from(vec![
                         lbl("CONDITION  "),
@@ -1294,9 +1311,9 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                                 format!("obs.{}  ·  multi-run (--condition)", rc.condition_split)
                             },
                             if rc.condition_split == "—" {
-                                MUTED
+                                pal.muted
                             } else {
-                                LILAC
+                                pal.lilac
                             },
                         ),
                     ]),
@@ -1304,10 +1321,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(TEL_BORD))
+                        .border_style(Style::default().fg(pal.tel_bord))
                         .title(Span::styled(
                             " Run configuration ",
-                            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                         )),
                 )
                 .style(bg),
@@ -1323,20 +1340,20 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .enumerate()
             {
                 if i == 0 {
-                    mission_lines.push(Line::from(vec![lbl("SRC  "), val(chunk, MUTED)]));
+                    mission_lines.push(Line::from(vec![lbl("SRC  "), val(chunk, pal.muted)]));
                 } else {
                     mission_lines.push(Line::from(vec![
                         Span::raw(PATH_CONT_INDENT),
-                        val(chunk, MUTED),
+                        val(chunk, pal.muted),
                     ]));
                 }
             }
             mission_lines.push(Line::from(vec![
                 lbl("ETA  "),
-                val(eta_s, VALUE),
+                val(eta_s, pal.value),
                 sep(),
                 lbl("RATE  "),
-                val(rate_s, SKY),
+                val(rate_s, pal.sky),
             ]));
             if rc.condition_split != "—" {
                 let active = match (
@@ -1348,19 +1365,19 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     (None, Some((i, n))) => format!("…  ·  {i}/{n}"),
                     (None, None) => "preparing splits…".to_string(),
                 };
-                mission_lines.push(Line::from(vec![lbl("ACTIVE  "), val(active, LILAC)]));
+                mission_lines.push(Line::from(vec![lbl("ACTIVE  "), val(active, pal.lilac)]));
             }
             mission_lines.push(Line::from(vec![
                 lbl("GRID  "),
                 val(
                     format!("{} cells  ·  {} clusters", st.n_cells, st.n_clusters),
-                    VALUE,
+                    pal.value,
                 ),
                 sep(),
                 lbl("WORKERS  "),
                 val(
                     format!("local {}  ·  external {}", st.n_parallel, external_workers),
-                    GRAPE,
+                    pal.grape,
                 ),
             ]));
             mission_lines.push(Line::from(vec![
@@ -1370,24 +1387,24 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                         "seed-only {}  ·  CNN {}",
                         st.genes_exported_seed_only, st.genes_exported_cnn
                     ),
-                    VALUE,
+                    pal.value,
                 ),
             ]));
             mission_lines.push(Line::from(vec![
                 lbl("EPOCH  "),
-                val(format!("{}/gene", st.epochs_per_gene), LILAC),
+                val(format!("{}/gene", st.epochs_per_gene), pal.lilac),
             ]));
             mission_lines.push(Line::from(vec![
                 lbl("CPU  "),
-                val(format!("{cpu_pct:5.1}%"), SKY),
+                val(format!("{cpu_pct:5.1}%"), pal.sky),
                 sep(),
                 lbl("MEM  "),
-                val(format!("{mem_pct:5.1}%"), SKY),
+                val(format!("{mem_pct:5.1}%"), pal.sky),
                 sep(),
                 lbl("RAM  "),
                 val(
                     format!("{}/{} MiB", used_mem / 1024 / 1024, total_mem / 1024 / 1024),
-                    MUTED,
+                    pal.muted,
                 ),
             ]));
             for (i, chunk) in wrap_full_path(&st.output_dir, path_wrap_w)
@@ -1395,20 +1412,20 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 .enumerate()
             {
                 if i == 0 {
-                    mission_lines.push(Line::from(vec![lbl("OUT  "), val(chunk, MUTED)]));
+                    mission_lines.push(Line::from(vec![lbl("OUT  "), val(chunk, pal.muted)]));
                 } else {
                     mission_lines.push(Line::from(vec![
                         Span::raw(PATH_CONT_INDENT),
-                        val(chunk, MUTED),
+                        val(chunk, pal.muted),
                     ]));
                 }
             }
             mission_lines.push(Line::from(vec![
                 lbl("SIZE  "),
-                val(format_bytes(dir_bytes), VALUE),
+                val(format_bytes(dir_bytes), pal.value),
                 sep(),
                 lbl("FILES  "),
-                val(format!("{}", dir_files), LILAC),
+                val(format!("{}", dir_files), pal.lilac),
             ]));
             f.render_widget(
                 Paragraph::new(mission_lines)
@@ -1416,10 +1433,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(TEL_BORD))
+                            .border_style(Style::default().fg(pal.tel_bord))
                             .title(Span::styled(
                                 " Live telemetry ",
-                                Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                                Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                             )),
                     )
                     .style(bg),
@@ -1432,22 +1449,23 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let cw = (work_row[0].width as usize).saturating_sub(2);
 
             let (heart_glyph, heart_style) = if heart_peak {
-                ("♥", Style::default().fg(GRAPE).add_modifier(Modifier::BOLD))
+                ("♥", Style::default().fg(pal.grape).add_modifier(Modifier::BOLD))
             } else {
-                ("♡", Style::default().fg(MUTED))
+                ("♡", Style::default().fg(pal.muted))
             };
-            let rest_style = Style::default().fg(GRAPE).add_modifier(Modifier::BOLD);
+            let rest_style = Style::default().fg(pal.grape).add_modifier(Modifier::BOLD);
 
             f.render_widget(
                 List::new(workers_in_columns(
                     &active,
                     cw,
                     &st.gene_lasso_cluster_progress,
+                    pal,
                 ))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(WORK_BORD))
+                        .border_style(Style::default().fg(pal.work_bord))
                         .title(Line::from(vec![
                             Span::styled(" ", rest_style),
                             Span::styled(heart_glyph, heart_style),
@@ -1472,26 +1490,28 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let stale_gen = st.perf_stats_generation != cell.0;
                 let stale_t = now.duration_since(cell.1) > Duration::from_millis(450);
                 let stale_w = cell.2 != perf_inner;
-                if stale_gen || stale_t || stale_w {
-                    cell.3 = build_perf_panel_lines(&st, perf_inner);
+                let stale_theme = cell.3 != theme_slot;
+                if stale_gen || stale_t || stale_w || stale_theme {
+                    cell.4 = build_perf_panel_lines(&st, perf_inner, pal);
                     cell.0 = st.perf_stats_generation;
                     cell.1 = now;
                     cell.2 = perf_inner;
+                    cell.3 = theme_slot;
                 }
             }
-            let perf_snapshot = perf_cell.borrow().3.clone();
+            let perf_snapshot = perf_cell.borrow().4.clone();
             f.render_widget(
                 Paragraph::new(perf_snapshot)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(PERF_BORD))
+                            .border_style(Style::default().fg(pal.perf_bord))
                             .title(Span::styled(
                                 format!(
                                     " ✦ LASSO R²  · n = β cols in feather  · {} best / {} worst ",
                                     PERF_R2_LEADERBOARD_LEN, PERF_R2_LEADERBOARD_LEN
                                 ),
-                                Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                                Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                             )),
                     )
                     .style(bg),
@@ -1513,12 +1533,12 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             if st.n_cells == 0 {
                 cell_lines.push(Line::from(Span::styled(
                     "  ·  loading obs…  ·",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(pal.muted),
                 )));
             } else if cell_counts.is_empty() {
                 cell_lines.push(Line::from(Span::styled(
                     "  ·  no cell-type label column  ·",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(pal.muted),
                 )));
             } else {
                 for (ct, count) in cell_counts.iter().take(cell_panel_rows) {
@@ -1528,18 +1548,18 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     cell_lines.push(Line::from(vec![
                         Span::styled(
                             left,
-                            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             right,
-                            Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.value).add_modifier(Modifier::BOLD),
                         ),
                     ]));
                 }
                 if cell_counts.len() > cell_panel_rows {
                     cell_lines.push(Line::from(Span::styled(
                         format!("… +{} more", cell_counts.len() - cell_panel_rows),
-                        Style::default().fg(MUTED),
+                        Style::default().fg(pal.muted),
                     )));
                 }
             }
@@ -1549,10 +1569,10 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(TEL_BORD))
+                            .border_style(Style::default().fg(pal.tel_bord))
                             .title(Span::styled(
                                 " Cell Types ",
-                                Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                                Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                             )),
                     )
                     .style(bg),
@@ -1560,7 +1580,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             );
 
             let total = st.total_genes.max(1) as u64;
-            let pos = if Path::new(&st.output_dir).is_dir() {
+            let pos = if !st.is_demo && Path::new(&st.output_dir).is_dir() {
                 disk_genes_done.min(st.total_genes)
             } else {
                 st.genes_rounds.min(st.total_genes)
@@ -1587,11 +1607,12 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     rocket_inner_h,
                     now_rocket,
                     &sheep_snapshot,
+                    pal,
                 ))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(ROCKET_BORD)),
+                        .border_style(Style::default().fg(pal.rocket_bord)),
                 )
                 .style(bg),
                 rocket_panel,
@@ -1599,43 +1620,47 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Gene progress (title + stats on border; one row, full-block glyphs)
             let prog_area = vchunks[2];
-            let sky_bold = Style::default().fg(SKY).add_modifier(Modifier::BOLD);
-            let title_bold = Style::default().fg(TITLE).add_modifier(Modifier::BOLD);
+            let sky_bold = Style::default().fg(pal.sky).add_modifier(Modifier::BOLD);
+            let title_bold = Style::default().fg(pal.title).add_modifier(Modifier::BOLD);
             let prog_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(SKY))
+                .border_style(Style::default().fg(pal.sky))
                 .title(Line::from(vec![
                     Span::styled(" Gene progress ", sky_bold),
-                    Span::styled(" · ", Style::default().fg(MUTED)),
+                    Span::styled(" · ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}/{}", pos, total), title_bold),
-                    Span::styled("  ·  ok ", Style::default().fg(MUTED)),
+                    Span::styled("  ·  ok ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_done), title_bold),
-                    Span::styled("  fail ", Style::default().fg(MUTED)),
+                    Span::styled("  fail ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_failed), title_bold),
-                    Span::styled("  orphan ", Style::default().fg(MUTED)),
+                    Span::styled("  orphan ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_orphan), title_bold),
                 ]));
             let prog_inner = prog_block.inner(prog_area);
             f.render_widget(prog_block, prog_area);
             let gauge = LineGauge::default()
                 .style(bg)
-                .filled_style(Style::default().fg(SKY).add_modifier(Modifier::BOLD))
-                .unfilled_style(Style::default().fg(GAUGE_EMPTY))
-                .line_set(GENE_PROGRESS_LINE_SET)
+                .filled_style(Style::default().fg(pal.sky).add_modifier(Modifier::BOLD))
+                .unfilled_style(Style::default().fg(pal.gauge_empty))
+                .filled_symbol(GENE_PROGRESS_LINE_SET.horizontal)
+                .unfilled_symbol(symbols::line::THICK.horizontal)
                 .label(Line::from(""))
                 .ratio(ratio);
             f.render_widget(gauge, prog_inner);
 
             // ── Footer ────────────────────────────────────────────────────────
+            let theme_hint = TuiColors::theme_label(theme_slot);
             let footer = if st.should_cancel() {
                 Line::from(Span::styled(
                     " Stopping after in-flight genes finish… ",
-                    Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(Span::styled(
-                    " q: graceful exit   shift+q: french leave ",
-                    Style::default().fg(MUTED),
+                    format!(
+                        " q: graceful exit   shift+q: french leave   t: theme ({theme_hint}) "
+                    ),
+                    Style::default().fg(pal.muted),
                 ))
             };
             f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: true }), vchunks[3]);

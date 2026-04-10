@@ -1,5 +1,5 @@
 use crate::estimator::ClusterTrainingSummary;
-use crate::training_hud::TrainingHud;
+use crate::training_hud::{TrainingHud, TrainingHudState};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -238,6 +238,51 @@ fn demo_worker(
     }
 }
 
+/// Initialize HUD for `--demo` on the main thread before the dashboard opens (avoids blank first frames).
+pub fn prepare_demo_hud(
+    hud: &TrainingHud,
+    total_genes: usize,
+    _gene_filter: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let total_genes = total_genes.clamp(1, 512);
+    let mut g = hud
+        .lock()
+        .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
+    apply_demo_hud_baseline(&mut g, total_genes);
+    Ok(())
+}
+
+fn apply_demo_hud_baseline(g: &mut TrainingHudState, total_genes: usize) {
+    g.is_demo = true;
+    g.total_genes = total_genes;
+    g.n_cells = 18_432;
+    g.n_clusters = 14;
+    g.cell_type_counts = vec![
+        ("T cells".to_string(), 4_820usize),
+        ("B cells".to_string(), 3_450usize),
+        ("Monocytes".to_string(), 2_610usize),
+        ("DCs".to_string(), 1_920usize),
+        ("NK cells".to_string(), 1_280usize),
+        ("Plasma cells".to_string(), 840usize),
+        ("Epithelial cells".to_string(), 1_620usize),
+        ("Stromal cells".to_string(), 1_892usize),
+    ];
+    g.genes_done = 0;
+    g.genes_skipped = 0;
+    g.genes_failed = 0;
+    g.genes_orphan = 0;
+    g.genes_rounds = 0;
+    g.genes_exported_seed_only = 0;
+    g.genes_exported_cnn = 0;
+    g.active_genes.clear();
+    g.gene_lasso_cluster_progress.clear();
+    g.gene_train_times.clear();
+    g.gene_r2_mean.clear();
+    g.perf_stats_generation = 0;
+    g.finished = None;
+    g.started = std::time::Instant::now();
+}
+
 pub fn run_demo_training(
     hud: TrainingHud,
     total_genes: usize,
@@ -261,33 +306,7 @@ pub fn run_demo_training(
         let mut g = hud
             .lock()
             .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
-        g.total_genes = total_genes;
-        g.n_cells = 18_432;
-        g.n_clusters = 14;
-        g.cell_type_counts = vec![
-            ("T cells".to_string(), 4_820usize),
-            ("B cells".to_string(), 3_450usize),
-            ("Monocytes".to_string(), 2_610usize),
-            ("DCs".to_string(), 1_920usize),
-            ("NK cells".to_string(), 1_280usize),
-            ("Plasma cells".to_string(), 840usize),
-            ("Epithelial cells".to_string(), 1_620usize),
-            ("Stromal cells".to_string(), 1_892usize),
-        ];
-        g.genes_done = 0;
-        g.genes_skipped = 0;
-        g.genes_failed = 0;
-        g.genes_orphan = 0;
-        g.genes_rounds = 0;
-        g.genes_exported_seed_only = 0;
-        g.genes_exported_cnn = 0;
-        g.active_genes.clear();
-        g.gene_lasso_cluster_progress.clear();
-        g.gene_train_times.clear();
-        g.gene_r2_mean.clear();
-        g.perf_stats_generation = 0;
-        g.finished = None;
-        g.started = std::time::Instant::now();
+        apply_demo_hud_baseline(&mut g, total_genes);
     }
 
     let queue: VecDeque<(usize, String)> = names.into_iter().enumerate().collect();

@@ -29,23 +29,7 @@ use crate::perturb_mode::{
     export_joint_perturb_result, merge_csv_and_type_cell_indices, parse_obs_columns_csv,
     single_perturb_target,
 };
-
-// Palette aligned with `training_tui` (spacetravlr dashboard).
-const BG: Color = Color::Rgb(40, 40, 40);
-const OUTER_BORD: Color = Color::Rgb(60, 56, 54);
-const TEL_BORD: Color = Color::Rgb(69, 133, 136);
-const WORK_BORD: Color = Color::Rgb(215, 153, 33);
-const ROCKET_BORD: Color = Color::Rgb(131, 165, 152);
-const LABEL: Color = Color::Rgb(215, 153, 33);
-const VALUE: Color = Color::Rgb(142, 192, 124);
-const LILAC: Color = Color::Rgb(184, 187, 38);
-const SKY: Color = Color::Rgb(69, 133, 136);
-const GRAPE: Color = Color::Rgb(211, 134, 155);
-const MUTED: Color = Color::Rgb(146, 131, 116);
-const TITLE: Color = Color::Rgb(235, 219, 178);
-const C_WROTE: Color = Color::Rgb(142, 192, 124);
-const C_FAIL: Color = Color::Rgb(204, 36, 29);
-const GAUGE_EMPTY: Color = Color::Rgb(60, 56, 54);
+use crate::tui_theme::TuiColors;
 
 const SYS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -54,29 +38,27 @@ const LOAD_GAUGE_LINES: symbols::line::Set = symbols::line::Set {
     ..symbols::line::THICK
 };
 
-fn block_panel<'a>(title: impl Into<Line<'a>>, border: Color) -> Block<'a> {
+fn block_panel<'a>(pal: TuiColors, title: impl Into<Line<'a>>, border: Color) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border))
-        .style(Style::default().bg(BG))
+        .style(Style::default().bg(pal.bg))
         .title(title)
 }
 
-fn styled_result_line(s: &str) -> Line<'static> {
+fn styled_result_line(pal: TuiColors, s: &str) -> Line<'static> {
     let style = if s.starts_with("Δ ") {
-        Style::default().fg(SKY)
+        Style::default().fg(pal.sky)
     } else if s.starts_with("Joint export") {
-        Style::default().fg(C_WROTE)
+        Style::default().fg(pal.c_wrote)
     } else if s.starts_with("Export error") || s.starts_with("Perturbation failed") {
-        Style::default().fg(C_FAIL)
+        Style::default().fg(pal.c_fail)
     } else if s.starts_with("Per-step") {
-        Style::default().fg(LABEL).add_modifier(Modifier::BOLD)
-    } else if s.starts_with("  ") {
-        Style::default().fg(MUTED)
-    } else if s.contains("Enter / Esc") {
-        Style::default().fg(MUTED)
+        Style::default().fg(pal.label).add_modifier(Modifier::BOLD)
+    } else if s.starts_with("  ") || s.contains("Enter / Esc") {
+        Style::default().fg(pal.muted)
     } else {
-        Style::default().fg(TITLE)
+        Style::default().fg(pal.title)
     };
     Line::from(Span::styled(s.to_string(), style))
 }
@@ -237,6 +219,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
         last_sys_refresh: Instant::now()
             .checked_sub(SYS_REFRESH_INTERVAL)
             .unwrap_or_else(Instant::now),
+        theme_slot: 0,
     };
 
     if let Some(path) = opts.run_toml.clone() {
@@ -397,9 +380,14 @@ struct App {
     max_parallel: usize,
     sys: System,
     last_sys_refresh: Instant,
+    theme_slot: usize,
 }
 
 impl App {
+    fn pal(&self) -> TuiColors {
+        TuiColors::resolve(self.theme_slot)
+    }
+
     fn refresh_sys_if_due(&mut self) {
         if self.last_sys_refresh.elapsed() >= SYS_REFRESH_INTERVAL {
             self.sys.refresh_cpu_all();
@@ -409,29 +397,30 @@ impl App {
     }
 
     fn sys_resource_spans(&self) -> Vec<Span<'static>> {
+        let p = self.pal();
         let cpu_pct = self.sys.global_cpu_usage();
         let used_mem = self.sys.used_memory();
         let total_mem = self.sys.total_memory().max(1);
         let mem_pct = (used_mem as f64 / total_mem as f64) * 100.0;
         vec![
-            Span::styled("CPU ", Style::default().fg(LABEL)),
+            Span::styled("CPU ", Style::default().fg(p.label)),
             Span::styled(
                 format!("{cpu_pct:5.1}%"),
-                Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.sky).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  MEM ", Style::default().fg(LABEL)),
+            Span::styled("  MEM ", Style::default().fg(p.label)),
             Span::styled(
                 format!("{mem_pct:5.1}%"),
-                Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.sky).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  RAM ", Style::default().fg(LABEL)),
+            Span::styled("  RAM ", Style::default().fg(p.label)),
             Span::styled(
                 format!(
                     "{} / {} MiB",
                     used_mem / 1024 / 1024,
                     total_mem / 1024 / 1024
                 ),
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             ),
         ]
     }
@@ -706,15 +695,16 @@ impl App {
     fn expression_preview_content(&self, inner_width: u16) -> (Line<'static>, Vec<Line<'static>>) {
         use std::collections::HashMap;
 
+        let p = self.pal();
         let Some(rt) = self.runtime.as_ref() else {
             return (
                 Line::from(Span::styled(
                     " Expression preview ",
-                    Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+                    Style::default().fg(p.label).add_modifier(Modifier::BOLD),
                 )),
                 vec![Line::from(Span::styled(
                     "Load a run to preview.",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(p.muted),
                 ))],
             );
         };
@@ -722,12 +712,12 @@ impl App {
         let Some(gene) = self.selected_gene_name() else {
             return (
                 Line::from(vec![
-                    Span::styled(" Mean expr ", Style::default().fg(LABEL)),
-                    Span::styled(format!("· {} · ", title_layer), Style::default().fg(MUTED)),
+                    Span::styled(" Mean expr ", Style::default().fg(p.label)),
+                    Span::styled(format!("· {} · ", title_layer), Style::default().fg(p.muted)),
                 ]),
                 vec![Line::from(Span::styled(
                     "Select a gene (↑/↓) for cluster means (input layer).",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(p.muted),
                 ))],
             );
         };
@@ -735,7 +725,7 @@ impl App {
             return (
                 Line::from(Span::styled(
                     " Expression preview ",
-                    Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+                    Style::default().fg(p.label).add_modifier(Modifier::BOLD),
                 )),
                 vec![Line::from("Gene index error.")],
             );
@@ -745,11 +735,11 @@ impl App {
             return (
                 Line::from(Span::styled(
                     " Expression preview ",
-                    Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+                    Style::default().fg(p.label).add_modifier(Modifier::BOLD),
                 )),
                 vec![Line::from(Span::styled(
                     "Cluster key length mismatch.",
-                    Style::default().fg(C_FAIL),
+                    Style::default().fg(p.c_fail),
                 ))],
             );
         }
@@ -799,26 +789,26 @@ impl App {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{lab:<label_w$}"),
-                    Style::default().fg(TITLE),
+                    Style::default().fg(p.title),
                 ),
                 Span::raw(" "),
-                Span::styled(bar, Style::default().fg(SKY)),
+                Span::styled(bar, Style::default().fg(p.sky)),
                 Span::raw(" "),
-                Span::styled(num, Style::default().fg(MUTED)),
+                Span::styled(num, Style::default().fg(p.muted)),
             ]));
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No rows to aggregate.",
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             )));
         }
         let block_title = Line::from(vec![
-            Span::styled(" Mean ", Style::default().fg(LABEL)),
-            Span::styled(gene.clone(), Style::default().fg(VALUE).add_modifier(Modifier::BOLD)),
+            Span::styled(" Mean ", Style::default().fg(p.label)),
+            Span::styled(gene.clone(), Style::default().fg(p.value).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!(" · {} ", title_layer),
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             ),
         ]);
         (block_title, lines)
@@ -845,16 +835,20 @@ impl App {
 
     fn render(&mut self, f: &mut Frame) {
         self.refresh_sys_if_due();
-        f.render_widget(Block::default().style(Style::default().bg(BG)), f.area());
+        let pal = self.pal();
+        f.render_widget(
+            Block::default().style(Style::default().bg(pal.bg)),
+            f.area(),
+        );
 
         let outer_title = Line::from(vec![
-            Span::styled("✿ ", Style::default().fg(GRAPE)),
+            Span::styled("✿ ", Style::default().fg(pal.grape)),
             Span::styled(
                 "spacetravlr-perturb",
-                Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
             ),
         ]);
-        let block = block_panel(outer_title, TEL_BORD);
+        let block = block_panel(pal, outer_title, pal.tel_bord);
         let inner = block.inner(f.area());
         f.render_widget(block, f.area());
 
@@ -870,42 +864,46 @@ impl App {
                     .split(inner);
                 let mut txt = vec![
                     Line::from(vec![
-                        Span::styled("Path to ", Style::default().fg(TITLE)),
+                        Span::styled("Path to ", Style::default().fg(pal.title)),
                         Span::styled(
                             "spacetravlr_run_repro.toml",
-                            Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled("  ·  Enter load  ·  Esc quit", Style::default().fg(MUTED)),
+                        Span::styled(
+                            "  ·  Enter load  ·  Esc quit",
+                            Style::default().fg(pal.muted),
+                        ),
                     ]),
                     Line::from(""),
                 ];
                 if let Some(e) = err {
                     txt.push(Line::from(vec![Span::styled(
                         format!("Error: {e}"),
-                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
                     )]));
                 }
                 f.render_widget(
                     Paragraph::new(txt)
-                        .style(Style::default().bg(BG))
+                        .style(Style::default().bg(pal.bg))
                         .wrap(Wrap { trim: true }),
                     chunks[0],
                 );
                 f.render_widget(
                     Paragraph::new(Span::styled(
                         path_input.as_str(),
-                        Style::default().fg(TITLE),
+                        Style::default().fg(pal.title),
                     ))
                     .block(block_panel(
-                        Line::from(Span::styled(" Path ", Style::default().fg(LABEL))),
-                        SKY,
+                        pal,
+                        Line::from(Span::styled(" Path ", Style::default().fg(pal.label))),
+                        pal.sky,
                     )),
                     chunks[1],
                 );
                 f.render_widget(
                     Paragraph::new(Line::from(self.sys_resource_spans()))
                         .alignment(Alignment::Center)
-                        .style(Style::default().bg(BG)),
+                        .style(Style::default().bg(pal.bg)),
                     chunks[2],
                 );
             }
@@ -931,28 +929,29 @@ impl App {
                     .split(inner);
 
                 let title = Line::from(vec![
-                    Span::styled("✿ ", Style::default().fg(GRAPE)),
+                    Span::styled("✿ ", Style::default().fg(pal.grape)),
                     Span::styled(
                         "Loading PerturbRuntime",
-                        Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("  ·  {pct}%"),
-                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
                     ),
                 ]);
                 f.render_widget(
                     Paragraph::new(title)
                         .alignment(Alignment::Center)
-                        .style(Style::default().bg(BG)),
+                        .style(Style::default().bg(pal.bg)),
                     chunks[0],
                 );
 
                 let gauge = LineGauge::default()
-                    .style(Style::default().bg(BG))
-                    .filled_style(Style::default().fg(SKY).add_modifier(Modifier::BOLD))
-                    .unfilled_style(Style::default().fg(GAUGE_EMPTY))
-                    .line_set(LOAD_GAUGE_LINES)
+                    .style(Style::default().bg(pal.bg))
+                    .filled_style(Style::default().fg(pal.sky).add_modifier(Modifier::BOLD))
+                    .unfilled_style(Style::default().fg(pal.gauge_empty))
+                    .filled_symbol(LOAD_GAUGE_LINES.horizontal)
+                    .unfilled_symbol(symbols::line::THICK.horizontal)
                     .label(Line::from(""))
                     .ratio(ratio);
                 f.render_widget(gauge, chunks[1]);
@@ -960,7 +959,7 @@ impl App {
                 f.render_widget(
                     Paragraph::new(Line::from(self.sys_resource_spans()))
                         .alignment(Alignment::Center)
-                        .style(Style::default().bg(BG)),
+                        .style(Style::default().bg(pal.bg)),
                     chunks[2],
                 );
 
@@ -968,44 +967,47 @@ impl App {
                     Paragraph::new(Line::from(vec![
                         Span::styled(
                             format!("{spin}  "),
-                            Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(status, Style::default().fg(VALUE)),
+                        Span::styled(status, Style::default().fg(pal.value)),
                     ]))
                     .alignment(Alignment::Center)
                     .wrap(Wrap { trim: true })
-                    .style(Style::default().bg(BG)),
+                    .style(Style::default().bg(pal.bg)),
                     chunks[3],
                 );
                 f.render_widget(
                     Paragraph::new(Span::styled(
                         "Esc — return to path entry (load continues in background; result ignored)",
-                        Style::default().fg(MUTED),
+                        Style::default().fg(pal.muted),
                     ))
                     .alignment(Alignment::Center)
-                    .style(Style::default().bg(BG)),
+                    .style(Style::default().bg(pal.bg)),
                     chunks[4],
                 );
             }
-            Screen::Main => self.render_main(f, inner),
+            Screen::Main => self.render_main(f, inner, pal),
             Screen::EditDesired { buf } => {
                 let mut lines = vec![
                     Line::from(vec![
-                        Span::styled("Desired ", Style::default().fg(TITLE)),
-                        Span::styled("desired_expr", Style::default().fg(VALUE)),
-                        Span::styled("  ·  Enter OK  ·  Esc cancel", Style::default().fg(MUTED)),
+                        Span::styled("Desired ", Style::default().fg(pal.title)),
+                        Span::styled("desired_expr", Style::default().fg(pal.value)),
+                        Span::styled(
+                            "  ·  Enter OK  ·  Esc cancel",
+                            Style::default().fg(pal.muted),
+                        ),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
                         buf.as_str(),
-                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
                     )),
                 ];
                 if !self.status_line.is_empty() {
                     let st = if self.status_is_error {
-                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)
+                        Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(C_WROTE)
+                        Style::default().fg(pal.c_wrote)
                     };
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(self.status_line.as_str(), st)));
@@ -1013,31 +1015,38 @@ impl App {
                 f.render_widget(
                     Paragraph::new(lines)
                         .block(block_panel(
-                            Line::from(Span::styled(" desired_expr ", Style::default().fg(LABEL))),
-                            WORK_BORD,
+                            pal,
+                            Line::from(Span::styled(
+                                " desired_expr ",
+                                Style::default().fg(pal.label),
+                            )),
+                            pal.work_bord,
                         ))
-                        .style(Style::default().bg(BG)),
+                        .style(Style::default().bg(pal.bg)),
                     inner,
                 );
             }
             Screen::EditNPropagation { buf } => {
                 let mut lines = vec![
                     Line::from(vec![
-                        Span::styled("Integer ", Style::default().fg(TITLE)),
-                        Span::styled("n_propagation", Style::default().fg(VALUE)),
-                        Span::styled("  ·  Enter OK  ·  Esc cancel", Style::default().fg(MUTED)),
+                        Span::styled("Integer ", Style::default().fg(pal.title)),
+                        Span::styled("n_propagation", Style::default().fg(pal.value)),
+                        Span::styled(
+                            "  ·  Enter OK  ·  Esc cancel",
+                            Style::default().fg(pal.muted),
+                        ),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
                         buf.as_str(),
-                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
                     )),
                 ];
                 if !self.status_line.is_empty() {
                     let st = if self.status_is_error {
-                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)
+                        Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(C_WROTE)
+                        Style::default().fg(pal.c_wrote)
                     };
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(self.status_line.as_str(), st)));
@@ -1045,10 +1054,14 @@ impl App {
                 f.render_widget(
                     Paragraph::new(lines)
                         .block(block_panel(
-                            Line::from(Span::styled(" n_propagation ", Style::default().fg(LABEL))),
-                            ROCKET_BORD,
+                            pal,
+                            Line::from(Span::styled(
+                                " n_propagation ",
+                                Style::default().fg(pal.label),
+                            )),
+                            pal.rocket_bord,
                         ))
-                        .style(Style::default().bg(BG)),
+                        .style(Style::default().bg(pal.bg)),
                     inner,
                 );
             }
@@ -1062,33 +1075,33 @@ impl App {
                     .iter()
                     .map(|ct| {
                         let (m, mc) = if picked.contains(ct) {
-                            ("[•]", GRAPE)
+                            ("[•]", pal.grape)
                         } else {
-                            ("[ ]", MUTED)
+                            ("[ ]", pal.muted)
                         };
                         ListItem::new(Line::from(vec![
                             Span::styled(format!("{m} "), Style::default().fg(mc)),
-                            Span::styled("cell_type_int ", Style::default().fg(MUTED)),
-                            Span::styled(format!("{ct}"), Style::default().fg(TITLE)),
+                            Span::styled("cell_type_int ", Style::default().fg(pal.muted)),
+                            Span::styled(format!("{ct}"), Style::default().fg(pal.title)),
                         ]))
                     })
                     .collect();
                 let hint = vec![
                     Line::from(vec![
-                        Span::styled("Cell scope  ", Style::default().fg(LABEL)),
-                        Span::styled("·  ", Style::default().fg(MUTED)),
+                        Span::styled("Cell scope  ", Style::default().fg(pal.label)),
+                        Span::styled("·  ", Style::default().fg(pal.muted)),
                         Span::styled(
                             gene.as_str(),
-                            Style::default().fg(GRAPE).add_modifier(Modifier::BOLD),
+                            Style::default().fg(pal.grape).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             "  ·  Space toggle  ·  Enter save  ·  Esc cancel",
-                            Style::default().fg(MUTED),
+                            Style::default().fg(pal.muted),
                         ),
                     ]),
                     Line::from(vec![Span::styled(
                         "All types on = whole tissue. Subset = only those cell types get the perturbation.",
-                        Style::default().fg(MUTED),
+                        Style::default().fg(pal.muted),
                     )]),
                     Line::from(""),
                 ];
@@ -1097,15 +1110,21 @@ impl App {
                     .constraints([Constraint::Length(4), Constraint::Min(3)])
                     .split(inner);
                 f.render_widget(
-                    Paragraph::new(hint).style(Style::default().bg(BG)),
+                    Paragraph::new(hint).style(Style::default().bg(pal.bg)),
                     chunks[0],
                 );
                 let list = List::new(items)
                     .block(block_panel(
-                        Line::from(Span::styled(" cell types ", Style::default().fg(LABEL))),
-                        ROCKET_BORD,
+                        pal,
+                        Line::from(Span::styled(" cell types ", Style::default().fg(pal.label))),
+                        pal.rocket_bord,
                     ))
-                    .highlight_style(Style::default().bg(SKY).fg(BG).add_modifier(Modifier::BOLD));
+                    .highlight_style(
+                        Style::default()
+                            .bg(pal.sky)
+                            .fg(pal.bg)
+                            .add_modifier(Modifier::BOLD),
+                    );
                 f.render_stateful_widget(list, chunks[1], list_state);
             }
             Screen::PickCsvColumn { list_state } => {
@@ -1124,22 +1143,25 @@ impl App {
                             .map(|v| v.len())
                             .unwrap_or(0);
                         ListItem::new(Line::from(vec![
-                            Span::styled(n.as_str(), Style::default().fg(TITLE)),
+                            Span::styled(n.as_str(), Style::default().fg(pal.title)),
                             Span::styled(
                                 format!("  ({n_cells} cells)"),
-                                Style::default().fg(MUTED),
+                                Style::default().fg(pal.muted),
                             ),
                         ]))
                     })
                     .collect();
                 let hint = vec![
                     Line::from(vec![
-                        Span::styled("Cells CSV column ", Style::default().fg(LABEL)),
-                        Span::styled("  ·  Enter save  ·  Esc cancel", Style::default().fg(MUTED)),
+                        Span::styled("Cells CSV column ", Style::default().fg(pal.label)),
+                        Span::styled(
+                            "  ·  Enter save  ·  Esc cancel",
+                            Style::default().fg(pal.muted),
+                        ),
                     ]),
                     Line::from(vec![Span::styled(
                         "Values must be obs_names; merged with per-gene cell-type scope (intersection).",
-                        Style::default().fg(MUTED),
+                        Style::default().fg(pal.muted),
                     )]),
                     Line::from(""),
                 ];
@@ -1148,40 +1170,46 @@ impl App {
                     .constraints([Constraint::Length(4), Constraint::Min(3)])
                     .split(inner);
                 f.render_widget(
-                    Paragraph::new(hint).style(Style::default().bg(BG)),
+                    Paragraph::new(hint).style(Style::default().bg(pal.bg)),
                     chunks[0],
                 );
                 let list = List::new(items)
                     .block(block_panel(
-                        Line::from(Span::styled(" CSV columns ", Style::default().fg(LABEL))),
-                        ROCKET_BORD,
+                        pal,
+                        Line::from(Span::styled(" CSV columns ", Style::default().fg(pal.label))),
+                        pal.rocket_bord,
                     ))
-                    .highlight_style(Style::default().bg(SKY).fg(BG).add_modifier(Modifier::BOLD));
+                    .highlight_style(
+                        Style::default()
+                            .bg(pal.sky)
+                            .fg(pal.bg)
+                            .add_modifier(Modifier::BOLD),
+                    );
                 f.render_stateful_widget(list, chunks[1], list_state);
             }
         }
     }
 
-    fn render_jobs_strip(&self, f: &mut Frame, area: Rect) {
+    fn render_jobs_strip(&self, f: &mut Frame, area: Rect, pal: TuiColors) {
         let head = Line::from(vec![
-            Span::styled("Parallel jobs ", Style::default().fg(LABEL)),
+            Span::styled("Parallel jobs ", Style::default().fg(pal.label)),
             Span::styled(
                 format!("{} running ", self.active_jobs.len()),
-                Style::default().fg(SKY),
+                Style::default().fg(pal.sky),
             ),
-            Span::styled("· ", Style::default().fg(MUTED)),
+            Span::styled("· ", Style::default().fg(pal.muted)),
             Span::styled(
                 format!("{} queued ", self.job_queue.len()),
-                Style::default().fg(LILAC),
+                Style::default().fg(pal.lilac),
             ),
-            Span::styled("· ", Style::default().fg(MUTED)),
+            Span::styled("· ", Style::default().fg(pal.muted)),
             Span::styled(
                 format!("≤{} at once ", self.max_parallel),
-                Style::default().fg(MUTED),
+                Style::default().fg(pal.muted),
             ),
             Span::styled(
                 "· Ctrl+R queue · Ctrl+X cancel all",
-                Style::default().fg(MUTED),
+                Style::default().fg(pal.muted),
             ),
         ]);
         let mut lines: Vec<Line> = vec![head];
@@ -1196,25 +1224,26 @@ impl App {
                 msg
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("#{} ", j.id), Style::default().fg(GRAPE)),
-                Span::styled(j.label.as_str(), Style::default().fg(TITLE)),
-                Span::styled(format!(" {pct}% "), Style::default().fg(WORK_BORD)),
-                Span::styled(short, Style::default().fg(VALUE)),
+                Span::styled(format!("#{} ", j.id), Style::default().fg(pal.grape)),
+                Span::styled(j.label.as_str(), Style::default().fg(pal.title)),
+                Span::styled(format!(" {pct}% "), Style::default().fg(pal.work_bord)),
+                Span::styled(short, Style::default().fg(pal.value)),
             ]));
         }
         f.render_widget(
             Paragraph::new(lines)
-                .style(Style::default().bg(BG))
+                .style(Style::default().bg(pal.bg))
                 .block(block_panel(
-                    Line::from(Span::styled(" Queue ", Style::default().fg(LABEL))),
-                    WORK_BORD,
+                    pal,
+                    Line::from(Span::styled(" Queue ", Style::default().fg(pal.label))),
+                    pal.work_bord,
                 ))
                 .wrap(Wrap { trim: false }),
             area,
         );
     }
 
-    fn render_last_perturb_panel(&mut self, f: &mut Frame, area: Rect) {
+    fn render_last_perturb_panel(&mut self, f: &mut Frame, area: Rect, pal: TuiColors) {
         let lines = &self.last_perturb_lines;
         let view_h = area.height.saturating_sub(2) as usize;
         let max_scroll = lines.len().saturating_sub(view_h.max(1));
@@ -1223,41 +1252,41 @@ impl App {
         let end = (s + view_h.max(1)).min(lines.len());
         let slice: Vec<Line> = lines[s..end]
             .iter()
-            .map(|x| styled_result_line(x))
+            .map(|x| styled_result_line(pal, x))
             .collect();
         let title_line = if lines.len() > view_h.max(1) {
             Line::from(vec![
                 Span::styled(
                     " Latest run ",
-                    Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("·", Style::default().fg(MUTED)),
-                Span::styled(" Alt+PgUp/Dn ", Style::default().fg(SKY)),
+                Span::styled("·", Style::default().fg(pal.muted)),
+                Span::styled(" Alt+PgUp/Dn ", Style::default().fg(pal.sky)),
                 Span::styled(
                     format!("({}/{}) ", s + 1, lines.len()),
-                    Style::default().fg(LILAC),
+                    Style::default().fg(pal.lilac),
                 ),
-                Span::styled("· Ctrl+L clear ", Style::default().fg(MUTED)),
+                Span::styled("· Ctrl+L clear ", Style::default().fg(pal.muted)),
             ])
         } else {
             Line::from(vec![
                 Span::styled(
                     " Latest run ",
-                    Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("· Ctrl+L clear ", Style::default().fg(MUTED)),
+                Span::styled("· Ctrl+L clear ", Style::default().fg(pal.muted)),
             ])
         };
         f.render_widget(
             Paragraph::new(slice)
-                .style(Style::default().bg(BG))
-                .block(block_panel(title_line, TEL_BORD))
+                .style(Style::default().bg(pal.bg))
+                .block(block_panel(pal, title_line, pal.tel_bord))
                 .wrap(Wrap { trim: false }),
             area,
         );
     }
 
-    fn render_main(&mut self, f: &mut Frame, area: Rect) {
+    fn render_main(&mut self, f: &mut Frame, area: Rect, pal: TuiColors) {
         let has_summary = !self.last_perturb_lines.is_empty();
         let show_jobs = !self.active_jobs.is_empty() || !self.job_queue.is_empty();
         let summary_h = if has_summary {
@@ -1306,10 +1335,10 @@ impl App {
             height: status_h,
         };
         if has_summary {
-            self.render_last_perturb_panel(f, summary_rect);
+            self.render_last_perturb_panel(f, summary_rect, pal);
         }
         if show_jobs {
-            self.render_jobs_strip(f, jobs_rect);
+            self.render_jobs_strip(f, jobs_rect, pal);
         }
 
         let Some(rt) = self.runtime.as_ref() else {
@@ -1324,11 +1353,11 @@ impl App {
                     Line::from(""),
                     Line::from(Span::styled(
                         "Internal error: PerturbRuntime missing on Main screen. Press Ctrl+Q to quit.",
-                        Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
                     )),
                 ])
                 .alignment(Alignment::Center)
-                .style(Style::default().bg(BG)),
+                .style(Style::default().bg(pal.bg)),
                 fill,
             );
             return;
@@ -1350,13 +1379,13 @@ impl App {
                 .filter_map(|&gi| {
                     rt.gene_names.get(gi).map(|g| {
                         let (mark, mc) = if self.perturb_targets.iter().any(|t| t == g) {
-                            ("[•] ", GRAPE)
+                            ("[•] ", pal.grape)
                         } else {
-                            ("[ ] ", MUTED)
+                            ("[ ] ", pal.muted)
                         };
                         ListItem::new(Line::from(vec![
                             Span::styled(mark, Style::default().fg(mc)),
-                            Span::styled(g.as_str(), Style::default().fg(TITLE)),
+                            Span::styled(g.as_str(), Style::default().fg(pal.title)),
                         ]))
                     })
                 })
@@ -1380,20 +1409,26 @@ impl App {
 
         let list = List::new(list_items)
             .block(block_panel(
+                pal,
                 Line::from(vec![
                     Span::styled(
                         " Genes ",
-                        Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+                        Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(count_note, Style::default().fg(SKY)),
+                    Span::styled(count_note, Style::default().fg(pal.sky)),
                     Span::styled(
                         " · PgUp/PgDn Home/End · Ctrl+J/K · type · Space ",
-                        Style::default().fg(MUTED),
+                        Style::default().fg(pal.muted),
                     ),
                 ]),
-                ROCKET_BORD,
+                pal.rocket_bord,
             ))
-            .highlight_style(Style::default().bg(SKY).fg(BG).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .bg(pal.sky)
+                    .fg(pal.bg)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         f.render_stateful_widget(list, chunks[0], &mut self.list_state);
 
@@ -1416,27 +1451,28 @@ impl App {
             (None, _) => String::new(),
         };
 
+        let theme_label = TuiColors::theme_label(self.theme_slot);
         let hdr = vec![
             Line::from(vec![
-                Span::styled("Run ", Style::default().fg(LABEL)),
-                Span::styled("· ", Style::default().fg(MUTED)),
+                Span::styled("Run ", Style::default().fg(pal.label)),
+                Span::styled("· ", Style::default().fg(pal.muted)),
                 Span::styled(
                     rt.run_toml_path.display().to_string(),
-                    Style::default().fg(VALUE),
+                    Style::default().fg(pal.value),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Cells × genes ", Style::default().fg(LABEL)),
-                Span::styled("· ", Style::default().fg(MUTED)),
+                Span::styled("Cells × genes ", Style::default().fg(pal.label)),
+                Span::styled("· ", Style::default().fg(pal.muted)),
                 Span::styled(
                     format!("{} × {}", rt.obs_names.len(), rt.gene_names.len()),
-                    Style::default().fg(SKY),
+                    Style::default().fg(pal.sky),
                 ),
             ]),
             Line::from(self.sys_resource_spans()),
             Line::from(vec![
-                Span::styled("Targets ", Style::default().fg(LABEL)),
-                Span::styled("· ", Style::default().fg(MUTED)),
+                Span::styled("Targets ", Style::default().fg(pal.label)),
+                Span::styled("· ", Style::default().fg(pal.muted)),
                 Span::styled(
                     if self.perturb_targets.is_empty() {
                         "— (none)".to_string()
@@ -1444,27 +1480,27 @@ impl App {
                         self.perturb_targets.join(", ")
                     },
                     Style::default().fg(if self.perturb_targets.is_empty() {
-                        MUTED
+                        pal.muted
                     } else {
-                        LILAC
+                        pal.lilac
                     }),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Row scope ", Style::default().fg(LABEL)),
-                Span::styled("· ", Style::default().fg(MUTED)),
+                Span::styled("Row scope ", Style::default().fg(pal.label)),
+                Span::styled("· ", Style::default().fg(pal.muted)),
                 Span::styled(
                     if scope_hint.is_empty() {
                         "—".into()
                     } else {
                         scope_hint
                     },
-                    Style::default().fg(GRAPE),
+                    Style::default().fg(pal.grape),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("CSV cells ", Style::default().fg(LABEL)),
-                Span::styled("· ", Style::default().fg(MUTED)),
+                Span::styled("CSV cells ", Style::default().fg(pal.label)),
+                Span::styled("· ", Style::default().fg(pal.muted)),
                 Span::styled(
                     if csv_hint.is_empty() {
                         "—".into()
@@ -1472,84 +1508,96 @@ impl App {
                         csv_hint
                     },
                     Style::default().fg(if self.cells_csv_data.is_some() {
-                        SKY
+                        pal.sky
                     } else {
-                        MUTED
+                        pal.muted
                     }),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("desired_expr ", Style::default().fg(LABEL)),
+                Span::styled("desired_expr ", Style::default().fg(pal.label)),
                 Span::styled(
                     format!("{}", self.desired_expr),
-                    Style::default().fg(VALUE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.value).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("   n_prop ", Style::default().fg(LABEL)),
+                Span::styled("   n_prop ", Style::default().fg(pal.label)),
                 Span::styled(
                     format!("{}", self.n_propagation),
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Verbose ", Style::default().fg(LABEL)),
+                Span::styled("Theme ", Style::default().fg(pal.label)),
+                Span::styled(
+                    format!("{theme_label} · "),
+                    Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("t cycle", Style::default().fg(pal.muted)),
+            ]),
+            Line::from(vec![
+                Span::styled("Verbose ", Style::default().fg(pal.label)),
                 Span::styled(
                     if self.pending_verbose { "on" } else { "off" },
                     Style::default()
-                        .fg(if self.pending_verbose { C_WROTE } else { MUTED })
+                        .fg(if self.pending_verbose {
+                            pal.c_wrote
+                        } else {
+                            pal.muted
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" (Ctrl+V)", Style::default().fg(MUTED)),
+                Span::styled(" (Ctrl+V)", Style::default().fg(pal.muted)),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
                     "Ctrl+R",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" queue  ", Style::default().fg(MUTED)),
+                Span::styled(" queue  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+T",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" scope  ", Style::default().fg(MUTED)),
+                Span::styled(" scope  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+O",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" csv  ", Style::default().fg(MUTED)),
+                Span::styled(" csv  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+E",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" d.expr  ", Style::default().fg(MUTED)),
+                Span::styled(" d.expr  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+P",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" n  ", Style::default().fg(MUTED)),
+                Span::styled(" n  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+X",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" halt q  ", Style::default().fg(MUTED)),
-                Span::styled("Esc", Style::default().fg(SKY).add_modifier(Modifier::BOLD)),
-                Span::styled(" clr  ", Style::default().fg(MUTED)),
+                Span::styled(" halt q  ", Style::default().fg(pal.muted)),
+                Span::styled("Esc", Style::default().fg(pal.sky).add_modifier(Modifier::BOLD)),
+                Span::styled(" clr  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+Q",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" quit  ", Style::default().fg(MUTED)),
+                Span::styled(" quit  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+L",
-                    Style::default().fg(SKY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" clr run log", Style::default().fg(MUTED)),
+                Span::styled(" clr run log", Style::default().fg(pal.muted)),
             ]),
         ];
 
         let filter_title = Line::from(vec![
-            Span::styled(" Filter ", Style::default().fg(LABEL)),
-            Span::styled("· type to narrow", Style::default().fg(MUTED)),
+            Span::styled(" Filter ", Style::default().fg(pal.label)),
+            Span::styled("· type to narrow", Style::default().fg(pal.muted)),
         ]);
         let right = Layout::default()
             .direction(Direction::Vertical)
@@ -1560,38 +1608,41 @@ impl App {
             ])
             .split(chunks[1]);
 
-        f.render_widget(Paragraph::new(hdr).style(Style::default().bg(BG)), right[0]);
+        f.render_widget(
+            Paragraph::new(hdr).style(Style::default().bg(pal.bg)),
+            right[0],
+        );
         f.render_widget(
             Paragraph::new(Span::styled(
                 self.gene_filter.as_str(),
-                Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
             ))
-            .block(block_panel(filter_title, OUTER_BORD)),
+            .block(block_panel(pal, filter_title, pal.outer_bord)),
             right[1],
         );
         let (preview_title, preview_lines) = self.expression_preview_content(right[2].width);
         f.render_widget(
-            Paragraph::new(preview_lines).block(block_panel(preview_title, WORK_BORD)),
+            Paragraph::new(preview_lines).block(block_panel(pal, preview_title, pal.work_bord)),
             right[2],
         );
 
         let st_style = if self.status_is_error {
-            Style::default().fg(C_FAIL).add_modifier(Modifier::BOLD)
+            Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(C_WROTE)
+            Style::default().fg(pal.c_wrote)
         };
         let status_txt = if self.status_line.is_empty() {
             Line::from(vec![
-                Span::styled("✿ ", Style::default().fg(GRAPE)),
-                Span::styled("Joint export ", Style::default().fg(LABEL)),
-                Span::styled("· auto after run · ", Style::default().fg(MUTED)),
-                Span::styled("summary above · Ctrl+L clear", Style::default().fg(SKY)),
+                Span::styled("✿ ", Style::default().fg(pal.grape)),
+                Span::styled("Joint export ", Style::default().fg(pal.label)),
+                Span::styled("· auto after run · ", Style::default().fg(pal.muted)),
+                Span::styled("summary above · Ctrl+L clear", Style::default().fg(pal.sky)),
             ])
         } else {
             Line::from(vec![Span::styled(self.status_line.as_str(), st_style)])
         };
         f.render_widget(
-            Paragraph::new(status_txt).style(Style::default().bg(BG)),
+            Paragraph::new(status_txt).style(Style::default().bg(pal.bg)),
             status_area,
         );
     }
@@ -1788,6 +1839,14 @@ impl App {
                     return Ok(None);
                 }
                 Screen::Main => {
+                    if matches!(key.code, KeyCode::Char('t' | 'T'))
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
+                        self.theme_slot = TuiColors::advance_slot(self.theme_slot);
+                        return Ok(None);
+                    }
                     if key.modifiers.contains(KeyModifiers::ALT)
                         && !self.last_perturb_lines.is_empty()
                     {

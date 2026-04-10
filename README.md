@@ -22,8 +22,8 @@ This installs **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewe
 
 ```bash
 cargo install space_trav_lr_rust --locked
-# Full CLI set + opt-in GitHub self-update (same features as binary releases):
-cargo install space_trav_lr_rust --locked --features "spatial-viewer,self-update"
+# Same binaries as GitHub release tarballs (add spatial_viewer):
+cargo install space_trav_lr_rust --locked --features spatial-viewer
 ```
 
 The **crate name** is `space_trav_lr_rust`; installed **binaries** stay `spacetravlr`, `spacetravlr-perturb`, and optionally `spatial_viewer`.
