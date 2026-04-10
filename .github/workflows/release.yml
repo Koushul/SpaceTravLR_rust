@@ -85,7 +85,7 @@ jobs:
           set -euo pipefail
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config libvulkan-dev vulkan-tools
+            ca-certificates cmake curl git build-essential pkg-config libvulkan-dev vulkan-tools zlib1g-dev
 
       - uses: actions/checkout@v4
 
