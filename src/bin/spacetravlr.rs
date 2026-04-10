@@ -957,9 +957,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     if cli.plot_h5ad {
-        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(
+        let color_by = spacetravlr::adata_terminal_scatter::resolve_plot_h5ad_color_column(
             Path::new(&path),
             cfg.data.cluster_annot.as_str(),
+        )?;
+        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(
+            Path::new(&path),
+            color_by.as_str(),
         );
     }
 

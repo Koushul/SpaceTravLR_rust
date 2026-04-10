@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # SpaceTravLR CLI installer — keep tarball names in sync with src/self_update.rs
 # (GITHUB_REPO, tarball_name, LINUX_GNU_*, prebuilt_tarball_target).
-# curl -fsSL …/scripts/install.sh -o install-spacetravlr.sh && sh install-spacetravlr.sh && rm -f install-spacetravlr.sh
+# After binaries: downloads human_network.parquet + mouse_network.parquet into INSTALL_DIR/data/
+# from raw.githubusercontent.com (release tag, then main). curl -fsSL …/install.sh | sh
 set -e
 
 REPO="${SPACETRAVLR_GITHUB_REPO:-Koushul/SpaceTravLR_rust}"
@@ -261,13 +262,13 @@ install_release() {
     TAR="$(tarball_basename)"
     DOWNLOAD_URL="${BASE}${TAR}"
 
-    progress_line 45 "Downloading ${TAR}"
+    progress_line 42 "Downloading release ${TAR}"
     TEMP_DIR="$(mktemp -d)"
     trap 'rm -rf "$TEMP_DIR"' EXIT INT HUP
     ARCHIVE="${TEMP_DIR}/${TAR}"
 
     download_url_to "$DOWNLOAD_URL" "$ARCHIVE" || error "Failed to download binary archive"
-    progress_line 65 "Archive downloaded"
+    progress_line 62 "Release archive downloaded"
 
     if [ "${INSTALL_VERIFY_CHECKSUM:-1}" != "0" ]; then
         SUMS_URL="${BASE}SHA256SUMS"
@@ -286,13 +287,13 @@ install_release() {
         if [ "$_expect" != "$_got" ]; then
             error "Checksum mismatch (expected $_expect, got $_got)"
         fi
-        progress_line 78 "Checksum OK"
+        progress_line 75 "Checksum verified"
     fi
 
-    progress_line 85 "Extracting"
+    progress_line 82 "Extracting archive"
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
 
-    progress_line 92 "Installing to ${INSTALL_DIR}"
+    progress_line 88 "Installing binaries to ${INSTALL_DIR}"
     mkdir -p "$INSTALL_DIR"
     for b in $BINARY_NAMES; do
         if [ ! -f "${TEMP_DIR}/${b}" ]; then
@@ -304,6 +305,52 @@ install_release() {
 
     rm -rf "$TEMP_DIR"
     trap - EXIT INT HUP
+    progress_line 90 "Binaries installed"
+}
+
+# GRN parquet files for training (same search path as spacetravlr: install_dir/data/).
+install_grn_data() {
+    if [ "${INSTALL_SKIP_GRN_DATA:-0}" = "1" ]; then
+        progress_line 95 "Skipping GRN parquet download (INSTALL_SKIP_GRN_DATA=1)"
+        [ "$QUIET" -eq 0 ] && info "  Skipping human_network.parquet / mouse_network.parquet (set SPACETRAVLR_DATA_DIR or copy data/ yourself)"
+        progress_line 100 "Complete"
+        return 0
+    fi
+
+    DATA_DIR="${INSTALL_DIR}/data"
+    mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
+
+    progress_line 92 "Downloading GRN parquet (human_network, mouse_network) from GitHub…"
+    _failed=0
+    for f in human_network.parquet mouse_network.parquet; do
+        _dest="${DATA_DIR}/${f}"
+        if [ -f "$_dest" ]; then
+            _sz=$(wc -c < "$_dest" 2>/dev/null | tr -d '[:space:]' || echo 0)
+            if [ "${INSTALL_REFRESH_GRN_DATA:-0}" != "1" ] && [ "${_sz:-0}" -gt 100000 ] 2>/dev/null; then
+                continue
+            fi
+        fi
+        _ok=0
+        for ref in "$VERSION" main; do
+            _url="https://raw.githubusercontent.com/${REPO}/${ref}/data/${f}"
+            if curl -fsSL "$_url" -o "${_dest}.part" 2>/dev/null; then
+                mv "${_dest}.part" "$_dest"
+                _ok=1
+                break
+            fi
+            rm -f "${_dest}.part"
+        done
+        if [ "$_ok" != "1" ]; then
+            warn "Could not download ${f} from GitHub (tried tag ${VERSION} and main). Copy into ${DATA_DIR}/ manually or set SPACETRAVLR_DATA_DIR."
+            _failed=1
+        fi
+    done
+
+    if [ "$_failed" -eq 0 ]; then
+        progress_line 97 "GRN data ready at ${DATA_DIR} (spacetravlr finds this next to the binary)"
+    else
+        progress_line 97 "Install finished (GRN files incomplete — see warning above)"
+    fi
     progress_line 100 "Complete"
 }
 
@@ -347,6 +394,8 @@ dry_run() {
     progress_line 100 "Dry run"
     printf '  REPO=%s\n  VERSION=%s\n  TARGET=%s\n  TAR=%s\n  INSTALL_DIR=%s\n' \
         "$REPO" "$VERSION" "$TARGET" "$(tarball_basename)" "$INSTALL_DIR"
+    printf '  GRN data → %s/data/ (human_network.parquet, mouse_network.parquet from GitHub raw, tag then main)\n' \
+        "$INSTALL_DIR"
     info "Unset INSTALL_DRY_RUN to install."
 }
 
@@ -405,6 +454,8 @@ show_help() {
     _row "INSTALL_DRY_RUN=1" "Print plan only; no download or install"
     _row "INSTALL_TEST_VERSION=v..." "Pin release tag (e.g. tests)"
     _row "INSTALL_VERIFY_CHECKSUM=0" "Skip SHA256 verification (unsafe)"
+    _row "INSTALL_SKIP_GRN_DATA=1" "Skip downloading human_network.parquet / mouse_network.parquet"
+    _row "INSTALL_REFRESH_GRN_DATA=1" "Re-download GRN parquet even if already present"
     _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat (Linux x86_64; overrides glibc probe)"
     _row "SPACETRAVLR_INSTALL_COLOR=1" "Enable ANSI colors (default off; use with --color)"
     _row "NO_COLOR" "Set (any value) to disable colors per no-color.org"
@@ -442,6 +493,7 @@ main() {
     fi
 
     install_release
+    install_grn_data
     echo ""
     add_install_dir_to_path
     echo ""

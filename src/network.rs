@@ -17,8 +17,9 @@ fn try_file_path(path: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
     if path.is_file() { Some(path) } else { None }
 }
 
-/// Resolve `{species}_network.parquet` using config override, env, build-time manifest, exe-relative
-/// paths, and cwd ancestors (so training works when the process cwd is not the repo root).
+/// Resolve `{species}_network.parquet` using config override, env, exe-relative paths, and cwd
+/// ancestors. Prebuilt binaries do **not** embed a repo path; ship or download `data/*.parquet`
+/// and set `SPACETRAVLR_DATA_DIR` / `[grn].network_data_dir` (see error text when missing).
 pub fn resolve_species_network_parquet(
     species: &str,
     config_network_data_dir: Option<&str>,
@@ -44,13 +45,6 @@ pub fn resolve_species_network_parquet(
             if let Some(p) = try_file_path(candidate, &mut tried) {
                 return Ok(p);
             }
-        }
-    }
-
-    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-        let candidate = Path::new(manifest).join("data").join(&filename);
-        if let Some(p) = try_file_path(candidate, &mut tried) {
-            return Ok(p);
         }
     }
 
@@ -82,7 +76,9 @@ pub fn resolve_species_network_parquet(
     }
 
     anyhow::bail!(
-        "Could not find GRN network file {:?} for species {:?}. Set [{}], add [grn].network_data_dir in spaceship_config.toml, or run from a directory that contains data/ with that file. Tried:\n  {}",
+        "Could not find GRN network file {:?} for species {:?}. \
+Prebuilt binaries do not bundle these files; copy `human_network.parquet` / `mouse_network.parquet` from the SpaceTravLR_rust repo `data/` (or clone the repo) and set [{}] to that directory, or set [grn].network_data_dir in spaceship_config.toml. \
+You can also place a `data/` folder next to the executable (or walk up from the current cwd). Tried:\n  {}",
         filename,
         species,
         SPACETRAVLR_DATA_DIR_ENV,

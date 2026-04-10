@@ -308,6 +308,28 @@ pub fn spatial_scatter_lines_for_tui(
     Ok(ansi_braille_to_lines(&canvas))
 }
 
+/// Prefer string cell-type label columns for terminal spatial plots (`cell_type`, …);
+/// otherwise use `fallback` (typically `[data].cluster_annot`, e.g. `cell_type_int`).
+pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Result<String> {
+    let file = H5::open(path)?;
+    let adata = AnnData::<H5>::open(file)?;
+    let obs = adata.read_obs()?;
+    let names = obs.get_column_names();
+    const PREFERRED: &[&str] = &["cell_type", "cell_types", "celltype", "major_cell_type"];
+    for p in PREFERRED {
+        if let Some(n) = names.iter().find(|n| n.as_str() == *p) {
+            return Ok(n.to_string());
+        }
+    }
+    if let Some(n) = names
+        .iter()
+        .find(|n| n.as_str().eq_ignore_ascii_case("cell_type"))
+    {
+        return Ok(n.to_string());
+    }
+    Ok(fallback.to_string())
+}
+
 pub fn print_h5ad_scatter(path: &Path, color_by: &str) -> anyhow::Result<()> {
     use colored::Colorize;
     let term = terminal_size::terminal_size();

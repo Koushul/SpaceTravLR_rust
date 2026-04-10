@@ -1798,10 +1798,26 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Footer ────────────────────────────────────────────────────────
             let theme_hint = TuiColors::theme_label(theme_slot);
-            let credit = Line::from(Span::styled(
-                "© 2026, Koushul & Ally @ jishnulab.org",
-                Style::default().fg(pal.muted).add_modifier(Modifier::DIM),
-            ));
+            let credit = Line::from(vec![
+                Span::styled(
+                    "© ",
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "2026",
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ·  ", Style::default().fg(pal.muted)),
+                Span::styled(
+                    "Koushul & Ally",
+                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  @  ", Style::default().fg(pal.muted)),
+                Span::styled(
+                    "jishnulab.org",
+                    Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
+                ),
+            ]);
             let footer = if st.should_cancel() {
                 Paragraph::new(vec![
                     Line::from(Span::styled(
