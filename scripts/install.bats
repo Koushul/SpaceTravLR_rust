@@ -50,7 +50,8 @@ setup() {
 }
 
 @test "quiet suppresses info lines" {
-    run env UNAME_S=Linux UNAME_M=x86_64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH" --quiet
+    # SPACETRAVLR_LINUX_VARIANT avoids ldd glibc probe (macOS hosts lack GNU ldd when faking Linux).
+    run env UNAME_S=Linux UNAME_M=x86_64 SPACETRAVLR_LINUX_VARIANT=standard INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH" --quiet
     [ "$status" -eq 0 ]
     [[ "$output" != *"[INFO]"* ]]
 }

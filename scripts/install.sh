@@ -20,19 +20,25 @@ DIM='\033[2m'
 NC='\033[0m'
 
 QUIET=0
+USE_COLOR=0
 for arg in "$@"; do
     case "$arg" in
         --quiet) QUIET=1 ;;
+        --color) USE_COLOR=1 ;;
     esac
 done
 
+# Plain text by default so terminal scrollback / log files stay readable (no ANSI).
+# Colors: pass --color or set SPACETRAVLR_INSTALL_COLOR=1. Honors https://no-color.org/
 is_tty() {
-    [ -t 2 ]
+    [ -t 1 ] && [ -t 2 ]
 }
 
 color_ok=0
-if is_tty && [ "$QUIET" -eq 0 ]; then
-    color_ok=1
+if [ "$QUIET" -eq 0 ] && is_tty && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    if [ "$USE_COLOR" -eq 1 ] || [ "${SPACETRAVLR_INSTALL_COLOR:-0}" = "1" ]; then
+        color_ok=1
+    fi
 fi
 
 info() {
@@ -63,6 +69,7 @@ error() {
 }
 
 # $1 = percent 0-100, $2 = label
+# Build the bar as two strings so we emit a few ANSI sequences per line (not one per column).
 progress_line() {
     [ "$QUIET" -eq 1 ] && return 0
     _pct="$1"
@@ -71,41 +78,48 @@ progress_line() {
     _fill=$((_pct * _w / 100))
     if [ "$_fill" -lt 0 ]; then _fill=0; fi
     if [ "$_fill" -gt "$_w" ]; then _fill="$_w"; fi
-    if [ "$color_ok" -eq 1 ]; then
-        printf '  %s[%s' "$DIM" "$NC"
-    else
-        printf '  ['
-    fi
     _i=0
+    _filled=""
+    while [ "$_i" -lt "$_fill" ]; do
+        _filled="${_filled}="
+        _i=$((_i + 1))
+    done
+    _i=$_fill
+    _empty=""
     while [ "$_i" -lt "$_w" ]; do
-        if [ "$_i" -lt "$_fill" ]; then
-            if [ "$color_ok" -eq 1 ]; then printf '%s=%s' "$CYAN" "$NC"; else printf '='; fi
-        else
-            if [ "$color_ok" -eq 1 ]; then printf '%s.%s' "$DIM" "$NC"; else printf '.'; fi
-        fi
+        _empty="${_empty}."
         _i=$((_i + 1))
     done
     if [ "$color_ok" -eq 1 ]; then
+        printf '  %s[%s' "$DIM" "$NC"
+        printf '%s%s%s' "$CYAN" "$_filled" "$NC"
+        if [ -n "$_empty" ]; then
+            printf '%s%s' "$DIM" "$_empty"
+        fi
         printf '%s]%s %3d%%  %s\n' "$DIM" "$NC" "$_pct" "$_label"
     else
-        printf '] %3d%%  %s\n' "$_pct" "$_label"
+        printf '  [%s%s] %3d%%  %s\n' "$_filled" "$_empty" "$_pct" "$_label"
     fi
 }
 
 show_banner() {
     [ "$QUIET" -eq 1 ] && return 0
     if [ "$color_ok" -eq 1 ]; then
-        printf '%s\n' "${BLUE}${BOLD}"
+        printf '%s%s' "$CYAN" "$BOLD"
     fi
-    printf '%s\n' '  ___  ___  ___ ___ ___  _   _   _'
-    printf '%s\n' ' / __|/ _ \| _ \ _ \_ _|| |_| | | |'
-    printf '%s\n' ' \__ \ (_) |  _/  _/| | | | |_| |_|'
-    printf '%s\n' ' |___/\___/|_| |_| |___|_|___|___(_)'
-    printf '%s\n' '              \>'
-    printf '%s\n' '               \>>'
-    printf '%s\n' '                \|   SpaceTravLR'
+    cat << 'EOF'
+
+ ____                             _____                      _      ____
+/ ___|  _ __    __ _   ___   ___ |_   _| _ __   __ _ __   __| |    |  _ \
+\___ \ | '_ \  / _` | / __| / _ \  | |  | '__| / _` |\ \ / /| |    | |_) |
+ ___) || |_) || (_| || (__ |  __/  | |  | |   | (_| | \ V / | |___ |  _ <
+|____/ | .__/  \__,_| \___| \___|  |_|  |_|    \__,_|  \_/  |_____||_| \_\
+       |_|
+EOF
     if [ "$color_ok" -eq 1 ]; then
-        printf '%s\n' "${NC}"
+        printf '%s%s  Spatial Transcriptomics Ligand-Receptor Analysis%s\n' "$NC" "$DIM" "$NC"
+    else
+        printf '  Spatial Transcriptomics Ligand-Receptor Analysis\n'
     fi
 }
 
@@ -340,10 +354,10 @@ dry_run() {
     info "Unset INSTALL_DRY_RUN to install."
 }
 
-# Two-column help; colors when stdout is a tty (piping disables them).
+# Two-column help; colors only when color_ok (opt-in).
 show_help() {
     _c=0
-    [ -t 1 ] && _c=1
+    [ "$color_ok" -eq 1 ] && _c=1
 
     _section() {
         if [ "$_c" -eq 1 ]; then
@@ -371,13 +385,14 @@ show_help() {
 
     _section "Usage"
     if [ "$_c" -eq 1 ]; then
-        printf '    %s%s%s\n' "$GREEN" "install.sh [--quiet]" "$NC"
+        printf '    %s%s%s\n' "$GREEN" "install.sh [--quiet] [--color]" "$NC"
     else
-        printf '    install.sh [--quiet]\n'
+        printf '    install.sh [--quiet] [--color]\n'
     fi
 
     _section "Options"
     _row "--quiet" "Suppress progress and status output"
+    _row "--color" "ANSI colors (also SPACETRAVLR_INSTALL_COLOR=1); default is plain text"
     _row "-h, --help" "Show this help and exit"
 
     _section "Environment"
@@ -395,6 +410,8 @@ show_help() {
     _row "INSTALL_TEST_VERSION=v..." "Pin release tag (e.g. tests)"
     _row "INSTALL_VERIFY_CHECKSUM=0" "Skip SHA256 verification (unsafe)"
     _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat (Linux x86_64; overrides glibc probe)"
+    _row "SPACETRAVLR_INSTALL_COLOR=1" "Enable ANSI colors (default off; use with --color)"
+    _row "NO_COLOR" "Set (any value) to disable colors per no-color.org"
     _row "UNAME_S / UNAME_M" "Override platform detection (tests)"
     printf '\n'
 }
