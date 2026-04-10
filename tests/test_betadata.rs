@@ -1,5 +1,5 @@
 use ndarray::{Array2, array};
-use space_trav_lr_rust::betadata::{
+use spacetravlr::betadata::{
     BetaFrame, Betabase, GeneMatrix, betadata_feather_per_cell_column, betadata_pair_lr_parallel,
     write_betadata_feather,
 };
@@ -19,17 +19,17 @@ fn resolve_betadata_key_column_uses_cell_type_int_with_cell_type_annot() {
     ])
     .unwrap();
     assert_eq!(
-        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&df, "cell_type"),
+        spacetravlr::betadata::resolve_betadata_cluster_key_column(&df, "cell_type"),
         "cell_type_int"
     );
     assert_eq!(
-        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&df, "leiden"),
+        spacetravlr::betadata::resolve_betadata_cluster_key_column(&df, "leiden"),
         "leiden"
     );
     let df_no_int =
         DataFrame::new(vec![Series::new("cell_type".into(), &["A", "B"]).into()]).unwrap();
     assert_eq!(
-        space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(&df_no_int, "cell_type"),
+        spacetravlr::betadata::resolve_betadata_cluster_key_column(&df_no_int, "cell_type"),
         "cell_type"
     );
 }

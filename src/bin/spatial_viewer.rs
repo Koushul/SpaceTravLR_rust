@@ -20,36 +20,36 @@ use clap::Parser;
 use ndarray::{Array2, Axis};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use space_trav_lr_rust::adata_query::{
+use spacetravlr::adata_query::{
     cell_expression_map, cell_type_encoding, clusters_as_u32_le_bytes,
     expression_matrix_genes_subset, expression_profiles_for_cells, f32_vec_to_le_bytes,
     gene_expression_f32, genes_with_prefix, obs_names, open_adata, spatial_obsm_key_used,
     spatial_xy, spatial_xy_f32_interleaved, try_umap_xy, u16_vec_to_le_bytes, var_names,
 };
-use space_trav_lr_rust::betadata::{
+use spacetravlr::betadata::{
     BetadataCollectAggregate, BetadataUiProgress, CollectedInteraction, GeneMatrix, PairLrBetaRow,
     TopBetaCoefficient, betadata_collect_interactions_parallel,
     betadata_feather_modulator_beta_means_for_cells, betadata_feather_per_cell_column,
     betadata_feather_plottable_columns, betadata_feather_row_id_column,
     betadata_feather_top_coefficients_for_selection, betadata_pair_lr_parallel,
 };
-use space_trav_lr_rust::betadata_view::{betadata_feather_path, list_betadata_target_genes};
-use space_trav_lr_rust::config::{SpaceshipConfig, expand_user_path, normalize_ui_path};
-use space_trav_lr_rust::foyer_perturb_cache::{
+use spacetravlr::betadata_view::{betadata_feather_path, list_betadata_target_genes};
+use spacetravlr::config::{SpaceshipConfig, expand_user_path, normalize_ui_path};
+use spacetravlr::foyer_perturb_cache::{
     self, FoyerCacheLimits, FoyerPerturbCaches, PerturbCacheKey, UmapGridBlob,
 };
-use space_trav_lr_rust::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
-use space_trav_lr_rust::network::{GeneNetwork, infer_species};
-use space_trav_lr_rust::perturb::{
+use spacetravlr::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use spacetravlr::network::{GeneNetwork, infer_species};
+use spacetravlr::perturb::{
     PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, compute_splash_all_progress,
     perturb_with_targets,
 };
-use space_trav_lr_rust::perturb_batch::{
+use spacetravlr::perturb_batch::{
     effective_parallelism, expand_prepared_jobs, load_batch_file,
     resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
 };
-use space_trav_lr_rust::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
-use space_trav_lr_rust::transition_umap::{
+use spacetravlr::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
+use spacetravlr::transition_umap::{
     SignatureUmapParams, TransitionGrid, TransitionUmapParams, compute_signature_umap_grid,
     compute_umap_transition_grid, signature_sum_per_cell,
 };
@@ -612,7 +612,7 @@ struct NeighborContextJson {
 struct CellContextResponse {
     focus_gene: String,
     cell_index: usize,
-    modulators: space_trav_lr_rust::network::Modulators,
+    modulators: spacetravlr::network::Modulators,
     neighbors: Vec<NeighborContextJson>,
     sender_regulator_exprs: Vec<GeneExprEntry>,
     sender_ligand_exprs: Vec<GeneExprEntry>,
@@ -1453,12 +1453,12 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
     }
     let obs_df = adata.read_obs()?;
     let clusters = Arc::new(
-        space_trav_lr_rust::adata_query::clusters_from_obs_dataframe(
+        spacetravlr::adata_query::clusters_from_obs_dataframe(
             &obs_df,
             &inputs.cluster_annot,
         )?,
     );
-    let betadata_key_col = space_trav_lr_rust::betadata::resolve_betadata_cluster_key_column(
+    let betadata_key_col = spacetravlr::betadata::resolve_betadata_cluster_key_column(
         &obs_df,
         &inputs.cluster_annot,
     );
@@ -1470,7 +1470,7 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         );
     }
     let betadata_cluster_keys = Arc::new(
-        space_trav_lr_rust::betadata::betadata_cluster_keys_from_obs_dataframe(
+        spacetravlr::betadata::betadata_cluster_keys_from_obs_dataframe(
             &obs_df,
             betadata_key_col.as_str(),
         )?,
@@ -3546,7 +3546,7 @@ async fn api_perturb_export_feather(
         )
         .map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
-        space_trav_lr_rust::betadata::write_betadata_feather_to_writer(
+        spacetravlr::betadata::write_betadata_feather_to_writer(
             &mut buf,
             "CellID",
             &obs_names,

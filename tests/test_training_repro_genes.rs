@@ -1,6 +1,6 @@
 //! Join-style loading of `spacetravlr_run_repro.toml` with `[training] genes` / `max_genes`.
 
-use space_trav_lr_rust::config::{
+use spacetravlr::config::{
     SpaceshipConfig, filter_training_var_names, resolve_training_target_genes,
 };
 use std::fs;

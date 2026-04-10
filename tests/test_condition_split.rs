@@ -1,4 +1,4 @@
-use space_trav_lr_rust::condition_split::{
+use spacetravlr::condition_split::{
     find_condition_dir_matching_label, resolve_condition_dir_names, sanitize_condition_value,
 };
 use std::fs;

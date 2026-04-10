@@ -6,22 +6,22 @@ use compute_backend::{
     select_compute_backend,
 };
 use serde_json::Value;
-use space_trav_lr_rust::condition_split::{prepare_condition_splits, scan_condition_status};
-use space_trav_lr_rust::config::{
+use spacetravlr::condition_split::{prepare_condition_splits, scan_condition_status};
+use spacetravlr::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
     default_output_dir_for_adata_path, expand_user_path,
 };
-use space_trav_lr_rust::grn_extra;
+use spacetravlr::grn_extra;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_demo::{prepare_demo_hud, run_demo_training};
-use space_trav_lr_rust::training_hud::RunConfigSummary;
+use spacetravlr::training_demo::{prepare_demo_hud, run_demo_training};
+use spacetravlr::training_hud::RunConfigSummary;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_hud::TrainingHudState;
+use spacetravlr::training_hud::TrainingHudState;
 #[cfg(feature = "tui")]
-use space_trav_lr_rust::training_tui::{
+use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
 };
-use space_trav_lr_rust::{RunSummaryParams, write_run_summary_html};
+use spacetravlr::{RunSummaryParams, write_run_summary_html};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "tui")]
@@ -800,7 +800,7 @@ fn main() -> anyhow::Result<()> {
 
     if cli.update {
         #[cfg(feature = "self-update")]
-        return space_trav_lr_rust::self_update::run(cli.update_version.as_deref());
+        return spacetravlr::self_update::run(cli.update_version.as_deref());
         #[cfg(not(feature = "self-update"))]
         anyhow::bail!(
             "This binary was built without the `self-update` feature. Upgrade with:\n\
@@ -848,7 +848,7 @@ fn main() -> anyhow::Result<()> {
     if join_training
         && condition_column.is_none()
         && Path::new(&cfg.execution.output_dir)
-            .join(space_trav_lr_rust::condition_split::CONDITION_RUNS_SUBDIR)
+            .join(spacetravlr::condition_split::CONDITION_RUNS_SUBDIR)
             .is_dir()
     {
         eprintln!(

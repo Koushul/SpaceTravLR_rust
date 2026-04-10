@@ -17,7 +17,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use space_trav_lr_rust::lasso::group_lasso::{GroupLasso, GroupLassoParams, ScaleReg};
+//! use spacetravlr::lasso::group_lasso::{GroupLasso, GroupLassoParams, ScaleReg};
 //! use ndarray::Array2;
 //!
 //! let X: Array2<f64> = Array2::zeros((100, 10));

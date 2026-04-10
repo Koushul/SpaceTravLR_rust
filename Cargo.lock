@@ -6866,7 +6866,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f58d7b0190c7f12df7e8be6b79767a0836059159811b869d5ab55721fe14d0"
 
 [[package]]
-name = "space_trav_lr_rust"
+name = "spacetravlr"
 version = "1.3.0"
 dependencies = [
  "anndata",

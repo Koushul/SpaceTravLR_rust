@@ -87,16 +87,16 @@ There are **no** official Windows `.exe` artifacts in this repo today. Use **WSL
 If the crate is [published on crates.io](https://rust-cli.github.io/book/tutorial/packaging.html#quickest-cargo-publish), install with Cargo (compiles locally; Rust ≥ **1.86**):
 
 ```bash
-cargo install space_trav_lr_rust --locked
+cargo install spacetravlr --locked
 ```
 
 Default **`cargo install`** includes the training/perturb TUIs and **`self-update`** (so **`spacetravlr --update`** works). Add **`spatial_viewer`** to match release tarballs:
 
 ```bash
-cargo install space_trav_lr_rust --locked --features spatial-viewer
+cargo install spacetravlr --locked --features spatial-viewer
 ```
 
-The package name is **`space_trav_lr_rust`**; binaries are **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** when **`spatial-viewer`** is enabled.
+The package name is **`spacetravlr`**; binaries are **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** when **`spatial-viewer`** is enabled.
 
 ## Install from source (developers)
 

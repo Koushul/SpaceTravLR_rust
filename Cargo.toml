@@ -1,12 +1,12 @@
 [package]
-name = "space_trav_lr_rust"
+name = "spacetravlr"
 version = "1.3.0"
 edition = "2024"
 description = "Spatial gene regulatory network inference and in-silico perturbation (Rust port of SpaceTravLR)"
 readme = "README.md"
 repository = "https://github.com/Koushul/SpaceTravLR_rust"
 homepage = "https://github.com/Koushul/SpaceTravLR_rust"
-documentation = "https://docs.rs/space_trav_lr_rust"
+documentation = "https://docs.rs/spacetravlr"
 license = "MIT"
 keywords = ["spatial", "transcriptomics", "grn", "single-cell", "machine-learning"]
 categories = ["science", "command-line-utilities"]
@@ -75,7 +75,7 @@ name = "spacetravlr-perturb"
 path = "src/bin/spacetravlr_perturb.rs"
 
 [[bin]]
-name = "space_trav_lr_rust"
+name = "spacetravlr-dev"
 path = "src/main.rs"
 required-features = ["dev-main"]
 

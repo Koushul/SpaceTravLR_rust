@@ -6,7 +6,7 @@ use burn_autodiff::Autodiff;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
+use spacetravlr::spatial_estimator::SpatialCellularProgramsEstimator;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {

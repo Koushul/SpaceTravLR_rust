@@ -21,12 +21,12 @@ This installs **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewe
 **From crates.io ([Rust CLI packaging / `cargo publish`](https://rust-cli.github.io/book/tutorial/packaging.html#quickest-cargo-publish)):** after the crate is published, Rust users can install from the registry (compiles on your machine; ensure `~/.cargo/bin` is on `PATH`):
 
 ```bash
-cargo install space_trav_lr_rust --locked
+cargo install spacetravlr --locked
 # Same binaries as GitHub release tarballs (add spatial_viewer):
-cargo install space_trav_lr_rust --locked --features spatial-viewer
+cargo install spacetravlr --locked --features spatial-viewer
 ```
 
-The **crate name** is `space_trav_lr_rust`; installed **binaries** stay `spacetravlr`, `spacetravlr-perturb`, and optionally `spatial_viewer`.
+The **crate name** is `spacetravlr`; installed **binaries** stay `spacetravlr`, `spacetravlr-perturb`, and optionally `spatial_viewer`.
 
 ---
 
@@ -96,7 +96,7 @@ spacetravlr --help
 
 
 
-`cargo install --path .` installs **`spacetravlr`** and **`spacetravlr-perturb`** by default. To also install **`spatial_viewer`**, use **`--features spatial-viewer`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin space_trav_lr_rust`.
+`cargo install --path .` installs **`spacetravlr`** and **`spacetravlr-perturb`** by default. To also install **`spatial_viewer`**, use **`--features spatial-viewer`**. The legacy **`src/main.rs`** scratch binary is **not** installed; to run it from a clone: `cargo run --features dev-main --bin spacetravlr-dev`.
 
 ### Build without installing
 
@@ -269,16 +269,16 @@ In your crate’s `Cargo.toml`:
 
 ```toml
 [dependencies]
-space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git" }
+spacetravlr = { git = "https://github.com/Koushul/SpaceTravLR_rust.git" }
 ```
 
 To depend on the library **without** the optional TUI stack (smaller dependency graph for library-only use):
 
 ```toml
-space_trav_lr_rust = { git = "https://github.com/Koushul/SpaceTravLR_rust.git", default-features = false }
+spacetravlr = { git = "https://github.com/Koushul/SpaceTravLR_rust.git", default-features = false }
 ```
 
-Then `use space_trav_lr_rust::...` as in this repository’s `src/lib.rs` exports.
+Then `use spacetravlr::...` as in this repository’s `src/lib.rs` exports.
 
 ## What SpaceTravLR does
 

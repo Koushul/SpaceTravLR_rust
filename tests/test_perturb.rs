@@ -1,9 +1,9 @@
 use ndarray::{Array2, Zip, array};
 use rayon::prelude::*;
-use space_trav_lr_rust::betadata::{BetaFrame, Betabase, GeneMatrix};
-use space_trav_lr_rust::ligand::calculate_weighted_ligands;
-use space_trav_lr_rust::perturb::{PerturbConfig, PerturbTarget, perturb, perturb_with_targets};
-use space_trav_lr_rust::perturb_mode::compute_initial_weighted_ligands;
+use spacetravlr::betadata::{BetaFrame, Betabase, GeneMatrix};
+use spacetravlr::ligand::calculate_weighted_ligands;
+use spacetravlr::perturb::{PerturbConfig, PerturbTarget, perturb, perturb_with_targets};
+use spacetravlr::perturb_mode::compute_initial_weighted_ligands;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -486,7 +486,7 @@ fn test_perturb_with_target_cell_subset() {
         ..Default::default()
     };
     let target_cells = vec![0usize, 1usize, 2usize];
-    let mut no_timings: Option<space_trav_lr_rust::perturb::PerturbTimings> = None;
+    let mut no_timings: Option<spacetravlr::perturb::PerturbTimings> = None;
     let result = perturb_with_targets(
         &bb,
         &gene_mtx,
@@ -592,7 +592,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         n_propagation: 1,
         ..Default::default()
     };
-    let mut no_timings: Option<space_trav_lr_rust::perturb::PerturbTimings> = None;
+    let mut no_timings: Option<spacetravlr::perturb::PerturbTimings> = None;
     let result = perturb_with_targets(
         &bb,
         &gene_mtx,
@@ -686,7 +686,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
 
 #[test]
 fn test_transition_ko_vs_oe_opposite_direction() {
-    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -735,8 +735,8 @@ fn test_transition_ko_vs_oe_opposite_direction() {
         .column(1)
         .to_owned()
         .insert_axis(ndarray::Axis(1));
-    let rw_oe = space_trav_lr_rust::betadata::GeneMatrix::new(
-        space_trav_lr_rust::ligand::calculate_weighted_ligands(&xy, &lig_vals, 50.0, 1.0)
+    let rw_oe = spacetravlr::betadata::GeneMatrix::new(
+        spacetravlr::ligand::calculate_weighted_ligands(&xy, &lig_vals, 50.0, 1.0)
             .mapv(|v| v as f32),
         vec!["B".to_string()],
     );
@@ -793,7 +793,7 @@ fn test_transition_ko_vs_oe_opposite_direction() {
 
 #[test]
 fn test_transition_magnitude_monotonic_with_perturbation_strength() {
-    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -864,7 +864,7 @@ fn test_transition_magnitude_monotonic_with_perturbation_strength() {
 
 #[test]
 fn test_transition_no_perturbation_no_vectors() {
-    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 16;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -919,7 +919,7 @@ fn test_transition_no_perturbation_no_vectors() {
 
 #[test]
 fn test_transition_isolated_gene_no_field() {
-    use space_trav_lr_rust::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 16;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -1575,7 +1575,7 @@ fn test_pin_nonneg_parity_and_perf() {
 
 #[test]
 fn perturb_obs_subset_file_maps_to_sorted_unique_indices() {
-    use space_trav_lr_rust::perturb_mode::perturb_obs_indices_from_file;
+    use spacetravlr::perturb_mode::perturb_obs_indices_from_file;
     let obs: Vec<String> = (0..5).map(|i| format!("cell-{i}")).collect();
     let path = std::env::temp_dir().join(format!(
         "spacetravlr_obs_subset_{}.txt",

@@ -2,11 +2,11 @@ use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
 use burn_autodiff::Autodiff;
-use space_trav_lr_rust::config::{
+use spacetravlr::config::{
     CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,
 };
-use space_trav_lr_rust::spatial_estimator::SpatialCellularProgramsEstimator;
-use space_trav_lr_rust::training_hud::TrainingHud;
+use spacetravlr::spatial_estimator::SpatialCellularProgramsEstimator;
+use spacetravlr::training_hud::TrainingHud;
 use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]

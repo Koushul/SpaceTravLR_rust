@@ -1,15 +1,15 @@
 use clap::Parser;
-use space_trav_lr_rust::betadata::write_betadata_feather;
-use space_trav_lr_rust::perturb::{PerturbTarget, PerturbTimings, perturb_with_targets};
-use space_trav_lr_rust::perturb_batch::{
+use spacetravlr::betadata::write_betadata_feather;
+use spacetravlr::perturb::{PerturbTarget, PerturbTimings, perturb_with_targets};
+use spacetravlr::perturb_batch::{
     PerturbBatchFile, batch_from_perturb_table, effective_parallelism, expand_prepared_jobs,
     load_batch_file, load_perturb_cli_toml, resolve_effective_run_toml,
     resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
 };
-use space_trav_lr_rust::config::expand_user_path;
-use space_trav_lr_rust::perturb_mode::{PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix};
+use spacetravlr::config::expand_user_path;
+use spacetravlr::perturb_mode::{PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix};
 #[cfg(not(feature = "tui"))]
-use space_trav_lr_rust::perturb_mode::{interactive_run_toml_prompt, run_interactive};
+use spacetravlr::perturb_mode::{interactive_run_toml_prompt, run_interactive};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -230,7 +230,7 @@ fn main() -> anyhow::Result<()> {
     if cli.export.is_none() {
         #[cfg(feature = "tui")]
         {
-            let opts = space_trav_lr_rust::perturb_tui::PerturbTuiOptions {
+            let opts = spacetravlr::perturb_tui::PerturbTuiOptions {
                 run_toml: run_for_interactive.clone(),
                 default_desired_expr: cli.desired_expr,
                 n_propagation_initial: cli.n_propagation,
@@ -247,7 +247,7 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            return rt.block_on(space_trav_lr_rust::perturb_tui::run(opts));
+            return rt.block_on(spacetravlr::perturb_tui::run(opts));
         }
         #[cfg(not(feature = "tui"))]
         {
