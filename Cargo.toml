@@ -1,6 +1,6 @@
 [package]
 name = "spacetravlr"
-version = "1.4.0"
+version = "1.4.2"
 edition = "2024"
 description = "Spatial gene regulatory network inference and in-silico perturbation (Rust port of SpaceTravLR)"
 readme = "README.md"
