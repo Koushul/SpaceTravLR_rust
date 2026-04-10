@@ -117,9 +117,9 @@ show_banner() {
        |_|
 EOF
     if [ "$color_ok" -eq 1 ]; then
-        printf '%s%s  Spatial Transcriptomics Ligand-Receptor Analysis%s\n' "$NC" "$DIM" "$NC"
+        printf '%s%s  Characterizing Functional Microniches%s\n' "$NC" "$DIM" "$NC"
     else
-        printf '  Spatial Transcriptomics Ligand-Receptor Analysis\n'
+        printf '  Characterizing Functional Microniches\n'
     fi
 }
 
@@ -253,11 +253,7 @@ checksum_for_tarball() {
 download_url_to() {
     _url="$1"
     _path="$2"
-    if is_tty && [ "${CI:-}" != "true" ] && [ "$QUIET" -eq 0 ]; then
-        curl -fSL --progress-bar "$_url" -o "$_path"
-    else
-        curl -fsSL "$_url" -o "$_path"
-    fi
+    curl -fsSL "$_url" -o "$_path"
 }
 
 install_release() {
