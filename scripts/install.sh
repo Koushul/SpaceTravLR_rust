@@ -104,7 +104,12 @@ get_target() {
             esac
             ;;
         darwin)
-            TARGET="${ARCH}-apple-darwin"
+            case "$ARCH" in
+                aarch64) TARGET="aarch64-apple-darwin" ;;
+                x86_64)
+                    error "No prebuilt Intel Mac binaries. Build from source: cargo install spacetravlr --locked --features spatial-viewer"
+                    ;;
+            esac
             ;;
     esac
     if [ -z "$TARGET" ]; then

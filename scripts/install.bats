@@ -37,6 +37,12 @@ setup() {
     [[ "$output" == *"aarch64-apple-darwin"* ]]
 }
 
+@test "darwin x86_64 has no prebuilt installer path" {
+    run env UNAME_S=Darwin UNAME_M=x86_64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"prebuilt Intel Mac"* ]]
+}
+
 @test "unsupported architecture fails" {
     run env UNAME_S=Linux UNAME_M=mips INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH"
     [ "$status" -eq 1 ]

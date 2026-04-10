@@ -25,7 +25,6 @@ pub fn tarball_name(version_tag: &str, target: &str) -> String {
 pub fn host_target_triple() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some(LINUX_GNU_TRIPLE),
-        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
         _ => None,
     }
@@ -94,6 +93,12 @@ pub fn prebuilt_tarball_target() -> Result<String> {
         ("linux", "aarch64") => {
             bail!(
                 "no prebuilt Linux ARM64 binaries; build from source (e.g. cargo install spacetravlr --locked --features spatial-viewer)"
+            )
+        }
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin".to_string()),
+        ("macos", "x86_64") => {
+            bail!(
+                "no prebuilt Intel Mac binaries; use an Apple Silicon Mac or build from source (cargo install spacetravlr --locked --features spatial-viewer)"
             )
         }
         _ => host_target_triple()

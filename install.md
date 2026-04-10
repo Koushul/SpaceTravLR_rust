@@ -4,14 +4,15 @@ Prebuilt binaries include **`spacetravlr`** (training), **`spacetravlr-perturb`*
 
 ## Supported platforms (prebuilt)
 
-GitHub Releases publish tarballs for:
+GitHub Releases publish **three** tarballs:
 
 | Asset name (after `spacetravlr-<tag>-`) | Typical systems |
 |----------------------------------------|-----------------|
 | `x86_64-unknown-linux-gnu.tar.gz` | 64-bit Linux (glibc **≥ 2.35**, e.g. Ubuntu 22.04+) |
 | `x86_64-unknown-linux-gnu-glibc2.31.tar.gz` | Older glibc (**≥ ~2.31**, e.g. RHEL 9 / glibc **2.34**) |
-| `x86_64-apple-darwin.tar.gz` | Intel Mac |
 | `aarch64-apple-darwin.tar.gz` | Apple Silicon Mac |
+
+**Intel Mac** (x86_64) has no prebuilt — install [from source](#install-from-source-developers).
 
 On **Linux x86_64**, the **[install script](scripts/install.sh)** runs **`ldd --version`**, picks the **standard** tarball when glibc is **2.35+**, otherwise the **compat** tarball. Override with **`SPACETRAVLR_LINUX_VARIANT=standard`** or **`SPACETRAVLR_LINUX_VARIANT=compat`**.
 
@@ -141,7 +142,7 @@ cargo install --path . --locked --no-default-features --features self-update
 
 | Issue | What to try |
 |-------|-------------|
-| Wrong architecture | Download the tarball matching your triple; on Mac, check Apple Silicon vs Intel. |
+| Wrong architecture | Download the tarball for your OS; prebuilt Mac is **Apple Silicon only** (Intel Mac: build from source). |
 | `spacetravlr: command not found` | Add `$HOME/.local/bin` (or your install dir) to `PATH`. |
 | Unwritable install directory | Choose a user-owned `SPACETRAVLR_INSTALL_DIR`, or fix permissions. |
 | GitHub API rate limit | Rare for install/self-update; retry later or download manually from Releases. |

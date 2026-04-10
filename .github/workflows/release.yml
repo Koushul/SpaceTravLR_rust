@@ -134,16 +134,10 @@ jobs:
             checksum-*.txt
 
   build-macos:
-    name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
+    name: aarch64-apple-darwin
+    runs-on: macos-14
+    env:
+      BUNDLE_ID: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
 
@@ -161,7 +155,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: release-${{ matrix.target }}
+          prefix-key: release-${{ env.BUNDLE_ID }}
 
       - name: Build metadata for spacetravlr --version
         shell: bash
@@ -174,7 +168,7 @@ jobs:
       - name: Package tarball and checksum
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: aarch64-apple-darwin
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
@@ -182,11 +176,11 @@ jobs:
           mkdir -p pack
           cp target/release/spacetravlr target/release/spacetravlr-perturb target/release/spatial_viewer pack/
           tar -czvf "$TAR" -C pack spacetravlr spacetravlr-perturb spatial_viewer
-          shasum -a 256 "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${TARGET}.txt"
+          shasum -a 256 "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${BUNDLE_ID}.txt"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bundle-${{ matrix.target }}
+          name: bundle-${{ env.BUNDLE_ID }}
           path: |
             spacetravlr-*.tar.gz
             checksum-*.txt
