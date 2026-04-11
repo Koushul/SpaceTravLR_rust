@@ -10,5 +10,5 @@ curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 
 Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
 
-![SpaceTravLR training dashboard UI](data/example.png)
+![SpaceTravLR training dashboard UI](data/demo.gif)
 
