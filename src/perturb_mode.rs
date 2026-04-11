@@ -898,7 +898,7 @@ pub fn run_interactive(runtime: PerturbRuntime) -> anyhow::Result<()> {
     println!(
         "Commands: list [N], search <query>, mark <gene> [all|ct1,ct2], scope <gene> <all|ct1,ct2>, unmark <gene>, show, run <value>, quit"
     );
-    println!("Available cell_type_int values: {:?}", all_cell_types);
+    println!("Available cell_type values: {:?}", all_cell_types);
 
     fn parse_cell_type_scope(raw: &str) -> anyhow::Result<Option<HashSet<usize>>> {
         let cleaned = raw.trim();

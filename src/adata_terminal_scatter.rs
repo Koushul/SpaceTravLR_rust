@@ -340,7 +340,7 @@ pub fn spatial_scatter_lines_from_xy_labels(
 }
 
 /// Prefer string cell-type label columns for terminal spatial plots (`cell_type`, …);
-/// otherwise use `fallback` (typically `[data].cluster_annot`, e.g. `cell_type_int`).
+/// otherwise use `fallback` (typically `[data].cluster_annot`, e.g. `cell_type`).
 pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Result<String> {
     let file = H5::open(path)?;
     let adata = AnnData::<H5>::open(file)?;

@@ -1081,7 +1081,7 @@ impl App {
                         };
                         ListItem::new(Line::from(vec![
                             Span::styled(format!("{m} "), Style::default().fg(mc)),
-                            Span::styled("cell_type_int ", Style::default().fg(pal.muted)),
+                            Span::styled("cell_type ", Style::default().fg(pal.muted)),
                             Span::styled(format!("{ct}"), Style::default().fg(pal.title)),
                         ]))
                     })

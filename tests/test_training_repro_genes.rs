@@ -22,7 +22,7 @@ fn from_file_join_repro_with_training_genes() {
 [data]
 adata_path = "/data/dataset.h5ad"
 layer = "X"
-cluster_annot = "cell_type_int"
+cluster_annot = "cell_type"
 
 [training]
 mode = "seed"

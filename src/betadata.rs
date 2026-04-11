@@ -52,30 +52,9 @@ impl GeneMatrix {
     }
 }
 
-fn obs_df_has_column(obs: &DataFrame, name: &str) -> bool {
-    obs.get_column_names().iter().any(|n| n.as_str() == name)
-}
-
-fn is_cell_type_label_column(cluster_annot: &str) -> bool {
-    let t = cluster_annot.trim();
-    t.eq_ignore_ascii_case("cell_type")
-        || t.eq_ignore_ascii_case("cell_types")
-        || t.eq_ignore_ascii_case("celltype")
-        || t.eq_ignore_ascii_case("major_cell_type")
-}
-
-/// Column to use when building feather join keys (see [`betadata_cluster_keys_from_obs_dataframe`]).
-///
-/// Many h5ads store both `cell_type` (labels) and `cell_type_int` (ids that match seed-only
-/// `Cluster` in betadata). If the viewer is configured with a `cell_type*`-style column but
-/// `cell_type_int` exists, we prefer the integer column for betadata only; [`clusters_usize_from_obs_dataframe`]
-/// should still use `cluster_annot` so the UI / filters stay on the user’s chosen grouping.
-pub fn resolve_betadata_cluster_key_column(obs: &DataFrame, cluster_annot: &str) -> String {
-    if obs_df_has_column(obs, "cell_type_int") && is_cell_type_label_column(cluster_annot) {
-        "cell_type_int".to_string()
-    } else {
-        cluster_annot.to_string()
-    }
+/// Column used for feather join keys (same as training `cluster_annot`).
+pub fn resolve_betadata_cluster_key_column(_obs: &DataFrame, cluster_annot: &str) -> String {
+    cluster_annot.to_string()
 }
 
 fn obs_cluster_column_is_numeric_id(dt: &DataType) -> bool {

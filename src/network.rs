@@ -504,6 +504,65 @@ impl GeneNetwork {
         })
     }
 
+    /// Union of LR ligands on edges whose endpoints are both in `var_names`, for dataset-wide caches.
+    /// Applies [`apply_max_ligands_filter`] when `max_ligands` is `Some(k)` with `k > 0`.
+    pub fn dataset_union_lr_ligands(
+        &self,
+        var_names: &[String],
+        max_ligands: Option<usize>,
+        gene_mean_expression: Option<&HashMap<String, f64>>,
+    ) -> Result<Vec<String>> {
+        let var_set: HashSet<&str> = var_names.iter().map(|s| s.as_str()).collect();
+        let lf = self.network_df.clone().lazy();
+        let lr_df = lf
+            .filter(col("edge_type").cast(DataType::String).eq(lit("lr")))
+            .select([col("source"), col("target")])
+            .collect()?;
+
+        let mut ligands = Vec::new();
+        let mut receptors = Vec::new();
+        let mut lr_pairs = Vec::new();
+
+        if let (Ok(l_col), Ok(r_col)) = (
+            lr_df.column("source")?.cast(&DataType::String)?.str(),
+            lr_df.column("target")?.cast(&DataType::String)?.str(),
+        ) {
+            let mut seen_pairs = HashSet::new();
+            for (l, r) in l_col.into_no_null_iter().zip(r_col.into_no_null_iter()) {
+                if !var_set.contains(l) || !var_set.contains(r) {
+                    continue;
+                }
+                let pair = format!("{}${}", l, r);
+                if seen_pairs.insert(pair.clone()) {
+                    ligands.push(l.to_string());
+                    receptors.push(r.to_string());
+                    lr_pairs.push(pair);
+                }
+            }
+        }
+
+        if let Some(k) = max_ligands {
+            if k > 0 && gene_mean_expression.is_none() {
+                anyhow::bail!(
+                    "max_ligands={k} requires per-gene mean expression (from [data].layer); gene_mean_expression is missing"
+                );
+            }
+        }
+        if let (Some(means), Some(k)) = (gene_mean_expression, max_ligands) {
+            if k > 0 {
+                apply_max_ligands_filter(
+                    &mut ligands,
+                    &mut receptors,
+                    &mut lr_pairs,
+                    max_ligands,
+                    means,
+                );
+            }
+        }
+
+        Ok(ligands)
+    }
+
     /// Curated `ligand$receptor` keys for `edge_type == "lr"` (as in betadata column stems).
     pub fn all_lr_pair_keys(&self) -> Result<HashSet<String>> {
         let lr_df = self

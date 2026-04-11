@@ -82,6 +82,8 @@ const ROCKET_MIN_BOTTOM_MARGIN: usize = 1;
 const ROCKET_MIN_STARS: usize = 3;
 const SHEEP_MAX_SIMULTANEOUS: usize = 12;
 const SHEEP_RETAIN: Duration = Duration::from_secs(4);
+/// Falling sheep on the rocket panel (demo). Set `true` to re-enable.
+const SHEEP_DROP_ENABLED: bool = false;
 
 fn rocket_line_centered(spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
     let w: usize = spans.iter().map(Span::width).sum();
@@ -217,15 +219,7 @@ fn rocket_lines(
         ));
     }
 
-    apply_rocket_sheep_overlays(
-        &mut lines,
-        inner_w,
-        top_pad,
-        frame,
-        now,
-        falling_sheep,
-        pal,
-    );
+    apply_rocket_sheep_overlays(&mut lines, inner_w, top_pad, now, falling_sheep, pal);
 
     lines
 }
@@ -234,11 +228,13 @@ fn apply_rocket_sheep_overlays(
     lines: &mut Vec<Line<'static>>,
     inner_w: usize,
     top_pad: usize,
-    frame: usize,
     now: Instant,
     falling_sheep: &[Instant],
     pal: TuiColors,
 ) {
+    if !SHEEP_DROP_ENABLED {
+        return;
+    }
     if falling_sheep.is_empty() || lines.is_empty() {
         return;
     }
@@ -247,8 +243,11 @@ fn apply_rocket_sheep_overlays(
         return;
     }
     let first_row_below_rocket = ROCKET_HEADER_LINES + top_pad + ROCKET_BODY_FIRE_LINES;
+    if first_row_below_rocket >= lines.len() {
+        return;
+    }
 
-    for (si, &started) in falling_sheep.iter().enumerate() {
+    for &started in falling_sheep {
         let age = now.checked_duration_since(started).unwrap_or(Duration::ZERO);
         let t = age.as_secs_f64();
         let fall_rows = ((t * 10.0).powf(1.35)).floor() as usize;
@@ -256,13 +255,10 @@ fn apply_rocket_sheep_overlays(
         if line_idx >= lines.len() {
             continue;
         }
-        let wobble = (((frame + si * 3) / 2) % 3) as i32 - 1;
-        let lane = (si as i32 * 5).rem_euclid(9) - 4;
-        let off = wobble + lane;
         let center = (inner_w / 2) as i32;
         let half = (sheep_w / 2) as i32;
         let max_col = inner_w.saturating_sub(sheep_w) as i32;
-        let col = (center - half + off).clamp(0, max_col) as usize;
+        let col = (center - half).clamp(0, max_col) as usize;
 
         let mut style = Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD);
         if t > 0.9 {
@@ -464,6 +460,115 @@ fn wrap_full_path(path: &str, max_width: usize) -> Vec<String> {
         rest = &rest[split..];
     }
     lines
+}
+
+fn pad_label_to(s: &str, cols: usize) -> String {
+    let w = s.width();
+    if w >= cols {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(cols - w))
+    }
+}
+
+fn break_long_word(s: &str, max_width: usize) -> Vec<String> {
+    if max_width < 1 {
+        return vec![s.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if cur_w + cw > max_width && !cur.is_empty() {
+            out.push(cur);
+            cur = String::new();
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        vec![String::new()]
+    } else {
+        out
+    }
+}
+
+/// Word-wrap to display width `max_width` (spaces; long tokens hard-broken).
+fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
+    if max_width < 2 {
+        return vec![text.to_string()];
+    }
+    if text.width() <= max_width {
+        return vec![text.to_string()];
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for w in words {
+        let ww = w.width();
+        if ww > max_width {
+            if !cur.is_empty() {
+                lines.push(cur);
+                cur = String::new();
+                cur_w = 0;
+            }
+            lines.extend(break_long_word(w, max_width));
+            continue;
+        }
+        let add = if cur.is_empty() { ww } else { ww + 1 };
+        if cur_w + add > max_width && !cur.is_empty() {
+            lines.push(cur);
+            cur = String::new();
+            cur_w = 0;
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+            cur_w += 1;
+        }
+        cur.push_str(w);
+        cur_w += ww;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn append_cfg_wrapped_lines(
+    out: &mut Vec<Line<'static>>,
+    label_w: usize,
+    val_wrap: usize,
+    label: &'static str,
+    text: &str,
+    label_style: Style,
+    value_color: Color,
+) {
+    for (i, chunk) in wrap_words(text, val_wrap).into_iter().enumerate() {
+        if i == 0 {
+            out.push(Line::from(vec![
+                Span::styled(pad_label_to(label, label_w), label_style),
+                Span::styled(chunk, Style::default().fg(value_color)),
+            ]));
+        } else {
+            out.push(Line::from(vec![
+                Span::raw(" ".repeat(label_w)),
+                Span::styled(chunk, Style::default().fg(value_color)),
+            ]));
+        }
+    }
 }
 
 fn format_bytes(b: u64) -> String {
@@ -1081,9 +1186,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 prev_genes_rounds_heartbeat = rounds;
             }
             if rounds > prev_genes_rounds_sheep {
-                for _ in 0..(rounds - prev_genes_rounds_sheep) {
-                    if falling_sheep.len() < SHEEP_MAX_SIMULTANEOUS {
-                        falling_sheep.push(now_heartbeat);
+                if SHEEP_DROP_ENABLED {
+                    for _ in 0..(rounds - prev_genes_rounds_sheep) {
+                        if falling_sheep.len() < SHEEP_MAX_SIMULTANEOUS {
+                            falling_sheep.push(now_heartbeat);
+                        }
                     }
                 }
                 prev_genes_rounds_sheep = rounds;
@@ -1247,131 +1354,167 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let sep = || Span::styled("  ·  ", Style::default().fg(pal.muted));
             let lbl = |s: &'static str| Span::styled(s, Style::default().fg(pal.label));
             let val = |s: String, c: Color| Span::styled(s, Style::default().fg(c));
-            let sub = || Span::raw("  ");
 
             let rc = &st.run_config;
             let cfg_panel = top_panels[0];
             let cfg_inner_w = cfg_panel.width.saturating_sub(2) as usize;
-            let cfg_col_w = (cfg_inner_w / 2).max(8);
-            let cfg_src_max = cfg_col_w.saturating_sub(10);
-            let cfg_disp = truncate_label(&rc.config_source, cfg_src_max);
+            const CFG_LABEL_W: usize = 11;
+            let cfg_val_wrap = cfg_inner_w.saturating_sub(CFG_LABEL_W).max(6);
+            let cfg_lbl_style = Style::default().fg(pal.label);
+            let mut cfg_lines: Vec<Line<'static>> = Vec::new();
 
-            let cfg_left_lines = vec![
-                Line::from(vec![lbl("CONFIG  "), val(cfg_disp, pal.muted)]),
-                Line::from(vec![lbl("BACKEND  "), val(rc.compute_backend.clone(), pal.value)]),
-                Line::from(vec![lbl("DEVICE  "), val(rc.compute_device_detail.clone(), pal.value)]),
-                Line::from(vec![lbl("LAYER  "), val(rc.layer.clone(), pal.sky)]),
-                Line::from(vec![lbl("OBS  "), val(rc.cluster_annot.clone(), pal.lilac)]),
-                Line::from(vec![
-                    lbl("SPATIAL  "),
-                    val(format!("r={:.1}", rc.spatial_radius), pal.value),
-                ]),
-                Line::from(vec![
-                    sub(),
-                    val(format!("dim={}", rc.spatial_dim), pal.value),
-                ]),
-                Line::from(vec![
-                    sub(),
-                    val(format!("contact={:.1}", rc.contact_distance), pal.value),
-                ]),
-                Line::from(vec![
-                    sub(),
-                    val(
-                        format!("wl_scale={:.3}", rc.weighted_ligand_scale_factor),
-                        pal.value,
-                    ),
-                ]),
-            ];
-            let cfg_right_lines = vec![
-                Line::from(vec![
-                    lbl("LASSO  "),
-                    val(format!("l1={}", fmt_lasso_float(rc.l1_reg)), pal.grape),
-                ]),
-                Line::from(vec![
-                    sub(),
-                    val(format!("group={}", fmt_lasso_float(rc.group_reg)), pal.grape),
-                ]),
-                Line::from(vec![sub(), val(format!("n_iter={}", rc.n_iter), pal.grape)]),
-                Line::from(vec![sub(), val(format!("tol={:.1e}", rc.tol), pal.grape)]),
-                Line::from(vec![
-                    lbl("TRAIN  "),
-                    val(format!("lr={}", fmt_lasso_float(rc.learning_rate)), pal.sky),
-                ]),
-                Line::from(vec![sub(), val(format!("score≥{:.2}", rc.score_threshold), pal.sky)]),
-                Line::from(vec![
-                    sub(),
-                    val(format!("epochs={}/gene", rc.epochs_per_gene), pal.sky),
-                ]),
-                Line::from(vec![
-                    lbl("GRN  "),
-                    val(format!("tf_lig≥{:.2}", rc.tf_ligand_cutoff), pal.muted),
-                ]),
-                Line::from(vec![
-                    sub(),
-                    val(format!("max_ligands={}", rc.max_ligands), pal.muted),
-                ]),
-                Line::from(vec![lbl("GENES  "), val(
-                    truncate_label(&rc.gene_selection, cfg_col_w.saturating_sub(10)),
-                    pal.title,
-                )]),
-                Line::from(vec![
-                    lbl("TRAIN_MODE  "),
-                    val(
-                        truncate_label(&rc.cnn_training_mode, cfg_col_w.saturating_sub(14)),
-                        pal.sky,
-                    ),
-                ]),
-                Line::from(vec![
-                    lbl("CONDITION  "),
-                    val(
-                        truncate_label(
-                            &(if rc.condition_split == "—" {
-                                "—  ·  single run".to_string()
-                            } else {
-                                format!("obs.{}  ·  multi-run (--condition)", rc.condition_split)
-                            }),
-                            cfg_col_w.saturating_sub(14),
-                        ),
-                        if rc.condition_split == "—" {
-                            pal.muted
-                        } else {
-                            pal.lilac
-                        },
-                    ),
-                ]),
-            ];
-            let cfg_rows = cfg_left_lines.len().max(cfg_right_lines.len());
-            let mut cfg_left_padded = cfg_left_lines;
-            let mut cfg_right_padded = cfg_right_lines;
-            while cfg_left_padded.len() < cfg_rows {
-                cfg_left_padded.push(Line::default());
-            }
-            while cfg_right_padded.len() < cfg_rows {
-                cfg_right_padded.push(Line::default());
-            }
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "CONFIG",
+                &rc.config_source,
+                cfg_lbl_style,
+                pal.muted,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "RUNTIME",
+                &format!("{}  ·  {}", rc.compute_backend, rc.compute_device_detail),
+                cfg_lbl_style,
+                pal.value,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "LAYER",
+                &rc.layer,
+                cfg_lbl_style,
+                pal.sky,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "OBS",
+                &rc.cluster_annot,
+                cfg_lbl_style,
+                pal.lilac,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "SPATIAL",
+                &format!(
+                    "r={:.1}  ·  dim={}  ·  contact={:.1}  ·  wl={:.3}",
+                    rc.spatial_radius,
+                    rc.spatial_dim,
+                    rc.contact_distance,
+                    rc.weighted_ligand_scale_factor,
+                ),
+                cfg_lbl_style,
+                pal.value,
+            );
+
+            cfg_lines.push(Line::default());
+
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "LASSO",
+                &format!(
+                    "l1={}  ·  group={}  ·  n_iter={}  ·  tol={:.1e}",
+                    fmt_lasso_float(rc.l1_reg),
+                    fmt_lasso_float(rc.group_reg),
+                    rc.n_iter,
+                    rc.tol,
+                ),
+                cfg_lbl_style,
+                pal.grape,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "TRAIN",
+                &format!(
+                    "lr={}  ·  score≥{:.2}  ·  ep/gene={}",
+                    fmt_lasso_float(rc.learning_rate),
+                    rc.score_threshold,
+                    rc.epochs_per_gene,
+                ),
+                cfg_lbl_style,
+                pal.sky,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "GRN",
+                &format!(
+                    "tf_lig≥{:.2}  ·  max_ligands={}",
+                    rc.tf_ligand_cutoff, rc.max_ligands
+                ),
+                cfg_lbl_style,
+                pal.muted,
+            );
+
+            cfg_lines.push(Line::default());
+
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "GENES",
+                &rc.gene_selection,
+                cfg_lbl_style,
+                pal.title,
+            );
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "MODE",
+                &rc.cnn_training_mode,
+                cfg_lbl_style,
+                pal.sky,
+            );
+            let cond_txt = if rc.condition_split == "—" {
+                "—  ·  single run".to_string()
+            } else {
+                format!("obs.{}  ·  multi-run (--condition)", rc.condition_split)
+            };
+            let cond_c = if rc.condition_split == "—" {
+                pal.muted
+            } else {
+                pal.lilac
+            };
+            append_cfg_wrapped_lines(
+                &mut cfg_lines,
+                CFG_LABEL_W,
+                cfg_val_wrap,
+                "COND",
+                &cond_txt,
+                cfg_lbl_style,
+                cond_c,
+            );
 
             let cfg_block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(pal.tel_bord))
                 .title(Span::styled(
-                    " Run configuration ",
+                    " Run config ",
                     Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                 ))
                 .style(bg);
             let cfg_inner = cfg_block.inner(cfg_panel);
-            let cfg_cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(cfg_inner);
 
             f.render_widget(cfg_block, cfg_panel);
             f.render_widget(
-                Paragraph::new(cfg_left_padded).style(bg),
-                cfg_cols[0],
-            );
-            f.render_widget(
-                Paragraph::new(cfg_right_padded).style(bg),
-                cfg_cols[1],
+                Paragraph::new(cfg_lines)
+                    .wrap(Wrap { trim: true })
+                    .style(bg),
+                cfg_inner,
             );
 
             let tel_inner_w = top_panels[1].width.saturating_sub(2) as usize;
@@ -1844,7 +1987,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Footer ────────────────────────────────────────────────────────
             let theme_hint = TuiColors::theme_label(theme_slot);
-            let credit = Line::from(vec![
+            let credit_spans = vec![
                 Span::styled(
                     "© ",
                     Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
@@ -1863,7 +2006,16 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     "jishnulab.org",
                     Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
                 ),
-            ]);
+            ];
+            let footer_bar_w = vchunks[3].width as usize;
+            let credit_w: usize = credit_spans.iter().map(Span::width).sum();
+            let credit_pad = footer_bar_w.saturating_sub(credit_w);
+            let mut credit_line_spans = Vec::with_capacity(1 + credit_spans.len());
+            if credit_pad > 0 {
+                credit_line_spans.push(Span::raw(" ".repeat(credit_pad)));
+            }
+            credit_line_spans.extend(credit_spans);
+            let credit = Line::from(credit_line_spans);
             let footer = if st.should_cancel() {
                 Paragraph::new(vec![
                     Line::from(Span::styled(
@@ -1876,7 +2028,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let mut hint = format!(
                     " q: graceful exit   shift+q: french leave   t: theme ({theme_hint})"
                 );
-                if st.is_demo {
+                if st.is_demo && SHEEP_DROP_ENABLED {
                     hint.push_str("   ·   demo: sheep on each gene finish ");
                 } else {
                     hint.push(' ');

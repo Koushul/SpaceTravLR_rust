@@ -21,7 +21,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: spacetravlr binary compile env (env! in spacetravlr.rs)
+        run: |
+          echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          echo "SPACETRAVLR_TARGET_TRIPLE=$(rustc -vV | awk '/host:/ {print $2}')" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install OpenBLAS (LAPACK dgesdd for PCA)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev
 
       - name: Build
         run: cargo --config 'build.rustc-wrapper=""' build

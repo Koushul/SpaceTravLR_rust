@@ -683,7 +683,7 @@ async function main() {
                       />
                     </label>
                     <label class="splash-net-slider"
-                      >Cooling (α decay ×10⁴) <span id="splashNetForceAlphaDecayVal">210</span>
+                      >Cooling (alpha decay x 1e4) <span id="splashNetForceAlphaDecayVal">210</span>
                       <input
                         type="range"
                         id="splashNetForceAlphaDecay"

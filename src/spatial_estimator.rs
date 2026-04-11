@@ -4,7 +4,7 @@ use crate::cnn_gating::{
 };
 use crate::config::{
     CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, RUN_REPRO_TOML_FILENAME,
-    SpaceshipConfig,
+    SpaceshipConfig, expand_user_path,
 };
 use crate::estimator::{CachedSpatialData, ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
@@ -23,11 +23,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 use ndarray::{Array1, Array2, Array4};
 use ndarray_npy::NpzWriter;
-use polars::prelude::DataFrame;
+use polars::prelude::{DataFrame, NamedFrom, Series};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -73,7 +73,7 @@ pub(crate) fn remove_stale_lock_files_in_dir(dir: &Path, stale_secs: u64) -> usi
     removed
 }
 
-fn compute_gene_mean_expression<AnB: Backend>(
+pub(crate) fn compute_gene_mean_expression<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
     obs_row_subset: Option<&[usize]>,
@@ -177,6 +177,13 @@ pub(crate) fn read_expression_matrix_dense_f64<AnB: Backend>(
 ) -> anyhow::Result<Array2<f64>> {
     let data = expression_array_data_for_slice(adata, layer, slice)?;
     array_data_to_dense_f64(data)
+}
+
+/// Open an `.h5ad` and read all of `X` or a named layer as a dense `f64` matrix (obs × var).
+pub fn read_h5ad_expression_dense_f64(path: &Path, layer: &str) -> anyhow::Result<Array2<f64>> {
+    let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
+    read_expression_matrix_dense_f64(&adata, layer, &slice)
 }
 
 /// When the sliced `X`/layer is canonical CSR in AnnData, returns it without densifying (useful for
@@ -288,16 +295,79 @@ fn validate_training_inputs<AnB: Backend>(
             names
         );
     }
-    let col = obs.column(cluster_annot)?;
-    col.cast(&polars::prelude::DataType::Float64).map_err(|e| {
-        anyhow::anyhow!(
-            "obs column {:?} must be numeric (or castable to float) for cluster ids: {}",
-            cluster_annot,
-            e
-        )
-    })?;
+    let _ = clusters_array1_from_obs_column(&obs, cluster_annot)?;
     ensure_expression_layer_readable(adata, layer)?;
     Ok(obs)
+}
+
+/// Per-cell cluster indices for `cluster_annot`: numeric, categorical codes, or stable indices from strings.
+fn clusters_array1_from_obs_column(
+    obs_df: &DataFrame,
+    cluster_annot: &str,
+) -> anyhow::Result<Array1<usize>> {
+    use polars::prelude::DataType;
+    let col = obs_df.column(cluster_annot)?;
+    let s = col.as_materialized_series();
+    let n = obs_df.height();
+    let v: Vec<usize> = match s.dtype() {
+        DataType::String => {
+            let ca = s
+                .str()
+                .map_err(|e| anyhow::anyhow!("obs column {:?} as string: {}", cluster_annot, e))?;
+            let mut seen = HashSet::<String>::new();
+            for opt in ca.into_iter() {
+                if let Some(x) = opt {
+                    seen.insert(x.to_string());
+                }
+            }
+            let mut uniq: Vec<String> = seen.into_iter().collect();
+            uniq.sort();
+            let map: HashMap<String, usize> =
+                uniq.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
+            ca.into_iter()
+                .map(|o| {
+                    o.and_then(|x| map.get(x).copied())
+                        .unwrap_or(0)
+                })
+                .collect()
+        }
+        DataType::Categorical(_, _) | DataType::Enum(_, _) => {
+            let phys = s.cast(&DataType::UInt32).map_err(|e| {
+                anyhow::anyhow!(
+                    "obs column {:?} (categorical) could not be read as codes: {}",
+                    cluster_annot,
+                    e
+                )
+            })?;
+            let ca = phys.u32().map_err(|e| anyhow::anyhow!("{}", e))?;
+            ca.into_iter()
+                .map(|o| o.unwrap_or(0) as usize)
+                .collect()
+        }
+        _ => {
+            let f_series = s.cast(&DataType::Float64).map_err(|e| {
+                anyhow::anyhow!(
+                    "obs column {:?} must be numeric, string, or categorical for clusters: {}",
+                    cluster_annot,
+                    e
+                )
+            })?;
+            let f = f_series
+                .f64()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            f.into_iter()
+                .map(|o| o.unwrap_or(0.0).round() as usize)
+                .collect()
+        }
+    };
+    anyhow::ensure!(
+        v.len() == n,
+        "cluster column {:?} length {} != n_obs {}",
+        cluster_annot,
+        v.len(),
+        n
+    );
+    Ok(Array1::from_vec(v))
 }
 
 fn resolve_obs_cell_type_label_column(obs_df: &DataFrame) -> Option<String> {
@@ -348,21 +418,18 @@ fn build_cluster_to_cell_type_map(
         Ok(c) => c,
         Err(_) => return Ok(HashMap::new()),
     };
-    let clusters_ser = obs_df
-        .column(cluster_annot)?
-        .as_materialized_series()
-        .cast(&polars::prelude::DataType::Float64)?;
+    let cluster_ids = clusters_array1_from_obs_column(obs_df, cluster_annot)?;
     let cell_ser = cell_col.as_materialized_series();
 
     let mut counts: HashMap<usize, HashMap<String, usize>> = HashMap::new();
-    for (c, ct) in clusters_ser.iter().zip(cell_ser.iter()) {
-        let cluster_v = c.extract::<f64>();
+    for (i, ct) in cell_ser.iter().enumerate() {
+        if i >= cluster_ids.len() {
+            break;
+        }
+        let cid = cluster_ids[i];
         let cell_t = ct.to_string();
-        if let Some(v) = cluster_v {
-            if v.is_finite() && cell_t != "null" && !cell_t.trim().is_empty() {
-                let cid = v as usize;
-                *counts.entry(cid).or_default().entry(cell_t).or_insert(0) += 1;
-            }
+        if cell_t != "null" && !cell_t.trim().is_empty() {
+            *counts.entry(cid).or_default().entry(cell_t).or_insert(0) += 1;
         }
     }
 
@@ -386,7 +453,7 @@ fn detect_spatial_obsm_key<AnB: Backend>(adata: &AnnData<AnB>) -> anyhow::Result
     anyhow::bail!("No spatial coordinates found in obsm for minimal reproducibility export.");
 }
 
-fn dense_to_csr_f64(arr: &Array2<f64>) -> anyhow::Result<CsrMatrix<f64>> {
+pub fn dense_to_csr_f64(arr: &Array2<f64>) -> anyhow::Result<CsrMatrix<f64>> {
     let nrows = arr.nrows();
     let ncols = arr.ncols();
     let mut indptr = Vec::with_capacity(nrows + 1);
@@ -478,13 +545,7 @@ fn export_minimal_repro_adata_with_cache(
         .column("cell_type")
         .map_err(|_| anyhow::anyhow!("obs.cell_type is required for minimal reproducibility file"))?
         .clone();
-    let cell_type_int = obs
-        .column("cell_type_int")
-        .map_err(|_| {
-            anyhow::anyhow!("obs.cell_type_int is required for minimal reproducibility file")
-        })?
-        .clone();
-    let obs_min = DataFrame::new(vec![cell_type, cell_type_int])?;
+    let obs_min = DataFrame::new(vec![cell_type])?;
     dst.set_obs(obs_min)?;
 
     let spatial_key = detect_spatial_obsm_key(src)?;
@@ -568,8 +629,8 @@ fn verify_minimal_repro_adata_loadable(
 ) -> anyhow::Result<()> {
     let adata = AnnData::<H5>::open(H5::open(path)?)?;
     let obs = adata.read_obs()?;
-    if obs.column("cell_type").is_err() || obs.column("cell_type_int").is_err() {
-        anyhow::bail!("Minimal AnnData missing required obs columns.");
+    if obs.column("cell_type").is_err() {
+        anyhow::bail!("Minimal AnnData missing required obs column cell_type.");
     }
     if obs.column(cluster_annot).is_err() {
         anyhow::bail!(
@@ -1094,6 +1155,112 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
     Ok(Some(out_str.to_string()))
 }
 
+const RECEIVED_LIGANDS_UNS_DF: &str = "spacetravlr_received_ligands";
+const RECEIVED_LIGANDS_UNS_META: &str = "spacetravlr_received_ligands_meta";
+const RECEIVED_LIGANDS_LEGACY_OBSM: &str = "spacetravlr_received_ligands";
+
+fn strip_spacetravlr_received_ligand_keys(path: &Path) -> anyhow::Result<()> {
+    let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
+    let _ = adata.obsm().remove(RECEIVED_LIGANDS_LEGACY_OBSM);
+    let _ = adata.uns().remove(RECEIVED_LIGANDS_UNS_DF);
+    let _ = adata.uns().remove(RECEIVED_LIGANDS_UNS_META);
+    adata.close()?;
+    Ok(())
+}
+
+/// Parallel-safe per-gene mean Lasso R² (see [`patch_adata_var_mean_lasso_r2`]).
+#[derive(Clone)]
+pub struct MeanLassoR2Accum {
+    pub gene_to_idx: Arc<HashMap<String, usize>>,
+    pub scores: Arc<Vec<AtomicU64>>,
+}
+
+fn init_mean_lasso_r2_accum(all_var_names: &[String]) -> MeanLassoR2Accum {
+    let mut gene_to_idx = HashMap::new();
+    for (i, s) in all_var_names.iter().enumerate() {
+        gene_to_idx.entry(s.clone()).or_insert(i);
+    }
+    let nan = f64::NAN.to_bits();
+    let scores = Arc::new(
+        (0..all_var_names.len())
+            .map(|_| AtomicU64::new(nan))
+            .collect::<Vec<_>>(),
+    );
+    MeanLassoR2Accum {
+        gene_to_idx: Arc::new(gene_to_idx),
+        scores,
+    }
+}
+
+pub fn patch_adata_var_mean_lasso_r2(
+    path: &Path,
+    accum: &MeanLassoR2Accum,
+) -> anyhow::Result<()> {
+    let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
+    let mut df = adata.read_var()?;
+    let n = accum.scores.len();
+    anyhow::ensure!(
+        df.height() == n,
+        "var rows {} != training n_vars {}",
+        df.height(),
+        n
+    );
+    let mut col: Vec<f64> = Vec::with_capacity(n);
+    for i in 0..n {
+        let bits = accum.scores[i].load(Ordering::Acquire);
+        col.push(f64::from_bits(bits));
+    }
+    let s = Series::new("mean_lasso_r2".into(), col);
+    if df.column("mean_lasso_r2").is_ok() {
+        df = df.drop("mean_lasso_r2")?;
+    }
+    df.with_column(s)?;
+    adata.set_var(df)?;
+    adata.close()?;
+    Ok(())
+}
+
+/// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers.
+/// Drops any persisted `spacetravlr_received_ligands` / `_meta` keys (received ligands are not cached on disk).
+pub fn materialize_canonical_training_adata(
+    adata_path: &mut String,
+    output_dir: &Path,
+    original_input_for_stem: &Path,
+    _cfg: &SpaceshipConfig,
+    _network_data_dir: Option<&str>,
+) -> anyhow::Result<()> {
+    let expanded = expand_user_path(adata_path.trim());
+    let current = PathBuf::from(&expanded);
+    if !current.is_file() {
+        anyhow::bail!("AnnData not found at {}.", current.display());
+    }
+    if !current
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("h5ad"))
+        .unwrap_or(false)
+    {
+        *adata_path = expanded;
+        return Ok(());
+    }
+    let stem = crate::config::canonical_adata_stem(original_input_for_stem);
+    let canonical = crate::scanpy_preprocess::training_processed_h5ad_path(output_dir, &stem);
+    if current != canonical {
+        let _ = std::fs::remove_file(&canonical);
+        if crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
+            std::fs::copy(&current, &canonical)?;
+        } else {
+            crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &canonical, false)?;
+        }
+        *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
+    } else if !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
+        crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &current, false)?;
+    }
+    let path = PathBuf::from(expand_user_path(adata_path.trim()));
+    strip_spacetravlr_received_ligand_keys(&path)?;
+    Ok(())
+}
+
 pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub adata: Arc<AnnData<AnB>>,
     pub target_gene: String,
@@ -1141,6 +1308,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         grn: Arc<crate::network::GeneNetwork>,
         tf_priors: Option<Arc<crate::network::TfPriors>>,
         cluster_to_cell_type: Option<Arc<HashMap<usize, String>>>,
+        cluster_annot: String,
         layer: String,
         ligand_grid_factor: Option<f64>,
         weighted_ligand_scale_factor: f64,
@@ -1149,7 +1317,6 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         extra_modulator_candidates: &[String],
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
-        let cluster_annot = "cell_type_int".to_string();
 
         let var_set: HashSet<String> = adata.var_names().into_vec().into_iter().collect();
 
@@ -1321,6 +1488,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             grn,
             None,
             None,
+            "cell_type".to_string(),
             "imputed_count".to_string(),
             None,
             1.0,
@@ -1370,6 +1538,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         spaceship_config: &SpaceshipConfig,
         config_source_path: Option<PathBuf>,
         join_training: bool,
+        mean_r2_accum_parent: Option<MeanLassoR2Accum>,
         device: &AB::Device,
     ) -> anyhow::Result<()>
     where
@@ -1438,6 +1607,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 );
             }
             let all_var_names = setup_adata.var_names().into_vec();
+            let mean_r2_accum = match mean_r2_accum_parent {
+                Some(a) => a,
+                None => init_mean_lasso_r2_accum(&all_var_names),
+            };
 
             let mut target_genes =
                 crate::config::filter_training_var_names(&all_var_names, gene_filter.as_deref());
@@ -1488,15 +1661,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
             let t_cl = pipeline_step_begin(&hud, "build cluster labels & cell-type map");
             let cell_type_counts = cell_type_label_counts_from_obs(&obs_df);
-            let clusters_ser = obs_df.column(cluster_annot)?;
-            let clusters: Arc<Array1<usize>> = Arc::new(
-                clusters_ser
-                    .as_materialized_series()
-                    .cast(&polars::prelude::DataType::Float64)?
-                    .f64()?
-                    .to_ndarray()?
-                    .mapv(|v| v as usize),
-            );
+            let clusters: Arc<Array1<usize>> = Arc::new(clusters_array1_from_obs_column(
+                &obs_df,
+                cluster_annot,
+            )?);
             let num_clusters = clusters
                 .iter()
                 .copied()
@@ -1563,9 +1731,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             };
             let t_repro = pipeline_step_begin(&hud, repro_label);
             let worker_adata_path: String = if write_minimal_repro_h5ad {
-                if cluster_annot != "cell_type_int" {
+                if cluster_annot != "cell_type" {
                     anyhow::bail!(
-                        "Minimal reproducibility export keeps only obs.cell_type and obs.cell_type_int; set [data].cluster_annot = \"cell_type_int\"."
+                        "Minimal reproducibility export keeps only obs.cell_type; set [data].cluster_annot = \"cell_type\"."
                     );
                 }
                 let out = export_minimal_repro_adata_with_cache(
@@ -1773,6 +1941,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 ),
             );
             let t_workers = pipeline_step_begin(&hud, "per-gene training (workers running)");
+            let cluster_annot_for_workers = cluster_annot.to_string();
             for _worker in 0..n_workers {
                 let work = work.clone();
                 let xy = xy.clone();
@@ -1781,6 +1950,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let global_grn = global_grn.clone();
                 let tf_priors = tf_priors.clone();
                 let cluster_to_cell_type = cluster_to_cell_type.clone();
+                let cluster_annot_w = cluster_annot_for_workers.clone();
                 let hud = hud.clone();
                 let pb = pb_opt.clone();
                 let device = device.clone();
@@ -1804,6 +1974,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let candidates_w = cnn_candidates.clone();
                 let model_export_w = model_export.clone();
                 let collect_top_k = hybrid_collect_top_k;
+                let mean_r2_accum_w = mean_r2_accum.clone();
 
                 let handle = thread::Builder::new()
                     .stack_size(8 * 1024 * 1024)
@@ -1951,6 +2122,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 global_grn.clone(),
                                 tf_priors.clone(),
                                 Some(cluster_to_cell_type.clone()),
+                                cluster_annot_w.clone(),
                                 layer_w.clone(),
                                 ligand_grid_factor,
                                 weighted_ligand_scale_factor,
@@ -2434,6 +2606,20 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             }
                                         }
                                     }
+                                    if wrote && !est.cluster_training_summaries.is_empty() {
+                                        if let Some(&idx) = mean_r2_accum_w.gene_to_idx.get(&gene) {
+                                            let mean_r2: f64 = est
+                                                .cluster_training_summaries
+                                                .iter()
+                                                .map(|s| s.lasso_r2)
+                                                .sum::<f64>()
+                                                / est.cluster_training_summaries.len() as f64;
+                                            mean_r2_accum_w.scores[idx].store(
+                                                mean_r2.to_bits(),
+                                                Ordering::Release,
+                                            );
+                                        }
+                                    }
                                 }
                             }
 
@@ -2536,10 +2722,30 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             spaceship_config,
                             config_source_path.clone(),
                             join_training,
+                            Some(mean_r2_accum.clone()),
                             device,
                         );
                     }
                 }
+            }
+
+            if !join_training && obs_row_subset.is_none() {
+                match patch_adata_var_mean_lasso_r2(Path::new(adata_path), &mean_r2_accum) {
+                    Ok(()) => log_line(
+                        &hud,
+                        "Updated var['mean_lasso_r2'] on training AnnData.".to_string(),
+                    ),
+                    Err(e) => log_line(
+                        &hud,
+                        format!("Could not write var['mean_lasso_r2']: {}", e),
+                    ),
+                }
+            } else if join_training {
+                log_line(
+                    &hud,
+                    "Join mode: skipped var['mean_lasso_r2'] (multi-writer); use a single-host run for that column."
+                        .to_string(),
+                );
             }
 
             if join_training {
@@ -2818,13 +3024,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             .obsm()
             .get_item("spatial")?
             .ok_or_else(|| anyhow::anyhow!("obsm['spatial'] not found"))?;
-        let clusters_ser = obs_df.column(&self.cluster_annot)?;
-        let clusters: Array1<usize> = clusters_ser
-            .as_materialized_series()
-            .cast(&polars::prelude::DataType::Float64)?
-            .f64()?
-            .to_ndarray()?
-            .mapv(|v| v as usize);
+        let clusters: Array1<usize> =
+            clusters_array1_from_obs_column(&obs_df, self.cluster_annot.as_str())?;
         let num_clusters = clusters
             .iter()
             .copied()
@@ -2875,5 +3076,68 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     pub fn get_gene_expression(&self, gene: &str) -> anyhow::Result<Array1<f64>> {
         self.get_multiple_gene_expressions(&[gene.to_string()])
             .map(|data: Array2<f64>| data.column(0).to_owned())
+    }
+}
+
+#[cfg(test)]
+mod mean_lasso_r2_patch_tests {
+    use super::{
+        AnnData, AnnDataOp, ArrayData, Backend, MeanLassoR2Accum, dense_to_csr_f64,
+        patch_adata_var_mean_lasso_r2,
+    };
+    use anndata_hdf5::H5;
+    use ndarray::Array2;
+    use polars::prelude::{DataFrame, NamedFrom, Series};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn patch_var_mean_lasso_r2_column() {
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_var_patch_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("mini.h5ad");
+        let a = AnnData::<H5>::new(&p).unwrap();
+        a.set_obs_names(vec!["c0".into(), "c1".into()].into()).unwrap();
+        a.set_var_names(vec!["G0".into(), "G1".into()].into()).unwrap();
+        let obs = DataFrame::new(vec![Series::new(
+            "cell_type".into(),
+            vec!["x".to_string(), "x".to_string()],
+        )
+        .into()])
+        .unwrap();
+        a.set_obs(obs).unwrap();
+        let var = DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])
+            .unwrap();
+        a.set_var(var).unwrap();
+        let dense = Array2::from_elem((2, 2), 0.5f64);
+        let csr = dense_to_csr_f64(&dense).unwrap();
+        a.set_x(ArrayData::from(csr)).unwrap();
+        a.close().unwrap();
+
+        let mut m: HashMap<String, usize> = HashMap::new();
+        m.insert("G0".into(), 0);
+        m.insert("G1".into(), 1);
+        let scores = Arc::new(vec![
+            AtomicU64::new(0.25f64.to_bits()),
+            AtomicU64::new(f64::NAN.to_bits()),
+        ]);
+        let accum = MeanLassoR2Accum {
+            gene_to_idx: Arc::new(m),
+            scores,
+        };
+        patch_adata_var_mean_lasso_r2(&p, &accum).unwrap();
+
+        let a2 = AnnData::<H5>::open(H5::open(&p).unwrap()).unwrap();
+        let v = a2.read_var().unwrap();
+        let r2 = v.column("mean_lasso_r2").unwrap().f64().unwrap();
+        assert!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
+        assert!(r2.get(1).unwrap().is_nan());
+        a2.close().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -11,6 +11,7 @@ license = "MIT"
 keywords = ["spatial", "transcriptomics", "grn", "single-cell", "machine-learning"]
 categories = ["science", "command-line-utilities"]
 rust-version = "1.86"
+build = "build.rs"
 exclude = [
     ".agent/",
     ".agents/",
@@ -21,6 +22,7 @@ exclude = [
     ".vscode/",
     "results/",
     "data/",
+    "tmp_dir/",
     "web/",
     "genes_human_mouse.csv.xz",
 ]
@@ -84,6 +86,17 @@ name = "spatial_viewer"
 path = "src/bin/spatial_viewer.rs"
 required-features = ["spatial-viewer"]
 
+[[example]]
+name = "mock_h5ad_roundtrip"
+path = "examples/mock_h5ad_roundtrip.rs"
+
+[[example]]
+name = "repack_h5ad_var"
+path = "examples/repack_h5ad_var.rs"
+
+[build-dependencies]
+pkg-config = "0.3"
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }
@@ -114,7 +127,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["color", "derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-ndarray-npy = "0.9"
+ndarray-npy = { version = "0.9", features = ["npz", "compressed_npz"] }
 polars-utils = "0.51"
 ratatui = { version = "0.30", optional = true }
 ratatui-themes = { version = "0.2.0", optional = true }
@@ -162,3 +175,10 @@ semver = { version = "1", optional = true }
 colored = "2.2"
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
+faer = { version = "0.22.6", default-features = false, features = ["linalg", "rayon"] }
+lapack-sys = "0.14"
+
+# Use vendored anndata default WriteConfig: gzip (deflate) instead of Zstd→Blosc so Python
+# h5py/Scanpy on arm64 can read our .h5ad without a Blosc HDF5 plugin.
+[patch.crates-io]
+anndata = { path = "vendor/anndata" }

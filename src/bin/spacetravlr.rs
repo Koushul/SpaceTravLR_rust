@@ -2,6 +2,7 @@ mod compute_backend;
 
 use clap::builder::styling::AnsiColor;
 use clap::builder::Styles;
+use anyhow::Context;
 use clap::{ArgAction, ColorChoice, Parser, Subcommand};
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
@@ -11,7 +12,7 @@ use serde_json::Value;
 use spacetravlr::condition_split::{prepare_condition_splits, scan_condition_status};
 use spacetravlr::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
-    default_output_dir_for_adata_path, expand_user_path,
+    canonical_adata_stem, default_output_dir_for_adata_path, expand_user_path,
 };
 use spacetravlr::grn_extra;
 #[cfg(feature = "tui")]
@@ -25,6 +26,8 @@ use spacetravlr::training_hud::TrainingHudState;
 use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
 };
+use ndarray_npy::{read_npy, write_npy};
+use spacetravlr::magic::{MagicGraphParams, magic_impute_from_embedding};
 use spacetravlr::{RunSummaryParams, write_run_summary_html};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -202,6 +205,14 @@ struct Cli {
         help = "Spatial AnnData .h5ad — overrides [data].adata_path"
     )]
     h5ad: Option<PathBuf>,
+
+    #[arg(
+        long = "skip-auto-adata-prep",
+        action = ArgAction::SetTrue,
+        help_heading = "Input",
+        help = "Do not auto-run Scanpy / imputation when AnnData lacks cell_type or layers[\"imputed_count\"]"
+    )]
+    skip_auto_adata_prep: bool,
 
     #[arg(
         long = "tf-prior",
@@ -394,6 +405,51 @@ struct Cli {
         help = "Print terminal spatial scatter (obsm spatial, obs colored by cluster column) and exit"
     )]
     plot_h5ad: bool,
+
+    #[arg(
+        long = "process-h5ad",
+        alias = "process_h5ad",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise MAGIC → `<stem>_processed.h5ad` (requires `--h5ad`)"
+    )]
+    process_h5ad: bool,
+
+    #[arg(
+        long = "process-output-dir",
+        value_name = "DIR",
+        help_heading = "Utility",
+        help = "With `--process-h5ad` / `--impute`: write `<stem>_processed.h5ad` or `<stem>_imputed.h5ad` here (default: current directory)"
+    )]
+    process_output_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Imputation only: clusterwise MAGIC on `layers[\"normalized_count\"]` (same attach step as `--process-h5ad`) → `<stem>_imputed.h5ad` (requires `--h5ad`; needs `cell_type` or `leiden`)"
+    )]
+    impute: bool,
+
+    #[arg(
+        long = "impute-out",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "Hidden parity mode only: with `--impute-data-nu` and `--impute-x`, write imputed matrix `.npy` here"
+    )]
+    impute_out: Option<PathBuf>,
+
+    #[arg(long = "impute-layer", hide = true)]
+    impute_layer: Option<String>,
+
+    #[arg(long, hide = true)]
+    impute_data_nu: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    impute_x: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    impute_t: Option<usize>,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
@@ -811,7 +867,7 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     prepare_demo_hud(&hud, demo_total, gene_filter.as_deref())?;
 
     println!(
-        "SpaceTravLR --demo: opening dashboard (Shift+Q exit · t cycles theme · sheep fall each gene finish). Dataset path is display-only; spatial panel uses embedded kidney obsm cache (no .h5ad read)."
+        "SpaceTravLR --demo: opening dashboard (Shift+Q exit · t cycles theme). Dataset path is display-only; spatial panel uses embedded kidney obsm cache (no .h5ad read)."
     );
 
     let hud_worker = hud.clone();
@@ -832,6 +888,99 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     }
 
     println!("Demo finished.");
+    Ok(())
+}
+
+fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
+    let h5ad = cli
+        .h5ad
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--process-h5ad requires `--h5ad PATH`"))?;
+    let h5ad = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
+    if !h5ad.is_file() {
+        anyhow::bail!("AnnData not found at {}.", h5ad.display());
+    }
+    let out_dir = match &cli.process_output_dir {
+        Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
+        None => std::env::current_dir().context("process-output-dir default (cwd)")?,
+    };
+    std::fs::create_dir_all(&out_dir)?;
+    let stem = canonical_adata_stem(&h5ad);
+    let dest =
+        spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
+    let (out, log) =
+        spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(&h5ad, &dest, true)?;
+    if let Some(l) = log {
+        eprint!("{l}");
+    }
+    eprintln!("Wrote {}", out.display());
+    Ok(())
+}
+
+fn run_impute(cli: &Cli) -> anyhow::Result<()> {
+    use ndarray::Array2;
+    use spacetravlr::scanpy_preprocess::{magic_impute_and_attach, training_imputed_h5ad_path};
+
+    let default_t = 3usize;
+    if let (Some(dn_path), Some(x_path)) = (&cli.impute_data_nu, &cli.impute_x) {
+        let t = cli.impute_t.unwrap_or(default_t);
+        let out = cli.impute_out.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--impute with --impute-data-nu / --impute-x requires --impute-out PATH"
+            )
+        })?;
+        let data_nu: Array2<f64> = read_npy(dn_path)?;
+        let x: Array2<f64> = read_npy(x_path)?;
+        if data_nu.nrows() != x.nrows() {
+            anyhow::bail!(
+                "data_nu rows {} != X rows {}",
+                data_nu.nrows(),
+                x.nrows()
+            );
+        }
+        let y = magic_impute_from_embedding(
+            data_nu.view(),
+            x.view(),
+            t,
+            &MagicGraphParams::default(),
+        )?;
+        write_npy(&out, &y)?;
+        eprintln!(
+            "magic impute (npy parity): cells={} genes={} t={} -> {}",
+            y.nrows(),
+            y.ncols(),
+            t,
+            out.display()
+        );
+        return Ok(());
+    }
+
+    if cli.impute_out.is_some() {
+        anyhow::bail!("--impute-out is only for hidden --impute-data-nu and --impute-x");
+    }
+    if cli.impute_layer.is_some() {
+        eprintln!("Note: --impute-layer is ignored; use layers[\"normalized_count\"] and obs labels from your .h5ad.");
+    }
+
+    let h5ad = cli.h5ad.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--impute requires `--h5ad PATH` (or hidden --impute-data-nu / --impute-x for .npy parity)"
+        )
+    })?;
+    let h5ad = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
+    if !h5ad.is_file() {
+        anyhow::bail!("AnnData not found at {}.", h5ad.display());
+    }
+    let out_dir = match &cli.process_output_dir {
+        Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
+        None => std::env::current_dir().context("process-output-dir default (cwd)")?,
+    };
+    std::fs::create_dir_all(&out_dir)?;
+    let stem = canonical_adata_stem(&h5ad);
+    let out = training_imputed_h5ad_path(&out_dir, &stem);
+    let log = magic_impute_and_attach(&h5ad, &out, true)?;
+    eprint!("{log}");
+    eprintln!("Wrote {}", out.display());
     Ok(())
 }
 
@@ -860,6 +1009,14 @@ fn main() -> anyhow::Result<()> {
         );
         #[cfg(feature = "tui")]
         return run_demo_mode(&cli);
+    }
+
+    if cli.process_h5ad {
+        return run_process_h5ad(&cli);
+    }
+
+    if cli.impute {
+        return run_impute(&cli);
     }
 
     let (mut cfg, join_training) = load_config_for_main(&cli)?;
@@ -937,7 +1094,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let path = expand_user_path(&cfg.data.adata_path);
+    let mut path = expand_user_path(&cfg.data.adata_path);
     cfg.data.adata_path = path.clone();
 
     let network_data_dir: Option<String> = cfg
@@ -958,6 +1115,51 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("Dataset not found at {}.", path);
     }
 
+    let adata_path_for_stem = path.clone();
+
+    if cfg.execution.output_dir.trim().is_empty() {
+        cfg.execution.output_dir =
+            default_output_dir_for_adata_path(Path::new(&adata_path_for_stem))?;
+    }
+    let output_dir_pb = PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()));
+    std::fs::create_dir_all(&output_dir_pb)?;
+    cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
+
+    if !cli.skip_auto_adata_prep
+        && Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("h5ad"))
+            .unwrap_or(false)
+    {
+        spacetravlr::scanpy_preprocess::ensure_training_adata_ready(
+            &mut cfg.data.adata_path,
+            &output_dir_pb,
+            Path::new(&adata_path_for_stem),
+        )?;
+        path = expand_user_path(&cfg.data.adata_path);
+        cfg.data.adata_path = path.clone();
+        if !Path::new(&path).exists() {
+            anyhow::bail!("Dataset not found at {} after auto-prep.", path);
+        }
+    }
+
+    if Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("h5ad"))
+        .unwrap_or(false)
+    {
+        spacetravlr::spatial_estimator::materialize_canonical_training_adata(
+            &mut path,
+            &output_dir_pb,
+            Path::new(&adata_path_for_stem),
+            &cfg,
+            network_data_dir.as_deref(),
+        )?;
+        cfg.data.adata_path = path.clone();
+    }
+
     if cli.plot_h5ad {
         let color_by = spacetravlr::adata_terminal_scatter::resolve_plot_h5ad_color_column(
             Path::new(&path),
@@ -967,10 +1169,6 @@ fn main() -> anyhow::Result<()> {
             Path::new(&path),
             color_by.as_str(),
         );
-    }
-
-    if cfg.execution.output_dir.trim().is_empty() {
-        cfg.execution.output_dir = default_output_dir_for_adata_path(Path::new(&path))?;
     }
 
     let mode_label = match cfg.resolved_cnn_mode() {

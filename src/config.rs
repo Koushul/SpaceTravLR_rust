@@ -337,7 +337,7 @@ impl Default for DataConfig {
         Self {
             adata_path: String::new(),
             layer: "imputed_count".into(),
-            cluster_annot: "cell_type_int".into(),
+            cluster_annot: "cell_type".into(),
             condition: None,
             perturb_obs_subset_file: None,
         }
@@ -646,6 +646,26 @@ pub fn default_output_dir_for_adata_path(adata_path: impl AsRef<Path>) -> anyhow
     let cwd =
         std::env::current_dir().context("default output_dir: could not read current directory")?;
     Ok(cwd.join(dir_name).to_string_lossy().to_string())
+}
+
+/// Sanitized `.h5ad` stem for canonical output filenames (same rules as [`default_output_dir_for_adata_path`]).
+pub fn canonical_adata_stem(adata_path: &std::path::Path) -> String {
+    let stem = adata_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim();
+    let stem = if stem.is_empty() {
+        "spacetravlr_run"
+    } else {
+        stem
+    };
+    stem.chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            c => c,
+        })
+        .collect()
 }
 
 impl SpaceshipConfig {

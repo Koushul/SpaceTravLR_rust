@@ -1012,7 +1012,7 @@ server.registerTool(
   "spatial_viewer_perturb_neighbor_sanity",
   {
     description:
-      "Single-cell scoped GRN perturbation sanity check: applies desired_expr to exactly one cell (optional require_cluster_id, e.g. Tfh cluster from cell_type_int), runs the same perturbation as /api/perturb/preview, then compares mean |Δ| in spatial neighbors (within neighbor_radius, default = max LR training radius) vs remote cells. BLOCKING (same cost as a full perturb pass). Use after perturb_ready. cell_index is 0-based AnnData row order (matches viewer indices).",
+      "Single-cell scoped GRN perturbation sanity check: applies desired_expr to exactly one cell (optional require_cluster_id, e.g. Tfh cluster from cell_type), runs the same perturbation as /api/perturb/preview, then compares mean |Δ| in spatial neighbors (within neighbor_radius, default = max LR training radius) vs remote cells. BLOCKING (same cost as a full perturb pass). Use after perturb_ready. cell_index is 0-based AnnData row order (matches viewer indices).",
     inputSchema: {
       gene: z.string().describe("Gene to perturb (e.g. IL21)"),
       cell_index: z.number().int().min(0).describe("0-based cell row index to receive the perturbation"),

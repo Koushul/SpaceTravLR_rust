@@ -165,6 +165,7 @@ macro_rules! dispatch_fit_all_genes {
             $p.spaceship_config,
             $p.config_source_path.clone(),
             $p.join_training,
+            None,
             $device,
         )
     };

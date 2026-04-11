@@ -11,26 +11,16 @@ fn cluster_keys_from_usize(cl: &[usize]) -> Vec<String> {
 }
 
 #[test]
-fn resolve_betadata_key_column_uses_cell_type_int_with_cell_type_annot() {
+fn resolve_betadata_key_column_matches_cluster_annot() {
     use polars::prelude::*;
-    let df = DataFrame::new(vec![
-        Series::new("cell_type".into(), &["A", "B"]).into(),
-        Series::new("cell_type_int".into(), &[0i32, 10i32]).into(),
-    ])
-    .unwrap();
+    let df = DataFrame::new(vec![Series::new("cell_type".into(), &["A", "B"]).into()]).unwrap();
     assert_eq!(
         spacetravlr::betadata::resolve_betadata_cluster_key_column(&df, "cell_type"),
-        "cell_type_int"
+        "cell_type"
     );
     assert_eq!(
         spacetravlr::betadata::resolve_betadata_cluster_key_column(&df, "leiden"),
         "leiden"
-    );
-    let df_no_int =
-        DataFrame::new(vec![Series::new("cell_type".into(), &["A", "B"]).into()]).unwrap();
-    assert_eq!(
-        spacetravlr::betadata::resolve_betadata_cluster_key_column(&df_no_int, "cell_type"),
-        "cell_type"
     );
 }
 
