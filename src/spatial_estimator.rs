@@ -3091,57 +3091,102 @@ mod mean_lasso_r2_patch_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Once;
+    use std::thread;
+    use std::time::Duration;
 
     static PATCH_TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+    static HDF5_TEST_LOCK_ENV: Once = Once::new();
 
     #[test]
     fn patch_var_mean_lasso_r2_column() {
-        let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_var_patch_{}_{}",
-            std::process::id(),
-            seq
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("mini.h5ad");
-        let a = AnnData::<H5>::new(&p).unwrap();
-        a.set_obs_names(vec!["c0".into(), "c1".into()].into()).unwrap();
-        a.set_var_names(vec!["G0".into(), "G1".into()].into()).unwrap();
-        let obs = DataFrame::new(vec![Series::new(
-            "cell_type".into(),
-            vec!["x".to_string(), "x".to_string()],
-        )
-        .into()])
-        .unwrap();
-        a.set_obs(obs).unwrap();
-        let var = DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])
-            .unwrap();
-        a.set_var(var).unwrap();
-        let dense = Array2::from_elem((2, 2), 0.5f64);
-        let csr = dense_to_csr_f64(&dense).unwrap();
-        a.set_x(ArrayData::from(csr)).unwrap();
-        a.close().unwrap();
+        HDF5_TEST_LOCK_ENV.call_once(|| {
+            // macOS / parallel `cargo test`: HDF5 single-writer flock can return EAGAIN (errno 35)
+            // between close and reopen; disabling file locking is the documented workaround.
+            unsafe {
+                std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+            }
+        });
 
-        let mut m: HashMap<String, usize> = HashMap::new();
-        m.insert("G0".into(), 0);
-        m.insert("G1".into(), 1);
-        let scores = Arc::new(vec![
-            AtomicU64::new(0.25f64.to_bits()),
-            AtomicU64::new(f64::NAN.to_bits()),
-        ]);
-        let accum = MeanLassoR2Accum {
-            gene_to_idx: Arc::new(m),
-            scores,
-        };
-        patch_adata_var_mean_lasso_r2(&p, &accum).unwrap();
+        const MAX_ATTEMPTS: usize = 12;
+        const BACKOFF: Duration = Duration::from_millis(40);
 
-        let a2 = AnnData::<H5>::open(H5::open(&p).unwrap()).unwrap();
-        let v = a2.read_var().unwrap();
-        let r2 = v.column("mean_lasso_r2").unwrap().f64().unwrap();
-        assert!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
-        assert!(r2.get(1).unwrap().is_nan());
-        a2.close().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(BACKOFF);
+            }
+
+            let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "spacetravlr_var_patch_{}_{}",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                continue;
+            }
+            let p = dir.join("mini.h5ad");
+
+            let step = (|| -> anyhow::Result<()> {
+                {
+                    let a = AnnData::<H5>::new(&p)?;
+                    a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
+                    a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
+                    let obs = DataFrame::new(vec![Series::new(
+                        "cell_type".into(),
+                        vec!["x".to_string(), "x".to_string()],
+                    )
+                    .into()])?;
+                    a.set_obs(obs)?;
+                    let var =
+                        DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+                    a.set_var(var)?;
+                    let dense = Array2::from_elem((2, 2), 0.5f64);
+                    let csr = dense_to_csr_f64(&dense)?;
+                    a.set_x(ArrayData::from(csr))?;
+                    a.close()?;
+                }
+                thread::sleep(Duration::from_millis(5));
+
+                let mut m: HashMap<String, usize> = HashMap::new();
+                m.insert("G0".into(), 0);
+                m.insert("G1".into(), 1);
+                let scores = Arc::new(vec![
+                    AtomicU64::new(0.25f64.to_bits()),
+                    AtomicU64::new(f64::NAN.to_bits()),
+                ]);
+                let accum = MeanLassoR2Accum {
+                    gene_to_idx: Arc::new(m),
+                    scores,
+                };
+                patch_adata_var_mean_lasso_r2(&p, &accum)?;
+
+                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
+                let v = a2.read_var()?;
+                let r2 = v.column("mean_lasso_r2")?.f64()?;
+                anyhow::ensure!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
+                anyhow::ensure!(r2.get(1).unwrap().is_nan());
+                a2.close()?;
+                Ok(())
+            })();
+
+            match step {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+            }
+        }
+
+        panic!(
+            "patch_var_mean_lasso_r2_column failed after {MAX_ATTEMPTS} attempts: {:?}",
+            last_err
+        );
     }
 }
