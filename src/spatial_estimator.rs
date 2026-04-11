@@ -3090,13 +3090,17 @@ mod mean_lasso_r2_patch_tests {
     use polars::prelude::{DataFrame, NamedFrom, Series};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PATCH_TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn patch_var_mean_lasso_r2_column() {
+        let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_var_patch_{}",
-            std::process::id()
+            "spacetravlr_var_patch_{}_{}",
+            std::process::id(),
+            seq
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
