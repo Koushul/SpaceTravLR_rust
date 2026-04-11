@@ -31,12 +31,23 @@
 //! | MAGIC batch column resolution | [`resolve_magic_batch_obs_column`] | CLI / config wiring |
 //! | Training auto-prep | [`ensure_training_adata_ready`] (pass **`[data].condition`** as MAGIC batch when set) | updates path in place |
 //!
-//! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess`];
+//! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess`], then
+//! [`cache_received_ligands_uns_for_processed_h5ad`](crate::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad)
+//! when `[grn].use_lr_modulators` / `use_tfl_modulators` and the species GRN yield ligands.
 //! **`spacetravlr --impute --h5ad …`** → [`imputed_count_from_normalized`] (same imputation+CSR as the full pipeline).
 //! With **`--condition`**, the same obs column name is used as the MAGIC batch axis unless **`--magic-batch-obs`** overrides.
 //!
 //! **Training:** [`ensure_training_adata_ready`] uses [`plan_training_prep`] to pick the minimal
 //! fix; when **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
+//!
+//! **Spatial coordinates:** After cell/gene filtering, when **`obsm['unscaled_spatial']`** is absent
+//! and a 2D array exists under **`spatial`** / **`X_spatial`** / **`spatial_loc`**, the embedded
+//! Scanpy script (constant **`SCANPY_BASIC_PREPROCESS_PY`** in this module) scales coordinates to
+//! **microns** (median *k*-NN distance vs a species prior).
+//! It stores the raw 2D matrix in **`obsm['unscaled_spatial']`** and **`obsm['spatial']`** in µm.
+//! Then set **[`spatial.radius`](crate::config::SpatialConfig::radius)**,
+//! **`contact_distance`**, and **[`cnn.spatial_feature_radius`](crate::config::CnnConfig::spatial_feature_radius)**
+//! in **µm** to match.
 
 use anndata::data::ArrayData;
 use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
@@ -60,11 +71,30 @@ const UV_WITH_MAGIC_IMPUTE: &[&str] = &[
 const UV_WITH_SCANPY: &[&str] = &[
     "numpy<2",
     "anndata>=0.11",
+    "scipy",
     "scanpy",
     "h5py",
     "leidenalg",
     "igraph",
 ];
+
+/// Options for heuristic **`obsm['spatial']` → microns** in the Scanpy embed ([`full_preprocess_maybe_log`]).
+#[derive(Clone, Debug)]
+pub struct SpatialMicronsOptions {
+    pub skip: bool,
+    pub species: String,
+    pub target_median_nn_um: Option<f64>,
+}
+
+impl Default for SpatialMicronsOptions {
+    fn default() -> Self {
+        Self {
+            skip: false,
+            species: "human".into(),
+            target_median_nn_um: None,
+        }
+    }
+}
 
 fn uv_executable() -> OsString {
     env::var_os("UV_BIN")
@@ -167,20 +197,31 @@ if batch_col is not None and batch_col not in a.obs.columns:
 
 nc = a.layers["normalized_count"]
 if sp.issparse(nc):
+    col_sum = np.asarray(nc.sum(axis=0)).ravel()
+else:
+    col_sum = np.sum(np.asarray(nc, dtype=np.float64), axis=0)
+expressed = col_sum > 0.0
+if not np.any(expressed):
+    sys.exit("normalized_count has no genes with positive total expression")
+if not np.all(expressed):
+    a = a[:, np.flatnonzero(expressed)].copy()
+    nc = a.layers["normalized_count"]
+if sp.issparse(nc):
     X = nc.toarray().astype(np.float64)
 else:
     X = np.asarray(nc, dtype=np.float64)
 
 labels = np.array([str(x) for x in a.obs[annot].to_numpy()], dtype=object)
 out = X.copy()
-n_vars = X.shape[1]
 knn_def, knn_max_cap, t_magic, n_pca_cap = 5, 10, 3, 100
 
 
-def magic_op_for_subset(n_sub):
+def magic_op_for_subset(n_sub, n_genes):
     knn = min(knn_def, max(1, n_sub - 1))
     knn_max = max(knn, min(knn_max_cap, n_sub - 1))
-    n_pca_eff = min(n_pca_cap, n_sub, max(1, n_vars))
+    # graphtools/sklearn PCA requires n_components < min(n_samples, n_features)
+    pca_bound = min(int(n_sub), int(n_genes))
+    n_pca_eff = min(n_pca_cap, max(1, pca_bound - 1))
     return magic.MAGIC(
         knn=knn,
         knn_max=knn_max,
@@ -191,16 +232,29 @@ def magic_op_for_subset(n_sub):
     )
 
 
+def magic_impute_rows(sub, n_sub):
+    gene_active = sub.sum(axis=0) > 0.0
+    n_g = int(gene_active.sum())
+    if n_g == 0:
+        return np.asarray(sub, dtype=np.float64)
+    op = magic_op_for_subset(n_sub, n_g)
+    if n_g == sub.shape[1]:
+        return np.asarray(op.fit_transform(sub, genes="all_genes"), dtype=np.float64)
+    imp = np.asarray(sub, dtype=np.float64)
+    sub_f = sub[:, gene_active]
+    imp_f = np.asarray(op.fit_transform(sub_f, genes="all_genes"), dtype=np.float64)
+    imp[:, gene_active] = imp_f
+    return imp
+
+
 if batch_col is None:
     for lab in np.unique(labels):
         m = labels == lab
         idx = np.flatnonzero(m)
         if idx.size < 2:
             continue
-        op = magic_op_for_subset(int(idx.size))
         sub = X[m]
-        imp = np.asarray(op.fit_transform(sub, genes="all_genes"), dtype=np.float64)
-        out[m] = imp
+        out[m] = magic_impute_rows(sub, int(idx.size))
 else:
     batch_vals = np.array([str(x) for x in a.obs[batch_col].to_numpy()], dtype=object)
     keys = list({(labels[i], batch_vals[i]) for i in range(labels.size)})
@@ -211,10 +265,8 @@ else:
         idx = np.flatnonzero(m)
         if idx.size < 2:
             continue
-        op = magic_op_for_subset(int(idx.size))
         sub = X[m]
-        imp = np.asarray(op.fit_transform(sub, genes="all_genes"), dtype=np.float64)
-        out[m] = imp
+        out[m] = magic_impute_rows(sub, int(idx.size))
 
 a.layers["imputed_count"] = out
 
@@ -255,6 +307,11 @@ a.write_h5ad(dst)
 print("wrote", dst)
 "#;
 
+/// Embedded Scanpy + QC pipeline (stdin to `uv run python -`). Includes **spatial → microns**:
+/// median distance to the 4th nearest neighbor (`knn_k = 4`) over finite 2D points; scale
+/// `s = target_median_nn_um / d_raw` unless `d_raw` lies in `[0.5×, 2×] target` (“already micron-like”,
+/// then `s = 1`). Default targets: human **13** µm, mouse **10.5** µm. Provenance:
+/// `uns['spacetravlr_spatial_microns']`.
 const SCANPY_BASIC_PREPROCESS_PY: &str = r#"
 import os, shutil, sys, tempfile
 from pathlib import Path
@@ -264,6 +321,8 @@ import numpy as np
 import scanpy as sc
 import scipy.sparse as sp
 from anndata._io.specs.registry import IORegistryError
+from datetime import datetime, timezone
+from scipy.spatial import cKDTree
 
 
 def _strip_uns_log1p(p: str) -> None:
@@ -327,9 +386,106 @@ src = Path(sys.argv[1])
 out_partial = Path(sys.argv[2])
 if src.suffix.lower() != ".h5ad":
     sys.exit("expected path ending in .h5ad")
+_skip_microns = len(sys.argv) > 3 and sys.argv[3] == "1"
+_species_m = (sys.argv[4] if len(sys.argv) > 4 else "human").lower().strip()
+_target_um_s = sys.argv[5] if len(sys.argv) > 5 else ""
 adata = _read_h5ad(str(src))
 sc.pp.filter_cells(adata, min_genes=100)
 sc.pp.filter_genes(adata, min_cells=3)
+
+
+def _spacetravlr_default_target_nn_um(species):
+    if species == "mouse":
+        return 10.5
+    if species == "human":
+        return 13.0
+    raise ValueError("spatial species must be human or mouse")
+
+
+def _spacetravlr_resolve_spatial_xy(a):
+    for key in ("spatial", "X_spatial", "spatial_loc"):
+        if key not in a.obsm:
+            continue
+        arr = np.asarray(a.obsm[key], dtype=np.float64)
+        if arr.ndim == 2 and arr.shape[0] > 0 and arr.shape[1] >= 2:
+            return key, arr[:, :2].copy()
+    return None, None
+
+
+def _spacetravlr_median_knn_raw(xy, knn_k=4):
+    mask = np.all(np.isfinite(xy), axis=1)
+    pts = np.asarray(xy[mask], dtype=np.float64)
+    n = pts.shape[0]
+    if n < knn_k + 1:
+        return float("nan")
+    tree = cKDTree(pts)
+    dists, _ = tree.query(pts, k=knn_k + 1)
+    if dists.ndim == 1:
+        dists = dists.reshape(-1, 1)
+    return float(np.median(dists[:, knn_k]))
+
+
+def _spacetravlr_maybe_obsm_spatial_microns(a):
+    if _skip_microns:
+        return
+    if "unscaled_spatial" in a.obsm:
+        return
+    sk, xy = _spacetravlr_resolve_spatial_xy(a)
+    if sk is None:
+        return
+    if _species_m not in ("human", "mouse"):
+        print(
+            "spacetravlr_preprocess spatial_microns skip bad species",
+            _species_m,
+            file=sys.stderr,
+        )
+        return
+    try:
+        if _target_um_s.strip():
+            target = float(_target_um_s)
+        else:
+            target = _spacetravlr_default_target_nn_um(_species_m)
+    except ValueError as e:
+        print("spacetravlr_preprocess spatial_microns skip", e, file=sys.stderr)
+        return
+    d_raw = _spacetravlr_median_knn_raw(xy, 4)
+    if not np.isfinite(d_raw) or d_raw <= 0:
+        print(
+            "spacetravlr_preprocess spatial_microns skip insufficient cells for kNN",
+            file=sys.stderr,
+        )
+        return
+    lo, hi = 0.5 * target, 2.0 * target
+    if lo <= d_raw <= hi:
+        scale = 1.0
+        already = True
+    else:
+        scale = target / d_raw
+        already = False
+    scaled = xy * scale
+    a.obsm["unscaled_spatial"] = np.asarray(xy, dtype=np.float64)
+    a.obsm["spatial"] = np.asarray(scaled, dtype=np.float64)
+    a.uns["spacetravlr_spatial_microns"] = {
+        "applied": True,
+        "scale": float(scale),
+        "species": _species_m,
+        "target_median_nn_um": float(target),
+        "knn_k": 4,
+        "median_knn_raw": float(d_raw),
+        "source_key": sk,
+        "already_micron_like": bool(already),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    print(
+        "spacetravlr_preprocess spatial_microns scale",
+        scale,
+        "species",
+        _species_m,
+        file=sys.stderr,
+    )
+
+
+_spacetravlr_maybe_obsm_spatial_microns(adata)
 adata.var["mt"] = adata.var_names.str.startswith(("MT-", "mt-"))
 
 x_is_log1p = _infer_x_is_log1p(adata)
@@ -704,6 +860,9 @@ pub fn plan_training_prep(
 /// **`magic_batch_obs`**: when `Some`, MAGIC imputation is batch-clusterwise on this **`adata.obs`**
 /// column (use the same name as **`[data].condition`** when training is split by that column).
 ///
+/// **`spatial_microns`**: heuristic **`obsm['spatial']` → µm** during full Scanpy preprocess only
+/// ([`TrainingPrepPlan::FullPreprocess`]); use **[`SpatialMicronsOptions::default`]** to match CLI defaults.
+///
 /// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_adata_stem`] on
 /// the pre-prep path for **`original_input_for_stem`** so filenames match the user's dataset stem.
 pub fn ensure_training_adata_ready(
@@ -711,6 +870,7 @@ pub fn ensure_training_adata_ready(
     output_dir: &Path,
     original_input_for_stem: &Path,
     magic_batch_obs: Option<&str>,
+    spatial_microns: SpatialMicronsOptions,
 ) -> anyhow::Result<()> {
     let expanded = expand_user_path(adata_path.trim());
     let p = PathBuf::from(&expanded);
@@ -766,7 +926,13 @@ pub fn ensure_training_adata_ready(
                 "spacetravlr: running full Scanpy preprocess (UMAP, Leiden, cell_type, imputation) → {}",
                 out.display()
             );
-            let (written, _) = full_preprocess_maybe_log(&p, &out, false, magic_batch_obs)?;
+            let (written, _) = full_preprocess_maybe_log(
+                &p,
+                &out,
+                false,
+                magic_batch_obs,
+                spatial_microns,
+            )?;
             debug_assert_eq!(written, out);
             *adata_path = expand_user_path(written.to_string_lossy().as_ref());
         }
@@ -793,6 +959,7 @@ fn run_uv_scanpy_to_scratch(
     scratch_out: &Path,
     adata_in: &Path,
     capture_output: bool,
+    spatial_microns: &SpatialMicronsOptions,
 ) -> anyhow::Result<String> {
     let adata_str = adata_in
         .to_str()
@@ -800,10 +967,27 @@ fn run_uv_scanpy_to_scratch(
     let scratch_str = scratch_out
         .to_str()
         .with_context(|| format!("scratch path must be UTF-8: {}", scratch_out.display()))?;
+    let skip = if spatial_microns.skip { "1" } else { "0" };
+    let species_trim = spatial_microns.species.trim();
+    let species_arg = if species_trim.is_empty() {
+        "human"
+    } else {
+        species_trim
+    };
+    let target_um = spatial_microns
+        .target_median_nn_um
+        .map(|x| x.to_string())
+        .unwrap_or_default();
     uv_python_stdin(
         UV_WITH_SCANPY,
         SCANPY_BASIC_PREPROCESS_PY,
-        &[adata_str, scratch_str],
+        &[
+            adata_str,
+            scratch_str,
+            skip,
+            species_arg,
+            target_um.as_str(),
+        ],
         capture_output,
         "scanpy preprocess",
     )
@@ -812,18 +996,27 @@ fn run_uv_scanpy_to_scratch(
 /// Scanpy QC → UMAP/Leiden (scratch `.h5ad`) → **magic-impute** → **`<stem>_processed.h5ad`** beside the input.
 pub fn full_preprocess(adata_in: &Path) -> anyhow::Result<PathBuf> {
     let dest = processed_h5ad_path(adata_in)?;
-    let (path, _) = full_preprocess_maybe_log(adata_in, &dest, false, None)?;
+    let (path, _) = full_preprocess_maybe_log(
+        adata_in,
+        &dest,
+        false,
+        None,
+        SpatialMicronsOptions::default(),
+    )?;
     Ok(path)
 }
 
 /// Full preprocess; when **`capture_output`** is true, uv stdout/stderr are returned for echoing (e.g. to stderr) while keeping stdout clean for paths.
 ///
 /// **`magic_batch_obs`**: optional `adata.obs` column name; when set, MAGIC runs per **(cell_type or leiden) × batch** group (see [`magic_impute_and_attach_batch`]).
+///
+/// **`spatial_microns`**: passed to the Scanpy embed (see [`SpatialMicronsOptions`]).
 pub fn full_preprocess_maybe_log(
     adata_in: &Path,
     dest_processed: &Path,
     capture_output: bool,
     magic_batch_obs: Option<&str>,
+    spatial_microns: SpatialMicronsOptions,
 ) -> anyhow::Result<(PathBuf, Option<String>)> {
     let adata_str = adata_in
         .to_str()
@@ -850,7 +1043,8 @@ pub fn full_preprocess_maybe_log(
     ));
     let _ = std::fs::remove_file(&scratch);
 
-    let mut log_scanpy = run_uv_scanpy_to_scratch(&scratch, adata_in, capture_output)?;
+    let mut log_scanpy =
+        run_uv_scanpy_to_scratch(&scratch, adata_in, capture_output, &spatial_microns)?;
     if !scratch.is_file() {
         bail!("Scanpy scratch output missing: {}", scratch.display());
     }
@@ -897,6 +1091,7 @@ mod tests {
     use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
     use anndata_hdf5::H5;
     use anyhow::Context;
+    use ndarray::Array2;
     use std::path::Path;
     use std::process::{Command, Stdio};
 
@@ -973,6 +1168,51 @@ a.write_h5ad(p)
         Ok(())
     }
 
+    fn write_spatial_grid_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
+        let path_str = path.to_str().context("toy path utf-8")?;
+        let status = Command::new(uv_executable())
+            .env_remove("PYTHONPATH")
+            .env("PYTHONNOUSERSITE", "1")
+            .arg("run")
+            .arg("--isolated")
+            .args(["--with", "numpy<2"])
+            .args(["--with", "anndata>=0.11"])
+            .arg("python")
+            .arg("-c")
+            .arg(
+                r#"
+import sys
+from pathlib import Path
+import numpy as np
+import anndata as ad
+
+p = Path(sys.argv[1])
+n_side = 10
+n_obs = n_side * n_side
+n_var = 2500
+rng = np.random.default_rng(0)
+pitch = 1.0
+idx = np.arange(n_obs, dtype=np.int64)
+rows = idx // n_side
+cols = idx % n_side
+spatial = np.column_stack([rows.astype(np.float64) * pitch, cols.astype(np.float64) * pitch])
+x = np.full((n_obs, n_var), 25.0, dtype=np.float32)
+x += rng.normal(0.0, 2.0, size=x.shape).astype(np.float32)
+x = np.clip(x, 0.0, None)
+a = ad.AnnData(X=x)
+a.obs_names = [f"c{i}" for i in range(n_obs)]
+a.var_names = [f"GEN{i}" for i in range(n_var)]
+a.obsm["spatial"] = spatial
+a.write_h5ad(p)
+"#,
+            )
+            .arg(path_str)
+            .status()
+            .context("spawn uv to write spatial grid h5ad")?;
+        anyhow::ensure!(status.success(), "uv spatial grid h5ad write failed: {status}");
+        Ok(())
+    }
+
     #[test]
     fn uv_isolated_scanpy_basic_preprocess_writes_sibling_processed() {
         if !uv_available() {
@@ -990,7 +1230,14 @@ a.write_h5ad(p)
 
         let expected = processed_h5ad_path(&in_path).unwrap();
         let (out, log) =
-            full_preprocess_maybe_log(&in_path, &expected, true, None).expect("preprocess");
+            full_preprocess_maybe_log(
+                &in_path,
+                &expected,
+                true,
+                None,
+                SpatialMicronsOptions::default(),
+            )
+            .expect("preprocess");
         let log = log.expect("captured");
 
         assert_eq!(out, expected);
@@ -1060,6 +1307,75 @@ a.write_h5ad(p)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn uv_preprocess_scales_obsm_spatial_microns() {
+        if !uv_available() {
+            eprintln!("skip: uv not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_spatial_um_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let in_path = dir.join("grid.h5ad");
+        write_spatial_grid_h5ad_via_uv(&in_path).expect("spatial grid h5ad");
+
+        let expected = processed_h5ad_path(&in_path).unwrap();
+        let (out, log) = full_preprocess_maybe_log(
+            &in_path,
+            &expected,
+            true,
+            None,
+            SpatialMicronsOptions::default(),
+        )
+        .expect("preprocess");
+        let log = log.expect("captured");
+        assert!(
+            log.contains("spatial_microns"),
+            "expected spatial_microns in log:\n{log}"
+        );
+
+        assert_eq!(out, expected);
+        let processed =
+            AnnData::<H5>::open(H5::open(&out).expect("open processed")).expect("ann data read");
+        let sp = processed
+            .obsm()
+            .get_item::<Array2<f64>>("spatial")
+            .expect("read spatial")
+            .expect("spatial key");
+        let un = processed
+            .obsm()
+            .get_item::<Array2<f64>>("unscaled_spatial")
+            .expect("read unscaled")
+            .expect("unscaled_spatial key");
+        assert_eq!(sp.nrows(), un.nrows());
+        let scale = 13.0 / 1.0;
+        let mut ratios = Vec::new();
+        for i in 0..sp.nrows() {
+            let ux = un[[i, 0]];
+            let uy = un[[i, 1]];
+            if ux.abs() > 0.2 && uy.abs() < 1e-6 {
+                ratios.push(sp[[i, 0]] / ux);
+            }
+        }
+        assert!(
+            ratios.len() >= 3,
+            "expected several lattice points on x-axis after QC, got {}",
+            ratios.len()
+        );
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = ratios[ratios.len() / 2];
+        assert!(
+            (med - scale).abs() < 0.35,
+            "median spatial/unscaled x ratio got {med} expected ~{scale}"
+        );
+        processed.close().expect("close");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn write_log1p_like_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
         let status = Command::new(uv_executable())
@@ -1111,7 +1427,14 @@ a.write_h5ad(p)
         write_log1p_like_h5ad_via_uv(&in_path).expect("log1p-like h5ad");
 
         let dest = processed_h5ad_path(&in_path).unwrap();
-        let (out, log) = full_preprocess_maybe_log(&in_path, &dest, true, None).expect("preprocess");
+        let (out, log) = full_preprocess_maybe_log(
+            &in_path,
+            &dest,
+            true,
+            None,
+            SpatialMicronsOptions::default(),
+        )
+        .expect("preprocess");
         let log = log.expect("captured");
         assert!(
             log.contains("x_space") && log.contains("log1p"),

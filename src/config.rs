@@ -89,6 +89,11 @@ pub struct DataConfig {
     /// Optional path (tilde-expanded like `adata_path`): one AnnData `obs_names` value per line (`#` comments, blanks skipped).
     /// When set, perturbation loads only these rows (expression, spatial, betadata alignment). Results apply to this ROI only.
     pub perturb_obs_subset_file: Option<String>,
+    /// Prior for heuristic `obsm['spatial']` → micron scaling during full Scanpy preprocess (`human` or `mouse`).
+    #[serde(default = "default_data_spatial_species")]
+    pub spatial_species: String,
+    /// Override median k-NN target distance (µm) for spatial scaling; omit to use the species default.
+    pub spatial_median_nn_target_um: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +337,10 @@ pub struct ModelExportConfig {
     pub output_subdir: String,
 }
 
+fn default_data_spatial_species() -> String {
+    "human".into()
+}
+
 impl Default for DataConfig {
     fn default() -> Self {
         Self {
@@ -340,6 +349,8 @@ impl Default for DataConfig {
             cluster_annot: "cell_type".into(),
             condition: None,
             perturb_obs_subset_file: None,
+            spatial_species: default_data_spatial_species(),
+            spatial_median_nn_target_um: None,
         }
     }
 }

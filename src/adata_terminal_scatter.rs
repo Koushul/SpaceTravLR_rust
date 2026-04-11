@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
-use anndata_hdf5::H5;
 use anyhow::{Context, bail};
 use colored::Color;
 use hdf5_metno::types::VarLenUnicode;
@@ -77,25 +76,40 @@ pub fn detect_spatial_obsm_key<B: Backend>(adata: &AnnData<B>) -> anyhow::Result
     anyhow::bail!("no usable 2D spatial in obsm (tried {:?}). Keys: {:?}", SPATIAL_OBSM_KEYS, keys)
 }
 
-fn obs_column_names_via_anndata(path: &Path) -> anyhow::Result<Vec<String>> {
-    let adata = AnnData::<H5>::open(H5::open(path).with_context(|| format!("open {}", path.display()))?)?;
-    let df = adata.read_obs()?;
-    Ok(df
-        .get_column_names()
-        .iter()
-        .map(|x| x.to_string())
-        .collect())
+fn obs_index_dataset_name(obs: &Group) -> Option<String> {
+    let a = obs.attr("_index").ok()?;
+    let names: Array1<VarLenUnicode> = a.read_1d().ok()?;
+    if names.is_empty() {
+        return None;
+    }
+    Some(names[[0]].to_string())
 }
 
-fn h5ad_obs_column_order(root: &Group) -> anyhow::Result<Vec<String>> {
+fn h5ad_obs_column_names_from_members(obs: &Group) -> anyhow::Result<Vec<String>> {
+    let mut names = obs.member_names().context("h5ad: list obs members")?;
+    if let Some(ix) = obs_index_dataset_name(obs) {
+        names.retain(|n| n != &ix);
+    }
+    names.retain(|n| !n.starts_with("__"));
+    names.sort();
+    anyhow::ensure!(
+        !names.is_empty(),
+        "h5ad obs: no data columns (after excluding cell index)"
+    );
+    Ok(names)
+}
+
+fn h5ad_obs_column_names_for_plot(root: &Group) -> anyhow::Result<Vec<String>> {
     let obs = root.group("obs").context("h5ad: missing obs group")?;
-    let attr = obs
-        .attr("column-order")
-        .context("h5ad: obs missing column-order attribute")?;
-    let names: Array1<VarLenUnicode> = attr
-        .read_1d()
-        .context("h5ad: read obs column-order attribute")?;
-    Ok(names.iter().map(|s| s.to_string()).collect())
+    if let Ok(attr) = obs.attr("column-order") {
+        if let Ok(raw) = attr.read_1d::<VarLenUnicode>() {
+            let v: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
+            if !v.is_empty() {
+                return Ok(v);
+            }
+        }
+    }
+    h5ad_obs_column_names_from_members(&obs)
 }
 
 fn h5ad_obs_labels_from_dataset(ds: &H5Dataset) -> anyhow::Result<Vec<String>> {
@@ -234,6 +248,86 @@ fn chart_size_square_pixels(max_chart_w: usize, max_chart_h: usize) -> (usize, u
     (cw, ch)
 }
 
+fn char_term_display_width(ch: char) -> usize {
+    #[cfg(feature = "tui")]
+    {
+        use unicode_width::UnicodeWidthChar;
+        ch.width().unwrap_or(0)
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = ch;
+        1usize
+    }
+}
+
+fn ansi_stripped_display_width(s: &str) -> usize {
+    let mut total = 0usize;
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\x1b' && it.peek() == Some(&'[') {
+            it.next();
+            while let Some(ch) = it.next() {
+                if ch == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        total += char_term_display_width(c);
+    }
+    total
+}
+
+fn pad_right_ansi_to_display_width(line: &str, target: usize) -> String {
+    let w = ansi_stripped_display_width(line);
+    if w >= target {
+        line.to_string()
+    } else {
+        format!("{}{}", line, " ".repeat(target - w))
+    }
+}
+
+fn legend_plain_width_budget(labels: &[String], n_obs: usize) -> usize {
+    let mut uniq: Vec<&str> = Vec::new();
+    for s in labels {
+        if !uniq.iter().any(|u| *u == s.as_str()) {
+            uniq.push(s.as_str());
+        }
+    }
+    uniq.sort();
+    let name_w = uniq
+        .iter()
+        .map(|n| n.chars().map(char_term_display_width).sum::<usize>())
+        .max()
+        .unwrap_or(0)
+        .min(48);
+    let num_w = format!("{}", n_obs).len().max(1);
+    name_w + 2 + num_w
+}
+
+fn zip_spatial_canvas_and_legend_lines(canvas: &str, legend_lines: &[String]) -> String {
+    let plot_lines: Vec<&str> = canvas.trim_end_matches('\n').lines().collect();
+    let plot_w = plot_lines
+        .iter()
+        .map(|l| ansi_stripped_display_width(l))
+        .max()
+        .unwrap_or(0);
+    let n = plot_lines.len().max(legend_lines.len());
+    let mut out = String::new();
+    for i in 0..n {
+        let left = plot_lines.get(i).copied().unwrap_or("");
+        let padded = pad_right_ansi_to_display_width(left, plot_w);
+        out.push_str(&padded);
+        if let Some(leg) = legend_lines.get(i) {
+            out.push_str("  ");
+            out.push_str(leg);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Largest square braille chart that fits in a terminal `inner_w × inner_h` cell rect (equal data aspect; see `chart_size_square_pixels`).
 /// `inner_w` / `inner_h` are terminal columns / rows; termplot uses one terminal column per braille cell.
 pub fn optimal_square_chart_dims(inner_w: usize, inner_h: usize) -> (usize, usize) {
@@ -303,20 +397,19 @@ fn map_to_pixel_equal_aspect(
     }
 }
 
-fn build_spatial_scatter_canvas_fixed_dims(
-    path: &Path,
+fn build_spatial_scatter_canvas_fixed_dims_from_root(
+    root: &Group,
     color_by: &str,
     chart_w: usize,
     chart_h: usize,
     obsm_key: Option<&str>,
 ) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
-    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let obsm = h5.group("obsm").context("h5ad: missing obsm group")?;
+    let obsm = root.group("obsm").context("h5ad: missing obsm group")?;
     let key = h5ad_spatial_obsm_key(&obsm, obsm_key)?;
     let xy = h5ad_obsm_xy_two_cols(&obsm, &key).with_context(|| format!("read obsm[{key}]"))?;
     let n_obs = xy.nrows();
     anyhow::ensure!(xy.ncols() == 2, "internal: expected two spatial columns");
-    let obs = h5.group("obs").context("h5ad: missing obs group")?;
+    let obs = root.group("obs").context("h5ad: missing obs group")?;
     let labels = h5ad_obs_labels(&obs, color_by).with_context(|| format!("obs[{color_by}]"))?;
     anyhow::ensure!(
         labels.len() == n_obs,
@@ -333,6 +426,17 @@ fn build_spatial_scatter_canvas_fixed_dims(
     let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
     legend.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((n_obs, key, canvas_no_border, canvas_with_border, legend))
+}
+
+fn build_spatial_scatter_canvas_fixed_dims(
+    path: &Path,
+    color_by: &str,
+    chart_w: usize,
+    chart_h: usize,
+    obsm_key: Option<&str>,
+) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+    build_spatial_scatter_canvas_fixed_dims_from_root(&h5, color_by, chart_w, chart_h, obsm_key)
 }
 
 pub fn build_spatial_scatter_canvas(
@@ -441,8 +545,14 @@ pub fn spatial_scatter_lines_for_tui(
     chart_h: usize,
     obsm_key: Option<&str>,
 ) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
-    let (_n, _key, canvas, _, _) =
-        build_spatial_scatter_canvas_fixed_dims(path, color_by, chart_w, chart_h, obsm_key)?;
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let (_n, _key, canvas, _, _) = build_spatial_scatter_canvas_fixed_dims_from_root(
+        &h5,
+        color_by,
+        chart_w,
+        chart_h,
+        obsm_key,
+    )?;
     Ok(ansi_braille_to_lines(&canvas))
 }
 
@@ -458,56 +568,142 @@ pub fn spatial_scatter_lines_from_xy_labels(
     Ok(ansi_braille_to_lines(&canvas_no_border))
 }
 
-/// Prefer string cell-type label columns for terminal spatial plots (`cell_type`, …);
-/// otherwise use `fallback` (typically `[data].cluster_annot`, e.g. `cell_type`).
-pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Result<String> {
-    let names = if let Ok(h5) = H5File::open(path) {
-        match h5ad_obs_column_order(&h5) {
-            Ok(n) if !n.is_empty() => n,
-            _ => obs_column_names_via_anndata(path)?,
-        }
-    } else {
-        obs_column_names_via_anndata(path)?
-    };
+/// Resolve a cell-type label column in obs, returning `None` when nothing suitable exists.
+fn resolve_plot_h5ad_color_column_opt(root: &Group) -> Option<String> {
+    let names = h5ad_obs_column_names_for_plot(root).ok()?;
     const PREFERRED: &[&str] = &["cell_type", "cell_types", "celltype", "major_cell_type"];
     for p in PREFERRED {
         if let Some(n) = names.iter().find(|n| n == p) {
-            return Ok(n.clone());
+            return Some(n.clone());
         }
     }
     if let Some(n) = names.iter().find(|n| n.eq_ignore_ascii_case("cell_type")) {
-        return Ok(n.clone());
+        return Some(n.clone());
+    }
+    None
+}
+
+/// Prefer string cell-type label columns for terminal spatial plots (`cell_type`, …);
+/// otherwise use `fallback` (typically `[data].cluster_annot`, e.g. `cell_type`).
+///
+/// Uses only HDF5 metadata and the chosen `obs` column — no full `AnnData` load.
+pub fn resolve_plot_h5ad_color_column_from_root(
+    root: &Group,
+    fallback: &str,
+) -> anyhow::Result<String> {
+    if let Some(c) = resolve_plot_h5ad_color_column_opt(root) {
+        return Ok(c);
+    }
+    let obs = root.group("obs").ok();
+    if let Some(ref obs) = obs {
+        if obs.link_exists(fallback) {
+            return Ok(fallback.to_string());
+        }
     }
     Ok(fallback.to_string())
 }
 
-pub fn print_h5ad_scatter(path: &Path, color_by: &str) -> anyhow::Result<()> {
+pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Result<String> {
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+    resolve_plot_h5ad_color_column_from_root(&h5, fallback)
+}
+
+/// Opens the `.h5ad` **once** (read-only HDF5), reads only `obsm` (two columns) and optionally one
+/// `obs` column for coloring. No `AnnData` open, no expression data, no preprocessing.
+///
+/// If no suitable cell-type column exists, every cell is drawn in a single color.
+pub fn print_h5ad_scatter(path: &Path, cluster_annot_fallback: &str) -> anyhow::Result<()> {
     use colored::Colorize;
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+
+    let obsm = h5
+        .group("obsm")
+        .context("h5ad: missing obsm group — cannot plot without spatial coordinates")?;
+    anyhow::ensure!(
+        obsm.link_exists("spatial"),
+        "obsm['spatial'] not found — --plot-h5ad requires spatial coordinates in obsm['spatial']"
+    );
+    let xy = h5ad_obsm_xy_two_cols(&obsm, "spatial")
+        .context("failed to read obsm['spatial']")?;
+    let n_obs = xy.nrows();
+    anyhow::ensure!(n_obs > 0, "obsm['spatial'] is empty");
+
+    let color_col = resolve_plot_h5ad_color_column_opt(&h5)
+        .or_else(|| {
+            let obs = h5.group("obs").ok()?;
+            if obs.link_exists(cluster_annot_fallback) {
+                Some(cluster_annot_fallback.to_string())
+            } else {
+                None
+            }
+        });
+
+    let labels: Vec<String> = if let Some(ref col) = color_col {
+        let obs = h5.group("obs").context("h5ad: missing obs group")?;
+        match h5ad_obs_labels(&obs, col) {
+            Ok(l) if l.len() == n_obs => l,
+            _ => vec!["cell".to_string(); n_obs],
+        }
+    } else {
+        vec!["cell".to_string(); n_obs]
+    };
+
+    let mut points: Vec<(f64, f64)> = Vec::with_capacity(n_obs);
+    for i in 0..n_obs {
+        points.push((xy[[i, 0]], xy[[i, 1]]));
+    }
+
     let term = terminal_size::terminal_size();
     let cols = term.map(|(w, _)| w.0 as usize).unwrap_or(100).max(60);
     let rows = term.map(|(_, h)| h.0 as usize).unwrap_or(32);
-    let max_chart_w = ((cols.saturating_sub(4)) / 2).clamp(15, 90);
+    let margin = 4usize;
+    let legend_gap = 2usize;
+    let border_cols = 2usize;
+    let legend_budget = legend_plain_width_budget(&labels, n_obs);
+    let max_chart_w = cols
+        .saturating_sub(margin)
+        .saturating_sub(legend_gap)
+        .saturating_sub(legend_budget)
+        .saturating_sub(border_cols)
+        .clamp(15, 90);
     let max_chart_h = rows.saturating_sub(10).clamp(8, 48);
-    let (n_obs, key, _, canvas, legend) =
-        build_spatial_scatter_canvas(path, color_by, max_chart_w, max_chart_h, None)?;
+    let (cw, ch) = chart_size_square_pixels(max_chart_w, max_chart_h);
+
+    let color_label = color_col
+        .as_deref()
+        .filter(|_| labels.iter().any(|l| l != "cell"))
+        .unwrap_or("(none)");
+
+    let (_, canvas, legend_map) =
+        draw_spatial_scatter_canvas_from_points(&points, &labels, cw, ch)?;
+    let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
+    legend.sort_by(|a, b| a.0.cmp(&b.0));
+
     println!(
-        "{}  {}  n={}  obsm[{key}]  color=obs[{color_by}]",
+        "{}  {}  n={}  obsm[spatial]  color=obs[{color_label}]",
         "AnnData spatial".bold(),
         path.display(),
         n_obs
     );
-    print!("{}", canvas);
-    let legend: String = legend
+    let mut label_counts: HashMap<&str, usize> = HashMap::new();
+    for l in &labels {
+        *label_counts.entry(l.as_str()).or_insert(0) += 1;
+    }
+    let legend_lines: Vec<String> = legend
         .iter()
         .map(|(name, c)| {
+            let cnt = label_counts.get(name.as_str()).copied().unwrap_or(0);
             let (r, g, b) = match c {
                 Color::TrueColor { r, g, b } => (*r, *g, *b),
                 _ => (255, 255, 255),
             };
-            format!("{}", name.as_str().truecolor(r, g, b))
+            format!(
+                "{} {}",
+                name.as_str().truecolor(r, g, b),
+                cnt.to_string().dimmed()
+            )
         })
-        .collect::<Vec<_>>()
-        .join("  ·  ");
-    println!("{}", legend);
+        .collect();
+    print!("{}", zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines));
     Ok(())
 }

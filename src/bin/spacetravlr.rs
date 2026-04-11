@@ -409,7 +409,7 @@ struct Cli {
         alias = "process_h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`)"
+        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`). Afterward, writes `uns['spacetravlr_received_ligands']` when config + GRN allow (see spaceship_config `[grn]` / `[spatial]` / `[data].layer`)."
     )]
     process_h5ad: bool,
 
@@ -436,6 +436,31 @@ struct Cli {
         help = "With `--process-h5ad` / `--impute`: run MAGIC once per (cell_type or Leiden) × this `adata.obs` column. When omitted but `--condition` is set, that column is used as the batch axis"
     )]
     magic_batch_obs: Option<String>,
+
+    #[arg(
+        long = "skip-spatial-microns",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "With `--process-h5ad`: skip heuristic scaling of obsm spatial coordinates to microns"
+    )]
+    skip_spatial_microns: bool,
+
+    #[arg(
+        long = "spatial-species",
+        value_name = "SPECIES",
+        default_value = "human",
+        help_heading = "Utility",
+        help = "With `--process-h5ad`: species prior for spatial → micron scaling (`human` or `mouse`)"
+    )]
+    spatial_species: String,
+
+    #[arg(
+        long = "spatial-microns-target-um",
+        value_name = "UM",
+        help_heading = "Utility",
+        help = "With `--process-h5ad`: override assumed median k-NN distance in µm (otherwise species default)"
+    )]
+    spatial_microns_target_um: Option<f64>,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
@@ -886,6 +911,17 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     if !h5ad.is_file() {
         anyhow::bail!("AnnData not found at {}.", h5ad.display());
     }
+    let mut cfg = match &cli.config {
+        Some(p) => SpaceshipConfig::from_file(p)
+            .with_context(|| format!("load spaceship config {}", p.display()))?,
+        None => SpaceshipConfig::load(),
+    };
+    if let Some(v) = cli.weighted_ligand_scale_factor {
+        cfg.spatial.weighted_ligand_scale_factor = v;
+    }
+    if let Some(v) = cli.max_ligands {
+        cfg.grn.max_ligands = Some(v.max(1));
+    }
     let out_dir = match &cli.process_output_dir {
         Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
         None => std::env::current_dir().context("process-output-dir default (cwd)")?,
@@ -899,16 +935,32 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
         cli.condition.as_deref(),
     );
     let batch = batch_owned.as_deref();
+    let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
+        skip: cli.skip_spatial_microns,
+        species: cli.spatial_species.trim().to_lowercase(),
+        target_median_nn_um: cli.spatial_microns_target_um,
+    };
     let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
         &h5ad,
         &dest,
         true,
         batch,
+        spatial_microns,
     )?;
     if let Some(l) = log {
         eprint!("{l}");
     }
-    eprintln!("Wrote {}", out.display());
+    match spacetravlr::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad(
+        out.as_path(),
+        &cfg,
+    ) {
+        Ok(true) => eprintln!("Wrote uns['spacetravlr_received_ligands'] (+ _meta)."),
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "Warning: could not write uns['spacetravlr_received_ligands']: {}",
+            e
+        ),
+    }
     Ok(())
 }
 
@@ -935,7 +987,6 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
     );
     let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
     eprint!("{log}");
-    eprintln!("Wrote {}", out.display());
     Ok(())
 }
 
@@ -974,6 +1025,24 @@ fn main() -> anyhow::Result<()> {
         return run_impute(&cli);
     }
 
+    if cli.plot_h5ad {
+        let h5ad = cli
+            .h5ad
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+            .filter(|p| p.is_file());
+        let h5ad = match h5ad {
+            Some(p) => p,
+            None => {
+                anyhow::bail!("--plot-h5ad requires --h5ad PATH pointing to an existing .h5ad file.");
+            }
+        };
+        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(
+            &h5ad,
+            cli.spatial_species.trim(),
+        );
+    }
+
     let (mut cfg, join_training) = load_config_for_main(&cli)?;
 
     let config_source_path: Option<PathBuf> = if join_training {
@@ -1010,15 +1079,6 @@ fn main() -> anyhow::Result<()> {
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
     let compute = select_compute_backend();
-
-    if cli.plot_h5ad && cfg.resolve_adata_path().is_empty() {
-        let can_prompt = cfg!(feature = "tui") && !cli.plain;
-        if !can_prompt {
-            anyhow::bail!(
-                "--plot-h5ad requires --h5ad or data.adata_path in spaceship_config.toml."
-            );
-        }
-    }
 
     if cfg.resolve_adata_path().is_empty() {
         #[cfg(feature = "tui")]
@@ -1091,11 +1151,24 @@ fn main() -> anyhow::Result<()> {
             None,
             cfg.data.condition.as_deref(),
         );
+        let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
+            skip: false,
+            species: {
+                let s = cfg.data.spatial_species.trim().to_lowercase();
+                if s.is_empty() {
+                    "human".into()
+                } else {
+                    s
+                }
+            },
+            target_median_nn_um: cfg.data.spatial_median_nn_target_um,
+        };
         spacetravlr::scanpy_preprocess::ensure_training_adata_ready(
             &mut cfg.data.adata_path,
             &output_dir_pb,
             Path::new(&adata_path_for_stem),
             magic_batch.as_deref(),
+            spatial_microns,
         )?;
         path = expand_user_path(&cfg.data.adata_path);
         cfg.data.adata_path = path.clone();
@@ -1118,17 +1191,6 @@ fn main() -> anyhow::Result<()> {
             network_data_dir.as_deref(),
         )?;
         cfg.data.adata_path = path.clone();
-    }
-
-    if cli.plot_h5ad {
-        let color_by = spacetravlr::adata_terminal_scatter::resolve_plot_h5ad_color_column(
-            Path::new(&path),
-            cfg.data.cluster_annot.as_str(),
-        )?;
-        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(
-            Path::new(&path),
-            color_by.as_str(),
-        );
     }
 
     let mode_label = match cfg.resolved_cnn_mode() {

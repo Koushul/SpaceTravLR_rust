@@ -17,6 +17,42 @@ use polars::prelude::{DataFrame, Series};
 
 use super::{BackendData, SelectInfoBounds, SelectInfoElemBounds};
 
+/// Reserved Polars column: when present as a string column with one row per dataframe row, it is
+/// written as the AnnData/HDF5 dataframe **index** only (not as a data column, omitted from
+/// `column-order`). Otherwise the index is `0..height` (range).
+const H5_DATAFRAME_ROW_INDEX_COL: &str = "_index";
+
+fn dataframe_h5_row_index(df: &DataFrame) -> Result<DataFrameIndex> {
+    let Ok(s) = df.column(H5_DATAFRAME_ROW_INDEX_COL) else {
+        return Ok(DataFrameIndex::from(df.height()));
+    };
+    if s.len() != df.height() {
+        bail!(
+            "column {:?} length {} != dataframe height {}",
+            H5_DATAFRAME_ROW_INDEX_COL,
+            s.len(),
+            df.height()
+        );
+    }
+    match s.dtype() {
+        DataType::String => {
+            let ca = s.str()?;
+            let mut v = Vec::with_capacity(ca.len());
+            for i in 0..ca.len() {
+                let Some(x) = ca.get(i) else {
+                    bail!("column {:?} has null at row {}", H5_DATAFRAME_ROW_INDEX_COL, i);
+                };
+                v.push(x.to_string());
+            }
+            Ok(DataFrameIndex::from(v))
+        }
+        _ => bail!(
+            "column {:?} must be String dtype for use as obs-style row index",
+            H5_DATAFRAME_ROW_INDEX_COL
+        ),
+    }
+}
+
 impl Element for DataFrame {
     fn data_type(&self) -> crate::backend::DataType {
         crate::backend::DataType::DataFrame
@@ -28,6 +64,7 @@ impl Element for DataFrame {
         let columns: Vec<String> = self
             .get_column_names()
             .into_iter()
+            .filter(|x| x.as_str() != H5_DATAFRAME_ROW_INDEX_COL)
             .map(|x| x.to_string())
             .collect();
         metadata.insert("column-order".to_string(), columns.into());
@@ -49,15 +86,16 @@ impl Writable for DataFrame {
         };
         self.metadata().save(&mut group)?;
 
-        self.iter().try_for_each(|x| {
-            write_series(x, &group, x.name())?;
-            anyhow::Ok(())
-        })?;
+        self.iter()
+            .filter(|x| x.name() != H5_DATAFRAME_ROW_INDEX_COL)
+            .try_for_each(|x| {
+                write_series(x, &group, x.name())?;
+                anyhow::Ok(())
+            })?;
 
         let mut container = DataContainer::Group(group);
 
-        // Create an index as the python anndata package enforce it. This is not used by this library
-        DataFrameIndex::from(self.height()).overwrite(&mut container)?;
+        dataframe_h5_row_index(self)?.overwrite(&mut container)?;
 
         Ok(container)
     }
@@ -72,19 +110,21 @@ impl Writable for DataFrame {
             }
             let n = self.height();
             if n != 0 && n != container.as_group()?.open_dataset(&index_name)?.shape()[0] {
-                DataFrameIndex::from(self.height()).overwrite(&mut container)?;
+                dataframe_h5_row_index(self)?.overwrite(&mut container)?;
             }
         } else {
             for obj in container.as_group()?.list()? {
                 container.as_group()?.delete(&obj)?;
             }
-            DataFrameIndex::from(self.height()).overwrite(&mut container)?;
+            dataframe_h5_row_index(self)?.overwrite(&mut container)?;
         }
 
-        self.iter().try_for_each(|x| {
-            write_series(x, container.as_group()?, x.name())?;
-            anyhow::Ok(())
-        })?;
+        self.iter()
+            .filter(|x| x.name() != H5_DATAFRAME_ROW_INDEX_COL)
+            .try_for_each(|x| {
+                write_series(x, container.as_group()?, x.name())?;
+                anyhow::Ok(())
+            })?;
         self.metadata().save(&mut container)?;
 
         Ok(container)

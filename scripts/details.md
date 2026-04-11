@@ -179,6 +179,8 @@ Example artifact: [`results/bench_scaling/bench_scaling.json`](results/bench_sca
 
 Interactive **deck.gl** UI for spatial coordinates from an `.h5ad` (`obsm["spatial"]`, then `X_spatial`, then `spatial_loc`) with coloring by **expression** (one gene from `X` or a layer), **betadata** (when a run TOML is supplied), or **cell type** when a standard `obs` cell-type column exists. Betadata is read from the **same directory as `spacetravlr_run_repro.toml`** (not a separate CLI path): **seed-only** models use a `Cluster` column (one β row per cluster; cells get values via `--cluster-annot`), while **spatial / full CNN** exports use `CellID` (per-cell β). `/api/meta` includes `betadata_row_id` (`Cluster` or `CellID`) when the first feather in that run directory can be probed.
 
+**Micron scaling:** `spacetravlr --process-h5ad` (and full training auto-prep) rescale `obsm` coordinates to **microns** when `unscaled_spatial` is absent, via the embedded Scanpy step in [`src/scanpy_preprocess.rs`](../src/scanpy_preprocess.rs) (`SCANPY_BASIC_PREPROCESS_PY`). After scaling, set **`[spatial].radius`**, **`contact_distance`**, and **`[cnn].spatial_feature_radius`** in **µm** in your TOML.
+
 Build the frontend once, then run the server:
 
 ```bash

@@ -1168,6 +1168,174 @@ fn strip_spacetravlr_received_ligand_keys(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn compute_received_ligands_uns_payload(
+    adata: &AnnData<H5>,
+    xy: &Array2<f64>,
+    layer: &str,
+    union_ligands_sorted: &[String],
+    radius: f64,
+    weighted_ligand_scale: f64,
+    ligand_grid_factor: Option<f64>,
+) -> anyhow::Result<(DataFrame, String)> {
+    anyhow::ensure!(
+        xy.nrows() == adata.n_obs(),
+        "xy rows {} != adata n_obs {}",
+        xy.nrows(),
+        adata.n_obs()
+    );
+    let mut lig_unique: Vec<String> = union_ligands_sorted.to_vec();
+    lig_unique.sort_unstable();
+    lig_unique.dedup();
+
+    let var_names = adata.var_names().into_vec();
+    let gene_to_idx: HashMap<String, usize> = var_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.clone(), i))
+        .collect();
+    let lig_present: Vec<String> = lig_unique
+        .into_iter()
+        .filter(|g| gene_to_idx.contains_key(g.as_str()))
+        .filter(|g| g.as_str() != "_index")
+        .collect();
+    if lig_present.is_empty() {
+        return Ok((DataFrame::new(vec![])?, String::new()));
+    }
+    let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
+    let full = read_expression_matrix_dense_f64(adata, layer, &slice)?;
+    let n = xy.nrows();
+    let mut lig_expr = Array2::<f64>::zeros((n, lig_present.len()));
+    for (k, lig) in lig_present.iter().enumerate() {
+        let idx = gene_to_idx[lig];
+        lig_expr.column_mut(k).assign(&full.column(idx));
+    }
+    let received = match ligand_grid_factor {
+        Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid(
+            xy,
+            &lig_expr,
+            radius,
+            weighted_ligand_scale,
+            gf,
+        ),
+        _ => calculate_weighted_ligands(xy, &lig_expr, radius, weighted_ligand_scale),
+    };
+    let obs_names: Vec<String> = adata.obs_names().into_iter().collect();
+    anyhow::ensure!(
+        obs_names.len() == n,
+        "obs_names len {} != expression rows {}",
+        obs_names.len(),
+        n
+    );
+    let mut cols: Vec<_> = vec![Series::new("_index".into(), obs_names).into()];
+    cols.extend(lig_present.iter().enumerate().map(|(k, name)| {
+        Series::new(
+            name.as_str().into(),
+            received.column(k).to_vec(),
+        )
+        .into()
+    }));
+    let df = DataFrame::new(cols)?;
+    let meta = serde_json::json!({
+        "schema": "spacetravlr_received_ligands/v1",
+        "radius": radius,
+        "weighted_ligand_scale_factor": weighted_ligand_scale,
+        "ligand_grid_factor": ligand_grid_factor,
+        "layer": layer,
+        "n_obs": n,
+        "n_ligands": lig_present.len(),
+        "ligands": lig_present,
+    });
+    let meta_str = serde_json::to_string(&meta)?;
+    Ok((df, meta_str))
+}
+
+fn write_received_ligands_uns_payload(
+    h5ad_path: &Path,
+    df: DataFrame,
+    meta_json: &str,
+) -> anyhow::Result<()> {
+    let adata_rw = AnnData::<H5>::open(H5::open_rw(h5ad_path)?)?;
+    let _ = adata_rw.obsm().remove(RECEIVED_LIGANDS_LEGACY_OBSM);
+    let _ = adata_rw.uns().remove(RECEIVED_LIGANDS_UNS_DF);
+    let _ = adata_rw.uns().remove(RECEIVED_LIGANDS_UNS_META);
+    adata_rw.uns().add(RECEIVED_LIGANDS_UNS_DF, df)?;
+    adata_rw.uns().add(RECEIVED_LIGANDS_UNS_META, meta_json.to_string())?;
+    adata_rw.close()?;
+    Ok(())
+}
+
+/// Writes `uns['spacetravlr_received_ligands']` (+ `_meta`) on a processed `.h5ad` using
+/// `[grn]`, `[spatial]`, `[data].layer`, and `[perturbation].ligand_grid_factor` from `cfg`
+/// (same rules as training: [`GeneNetwork::dataset_union_lr_ligands`], Gaussian / grid aggregation).
+///
+/// Returns `Ok(true)` if a non-empty dataframe was written. `Ok(false)` when LR and TFL modulators
+/// are both off, the expression layer name is empty, the GRN yields no union ligands, or the
+/// filtered ligand set is empty after matching `var`.
+pub fn cache_received_ligands_uns_for_processed_h5ad(
+    processed_h5ad: &Path,
+    cfg: &SpaceshipConfig,
+) -> anyhow::Result<bool> {
+    if !cfg.grn.use_lr_modulators && !cfg.grn.use_tfl_modulators {
+        return Ok(false);
+    }
+    let layer = cfg.data.layer.trim();
+    if layer.is_empty() {
+        return Ok(false);
+    }
+    let network_dd = cfg
+        .grn
+        .network_data_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(expand_user_path);
+
+    let adata = AnnData::<H5>::open(H5::open(processed_h5ad)?)?;
+    let all_var_names = adata.var_names().into_vec();
+    let species = crate::network::infer_species(&all_var_names);
+    let grn = crate::network::GeneNetwork::new(
+        species,
+        &all_var_names,
+        network_dd.as_deref(),
+    )?;
+    let max_lig = cfg.grn.max_ligands;
+    let gene_mean = if max_lig.map_or(false, |k| k > 0) {
+        Some(compute_gene_mean_expression(&adata, layer, None)?)
+    } else {
+        None
+    };
+    let mut union_ligs =
+        grn.dataset_union_lr_ligands(&all_var_names, max_lig, gene_mean.as_ref())?;
+    if union_ligs.is_empty() {
+        adata.close()?;
+        return Ok(false);
+    }
+    union_ligs.sort();
+    let xy = load_spatial_coords_f64(&adata)?;
+    let grid_eff = cfg.perturbation.ligand_grid_factor.or_else(|| {
+        if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
+            Some(DEFAULT_LIGAND_GRID_FACTOR)
+        } else {
+            None
+        }
+    });
+    let (df, meta) = compute_received_ligands_uns_payload(
+        &adata,
+        &xy,
+        layer,
+        &union_ligs,
+        cfg.spatial.radius,
+        cfg.spatial.weighted_ligand_scale_factor,
+        grid_eff,
+    )?;
+    adata.close()?;
+    if df.width() == 0 {
+        return Ok(false);
+    }
+    write_received_ligands_uns_payload(processed_h5ad, df, &meta)?;
+    Ok(true)
+}
+
 /// Parallel-safe per-gene mean Lasso R² (see [`patch_adata_var_mean_lasso_r2`]).
 #[derive(Clone)]
 pub struct MeanLassoR2Accum {
@@ -1221,7 +1389,8 @@ pub fn patch_adata_var_mean_lasso_r2(
 }
 
 /// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers.
-/// Drops any persisted `spacetravlr_received_ligands` / `_meta` keys (received ligands are not cached on disk).
+/// Drops any persisted `spacetravlr_received_ligands` / `_meta` keys so a stale on-disk cache is not reused;
+/// [`SpatialCellularProgramsEstimator::fit_all_genes`] recomputes and writes them to `adata.uns` when training starts (full-obs runs only).
 pub fn materialize_canonical_training_adata(
     adata_path: &mut String,
     output_dir: &Path,
@@ -1873,7 +2042,79 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let weighted_ligand_scale_factor =
                 spaceship_config.spatial.weighted_ligand_scale_factor;
 
-            drop(setup_adata); // release; workers open their own handles
+            if obs_row_subset.is_none() && (use_lr_modulators || use_tfl_modulators) {
+                let t_rl = pipeline_step_begin(&hud, "cache received ligands → adata.uns");
+                let grid_eff = ligand_grid_factor.or_else(|| {
+                    if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
+                        Some(DEFAULT_LIGAND_GRID_FACTOR)
+                    } else {
+                        None
+                    }
+                });
+                let received_payload: anyhow::Result<Option<(DataFrame, String)>> = (|| {
+                    let mut union_ligs = global_grn.dataset_union_lr_ligands(
+                        &all_var_names,
+                        max_ligands,
+                        gene_mean_arc.as_deref(),
+                    )?;
+                    if union_ligs.is_empty() {
+                        return Ok(None);
+                    }
+                    union_ligs.sort();
+                    let (df, meta) = compute_received_ligands_uns_payload(
+                        setup_adata.as_ref(),
+                        xy.as_ref(),
+                        layer,
+                        &union_ligs,
+                        radius,
+                        weighted_ligand_scale_factor,
+                        grid_eff,
+                    )?;
+                    if df.width() == 0 {
+                        return Ok(None);
+                    }
+                    Ok(Some((df, meta)))
+                })();
+                drop(setup_adata);
+                match received_payload {
+                    Ok(Some((df, meta))) => {
+                        let rw_path = PathBuf::from(&worker_adata_path);
+                        let n_l = df.width();
+                        let n_c = df.height();
+                        match write_received_ligands_uns_payload(&rw_path, df, &meta) {
+                            Ok(()) => log_line(
+                                &hud,
+                                format!(
+                                    "Wrote uns['{}'] ({} ligands × {} cells) → {}",
+                                    RECEIVED_LIGANDS_UNS_DF,
+                                    n_l,
+                                    n_c,
+                                    rw_path.display()
+                                ),
+                            ),
+                            Err(e) => log_line(
+                                &hud,
+                                format!("Could not write {}: {}", RECEIVED_LIGANDS_UNS_DF, e),
+                            ),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => log_line(
+                        &hud,
+                        format!("Could not build {}: {}", RECEIVED_LIGANDS_UNS_DF, e),
+                    ),
+                }
+                pipeline_step_end(&hud, "cache received ligands → adata.uns", t_rl);
+            } else {
+                if obs_row_subset.is_some() && (use_lr_modulators || use_tfl_modulators) {
+                    log_line(
+                        &hud,
+                        "Skipping spacetravlr_received_ligands cache (condition split: obs subset vs full .h5ad)."
+                            .to_string(),
+                    );
+                }
+                drop(setup_adata);
+            }
 
             let pb_opt: Option<ProgressBar> = if hud.is_none() {
                 let pb = ProgressBar::new(total_genes as u64);

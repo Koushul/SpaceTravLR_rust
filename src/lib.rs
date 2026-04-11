@@ -50,7 +50,7 @@ pub use estimator::{CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR};
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
-    read_h5ad_expression_dense_f64, materialize_canonical_training_adata,
-    SpatialCellularProgramsEstimator,
+    cache_received_ligands_uns_for_processed_h5ad, materialize_canonical_training_adata,
+    read_h5ad_expression_dense_f64, SpatialCellularProgramsEstimator,
 };
 pub use training_hud::RunConfigSummary;
