@@ -76,7 +76,7 @@ tol       = 1e-4
 [training]
 # Default when omitted: seed. Use full or hybrid to enable CNN paths.
 mode            = "seed"
-epochs          = 10
+epochs          = 50
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
 learning_rate   = 2e-4
 # Minimum mean lasso R² to allow CNN in hybrid mode (also used when hybrid.min_mean_lasso_r2_for_cnn is unset)
