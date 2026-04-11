@@ -12,7 +12,8 @@ benchmarks/
 web/spatial_viewer/node_modules/
 web/spatial_viewer/dist/
 
-
 results/
 .vscode/
 .cursor/
+
+examples/

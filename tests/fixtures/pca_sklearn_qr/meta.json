@@ -1,0 +1,13 @@
+{
+  "shape": [
+    30,
+    25
+  ],
+  "n_components": 5,
+  "n_oversamples": 10,
+  "iterated_power": 4,
+  "power_iteration_normalizer": "QR",
+  "sklearn_version": "1.7.2",
+  "sklearn_fit_s": 0.0018105419585481286,
+  "sklearn_transform_s": 0.00010404200293123722
+}
