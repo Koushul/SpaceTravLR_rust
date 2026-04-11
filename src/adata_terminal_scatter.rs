@@ -3,11 +3,11 @@ use std::path::Path;
 
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
-use anyhow::Context;
+use anyhow::{Context, bail};
 use colored::Color;
-use ndarray::{Array2, s};
-use polars::datatypes::DataType;
-use polars::prelude::*;
+use hdf5_metno::types::VarLenUnicode;
+use hdf5_metno::{Dataset as H5Dataset, File as H5File, Group, LocationType};
+use ndarray::{Array1, Array2, s};
 use termplot_rs::ChartContext;
 
 pub const SPATIAL_OBSM_KEYS: &[&str] = &["spatial", "X_spatial", "spatial_loc"];
@@ -77,15 +77,138 @@ pub fn detect_spatial_obsm_key<B: Backend>(adata: &AnnData<B>) -> anyhow::Result
     anyhow::bail!("no usable 2D spatial in obsm (tried {:?}). Keys: {:?}", SPATIAL_OBSM_KEYS, keys)
 }
 
-fn obs_column_strings(obs: &DataFrame, name: &str) -> anyhow::Result<Vec<String>> {
-    let col = obs.column(name).with_context(|| format!("obs column {name:?}"))?;
-    let series = col.as_materialized_series();
-    let as_str = series.cast(&DataType::String)?;
-    Ok(as_str
-        .str()?
-        .into_iter()
-        .map(|o| o.map(str::to_string).unwrap_or_else(|| "NA".into()))
+fn obs_column_names_via_anndata(path: &Path) -> anyhow::Result<Vec<String>> {
+    let adata = AnnData::<H5>::open(H5::open(path).with_context(|| format!("open {}", path.display()))?)?;
+    let df = adata.read_obs()?;
+    Ok(df
+        .get_column_names()
+        .iter()
+        .map(|x| x.to_string())
         .collect())
+}
+
+fn h5ad_obs_column_order(root: &Group) -> anyhow::Result<Vec<String>> {
+    let obs = root.group("obs").context("h5ad: missing obs group")?;
+    let attr = obs
+        .attr("column-order")
+        .context("h5ad: obs missing column-order attribute")?;
+    let names: Array1<VarLenUnicode> = attr
+        .read_1d()
+        .context("h5ad: read obs column-order attribute")?;
+    Ok(names.iter().map(|s| s.to_string()).collect())
+}
+
+fn h5ad_obs_labels_from_dataset(ds: &H5Dataset) -> anyhow::Result<Vec<String>> {
+    let sh = ds.shape();
+    anyhow::ensure!(sh.len() == 1, "expected 1d obs column, got shape {:?}", sh);
+    if let Ok(v) = ds.read_1d::<VarLenUnicode>() {
+        return Ok(v.iter().map(|s| s.to_string()).collect());
+    }
+    if let Ok(v) = ds.read_1d::<i64>() {
+        return Ok(v.iter().map(|x| x.to_string()).collect());
+    }
+    if let Ok(v) = ds.read_1d::<i32>() {
+        return Ok(v.iter().map(|x| x.to_string()).collect());
+    }
+    if let Ok(v) = ds.read_1d::<u32>() {
+        return Ok(v.iter().map(|x| x.to_string()).collect());
+    }
+    if let Ok(v) = ds.read_1d::<f64>() {
+        return Ok(v.iter().map(|x| x.to_string()).collect());
+    }
+    if let Ok(v) = ds.read_1d::<f32>() {
+        return Ok(v.iter().map(|x| x.to_string()).collect());
+    }
+    if let Ok(v) = ds.read_1d::<bool>() {
+        return Ok(v.iter().map(|b| if *b { "true" } else { "false" }.to_string()).collect());
+    }
+    bail!("unsupported obs column element type for plot-h5ad");
+}
+
+fn h5ad_obs_labels_from_categorical_group(g: &Group) -> anyhow::Result<Vec<String>> {
+    let codes = g.dataset("codes")?.read_1d::<i32>()?;
+    let cats: Array1<VarLenUnicode> = g.dataset("categories")?.read_1d()?;
+    let mut out = Vec::with_capacity(codes.len());
+    for &c in codes.iter() {
+        let i = c as usize;
+        let s = if c < 0 || i >= cats.len() {
+            "NA".to_string()
+        } else {
+            cats[[i]].to_string()
+        };
+        out.push(s);
+    }
+    Ok(out)
+}
+
+fn h5ad_obs_labels(obs: &Group, col: &str) -> anyhow::Result<Vec<String>> {
+    anyhow::ensure!(obs.link_exists(col), "obs column {col:?} not found");
+    match obs.loc_type_by_name(col).with_context(|| format!("obs[{col}]"))? {
+        LocationType::Dataset => h5ad_obs_labels_from_dataset(&obs.dataset(col)?),
+        LocationType::Group => h5ad_obs_labels_from_categorical_group(&obs.group(col)?),
+        _ => bail!("obs[{col}] unsupported HDF5 type for plot-h5ad"),
+    }
+}
+
+fn h5ad_read_obsm_xy_two_cols(ds: &H5Dataset) -> anyhow::Result<Array2<f64>> {
+    let sh = ds.shape();
+    anyhow::ensure!(sh.len() == 2, "expected 2d obsm matrix, got shape {:?}", sh);
+    let ncols = sh[1] as usize;
+    anyhow::ensure!(ncols >= 2, "obsm matrix needs ≥2 columns, got {ncols}");
+    if ncols == 2 {
+        if let Ok(a) = ds.read_2d::<f32>() {
+            return Ok(a.mapv(|x| x as f64));
+        }
+        if let Ok(a) = ds.read_2d::<f64>() {
+            return Ok(a);
+        }
+    } else if let Ok(a) = ds.read_slice_2d::<f32, _>(s![.., 0..2]) {
+        return Ok(a.mapv(|x| x as f64));
+    } else if let Ok(a) = ds.read_slice_2d::<f64, _>(s![.., 0..2]) {
+        return Ok(a);
+    }
+    bail!("unsupported obsm dtype (expected f32/f64)");
+}
+
+fn h5ad_obsm_xy_two_cols(obsm: &Group, key: &str) -> anyhow::Result<Array2<f64>> {
+    anyhow::ensure!(obsm.link_exists(key), "missing obsm[{key}]");
+    match obsm.loc_type_by_name(key)? {
+        LocationType::Dataset => h5ad_read_obsm_xy_two_cols(&obsm.dataset(key)?),
+        LocationType::Group => {
+            let g = obsm.group(key)?;
+            if g.link_exists("array") && matches!(g.loc_type_by_name("array")?, LocationType::Dataset)
+            {
+                h5ad_read_obsm_xy_two_cols(&g.dataset("array")?)
+            } else {
+                bail!("obsm[{key}] group has no numeric array dataset");
+            }
+        }
+        _ => bail!("obsm[{key}] unsupported HDF5 type"),
+    }
+}
+
+fn h5ad_spatial_obsm_key(obsm: &Group, forced: Option<&str>) -> anyhow::Result<String> {
+    if let Some(k) = forced {
+        anyhow::ensure!(obsm.link_exists(k), "obsm missing key {k:?}");
+        let m = h5ad_obsm_xy_two_cols(obsm, k)?;
+        anyhow::ensure!(m.nrows() > 0, "obsm[{k}] is empty");
+        return Ok(k.to_string());
+    }
+    for key in SPATIAL_OBSM_KEYS {
+        if !obsm.link_exists(key) {
+            continue;
+        }
+        if let Ok(m) = h5ad_obsm_xy_two_cols(obsm, key) {
+            if m.nrows() > 0 {
+                return Ok((*key).to_string());
+            }
+        }
+    }
+    let keys = obsm.member_names().unwrap_or_default();
+    anyhow::bail!(
+        "no usable 2D spatial in obsm (tried {:?}). obsm keys: {keys:?}",
+        SPATIAL_OBSM_KEYS
+    )
 }
 
 fn assign_colors(labels: &[String]) -> (HashMap<String, Color>, Vec<Color>) {
@@ -187,27 +310,23 @@ fn build_spatial_scatter_canvas_fixed_dims(
     chart_h: usize,
     obsm_key: Option<&str>,
 ) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
-    let file = H5::open(path)?;
-    let adata = AnnData::<H5>::open(file)?;
-    let n_obs = adata.n_obs();
-    let key = match obsm_key {
-        Some(k) => k.to_string(),
-        None => detect_spatial_obsm_key(&adata)?,
-    };
-    let xy = obsm_xy_f64(&adata, &key).with_context(|| format!("read obsm[{key}]"))?;
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let obsm = h5.group("obsm").context("h5ad: missing obsm group")?;
+    let key = h5ad_spatial_obsm_key(&obsm, obsm_key)?;
+    let xy = h5ad_obsm_xy_two_cols(&obsm, &key).with_context(|| format!("read obsm[{key}]"))?;
+    let n_obs = xy.nrows();
+    anyhow::ensure!(xy.ncols() == 2, "internal: expected two spatial columns");
+    let obs = h5.group("obs").context("h5ad: missing obs group")?;
+    let labels = h5ad_obs_labels(&obs, color_by).with_context(|| format!("obs[{color_by}]"))?;
     anyhow::ensure!(
-        xy.nrows() == n_obs,
-        "obsm[{key}] rows {} != n_obs {n_obs}",
-        xy.nrows()
+        labels.len() == n_obs,
+        "obs[{color_by}] length {} != n_obs {n_obs}",
+        labels.len()
     );
-    anyhow::ensure!(xy.ncols() >= 2, "obsm[{key}] needs ≥2 columns");
-    let slice = xy.slice(s![.., ..2]);
-    let obs = adata.read_obs()?;
-    let labels = obs_column_strings(&obs, color_by)?;
 
     let mut points: Vec<(f64, f64)> = Vec::with_capacity(n_obs);
     for i in 0..n_obs {
-        points.push((slice[[i, 0]], slice[[i, 1]]));
+        points.push((xy[[i, 0]], xy[[i, 1]]));
     }
     let (canvas_no_border, canvas_with_border, legend_map) =
         draw_spatial_scatter_canvas_from_points(&points, &labels, chart_w, chart_h)?;
@@ -342,21 +461,22 @@ pub fn spatial_scatter_lines_from_xy_labels(
 /// Prefer string cell-type label columns for terminal spatial plots (`cell_type`, …);
 /// otherwise use `fallback` (typically `[data].cluster_annot`, e.g. `cell_type`).
 pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Result<String> {
-    let file = H5::open(path)?;
-    let adata = AnnData::<H5>::open(file)?;
-    let obs = adata.read_obs()?;
-    let names = obs.get_column_names();
+    let names = if let Ok(h5) = H5File::open(path) {
+        match h5ad_obs_column_order(&h5) {
+            Ok(n) if !n.is_empty() => n,
+            _ => obs_column_names_via_anndata(path)?,
+        }
+    } else {
+        obs_column_names_via_anndata(path)?
+    };
     const PREFERRED: &[&str] = &["cell_type", "cell_types", "celltype", "major_cell_type"];
     for p in PREFERRED {
-        if let Some(n) = names.iter().find(|n| n.as_str() == *p) {
-            return Ok(n.to_string());
+        if let Some(n) = names.iter().find(|n| n == p) {
+            return Ok(n.clone());
         }
     }
-    if let Some(n) = names
-        .iter()
-        .find(|n| n.as_str().eq_ignore_ascii_case("cell_type"))
-    {
-        return Ok(n.to_string());
+    if let Some(n) = names.iter().find(|n| n.eq_ignore_ascii_case("cell_type")) {
+        return Ok(n.clone());
     }
     Ok(fallback.to_string())
 }

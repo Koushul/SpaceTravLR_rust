@@ -94,9 +94,6 @@ path = "examples/mock_h5ad_roundtrip.rs"
 name = "repack_h5ad_var"
 path = "examples/repack_h5ad_var.rs"
 
-[build-dependencies]
-pkg-config = "0.3"
-
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }
@@ -138,6 +135,7 @@ build_html = "2.7"
 serde_json = "1"
 chrono = "0.4"
 glob = "0.3"
+hdf5-metno = "0.10.1"
 flate2 = "1"
 nalgebra-sparse = "0.11"
 kiddo = ">=5.2, <5.3"
@@ -175,8 +173,6 @@ semver = { version = "1", optional = true }
 colored = "2.2"
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
-faer = { version = "0.22.6", default-features = false, features = ["linalg", "rayon"] }
-lapack-sys = "0.14"
 
 # Use vendored anndata default WriteConfig: gzip (deflate) instead of Zstd→Blosc so Python
 # h5py/Scanpy on arm64 can read our .h5ad without a Blosc HDF5 plugin.

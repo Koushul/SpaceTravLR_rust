@@ -12,10 +12,11 @@
 //! preserve incoming expression in **`layers["log1p_incoming"]`**, **`expm1(X)`** as a linear
 //! approximation, `normalize_total`, store **`normalized_count`**, then `log1p` again for HVG/PCA.
 //!
-//! Scanpy then runs through Leiden. **Clusterwise Markov imputation** on `normalized_count` is
-//! done in **Rust** ([`crate::magic::magic_impute_clusterwise_normalized_count_layer`]). A second
-//! **`uv`** step attaches **`imputed_count`** from a `.npy`, **CSR-sparsifies `X` and every
-//! `layers` matrix**, and writes the final file.
+//! Scanpy then runs through Leiden. **Clusterwise Markov imputation** on `normalized_count` uses
+//! isolated **`uv`** with [**magic-impute**](https://pypi.org/project/magic-impute/) (one
+//! **`MAGIC.fit_transform`** per `cell_type` or `leiden` label; optional **batch** column for
+//! (cluster × batch) groups). The same **`uv`** step **CSR-sparsifies `X` and every `layers` matrix**
+//! and writes the final file.
 //!
 //! Output is `<stem>_processed.h5ad` beside the input (pathlib `stem` rule, same as [`processed_h5ad_path`]).
 //!
@@ -23,23 +24,24 @@
 //!
 //! | Step | Function | Output |
 //! |------|----------|--------|
-//! | Full QC → UMAP/Leiden → MAGIC | [`full_preprocess`] | `<stem>_processed.h5ad` |
-//! | MAGIC + attach only | [`imputed_count_from_normalized`] | `<stem>_imputed.h5ad` |
+//! | Full QC → UMAP/Leiden → magic-impute | [`full_preprocess`] / [`full_preprocess_maybe_log`] | `<stem>_processed.h5ad` |
+//! | Imputation + CSR only | [`imputed_count_from_normalized`] / [`magic_impute_and_attach_batch`] | `<stem>_imputed.h5ad` |
 //! | `leiden` → `cell_type` (path helper) | [`cell_type_patch_h5ad_path`] | sibling filename |
 //! | `leiden` → `cell_type` (write) | [`write_cell_type_from_leiden`] | caller-chosen path |
-//! | Training auto-prep | [`ensure_training_adata_ready`] | updates path in place |
+//! | MAGIC batch column resolution | [`resolve_magic_batch_obs_column`] | CLI / config wiring |
+//! | Training auto-prep | [`ensure_training_adata_ready`] (pass **`[data].condition`** as MAGIC batch when set) | updates path in place |
 //!
 //! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess`];
-//! **`spacetravlr --impute --h5ad …`** → [`imputed_count_from_normalized`] (same MAGIC+attach as the full pipeline).
+//! **`spacetravlr --impute --h5ad …`** → [`imputed_count_from_normalized`] (same imputation+CSR as the full pipeline).
+//! With **`--condition`**, the same obs column name is used as the MAGIC batch axis unless **`--magic-batch-obs`** overrides.
 //!
 //! **Training:** [`ensure_training_adata_ready`] uses [`plan_training_prep`] to pick the minimal
-//! fix. Opt out with **`--skip-auto-adata-prep`**.
+//! fix; when **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
 
 use anndata::data::ArrayData;
 use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
-use ndarray_npy::write_npy;
 use crate::config::expand_user_path;
 use std::ffi::OsString;
 use std::io::Write;
@@ -49,6 +51,12 @@ use std::env;
 
 const UV_WITH_ANNDATA: &[&str] = &["numpy<2", "anndata>=0.11"];
 const UV_WITH_ATTACH: &[&str] = &["numpy<2", "anndata>=0.11", "scipy"];
+const UV_WITH_MAGIC_IMPUTE: &[&str] = &[
+    "numpy<2",
+    "anndata>=0.11",
+    "scipy",
+    "magic-impute>=3,<4",
+];
 const UV_WITH_SCANPY: &[&str] = &[
     "numpy<2",
     "anndata>=0.11",
@@ -134,15 +142,81 @@ fn uv_python_stdin(
     }
 }
 
-const ATTACH_IMPUTED_LAYER_PY: &str = r#"
+const MAGIC_CLUSTERWISE_IMPUTE_CSR_PY: &str = r#"
 import sys
+
 import anndata as ad
+import magic
 import numpy as np
 import scipy.sparse as sp
 
-partial, npy_path, final = sys.argv[1], sys.argv[2], sys.argv[3]
-a = ad.read_h5ad(partial)
-a.layers["imputed_count"] = np.load(npy_path)
+src, dst = sys.argv[1], sys.argv[2]
+batch_col = sys.argv[3] if len(sys.argv) > 3 else None
+
+a = ad.read_h5ad(src)
+if "normalized_count" not in a.layers:
+    sys.exit("expected layers['normalized_count']")
+if "cell_type" in a.obs.columns:
+    annot = "cell_type"
+elif "leiden" in a.obs.columns:
+    annot = "leiden"
+else:
+    sys.exit("clusterwise MAGIC needs obs column 'cell_type' or 'leiden'")
+if batch_col is not None and batch_col not in a.obs.columns:
+    sys.exit("magic batch obs column not found: %r" % (batch_col,))
+
+nc = a.layers["normalized_count"]
+if sp.issparse(nc):
+    X = nc.toarray().astype(np.float64)
+else:
+    X = np.asarray(nc, dtype=np.float64)
+
+labels = np.array([str(x) for x in a.obs[annot].to_numpy()], dtype=object)
+out = X.copy()
+n_vars = X.shape[1]
+knn_def, knn_max_cap, t_magic, n_pca_cap = 5, 10, 3, 100
+
+
+def magic_op_for_subset(n_sub):
+    knn = min(knn_def, max(1, n_sub - 1))
+    knn_max = max(knn, min(knn_max_cap, n_sub - 1))
+    n_pca_eff = min(n_pca_cap, n_sub, max(1, n_vars))
+    return magic.MAGIC(
+        knn=knn,
+        knn_max=knn_max,
+        decay=1,
+        t=t_magic,
+        n_pca=n_pca_eff,
+        verbose=0,
+    )
+
+
+if batch_col is None:
+    for lab in np.unique(labels):
+        m = labels == lab
+        idx = np.flatnonzero(m)
+        if idx.size < 2:
+            continue
+        op = magic_op_for_subset(int(idx.size))
+        sub = X[m]
+        imp = np.asarray(op.fit_transform(sub, genes="all_genes"), dtype=np.float64)
+        out[m] = imp
+else:
+    batch_vals = np.array([str(x) for x in a.obs[batch_col].to_numpy()], dtype=object)
+    keys = list({(labels[i], batch_vals[i]) for i in range(labels.size)})
+    for ct, bt in keys:
+        m = (labels == ct) & (batch_vals == bt)
+        if not np.any(m):
+            continue
+        idx = np.flatnonzero(m)
+        if idx.size < 2:
+            continue
+        op = magic_op_for_subset(int(idx.size))
+        sub = X[m]
+        imp = np.asarray(op.fit_transform(sub, genes="all_genes"), dtype=np.float64)
+        out[m] = imp
+
+a.layers["imputed_count"] = out
 
 
 def _as_csr(m):
@@ -154,8 +228,8 @@ def _as_csr(m):
 a.X = _as_csr(a.X)
 for k in list(a.layers.keys()):
     a.layers[k] = _as_csr(a.layers[k])
-a.write_h5ad(final)
-print("wrote", final)
+a.write_h5ad(dst)
+print("wrote", dst)
 "#;
 
 const CSR_LAYERS_PY: &str = r#"
@@ -257,8 +331,6 @@ adata = _read_h5ad(str(src))
 sc.pp.filter_cells(adata, min_genes=100)
 sc.pp.filter_genes(adata, min_cells=3)
 adata.var["mt"] = adata.var_names.str.startswith(("MT-", "mt-"))
-sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
-adata = adata[adata.obs.pct_counts_mt < 20].copy()
 
 x_is_log1p = _infer_x_is_log1p(adata)
 print("spacetravlr_preprocess x_space", "log1p" if x_is_log1p else "counts", file=sys.stderr)
@@ -274,7 +346,7 @@ if x_is_log1p:
         adata.layers["normalized_count"] = np.asarray(nc, dtype=np.float64)
     sc.pp.log1p(adata)
 else:
-    adata.layers["raw"] = adata.X.copy()
+    adata.layers["raw_count"] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=1e4)
     nc = adata.X.copy()
     if hasattr(nc, "toarray"):
@@ -501,51 +573,47 @@ pub fn ensure_h5ad_csr_layers_on_path(
     Ok(())
 }
 
-/// Writes **`dest_h5ad`**: Rust MAGIC on **`normalized_count`**, then uv attach + CSR sparsify.
-pub fn magic_impute_and_attach(
+/// Writes **`dest_h5ad`**: clusterwise [**magic-impute**](https://pypi.org/project/magic-impute/) on
+/// **`layers["normalized_count"]`** (one MAGIC fit per `cell_type` or `leiden` label), then CSR-sparsify **`X`** and all **`layers`** (isolated **`uv`**).
+///
+/// When **`obs_batch_column`** is set, imputation matches the batch-clusterwise pattern: one MAGIC fit
+/// per distinct **(annotation × batch)** pair in **`adata.obs`**, then rows are written back in obs order.
+pub fn magic_impute_and_attach_batch(
     source_h5ad: &Path,
     dest_h5ad: &Path,
+    obs_batch_column: Option<&str>,
     capture_output: bool,
 ) -> anyhow::Result<String> {
-    let parent = dest_h5ad.parent().unwrap_or_else(|| Path::new("."));
-    let npy_path = parent.join(format!(
-        ".spacetravlr_imputed_{}.npy",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&npy_path);
-
-    let imputed = crate::magic::magic_impute_clusterwise_normalized_count_layer(
-        source_h5ad,
-        &crate::magic::MagicMarkovParams::default(),
-    );
-
-    let imputed = match imputed {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = std::fs::remove_file(&npy_path);
-            return Err(e);
-        }
+    let p = source_h5ad
+        .to_str()
+        .with_context(|| format!("source .h5ad must be UTF-8: {}", source_h5ad.display()))?;
+    let f = dest_h5ad
+        .to_str()
+        .with_context(|| format!("dest .h5ad must be UTF-8: {}", dest_h5ad.display()))?;
+    let batch_owned = obs_batch_column
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let log = match &batch_owned {
+        None => uv_python_stdin(
+            UV_WITH_MAGIC_IMPUTE,
+            MAGIC_CLUSTERWISE_IMPUTE_CSR_PY,
+            &[p, f],
+            capture_output,
+            "magic impute clusterwise + csr",
+        )?,
+        Some(b) => uv_python_stdin(
+            UV_WITH_MAGIC_IMPUTE,
+            MAGIC_CLUSTERWISE_IMPUTE_CSR_PY,
+            &[p, f, b.as_str()],
+            capture_output,
+            "magic impute clusterwise + csr",
+        )?,
     };
-
-    if let Err(e) =
-        write_npy(&npy_path, &imputed).with_context(|| format!("write {}", npy_path.display()))
-    {
-        let _ = std::fs::remove_file(&npy_path);
-        return Err(e);
-    }
-
-    let log = run_uv_attach_imputed(source_h5ad, &npy_path, dest_h5ad, capture_output).map_err(
-        |e| {
-            let _ = std::fs::remove_file(&npy_path);
-            e
-        },
-    )?;
-
-    let _ = std::fs::remove_file(&npy_path);
 
     if !dest_h5ad.is_file() {
         bail!(
-            "expected output .h5ad missing after attach: {}",
+            "expected output .h5ad missing after magic impute: {}",
             dest_h5ad.display()
         );
     }
@@ -553,7 +621,16 @@ pub fn magic_impute_and_attach(
     Ok(log)
 }
 
-/// Clusterwise MAGIC on **`layers["normalized_count"]`** + sparse attach → **`<stem>_imputed.h5ad`**.
+/// Like [`magic_impute_and_attach_batch`] with no batch column (cluster annotation only).
+pub fn magic_impute_and_attach(
+    source_h5ad: &Path,
+    dest_h5ad: &Path,
+    capture_output: bool,
+) -> anyhow::Result<String> {
+    magic_impute_and_attach_batch(source_h5ad, dest_h5ad, None, capture_output)
+}
+
+/// Clusterwise **magic-impute** on **`layers["normalized_count"]`** + CSR write → **`<stem>_imputed.h5ad`**.
 pub fn imputed_count_from_normalized(adata_in: &Path) -> anyhow::Result<PathBuf> {
     let out = imputed_only_output_path(adata_in)?;
     magic_impute_and_attach(adata_in, &out, false)?;
@@ -565,8 +642,25 @@ pub fn run_imputed_layer_only_pipeline(adata_in: &Path) -> anyhow::Result<PathBu
     imputed_count_from_normalized(adata_in)
 }
 
+/// Resolves the `adata.obs` column name for **batch-aware** clusterwise MAGIC.
+///
+/// **`magic_batch_obs`** wins when non-empty after trim; otherwise **`condition_column`** (e.g. CLI
+/// `--condition` or config **`[data].condition`**) is used.
+pub fn resolve_magic_batch_obs_column(
+    magic_batch_obs: Option<&str>,
+    condition_column: Option<&str>,
+) -> Option<String> {
+    let trimmed = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    magic_batch_obs
+        .and_then(trimmed)
+        .or_else(|| condition_column.and_then(trimmed))
+}
+
 /// Minimal action for [`ensure_training_adata_ready`], derived from [`probe_adata_training_readiness`].
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TrainingPrepPlan {
     Noop,
     PatchCellType { out: PathBuf },
@@ -607,12 +701,16 @@ pub fn plan_training_prep(
 /// When **`data.adata_path`** points at a `.h5ad`, ensure **`obs["cell_type"]`** and
 /// **`layers["imputed_count"]`** exist (and **`normalized_count`** + Leiden when needed).
 ///
+/// **`magic_batch_obs`**: when `Some`, MAGIC imputation is batch-clusterwise on this **`adata.obs`**
+/// column (use the same name as **`[data].condition`** when training is split by that column).
+///
 /// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_adata_stem`] on
 /// the pre-prep path for **`original_input_for_stem`** so filenames match the user's dataset stem.
 pub fn ensure_training_adata_ready(
     adata_path: &mut String,
     output_dir: &Path,
     original_input_for_stem: &Path,
+    magic_batch_obs: Option<&str>,
 ) -> anyhow::Result<()> {
     let expanded = expand_user_path(adata_path.trim());
     let p = PathBuf::from(&expanded);
@@ -649,7 +747,7 @@ pub fn ensure_training_adata_ready(
                 "spacetravlr: adding layers[\"imputed_count\"] (clusterwise) → {}",
                 out.display()
             );
-            magic_impute_and_attach(&p, &out, false)?;
+            magic_impute_and_attach_batch(&p, &out, magic_batch_obs, false)?;
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
         }
         TrainingPrepPlan::PatchThenImpute { patched, out } => {
@@ -659,7 +757,7 @@ pub fn ensure_training_adata_ready(
             );
             let _ = std::fs::remove_file(&patched);
             write_cell_type_from_leiden(&p, &patched)?;
-            magic_impute_and_attach(&patched, &out, false)?;
+            magic_impute_and_attach_batch(&patched, &out, magic_batch_obs, false)?;
             let _ = std::fs::remove_file(&patched);
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
         }
@@ -668,7 +766,7 @@ pub fn ensure_training_adata_ready(
                 "spacetravlr: running full Scanpy preprocess (UMAP, Leiden, cell_type, imputation) → {}",
                 out.display()
             );
-            let (written, _) = full_preprocess_maybe_log(&p, &out, false)?;
+            let (written, _) = full_preprocess_maybe_log(&p, &out, false, magic_batch_obs)?;
             debug_assert_eq!(written, out);
             *adata_path = expand_user_path(written.to_string_lossy().as_ref());
         }
@@ -711,42 +809,21 @@ fn run_uv_scanpy_to_scratch(
     )
 }
 
-fn run_uv_attach_imputed(
-    source_h5ad: &Path,
-    npy_path: &Path,
-    final_h5ad: &Path,
-    capture_output: bool,
-) -> anyhow::Result<String> {
-    let p = source_h5ad
-        .to_str()
-        .with_context(|| format!("source .h5ad must be UTF-8: {}", source_h5ad.display()))?;
-    let n = npy_path
-        .to_str()
-        .with_context(|| format!(".npy path must be UTF-8: {}", npy_path.display()))?;
-    let f = final_h5ad
-        .to_str()
-        .with_context(|| format!("final .h5ad must be UTF-8: {}", final_h5ad.display()))?;
-    uv_python_stdin(
-        UV_WITH_ATTACH,
-        ATTACH_IMPUTED_LAYER_PY,
-        &[p, n, f],
-        capture_output,
-        "attach imputed_count",
-    )
-}
-
-/// Scanpy QC → UMAP/Leiden (scratch `.h5ad`) → Rust MAGIC → **`<stem>_processed.h5ad`** beside the input.
+/// Scanpy QC → UMAP/Leiden (scratch `.h5ad`) → **magic-impute** → **`<stem>_processed.h5ad`** beside the input.
 pub fn full_preprocess(adata_in: &Path) -> anyhow::Result<PathBuf> {
     let dest = processed_h5ad_path(adata_in)?;
-    let (path, _) = full_preprocess_maybe_log(adata_in, &dest, false)?;
+    let (path, _) = full_preprocess_maybe_log(adata_in, &dest, false, None)?;
     Ok(path)
 }
 
 /// Full preprocess; when **`capture_output`** is true, uv stdout/stderr are returned for echoing (e.g. to stderr) while keeping stdout clean for paths.
+///
+/// **`magic_batch_obs`**: optional `adata.obs` column name; when set, MAGIC runs per **(cell_type or leiden) × batch** group (see [`magic_impute_and_attach_batch`]).
 pub fn full_preprocess_maybe_log(
     adata_in: &Path,
     dest_processed: &Path,
     capture_output: bool,
+    magic_batch_obs: Option<&str>,
 ) -> anyhow::Result<(PathBuf, Option<String>)> {
     let adata_str = adata_in
         .to_str()
@@ -778,7 +855,12 @@ pub fn full_preprocess_maybe_log(
         bail!("Scanpy scratch output missing: {}", scratch.display());
     }
 
-    let log_attach = match magic_impute_and_attach(&scratch, dest_processed, capture_output) {
+    let log_attach = match magic_impute_and_attach_batch(
+        &scratch,
+        dest_processed,
+        magic_batch_obs,
+        capture_output,
+    ) {
         Ok(s) => s,
         Err(e) => {
             let _ = std::fs::remove_file(&scratch);
@@ -907,7 +989,8 @@ a.write_h5ad(p)
         write_minimal_h5ad_via_uv(&in_path).expect("toy h5ad");
 
         let expected = processed_h5ad_path(&in_path).unwrap();
-        let (out, log) = full_preprocess_maybe_log(&in_path, &expected, true).expect("preprocess");
+        let (out, log) =
+            full_preprocess_maybe_log(&in_path, &expected, true, None).expect("preprocess");
         let log = log.expect("captured");
 
         assert_eq!(out, expected);
@@ -946,7 +1029,7 @@ a.write_h5ad(p)
             ),
             "final X should be sparse"
         );
-        for key in ["raw", "normalized_count", "imputed_count"] {
+        for key in ["raw_count", "normalized_count", "imputed_count"] {
             let Some(elem) = processed.layers().get(key) else {
                 continue;
             };
@@ -1028,7 +1111,7 @@ a.write_h5ad(p)
         write_log1p_like_h5ad_via_uv(&in_path).expect("log1p-like h5ad");
 
         let dest = processed_h5ad_path(&in_path).unwrap();
-        let (out, log) = full_preprocess_maybe_log(&in_path, &dest, true).expect("preprocess");
+        let (out, log) = full_preprocess_maybe_log(&in_path, &dest, true, None).expect("preprocess");
         let log = log.expect("captured");
         assert!(
             log.contains("x_space") && log.contains("log1p"),
@@ -1040,7 +1123,373 @@ a.write_h5ad(p)
             ad.layers().get("log1p_incoming").is_some(),
             "log1p path should store layers[\"log1p_incoming\"]"
         );
+        assert!(
+            ad.layers().get("normalized_count").is_some(),
+            "log1p-classified input should still get layers[\"normalized_count\"]"
+        );
+        assert!(
+            ad.layers().get("imputed_count").is_some(),
+            "processed output should include imputed_count"
+        );
         ad.close().expect("close");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_magic_batch_obs_column_prefers_explicit_batch() {
+        assert_eq!(
+            resolve_magic_batch_obs_column(Some("  batch1  "), Some("cond")),
+            Some("batch1".to_string())
+        );
+        assert_eq!(
+            resolve_magic_batch_obs_column(None, Some("  slice  ")),
+            Some("slice".to_string())
+        );
+        assert_eq!(
+            resolve_magic_batch_obs_column(Some(""), Some("c")),
+            Some("c".to_string())
+        );
+        assert_eq!(
+            resolve_magic_batch_obs_column(Some("  "), None),
+            None
+        );
+        assert_eq!(resolve_magic_batch_obs_column(None, None), None);
+        assert_eq!(
+            resolve_magic_batch_obs_column(Some("x"), Some("y")),
+            Some("x".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_training_prep_all_branches() {
+        let out = Path::new("/tmp/spacetravlr_plan_test_out");
+        let stem = "stem";
+        let r = |has_cell_type, has_leiden, has_normalized_count, has_imputed_count| {
+            AdataTrainingReadiness {
+                has_cell_type,
+                has_leiden,
+                has_normalized_count,
+                has_imputed_count,
+            }
+        };
+
+        assert_eq!(
+            plan_training_prep(&r(true, false, true, true), out, stem).unwrap(),
+            TrainingPrepPlan::Noop
+        );
+        assert_eq!(
+            plan_training_prep(&r(true, true, true, true), out, stem).unwrap(),
+            TrainingPrepPlan::Noop
+        );
+
+        assert_eq!(
+            plan_training_prep(&r(false, true, true, true), out, stem).unwrap(),
+            TrainingPrepPlan::PatchCellType {
+                out: training_cell_type_patch_h5ad_path(out, stem),
+            }
+        );
+
+        assert_eq!(
+            plan_training_prep(&r(true, false, true, false), out, stem).unwrap(),
+            TrainingPrepPlan::ImputeOnly {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+        assert_eq!(
+            plan_training_prep(&r(true, true, true, false), out, stem).unwrap(),
+            TrainingPrepPlan::ImputeOnly {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+
+        assert_eq!(
+            plan_training_prep(&r(false, true, true, false), out, stem).unwrap(),
+            TrainingPrepPlan::PatchThenImpute {
+                patched: training_cell_type_patch_h5ad_path(out, stem),
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+
+        assert_eq!(
+            plan_training_prep(&r(false, false, true, false), out, stem).unwrap(),
+            TrainingPrepPlan::FullPreprocess {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+        assert_eq!(
+            plan_training_prep(&r(true, false, false, false), out, stem).unwrap(),
+            TrainingPrepPlan::FullPreprocess {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+        assert_eq!(
+            plan_training_prep(&r(false, true, false, false), out, stem).unwrap(),
+            TrainingPrepPlan::FullPreprocess {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+        assert_eq!(
+            plan_training_prep(&r(false, false, false, true), out, stem).unwrap(),
+            TrainingPrepPlan::FullPreprocess {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+        assert_eq!(
+            plan_training_prep(&r(true, false, false, true), out, stem).unwrap(),
+            TrainingPrepPlan::FullPreprocess {
+                out: training_processed_h5ad_path(out, stem),
+            }
+        );
+    }
+
+    fn write_h5ad_probe_fixture(path: &Path, py_body: &str) -> anyhow::Result<()> {
+        let path_str = path.to_str().context("fixture path utf-8")?;
+        let script = format!(
+            r#"
+import sys
+from pathlib import Path
+import numpy as np
+import anndata as ad
+import scipy.sparse as sp
+
+out = Path(sys.argv[1])
+{py_body}
+a.write_h5ad(out)
+"#,
+            py_body = py_body
+        );
+        let status = Command::new(uv_executable())
+            .env_remove("PYTHONPATH")
+            .env("PYTHONNOUSERSITE", "1")
+            .arg("run")
+            .arg("--isolated")
+            .args(["--with", "numpy<2"])
+            .args(["--with", "anndata>=0.11"])
+            .args(["--with", "scipy"])
+            .arg("python")
+            .arg("-c")
+            .arg(&script)
+            .arg(path_str)
+            .status()
+            .context("spawn uv fixture h5ad")?;
+        anyhow::ensure!(status.success(), "uv fixture h5ad failed: {status}");
+        Ok(())
+    }
+
+    #[test]
+    fn uv_probe_and_plan_leiden_only_normalized_not_imputed() {
+        if !uv_available() {
+            eprintln!("skip: uv not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_probe_leiden_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.h5ad");
+        write_h5ad_probe_fixture(
+            &path,
+            r#"
+n_obs, n_var = 36, 90
+rng = np.random.default_rng(42)
+X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
+a = ad.AnnData(X=sp.csr_matrix(X))
+a.obs_names = [f"c{i}" for i in range(n_obs)]
+a.var_names = [f"G{i}" for i in range(n_var)]
+a.layers["normalized_count"] = X.copy()
+a.obs["leiden"] = np.array([str(i % 3) for i in range(n_obs)], dtype=object)
+"#,
+        )
+        .expect("fixture");
+
+        let r = probe_adata_training_readiness(&path).expect("probe");
+        assert!(!r.has_cell_type);
+        assert!(r.has_leiden);
+        assert!(r.has_normalized_count);
+        assert!(!r.has_imputed_count);
+
+        let plan = plan_training_prep(&r, &dir, "stem").expect("plan");
+        assert_eq!(
+            plan,
+            TrainingPrepPlan::PatchThenImpute {
+                patched: training_cell_type_patch_h5ad_path(&dir, "stem"),
+                out: training_processed_h5ad_path(&dir, "stem"),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uv_probe_cell_type_normalized_not_imputed_is_impute_only() {
+        if !uv_available() {
+            eprintln!("skip: uv not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_probe_ct_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("y.h5ad");
+        write_h5ad_probe_fixture(
+            &path,
+            r#"
+n_obs, n_var = 24, 60
+rng = np.random.default_rng(43)
+X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
+a = ad.AnnData(X=sp.csr_matrix(X))
+a.obs_names = [f"c{i}" for i in range(n_obs)]
+a.var_names = [f"G{i}" for i in range(n_var)]
+a.layers["normalized_count"] = X.copy()
+a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
+"#,
+        )
+        .expect("fixture");
+
+        let r = probe_adata_training_readiness(&path).expect("probe");
+        assert!(r.has_cell_type);
+        assert!(!r.has_imputed_count);
+        assert!(r.has_normalized_count);
+
+        let plan = plan_training_prep(&r, &dir, "s").expect("plan");
+        assert_eq!(
+            plan,
+            TrainingPrepPlan::ImputeOnly {
+                out: training_processed_h5ad_path(&dir, "s"),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uv_probe_ready_for_training_is_noop() {
+        if !uv_available() {
+            eprintln!("skip: uv not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_probe_noop_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("z.h5ad");
+        write_h5ad_probe_fixture(
+            &path,
+            r#"
+n_obs, n_var = 16, 40
+rng = np.random.default_rng(44)
+X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
+a = ad.AnnData(X=sp.csr_matrix(X))
+a.obs_names = [f"c{i}" for i in range(n_obs)]
+a.var_names = [f"G{i}" for i in range(n_var)]
+a.layers["normalized_count"] = X.copy()
+a.layers["imputed_count"] = (X * 1.01).astype(np.float32)
+a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
+"#,
+        )
+        .expect("fixture");
+
+        let r = probe_adata_training_readiness(&path).expect("probe");
+        assert!(r.has_cell_type);
+        assert!(r.has_normalized_count);
+        assert!(r.has_imputed_count);
+
+        let plan = plan_training_prep(&r, &dir, "s").expect("plan");
+        assert_eq!(plan, TrainingPrepPlan::Noop);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uv_magic_impute_batch_obs_column_produces_imputed_layer() {
+        if !uv_available() {
+            eprintln!("skip: uv not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_magic_batch_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.h5ad");
+        write_h5ad_probe_fixture(
+            &src,
+            r#"
+n_obs, n_var = 32, 80
+rng = np.random.default_rng(45)
+X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
+a = ad.AnnData(X=sp.csr_matrix(X))
+a.obs_names = [f"c{i}" for i in range(n_obs)]
+a.var_names = [f"G{i}" for i in range(n_var)]
+a.layers["normalized_count"] = X.copy()
+a.obs["cell_type"] = np.array([str(i % 3) for i in range(n_obs)], dtype=object)
+a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
+"#,
+        )
+        .expect("fixture");
+
+        let dst = dir.join("out.h5ad");
+        magic_impute_and_attach_batch(&src, &dst, Some("sample"), false).expect("magic batch");
+
+        let ad = AnnData::<H5>::open(H5::open(&dst).expect("open")).expect("read");
+        assert!(ad.layers().get("imputed_count").is_some());
+        let obs = ad.read_obs().expect("obs");
+        assert!(obs.column("cell_type").is_ok());
+        ad.close().expect("close");
+
+        let dst2 = dir.join("out_nobatch.h5ad");
+        magic_impute_and_attach_batch(&src, &dst2, None, false).expect("magic no batch");
+        let ad2 = AnnData::<H5>::open(H5::open(&dst2).expect("open2")).expect("read2");
+        assert!(ad2.layers().get("imputed_count").is_some());
+        ad2.close().expect("close2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uv_magic_impute_unknown_batch_obs_column_fails() {
+        if !uv_available() {
+            eprintln!("skip: uv not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_magic_badbatch_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.h5ad");
+        write_h5ad_probe_fixture(
+            &src,
+            r#"
+n_obs, n_var = 20, 50
+rng = np.random.default_rng(46)
+X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
+a = ad.AnnData(X=sp.csr_matrix(X))
+a.obs_names = [f"c{i}" for i in range(n_obs)]
+a.var_names = [f"G{i}" for i in range(n_var)]
+a.layers["normalized_count"] = X.copy()
+a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
+"#,
+        )
+        .expect("fixture");
+
+        let dst = dir.join("bad.h5ad");
+        let err = magic_impute_and_attach_batch(&src, &dst, Some("no_such_column"), true)
+            .expect_err("expected uv/python failure");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no_such_column") || msg.contains("not found"),
+            "unexpected error: {msg}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

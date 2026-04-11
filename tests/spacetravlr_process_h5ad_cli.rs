@@ -26,6 +26,10 @@ fn help_lists_process_h5ad_and_impute() {
         s.contains("--process-output-dir"),
         "expected --process-output-dir in help:\n{s}"
     );
+    assert!(
+        s.contains("--magic-batch-obs"),
+        "expected --magic-batch-obs in help:\n{s}"
+    );
 }
 
 #[test]

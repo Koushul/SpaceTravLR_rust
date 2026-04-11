@@ -13,8 +13,6 @@ pub mod foyer_perturb_cache;
 pub mod grn_extra;
 pub mod lasso;
 pub mod ligand;
-pub mod magic;
-pub mod magic_pca;
 pub mod model;
 pub mod network;
 pub mod perturb;

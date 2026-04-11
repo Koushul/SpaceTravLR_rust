@@ -1987,35 +1987,42 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Footer ────────────────────────────────────────────────────────
             let theme_hint = TuiColors::theme_label(theme_slot);
+            let credit_dim = Modifier::DIM;
             let credit_spans = vec![
                 Span::styled(
                     "© ",
-                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.sky)
+                        .add_modifier(credit_dim),
                 ),
                 Span::styled(
                     "2026",
-                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.title)
+                        .add_modifier(credit_dim),
                 ),
-                Span::styled("  ·  ", Style::default().fg(pal.muted)),
+                Span::styled(
+                    " · ",
+                    Style::default().fg(pal.muted).add_modifier(credit_dim),
+                ),
                 Span::styled(
                     "Koushul & Ally",
-                    Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.title)
+                        .add_modifier(credit_dim),
                 ),
-                Span::styled("  @  ", Style::default().fg(pal.muted)),
+                Span::styled(
+                    " @ ",
+                    Style::default().fg(pal.muted).add_modifier(credit_dim),
+                ),
                 Span::styled(
                     "jishnulab.org",
-                    Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.lilac)
+                        .add_modifier(credit_dim),
                 ),
             ];
-            let footer_bar_w = vchunks[3].width as usize;
-            let credit_w: usize = credit_spans.iter().map(Span::width).sum();
-            let credit_pad = footer_bar_w.saturating_sub(credit_w);
-            let mut credit_line_spans = Vec::with_capacity(1 + credit_spans.len());
-            if credit_pad > 0 {
-                credit_line_spans.push(Span::raw(" ".repeat(credit_pad)));
-            }
-            credit_line_spans.extend(credit_spans);
-            let credit = Line::from(credit_line_spans);
+            let credit = Line::from(credit_spans).right_aligned();
             let footer = if st.should_cancel() {
                 Paragraph::new(vec![
                     Line::from(Span::styled(

@@ -24,14 +24,4 @@ fn emit_spacetravlr_build_metadata() {
 
 fn main() {
     emit_spacetravlr_build_metadata();
-
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-link-lib=framework=Accelerate");
-        return;
-    }
-    let mut ok = pkg_config::Config::new().probe("openblas").is_ok();
-    ok |= pkg_config::Config::new().probe("blas").is_ok();
-    if !ok {
-        println!("cargo:warning=pkg-config: openblas not found; install libopenblas-dev or set PKG_CONFIG_PATH");
-    }
 }

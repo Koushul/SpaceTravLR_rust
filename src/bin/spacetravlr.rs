@@ -26,8 +26,6 @@ use spacetravlr::training_hud::TrainingHudState;
 use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
 };
-use ndarray_npy::{read_npy, write_npy};
-use spacetravlr::magic::{MagicGraphParams, magic_impute_from_embedding};
 use spacetravlr::{RunSummaryParams, write_run_summary_html};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -356,7 +354,7 @@ struct Cli {
         long,
         value_name = "OBS_COLUMN",
         help_heading = "Output",
-        help = "Split training by this obs column (one subdirectory per value under output_dir/conditions/)"
+        help = "Split training by this obs column (one subdirectory per value under output_dir/conditions/). With `--process-h5ad` or `--impute`, also selects this `adata.obs` column as the MAGIC batch axis (unless `--magic-batch-obs` is set)"
     )]
     condition: Option<String>,
 
@@ -411,7 +409,7 @@ struct Cli {
         alias = "process_h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise MAGIC → `<stem>_processed.h5ad` (requires `--h5ad`)"
+        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`)"
     )]
     process_h5ad: bool,
 
@@ -427,29 +425,17 @@ struct Cli {
         long,
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Imputation only: clusterwise MAGIC on `layers[\"normalized_count\"]` (same attach step as `--process-h5ad`) → `<stem>_imputed.h5ad` (requires `--h5ad`; needs `cell_type` or `leiden`)"
+        help = "Imputation only: clusterwise magic-impute on `layers[\"normalized_count\"]` (same step as `--process-h5ad`) → `<stem>_imputed.h5ad` (requires `--h5ad`; needs `cell_type` or `leiden`)"
     )]
     impute: bool,
 
     #[arg(
-        long = "impute-out",
-        value_name = "PATH",
+        long = "magic-batch-obs",
+        value_name = "OBS_COLUMN",
         help_heading = "Utility",
-        help = "Hidden parity mode only: with `--impute-data-nu` and `--impute-x`, write imputed matrix `.npy` here"
+        help = "With `--process-h5ad` / `--impute`: run MAGIC once per (cell_type or Leiden) × this `adata.obs` column. When omitted but `--condition` is set, that column is used as the batch axis"
     )]
-    impute_out: Option<PathBuf>,
-
-    #[arg(long = "impute-layer", hide = true)]
-    impute_layer: Option<String>,
-
-    #[arg(long, hide = true)]
-    impute_data_nu: Option<PathBuf>,
-
-    #[arg(long, hide = true)]
-    impute_x: Option<PathBuf>,
-
-    #[arg(long, hide = true)]
-    impute_t: Option<usize>,
+    magic_batch_obs: Option<String>,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
@@ -908,8 +894,17 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let stem = canonical_adata_stem(&h5ad);
     let dest =
         spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
-    let (out, log) =
-        spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(&h5ad, &dest, true)?;
+    let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
+        cli.magic_batch_obs.as_deref(),
+        cli.condition.as_deref(),
+    );
+    let batch = batch_owned.as_deref();
+    let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+        &h5ad,
+        &dest,
+        true,
+        batch,
+    )?;
     if let Some(l) = log {
         eprint!("{l}");
     }
@@ -918,54 +913,10 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn run_impute(cli: &Cli) -> anyhow::Result<()> {
-    use ndarray::Array2;
-    use spacetravlr::scanpy_preprocess::{magic_impute_and_attach, training_imputed_h5ad_path};
-
-    let default_t = 3usize;
-    if let (Some(dn_path), Some(x_path)) = (&cli.impute_data_nu, &cli.impute_x) {
-        let t = cli.impute_t.unwrap_or(default_t);
-        let out = cli.impute_out.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--impute with --impute-data-nu / --impute-x requires --impute-out PATH"
-            )
-        })?;
-        let data_nu: Array2<f64> = read_npy(dn_path)?;
-        let x: Array2<f64> = read_npy(x_path)?;
-        if data_nu.nrows() != x.nrows() {
-            anyhow::bail!(
-                "data_nu rows {} != X rows {}",
-                data_nu.nrows(),
-                x.nrows()
-            );
-        }
-        let y = magic_impute_from_embedding(
-            data_nu.view(),
-            x.view(),
-            t,
-            &MagicGraphParams::default(),
-        )?;
-        write_npy(&out, &y)?;
-        eprintln!(
-            "magic impute (npy parity): cells={} genes={} t={} -> {}",
-            y.nrows(),
-            y.ncols(),
-            t,
-            out.display()
-        );
-        return Ok(());
-    }
-
-    if cli.impute_out.is_some() {
-        anyhow::bail!("--impute-out is only for hidden --impute-data-nu and --impute-x");
-    }
-    if cli.impute_layer.is_some() {
-        eprintln!("Note: --impute-layer is ignored; use layers[\"normalized_count\"] and obs labels from your .h5ad.");
-    }
+    use spacetravlr::scanpy_preprocess::{magic_impute_and_attach_batch, training_imputed_h5ad_path};
 
     let h5ad = cli.h5ad.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "--impute requires `--h5ad PATH` (or hidden --impute-data-nu / --impute-x for .npy parity)"
-        )
+        anyhow::anyhow!("--impute requires `--h5ad PATH`")
     })?;
     let h5ad = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
     if !h5ad.is_file() {
@@ -978,7 +929,11 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
     let stem = canonical_adata_stem(&h5ad);
     let out = training_imputed_h5ad_path(&out_dir, &stem);
-    let log = magic_impute_and_attach(&h5ad, &out, true)?;
+    let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
+        cli.magic_batch_obs.as_deref(),
+        cli.condition.as_deref(),
+    );
+    let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
     eprint!("{log}");
     eprintln!("Wrote {}", out.display());
     Ok(())
@@ -1132,10 +1087,15 @@ fn main() -> anyhow::Result<()> {
             .map(|e| e.eq_ignore_ascii_case("h5ad"))
             .unwrap_or(false)
     {
+        let magic_batch = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
+            None,
+            cfg.data.condition.as_deref(),
+        );
         spacetravlr::scanpy_preprocess::ensure_training_adata_ready(
             &mut cfg.data.adata_path,
             &output_dir_pb,
             Path::new(&adata_path_for_stem),
+            magic_batch.as_deref(),
         )?;
         path = expand_user_path(&cfg.data.adata_path);
         cfg.data.adata_path = path.clone();
