@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crate::betadata::write_betadata_feather;
 use crate::cnn_gating::{
     CnnGateDecision, build_neighbors, decide_cnn_for_gene, load_gene_set_file, predict_lasso_y,
@@ -184,6 +185,32 @@ pub fn read_h5ad_expression_dense_f64(path: &Path, layer: &str) -> anyhow::Resul
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
     let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
     read_expression_matrix_dense_f64(&adata, layer, &slice)
+}
+
+/// Gene symbols in AnnData `var` order (same columns as [`read_h5ad_expression_dense_f64`]).
+pub fn read_h5ad_var_names(path: &Path) -> anyhow::Result<Vec<String>> {
+    let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(adata.var_names().into_vec())
+}
+
+/// String values for one `adata.obs` column (e.g. `cell_type`, `leiden`).
+pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<String>> {
+    use polars::prelude::*;
+    let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let obs = adata.read_obs().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let col = obs.column(key).map_err(|_| {
+        anyhow::anyhow!("obs column {:?} missing", key)
+    })?;
+    let cast_col = col.cast(&DataType::String)?;
+    let s = cast_col.str().map_err(|_| {
+        anyhow::anyhow!("obs column {:?} could not be cast to string", key)
+    })?;
+    let mut out = Vec::with_capacity(s.len());
+    for i in 0..s.len() {
+        out.push(s.get(i).unwrap_or("").to_string());
+    }
+    adata.close()?;
+    Ok(out)
 }
 
 /// When the sliced `X`/layer is canonical CSR in AnnData, returns it without densifying (useful for
@@ -1873,6 +1900,72 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let loaded = crate::network::TfPriors::from_feather(path, &all_var_names)?;
                 pipeline_step_end(&hud, "load TF priors (feather)", t_tf);
                 log_line(&hud, format!("Loaded TF priors from {}", path));
+                Some(Arc::new(loaded))
+            } else if use_tf_modulators {
+                let co_path = Path::new(training_dir).join("celloracle_tf_priors.feather");
+                let co_path_str = co_path
+                    .to_str()
+                    .with_context(|| {
+                        format!(
+                            "celloracle TF priors path must be UTF-8: {}",
+                            co_path.display()
+                        )
+                    })?;
+                let t_co = pipeline_step_begin(&hud, "CellOracle GRN inference (auto TF priors)");
+                if !co_path.is_file() {
+                    let gem = read_h5ad_expression_dense_f64(Path::new(adata_path), layer)?;
+                    let gem_scaled = crate::celloracle::scale_gem_no_center(&gem);
+                    let tf_by_target = global_grn.grn_regulators_by_target()?;
+                    let links = if cluster_to_cell_type.is_empty() {
+                        crate::celloracle::infer_grn_whole(
+                            &gem,
+                            &gem_scaled,
+                            &all_var_names,
+                            &tf_by_target,
+                        )?
+                    } else {
+                        let n = clusters.len();
+                        let mut obs_cluster: Vec<String> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let cid = clusters[i];
+                            let ct = cluster_to_cell_type
+                                .get(&cid)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            obs_cluster.push(ct);
+                        }
+                        crate::celloracle::infer_grn_per_cluster(
+                            &gem,
+                            &gem_scaled,
+                            &all_var_names,
+                            &tf_by_target,
+                            &obs_cluster,
+                        )?
+                    };
+                    crate::celloracle::write_links_as_tf_priors_feather(&co_path, &links)?;
+                    log_line(
+                        &hud,
+                        format!(
+                            "Wrote CellOracle TF priors ({} edges) to {}",
+                            links.len(),
+                            co_path.display()
+                        ),
+                    );
+                } else {
+                    log_line(
+                        &hud,
+                        format!(
+                            "Reusing cached CellOracle TF priors: {}",
+                            co_path.display()
+                        ),
+                    );
+                }
+                let loaded = crate::network::TfPriors::from_feather(co_path_str, &all_var_names)?;
+                pipeline_step_end(&hud, "CellOracle GRN inference (auto TF priors)", t_co);
+                log_line(
+                    &hud,
+                    format!("Loaded TF priors from {}", co_path.display()),
+                );
                 Some(Arc::new(loaded))
             } else {
                 None

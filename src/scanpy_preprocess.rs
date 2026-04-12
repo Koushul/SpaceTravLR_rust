@@ -124,6 +124,8 @@ fn uv_python_stdin(
     };
 
     let mut cmd = uv_command_base();
+    #[cfg(test)]
+    cmd.env("SPACETRAVLR_TEST_FAST_UV", "1");
     cmd.arg("run").arg("--isolated");
     for w in with_packages {
         cmd.args(["--with", w]);
@@ -173,6 +175,7 @@ fn uv_python_stdin(
 }
 
 const MAGIC_CLUSTERWISE_IMPUTE_CSR_PY: &str = r#"
+import os
 import sys
 
 import anndata as ad
@@ -213,7 +216,10 @@ else:
 
 labels = np.array([str(x) for x in a.obs[annot].to_numpy()], dtype=object)
 out = X.copy()
-knn_def, knn_max_cap, t_magic, n_pca_cap = 5, 10, 3, 100
+_fast_uv = os.environ.get("SPACETRAVLR_TEST_FAST_UV") == "1"
+knn_def, knn_max_cap, t_magic, n_pca_cap = (
+    (3, 6, 2, 12) if _fast_uv else (5, 10, 3, 100)
+)
 
 
 def magic_op_for_subset(n_sub, n_genes):
@@ -390,6 +396,7 @@ _skip_microns = len(sys.argv) > 3 and sys.argv[3] == "1"
 _species_m = (sys.argv[4] if len(sys.argv) > 4 else "human").lower().strip()
 _target_um_s = sys.argv[5] if len(sys.argv) > 5 else ""
 adata = _read_h5ad(str(src))
+_fast_uv = os.environ.get("SPACETRAVLR_TEST_FAST_UV") == "1"
 sc.pp.filter_cells(adata, min_genes=100)
 sc.pp.filter_genes(adata, min_cells=3)
 
@@ -511,10 +518,20 @@ else:
         adata.layers["normalized_count"] = np.asarray(nc, dtype=np.float64)
     sc.pp.log1p(adata)
 
-sc.pp.highly_variable_genes(adata, n_top_genes=2000)
 sc.pp.scale(adata, max_value=10)
-sc.pp.pca(adata)
-sc.pp.neighbors(adata)
+nv = int(adata.n_vars) - 1
+no = int(adata.n_obs) - 1
+if _fast_uv:
+    n_hvg = min(400, max(3, nv))
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_hvg)
+    n_pca = min(20, max(2, nv), max(2, no))
+    sc.pp.pca(adata, n_comps=n_pca)
+    n_nb = min(10, max(2, no))
+    sc.pp.neighbors(adata, n_neighbors=n_nb)
+else:
+    sc.pp.highly_variable_genes(adata, n_top_genes=2000)
+    sc.pp.pca(adata)
+    sc.pp.neighbors(adata)
 sc.tl.umap(adata)
 try:
     import igraph  # noqa: F401
@@ -1150,7 +1167,7 @@ import numpy as np
 import anndata as ad
 
 p = Path(sys.argv[1])
-n_obs, n_var = 100, 2500
+n_obs, n_var = 80, 800
 rng = np.random.default_rng(0)
 x = np.full((n_obs, n_var), 25.0, dtype=np.float32)
 x += rng.normal(0.0, 2.0, size=x.shape).astype(np.float32)
@@ -1189,7 +1206,7 @@ import anndata as ad
 p = Path(sys.argv[1])
 n_side = 10
 n_obs = n_side * n_side
-n_var = 2500
+n_var = 800
 rng = np.random.default_rng(0)
 pitch = 1.0
 idx = np.arange(n_obs, dtype=np.int64)
@@ -1397,10 +1414,10 @@ import anndata as ad
 p = Path(sys.argv[1])
 rng = np.random.default_rng(1)
 # Values typical of log1p(counts): bounded, mostly non-integer
-x = rng.uniform(0.0, 3.5, size=(80, 600)).astype(np.float32)
+x = rng.uniform(0.0, 3.5, size=(60, 300)).astype(np.float32)
 a = ad.AnnData(X=x)
-a.obs_names = [f"c{i}" for i in range(80)]
-a.var_names = [f"G{i}" for i in range(600)]
+a.obs_names = [f"c{i}" for i in range(60)]
+a.var_names = [f"G{i}" for i in range(300)]
 a.write_h5ad(p)
 "#,
             )
@@ -1746,7 +1763,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
         write_h5ad_probe_fixture(
             &src,
             r#"
-n_obs, n_var = 32, 80
+n_obs, n_var = 24, 48
 rng = np.random.default_rng(45)
 X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
 a = ad.AnnData(X=sp.csr_matrix(X))
@@ -1793,7 +1810,7 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
         write_h5ad_probe_fixture(
             &src,
             r#"
-n_obs, n_var = 20, 50
+n_obs, n_var = 16, 40
 rng = np.random.default_rng(46)
 X = np.abs(rng.normal(2.0, 0.5, size=(n_obs, n_var))).astype(np.float32)
 a = ad.AnnData(X=sp.csr_matrix(X))

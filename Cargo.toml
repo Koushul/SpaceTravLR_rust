@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "celloracle", "crates/rctd-core", "crates/spacetravlr-rctd"]
+resolver = "2"
+
 [package]
 name = "spacetravlr"
 version = "1.5.1"
@@ -67,6 +71,8 @@ self-update = [
     "dep:sha2",
     "dep:semver",
 ]
+rctd = ["dep:spacetravlr-rctd"]
+rctd-wgpu = ["rctd", "spacetravlr-rctd/wgpu"]
 
 [[bin]]
 name = "spacetravlr"
@@ -137,6 +143,7 @@ chrono = "0.4"
 glob = "0.3"
 hdf5-metno = "0.10.1"
 flate2 = "1"
+nalgebra = { version = "0.33", default-features = false, features = ["std"] }
 nalgebra-sparse = "0.11"
 kiddo = ">=5.2, <5.3"
 axum = { version = "0.8", optional = true, default-features = false, features = [
@@ -170,9 +177,17 @@ ureq = { version = "2.12", optional = true, default-features = true, features = 
 tar = { version = "0.4", optional = true }
 sha2 = { version = "0.10", optional = true }
 semver = { version = "1", optional = true }
+spacetravlr-rctd = { path = "crates/spacetravlr-rctd", optional = true, default-features = false }
 colored = "2.2"
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
+statrs = "0.18"
+
+[dev-dependencies]
+approx = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+statrs = "0.18"
 
 # Use vendored anndata default WriteConfig: gzip (deflate) instead of Zstd→Blosc so Python
 # h5py/Scanpy on arm64 can read our .h5ad without a Blosc HDF5 plugin.

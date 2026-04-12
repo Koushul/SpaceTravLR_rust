@@ -14,3 +14,5 @@ web/spatial_viewer/dist/
 results/
 .vscode/
 .cursor/
+
+retro_synthesis/celloracle_parity/python/.venv/

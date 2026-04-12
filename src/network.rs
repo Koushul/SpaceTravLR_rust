@@ -504,6 +504,47 @@ impl GeneNetwork {
         })
     }
 
+    /// All GRN edges (`edge_type == "grn"`) as **target → deduplicated regulator list** (TF-only priors).
+    ///
+    /// Self-loops are omitted. Order follows the parquet scan (stable, not sorted).
+    pub fn grn_regulators_by_target(&self) -> Result<HashMap<String, Vec<String>>> {
+        let lf = self
+            .network_df
+            .clone()
+            .lazy()
+            .filter(col("edge_type").cast(DataType::String).eq(lit("grn")))
+            .select([col("source"), col("target")]);
+        let df = lf.collect()?;
+
+        let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+        let src_series = df.column("source")?.cast(&DataType::String)?;
+        let tgt_series = df.column("target")?.cast(&DataType::String)?;
+        let (Ok(s_col), Ok(t_col)) = (src_series.str(), tgt_series.str()) else {
+            return Ok(by_target);
+        };
+
+        for i in 0..df.height() {
+            let Some(src) = s_col.get(i).map(str::trim) else {
+                continue;
+            };
+            let Some(tgt) = t_col.get(i).map(str::trim) else {
+                continue;
+            };
+            if src.is_empty() || tgt.is_empty() {
+                continue;
+            }
+            if src == tgt {
+                continue;
+            }
+            let entry = by_target.entry(tgt.to_string()).or_default();
+            if !entry.iter().any(|s| s == src) {
+                entry.push(src.to_string());
+            }
+        }
+
+        Ok(by_target)
+    }
+
     /// Union of LR ligands on edges whose endpoints are both in `var_names`, for dataset-wide caches.
     /// Applies [`apply_max_ligands_filter`] when `max_ligands` is `Some(k)` with `k > 0`.
     pub fn dataset_union_lr_ligands(

@@ -35,6 +35,9 @@ jobs:
       - name: Build
         run: cargo --config 'build.rustc-wrapper=""' build
 
+      - name: Build (RCTD feature)
+        run: cargo --config 'build.rustc-wrapper=""' build -p spacetravlr --features rctd
+
       - name: Run tests
         run: cargo --config 'build.rustc-wrapper=""' test
 

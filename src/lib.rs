@@ -5,6 +5,7 @@ pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
 pub mod cnn_gating;
+pub mod celloracle;
 pub mod condition_split;
 pub mod config;
 pub mod estimator;
@@ -51,6 +52,7 @@ pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
     cache_received_ligands_uns_for_processed_h5ad, materialize_canonical_training_adata,
-    read_h5ad_expression_dense_f64, SpatialCellularProgramsEstimator,
+    read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
+    SpatialCellularProgramsEstimator,
 };
 pub use training_hud::RunConfigSummary;

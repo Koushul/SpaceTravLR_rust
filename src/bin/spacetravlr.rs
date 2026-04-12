@@ -104,6 +104,28 @@ impl From<CnnOutputActivationArg> for CnnOutputActivation {
     }
 }
 
+#[cfg(feature = "rctd")]
+use spacetravlr_rctd::{DeconvMode, RctdCliArgs, run_rctd};
+
+#[cfg(feature = "rctd")]
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RctdModeArg {
+    Full,
+    Doublet,
+    Multi,
+}
+
+#[cfg(feature = "rctd")]
+impl From<RctdModeArg> for DeconvMode {
+    fn from(value: RctdModeArg) -> Self {
+        match value {
+            RctdModeArg::Full => DeconvMode::Full,
+            RctdModeArg::Doublet => DeconvMode::Doublet,
+            RctdModeArg::Multi => DeconvMode::Multi,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// Generate spacetravlr_run_summary.html (AnnData summary, config, optional manifest).
@@ -395,6 +417,130 @@ struct Cli {
         help = "Fake training dashboard only — no AnnData, no disk exports, no accelerator"
     )]
     demo: bool,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd",
+        action = ArgAction::SetTrue,
+        help_heading = "RCTD",
+        help = "RCTD spatial deconvolution (GPL-3.0-or-later linked code); exits before training. Needs `--h5ad` (spatial) and `--ref-adata`."
+    )]
+    rctd: bool,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "ref-adata",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "Reference .h5ad (single-cell or K×G with --ref-rows-are-types) or .rds"
+    )]
+    rctd_reference: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "cell-type-col",
+        value_name = "NAME",
+        help_heading = "RCTD",
+        default_value = "cell_type",
+        help = "obs column with cell type labels (.h5ad single-cell reference only)"
+    )]
+    rctd_cell_type_col: String,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "ref-rows-are-types",
+        action = ArgAction::SetTrue,
+        help_heading = "RCTD",
+        help = "Reference matrix rows are cell types (K×G), obs_names are type labels"
+    )]
+    rctd_ref_rows_are_types: bool,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "ref-cell-min",
+        default_value_t = 25,
+        value_name = "N",
+        help_heading = "RCTD",
+        help = "Minimum cells per type when aggregating single-cell reference"
+    )]
+    rctd_ref_cell_min: usize,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "ref-min-umi",
+        default_value_t = 100,
+        value_name = "N",
+        help_heading = "RCTD",
+        help = "Minimum mean UMI per type when aggregating reference"
+    )]
+    rctd_ref_min_umi: u32,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "ref-max-cells-per-type",
+        default_value_t = 10000,
+        value_name = "N",
+        help_heading = "RCTD",
+        help = "Max cells sampled per type for reference profiles"
+    )]
+    rctd_ref_max_cells_per_type: usize,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "q-matrices",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "q_matrices.npz (default: ~/.cache/rctd/q_matrices.npz, downloaded on first run)"
+    )]
+    rctd_q_matrices: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "sigma",
+        default_value_t = 100,
+        value_name = "N",
+        help_heading = "RCTD",
+        help = "Q-matrix key (integer)"
+    )]
+    rctd_sigma: i32,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-mode",
+        value_enum,
+        default_value_t = RctdModeArg::Full,
+        help_heading = "RCTD",
+        help = "Deconvolution mode"
+    )]
+    rctd_mode: RctdModeArg,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-batch-size",
+        default_value_t = 4096,
+        value_name = "N",
+        help_heading = "RCTD",
+        help = "Batch size (spots per batch for outer RCTD loops)"
+    )]
+    rctd_batch_size: usize,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-output",
+        value_name = "PREFIX",
+        help_heading = "RCTD",
+        help = "Optional output path prefix; writes PREFIX.weights.csv when set"
+    )]
+    rctd_output: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "gpu",
+        action = ArgAction::SetTrue,
+        help_heading = "RCTD",
+        help = "Use wgpu for RCTD (f32; not bit-identical vs CPU). Build with `--features rctd,rctd-wgpu`."
+    )]
+    rctd_gpu: bool,
 
     #[arg(
         long = "plot-h5ad",
@@ -986,8 +1132,46 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
         cli.condition.as_deref(),
     );
     let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
-    eprint!("{log}");
+       eprint!("{log}");
     Ok(())
+}
+
+#[cfg(feature = "rctd")]
+fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
+    let h5ad = cli.h5ad.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("--rctd requires `--h5ad PATH` (spatial AnnData .h5ad or .rds via same path)")
+    })?;
+    let spatial = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
+    if !spatial.is_file() {
+        anyhow::bail!("spatial input not found at {}.", spatial.display());
+    }
+    let reference = cli
+        .rctd_reference
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--rctd requires `--ref-adata PATH`"))?;
+    let reference = PathBuf::from(expand_user_path(reference.to_string_lossy().as_ref()));
+    if !reference.is_file() {
+        anyhow::bail!("reference not found at {}.", reference.display());
+    }
+    run_rctd(RctdCliArgs {
+        spatial,
+        reference,
+        cell_type_col: cli.rctd_cell_type_col.clone(),
+        ref_rows_are_types: cli.rctd_ref_rows_are_types,
+        ref_cell_min: cli.rctd_ref_cell_min,
+        ref_min_umi: cli.rctd_ref_min_umi,
+        ref_max_cells_per_type: cli.rctd_ref_max_cells_per_type,
+        q_matrices: cli.rctd_q_matrices.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        sigma: cli.rctd_sigma,
+        mode: cli.rctd_mode.into(),
+        batch_size: cli.rctd_batch_size,
+        output_prefix: cli.rctd_output.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        gpu: cli.rctd_gpu,
+    })
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1023,6 +1207,11 @@ fn main() -> anyhow::Result<()> {
 
     if cli.impute {
         return run_impute(&cli);
+    }
+
+    #[cfg(feature = "rctd")]
+    if cli.rctd {
+        return run_rctd_from_cli(&cli);
     }
 
     if cli.plot_h5ad {

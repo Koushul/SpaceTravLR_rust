@@ -115,6 +115,8 @@ pub struct GrnConfig {
     pub network_data_dir: Option<String>,
     /// Optional Feather/IPC file containing TF priors with columns:
     /// `source` (TF), `target` (gene), `cell_type` (obs.cell_type label).
+    /// When omitted and `use_tf_modulators` is true, training runs CellOracle GRN inference and writes
+    /// `{output_dir}/celloracle_tf_priors.feather` (reused on subsequent runs if present).
     pub tf_priors_feather: Option<String>,
     pub tf_ligand_cutoff: f64,
     /// Keep only DB L–R pairs whose **ligand** is among the top `max_ligands` by mean expression
@@ -700,9 +702,7 @@ impl SpaceshipConfig {
         if let Some(ov) = overlay_root {
             merge_spaceship_overlay_into_toml(&mut root, ov);
         }
-        let merged_text = toml::to_string_pretty(&root)
-            .map_err(|e| anyhow::anyhow!("serialize merged SpaceshipConfig TOML: {e}"))?;
-        toml::from_str(&merged_text).with_context(|| {
+        <SpaceshipConfig as Deserialize>::deserialize(root).with_context(|| {
             format!(
                 "deserialize merged SpaceshipConfig from {} (after overlay)",
                 path.display()

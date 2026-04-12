@@ -1,0 +1,17 @@
+[package]
+name = "celloracle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "CellOracle-style TF GRN (Bayesian ridge) CLI — uses spacetravlr::celloracle"
+license = "MIT"
+
+[[bin]]
+name = "spacetravlr-celloracle"
+path = "src/main.rs"
+
+[dependencies]
+spacetravlr = { path = "..", default-features = false }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+rayon = "1.10"
