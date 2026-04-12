@@ -15,4 +15,5 @@ results/
 .vscode/
 .cursor/
 
-retro_synthesis/celloracle_parity/python/.venv/
+retro_synthesis/
+data/h5ad/
