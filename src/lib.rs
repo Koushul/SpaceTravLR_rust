@@ -15,6 +15,7 @@ pub mod grn_extra;
 pub mod lasso;
 pub mod ligand;
 pub mod model;
+mod modulator_scale;
 pub mod network;
 pub mod perturb;
 pub mod perturb_batch;

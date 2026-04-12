@@ -150,6 +150,10 @@ pub struct LassoConfig {
     pub group_reg: f64,
     pub n_iter: usize,
     pub tol: f64,
+    #[serde(default = "default_true")]
+    pub scale_modulators: bool,
+    #[serde(default = "default_true")]
+    pub unscale_betas_on_export: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -471,6 +475,8 @@ impl Default for LassoConfig {
             group_reg: 1e-5,
             n_iter: 500,
             tol: 1e-4,
+            scale_modulators: true,
+            unscale_betas_on_export: true,
         }
     }
 }
@@ -1038,5 +1044,89 @@ output_dir = "out_a"
         let cfg = SpaceshipConfig::from_file_merged(&repro, Some(&overlay)).unwrap();
         let dir = cfg.resolve_training_output_dir(repro.as_path());
         assert_eq!(dir, tmp.join("out_b"));
+    }
+}
+
+#[cfg(test)]
+mod lasso_scaling_config_tests {
+    use super::{LassoConfig, SpaceshipConfig};
+
+    #[test]
+    fn default_lasso_has_scale_modulators_true() {
+        assert!(LassoConfig::default().scale_modulators);
+    }
+
+    #[test]
+    fn default_lasso_has_unscale_betas_true() {
+        assert!(LassoConfig::default().unscale_betas_on_export);
+    }
+
+    #[test]
+    fn toml_explicit_scale_modulators_false_parsed() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 5
+learning_rate = 0.001
+score_threshold = 0.1
+
+[lasso]
+scale_modulators = false
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(!cfg.lasso.scale_modulators);
+        assert!(cfg.lasso.unscale_betas_on_export);
+    }
+
+    #[test]
+    fn toml_explicit_unscale_betas_false_parsed() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 5
+learning_rate = 0.001
+score_threshold = 0.1
+
+[lasso]
+unscale_betas_on_export = false
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.lasso.scale_modulators);
+        assert!(!cfg.lasso.unscale_betas_on_export);
+    }
+
+    #[test]
+    fn toml_omitted_scaling_fields_use_true_defaults() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 5
+learning_rate = 0.001
+score_threshold = 0.1
+
+[lasso]
+l1_reg = 1e-9
+group_reg = 1e-9
+n_iter = 50
+tol = 1e-4
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.lasso.scale_modulators);
+        assert!(cfg.lasso.unscale_betas_on_export);
     }
 }

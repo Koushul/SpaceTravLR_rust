@@ -73,6 +73,12 @@ group_reg = 1e-9
 n_iter    = 100
 # Relative convergence tolerance
 tol       = 1e-4
+# Column-wise scaling of modulator features (divide by std, no mean subtraction).
+# Matches CellOracle StandardScaler(with_mean=false). Default true.
+# scale_modulators = true
+# When scale_modulators is true, divide exported betas by column std (original expression units).
+# Set false to export scaled-space betas (CellOracle-style). Default true.
+# unscale_betas_on_export = true
 
 [training]
 # Default when omitted: seed. Use full or hybrid to enable CNN paths.

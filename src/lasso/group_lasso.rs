@@ -931,6 +931,52 @@ mod tests {
     }
 
     #[test]
+    fn prescaling_changes_coefficients_under_regularization() {
+        use crate::modulator_scale::scale_columns_no_center;
+        let (x_base, y) = simple_xy();
+        let mut x_big = x_base.clone();
+        for i in 0..x_big.nrows() {
+            x_big[[i, 0]] *= 1000.0;
+        }
+        let mut x_scaled = x_big.clone();
+        let _ = scale_columns_no_center(&mut x_scaled);
+        let params = GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 0.02,
+            l1_reg: 0.02,
+            n_iter: 800,
+            tol: 1e-8,
+            fit_intercept: false,
+            ..Default::default()
+        };
+        let mut m_unscaled = GroupLasso::new(params.clone());
+        let _ = m_unscaled.fit(&x_big, &y, None);
+        let mut m_scaled = GroupLasso::new(params);
+        let _ = m_scaled.fit(&x_scaled, &y, None);
+        let c1 = &m_unscaled.fitted.as_ref().unwrap().coef;
+        let c2 = &m_scaled.fitted.as_ref().unwrap().coef;
+        let diff: f64 = c1.iter().zip(c2.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(
+            diff > 1e-4,
+            "coefficients should differ when input scaling changes under regularization (diff={diff})"
+        );
+        let p2 = m_scaled.predict(&x_scaled).unwrap();
+        let r1 = y.column(0);
+        let ss2: f64 = r1
+            .iter()
+            .zip(p2.column(0).iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
+        let mean_r1 = r1.mean().unwrap();
+        let ss_tot: f64 = r1.iter().map(|v| (v - mean_r1).powi(2)).sum();
+        let r2_2 = 1.0 - ss2 / ss_tot;
+        assert!(
+            r2_2 > 0.9,
+            "scaled-input fit should explain variance (r2_2={r2_2})"
+        );
+    }
+
+    #[test]
     fn sparsity_mask_identifies_active_features() {
         let (x, y) = sparse_xy();
         let mut model = GroupLasso::new(GroupLassoParams {

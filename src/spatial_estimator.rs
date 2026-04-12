@@ -10,6 +10,9 @@ use crate::config::{
 use crate::estimator::{CachedSpatialData, ClusteredGCNNWR, finite_or_zero_f64};
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use crate::modulator_scale::{
+    apply_modulator_scales_inplace, scale_columns_no_center, unscale_betadata_columns_inplace,
+};
 use crate::run_summary_html::{RunSummaryParams, write_run_summary_html};
 use crate::training_hud::{
     TrainingHud, log_line, pipeline_step_begin, pipeline_step_end, print_training_outcome_banner,
@@ -1486,6 +1489,7 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub weighted_ligand_scale_factor: f64,
     /// When set, only these obs rows are read from the backing AnnData (read-only; no disk writes).
     pub obs_row_subset: Option<Arc<[usize]>>,
+    pub modulator_scales: Option<Array1<f64>>,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -1650,6 +1654,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             ligand_grid_factor,
             weighted_ligand_scale_factor,
             obs_row_subset,
+            modulator_scales: None,
         })
     }
 
@@ -2228,6 +2233,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let n_workers = n_parallel.max(1);
             let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
             let stale_lock_secs = spaceship_config.execution.stale_lock_secs;
+            let scale_modulators_w = spaceship_config.lasso.scale_modulators;
+            let unscale_betas_on_export_w = spaceship_config.lasso.unscale_betas_on_export;
 
             let janitor_stop = Arc::new(AtomicBool::new(false));
             let janitor_handle = if stale_lock_secs > 0 {
@@ -2556,6 +2563,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     group_reg,
                                     n_iter,
                                     tol,
+                                    scale_modulators_w,
                                     "lasso",
                                     &cnn_w,
                                     &device,
@@ -2581,7 +2589,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     && n_mods > 0;
                                 if hybrid_gate {
                                     match estimator.build_x_modulators_and_target_y(&xy) {
-                                        Ok((x_mat, y_vec)) => {
+                                        Ok((mut x_mat, y_vec)) => {
+                                            if scale_modulators_w {
+                                                if let Some(ref scales) =
+                                                    estimator.modulator_scales
+                                                {
+                                                    apply_modulator_scales_inplace(
+                                                        &mut x_mat, scales,
+                                                    );
+                                                }
+                                            }
                                             let decision_opt =
                                                 estimator.estimator.as_ref().map(|inn| {
                                                     let summaries_snapshot =
@@ -2725,6 +2742,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 }
                                             }
                                         }
+                                        if unscale_betas_on_export_w {
+                                            if let Some(ref scales) = estimator.modulator_scales {
+                                                unscale_betadata_columns_inplace(
+                                                    &mut all_betas,
+                                                    scales,
+                                                );
+                                            }
+                                        }
 
                                         let keep: Vec<usize> = (0..all_betas.ncols())
                                             .filter(|&j| {
@@ -2800,14 +2825,26 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                         .unwrap_or(0.0),
                                                 );
                                                 let coefs = &est_inner.lasso_coefficients[&c_id];
-                                                std::iter::once(intercept)
-                                                    .chain(
-                                                        coefs
-                                                            .column(0)
-                                                            .iter()
-                                                            .map(|&b| finite_or_zero_f64(b)),
-                                                    )
-                                                    .collect()
+                                                let mut row = Vec::with_capacity(1 + n_mods);
+                                                row.push(intercept);
+                                                for j in 0..coefs.nrows() {
+                                                    let mut b =
+                                                        finite_or_zero_f64(coefs[[j, 0]]);
+                                                    if unscale_betas_on_export_w {
+                                                        if let Some(ref s) =
+                                                            estimator.modulator_scales
+                                                        {
+                                                            if j < s.len() {
+                                                                let sj = s[j];
+                                                                if sj != 1.0 {
+                                                                    b /= sj;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    row.push(b);
+                                                }
+                                                row
                                             })
                                             .collect();
 
@@ -3283,13 +3320,20 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         group_reg: f64,
         n_iter: usize,
         tol: f64,
+        scale_modulators: bool,
         _estimator_type: &str,
         cnn: &CnnConfig,
         device: &AB::Device,
         cached_spatial: Option<&CachedSpatialData>,
         lasso_progress: F,
     ) -> anyhow::Result<()> {
-        let (x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
+        let (mut x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
+        if scale_modulators {
+            let scales = scale_columns_no_center(&mut x_modulators);
+            self.modulator_scales = Some(scales);
+        } else {
+            self.modulator_scales = None;
+        }
 
         if self.estimator.is_none() {
             let mut groups = Vec::new();
@@ -3368,6 +3412,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             .unwrap_or(1);
 
         let cnn = CnnConfig::default();
+        let scale_mod = crate::config::LassoConfig::default().scale_modulators;
         self.fit_with_cache(
             &xy,
             &clusters,
@@ -3379,6 +3424,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             group_reg,
             n_iter,
             tol,
+            scale_mod,
             estimator_type,
             &cnn,
             device,
@@ -3410,6 +3456,110 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     pub fn get_gene_expression(&self, gene: &str) -> anyhow::Result<Array1<f64>> {
         self.get_multiple_gene_expressions(&[gene.to_string()])
             .map(|data: Array2<f64>| data.column(0).to_owned())
+    }
+}
+
+#[cfg(test)]
+mod scale_columns_tests {
+    use crate::lasso::{GroupLasso, GroupLassoParams};
+    use crate::modulator_scale::{scale_columns_no_center, unscale_betadata_columns_inplace};
+    use approx::assert_abs_diff_eq;
+    use ndarray::{Array1, Array2};
+
+    fn pop_std(col: ndarray::ArrayView1<f64>) -> f64 {
+        let n = col.len() as f64;
+        let m = col.sum() / n;
+        (col.iter().map(|v| (v - m).powi(2)).sum::<f64>() / n).sqrt()
+    }
+
+    #[test]
+    fn scale_columns_matches_celloracle_standard() {
+        let x0 = Array2::from_shape_vec(
+            (4, 3),
+            vec![1.0, 2.0, 4.0, 2.0, 4.0, 6.0, 3.0, 6.0, 8.0, 4.0, 8.0, 10.0],
+        )
+        .unwrap();
+        let mut x = x0.clone();
+        let scales = scale_columns_no_center(&mut x);
+        for j in 0..3 {
+            let s = pop_std(x0.column(j));
+            let exp_s = if s > 1e-12 { s } else { 1.0 };
+            assert_abs_diff_eq!(scales[j], exp_s, epsilon = 1e-9);
+            for i in 0..4 {
+                assert_abs_diff_eq!(x[[i, j]], x0[[i, j]] / exp_s, epsilon = 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn scale_columns_zero_std_passthrough() {
+        let mut x = Array2::from_elem((3, 2), 5.0f64);
+        let scales = scale_columns_no_center(&mut x);
+        assert_abs_diff_eq!(scales[0], 1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(scales[1], 1.0, epsilon = 1e-12);
+        assert!(x.iter().all(|&v| (v - 5.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn scale_columns_no_mean_subtraction() {
+        let mut x = Array2::from_elem((5, 2), 3.0f64);
+        x[[0, 0]] = 10.0;
+        let _ = scale_columns_no_center(&mut x);
+        assert!(x.column(0).sum().abs() > 1e-6);
+    }
+
+    #[test]
+    fn unscale_betadata_columns_inplace_skips_intercept() {
+        let mut betas = Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 4.0, 1.0, 6.0, 8.0]).unwrap();
+        let scales = Array1::from_vec(vec![0.5, 2.0]);
+        unscale_betadata_columns_inplace(&mut betas, &scales);
+        assert_abs_diff_eq!(betas[[0, 0]], 1.0, epsilon = 1e-9);
+        assert_abs_diff_eq!(betas[[0, 1]], 4.0, epsilon = 1e-9);
+        assert_abs_diff_eq!(betas[[0, 2]], 2.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn unscale_roundtrip_matches_predict() {
+        let n = 50usize;
+        let x_orig = Array2::from_shape_fn((n, 2), |(i, j)| {
+            if j == 0 {
+                i as f64 * 10.0
+            } else {
+                (n - i) as f64 * 0.01
+            }
+        });
+        let y = Array2::from_shape_fn((n, 1), |(i, _)| {
+            1.5 * x_orig[[i, 0]] + 2.0 * x_orig[[i, 1]]
+        });
+        let mut x_scaled = x_orig.clone();
+        let scales = scale_columns_no_center(&mut x_scaled);
+        let params = GroupLassoParams {
+            groups: vec![0, 1],
+            group_reg: 1e-8,
+            l1_reg: 1e-8,
+            n_iter: 800,
+            tol: 1e-10,
+            fit_intercept: true,
+            ..Default::default()
+        };
+        let mut model = GroupLasso::new(params);
+        let _ = model.fit(&x_scaled, &y, None);
+        let fitted = model.fitted.as_ref().unwrap();
+        let intercept = fitted.intercept[[0, 0]];
+        let pred_scaled = model.predict(&x_scaled).unwrap();
+        let mut coef_orig = fitted.coef.column(0).to_owned();
+        for j in 0..coef_orig.len() {
+            if scales[j] != 1.0 {
+                coef_orig[j] /= scales[j];
+            }
+        }
+        for i in 0..n {
+            let mut v = intercept;
+            for j in 0..2 {
+                v += x_orig[[i, j]] * coef_orig[j];
+            }
+            assert_abs_diff_eq!(v, pred_scaled[[i, 0]], epsilon = 1e-5);
+        }
     }
 }
 
