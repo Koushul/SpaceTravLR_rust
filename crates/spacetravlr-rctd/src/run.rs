@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -10,10 +10,10 @@ use anyhow::{bail, ensure, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array1, Array2};
 use rctd_core::io_npz::load_q_matrices_npz;
-use rctd_core::likelihood_tables::compute_spline_coefficients;
 use rctd_core::{
-    device_cpu, sync_device, BatchProgress, DeconvMode, DeconvolutionOutput, PreparedData,
-    RctdConfig, RctdDevice, run_deconvolution,
+    build_x_vals, compute_q_matrix, compute_spline_coefficients, device_cpu, sync_device,
+    BatchProgress, DeconvMode, DeconvolutionOutput, PreparedData, RctdConfig, RctdDevice,
+    run_deconvolution,
 };
 
 #[cfg(feature = "wgpu")]
@@ -29,6 +29,14 @@ const Q_MATRICES_URL: &str =
 pub struct RctdCliArgs {
     pub spatial: PathBuf,
     pub reference: PathBuf,
+    pub spatial_obs_subset_file: Option<PathBuf>,
+    pub gene_subset_file: Option<PathBuf>,
+    pub spatial_numi_tsv: Option<PathBuf>,
+    pub sigma_float: Option<f64>,
+    pub q_matrix_tsv: Option<PathBuf>,
+    pub x_vals_tsv: Option<PathBuf>,
+    pub skip_profile_column_normalize: bool,
+    pub k_val: i64,
     pub cell_type_col: String,
     pub ref_rows_are_types: bool,
     pub ref_cell_min: usize,
@@ -85,6 +93,214 @@ fn align_genes_spatial_ref(
     }
     let profiles_gk = p.t().to_owned();
     Ok((c, profiles_gk))
+}
+
+fn apply_spatial_obs_subset(
+    counts: Array2<f64>,
+    spatial_obs_names: Vec<String>,
+    subset_path: &Path,
+) -> Result<(Array2<f64>, Vec<String>)> {
+    let raw = fs::read_to_string(subset_path)
+        .with_context(|| format!("read subset file {}", subset_path.display()))?;
+    let mut wanted: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for line in raw.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let s = line.to_string();
+        if !seen.insert(s.clone()) {
+            bail!("duplicate barcode in subset file: {s:?}");
+        }
+        wanted.push(s);
+    }
+    if wanted.is_empty() {
+        bail!("spatial obs subset file is empty (after removing blanks/comments)");
+    }
+    let index_of: HashMap<&str, usize> = spatial_obs_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    let g = counts.ncols();
+    let n = wanted.len();
+    let mut out = Array2::<f64>::zeros((n, g));
+    let mut names = Vec::with_capacity(n);
+    for (out_i, w) in wanted.iter().enumerate() {
+        let &src_i = index_of
+            .get(w.as_str())
+            .with_context(|| format!("barcode {w:?} not found in spatial obs_names"))?;
+        out.row_mut(out_i).assign(&counts.row(src_i));
+        names.push(w.clone());
+    }
+    Ok((out, names))
+}
+
+fn load_q_matrix_tsv(path: &Path) -> Result<Array2<f64>> {
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut rows: Vec<Vec<f64>> = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let row: Vec<f64> = line
+            .split_whitespace()
+            .map(|s| s.parse::<f64>())
+            .collect::<std::result::Result<_, _>>()
+            .with_context(|| format!("parse Q row {:?}", line.get(..40.min(line.len()))))?;
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        bail!("empty Q matrix TSV");
+    }
+    let ncols = rows[0].len();
+    for (i, r) in rows.iter().enumerate() {
+        if r.len() != ncols {
+            bail!("Q matrix row {} has {} cols, expected {}", i, r.len(), ncols);
+        }
+    }
+    let nrows = rows.len();
+    let flat: Vec<f64> = rows.into_iter().flatten().collect();
+    Array2::from_shape_vec((nrows, ncols), flat).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn load_x_vals_tsv(path: &Path) -> Result<Array1<f64>> {
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut v = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let x = line
+            .parse::<f64>()
+            .or_else(|_| {
+                line.split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .parse::<f64>()
+            })
+            .with_context(|| format!("parse X_vals line {:?}", line.get(..40.min(line.len()))))?;
+        v.push(x);
+    }
+    if v.is_empty() {
+        bail!("empty X_vals TSV");
+    }
+    Ok(Array1::from_vec(v))
+}
+
+fn load_spatial_numi_tsv(path: &Path, obs_order: &[String]) -> Result<Array1<f64>> {
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let lines: Vec<&str> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        bail!("empty spatial nUMI TSV");
+    }
+    let parse_row = |line: &str| -> Result<(String, f64)> {
+        let line = line.trim();
+        let (obs, val_str) = if let Some(i) = line.find('\t') {
+            (&line[..i], line[i + 1..].trim_start())
+        } else {
+            let mut it = line.split_whitespace();
+            let o = it.next().context("nUMI row: missing obs")?;
+            let r = it.next().context("nUMI row: missing value")?;
+            (o, r)
+        };
+        let obs = obs.trim().to_string();
+        let v = val_str
+            .split_whitespace()
+            .next()
+            .context("nUMI row: missing value")?
+            .parse::<f64>()
+            .with_context(|| format!("parse nUMI for obs={obs:?}"))?;
+        Ok((obs, v))
+    };
+    let data_lines: &[&str] = {
+        let first = lines[0];
+        let lower = first.to_lowercase();
+        if lower.starts_with("obs\t") || lower.starts_with("obs ") {
+            &lines[1..]
+        } else {
+            lines.as_slice()
+        }
+    };
+    let mut map: HashMap<String, f64> = HashMap::new();
+    for line in data_lines {
+        let (obs, v) = parse_row(line)?;
+        map.insert(obs, v);
+    }
+    let mut out = Vec::with_capacity(obs_order.len());
+    for o in obs_order {
+        let u = map
+            .get(o)
+            .copied()
+            .with_context(|| format!("nUMI TSV missing barcode {o:?}"))?;
+        if u <= 0.0 || !u.is_finite() {
+            bail!("invalid nUMI for barcode {o:?}: {u}");
+        }
+        out.push(u);
+    }
+    Ok(Array1::from_vec(out))
+}
+
+fn read_gene_list_file(path: &Path) -> Result<Vec<String>> {
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut wanted = Vec::new();
+    for line in raw.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        wanted.push(line.to_string());
+    }
+    if wanted.is_empty() {
+        bail!("gene subset file is empty (after removing blanks/comments)");
+    }
+    Ok(wanted)
+}
+
+fn subset_genes_from_file(
+    path: &Path,
+    spatial_genes: &[String],
+    counts: Array2<f64>,
+    ref_genes: &[String],
+    profiles_kg: &Array2<f64>,
+) -> Result<(Array2<f64>, Vec<String>, Array2<f64>)> {
+    let wanted = read_gene_list_file(path)?;
+    let smap: HashMap<&str, usize> = spatial_genes
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i))
+        .collect();
+    let rmap: HashMap<&str, usize> = ref_genes
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i))
+        .collect();
+    let k = profiles_kg.nrows();
+    let n_spots = counts.nrows();
+    let mut cols_s: Vec<usize> = Vec::new();
+    let mut cols_r: Vec<usize> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for g in wanted {
+        if let (Some(&si), Some(&ri)) = (smap.get(g.as_str()), rmap.get(g.as_str())) {
+            cols_s.push(si);
+            cols_r.push(ri);
+            names.push(g);
+        }
+    }
+    if names.is_empty() {
+        bail!("no genes from subset file appear in both spatial and reference");
+    }
+    let n = names.len();
+    let mut new_counts = Array2::<f64>::zeros((n_spots, n));
+    let mut new_prof = Array2::<f64>::zeros((k, n));
+    for (j, (&si, &ri)) in cols_s.iter().zip(cols_r.iter()).enumerate() {
+        new_counts.column_mut(j).assign(&counts.column(si));
+        new_prof.column_mut(j).assign(&profiles_kg.column(ri));
+    }
+    Ok((new_counts, names, new_prof))
 }
 
 pub fn resolve_q_matrices_path(arg: Option<PathBuf>) -> Result<PathBuf> {
@@ -232,6 +448,14 @@ pub fn run_rctd(args: RctdCliArgs) -> Result<()> {
         (counts, spatial_genes, spatial_obs_names)
     };
 
+    let (counts, spatial_obs_names) =
+        if let Some(ref subset_path) = args.spatial_obs_subset_file {
+            apply_spatial_obs_subset(counts, spatial_obs_names, subset_path.as_path())
+                .context("spatial obs subset")?
+        } else {
+            (counts, spatial_obs_names)
+        };
+
     let (profiles_kg, cell_type_names, ref_genes) = if input_is_rds(&args.reference) {
         if args.ref_rows_are_types {
             ref_rds::load_reference_profiles_rds(args.reference.as_path()).context(
@@ -284,31 +508,86 @@ pub fn run_rctd(args: RctdCliArgs) -> Result<()> {
         (pair.0, pair.1, ref_genes)
     };
 
+    let (counts, spatial_genes, profiles_kg) =
+        if let Some(ref gfp) = args.gene_subset_file {
+            let (c, sg, pk) = subset_genes_from_file(
+                gfp.as_path(),
+                &spatial_genes,
+                counts,
+                &ref_genes,
+                &profiles_kg,
+            )
+            .context("gene subset file")?;
+            (c, sg, pk)
+        } else {
+            (counts, spatial_genes, profiles_kg)
+        };
+
+    let ref_genes = spatial_genes.clone();
     let (counts, profiles_gk_raw) =
         align_genes_spatial_ref(&spatial_genes, &ref_genes, &counts, &profiles_kg)?;
-    let norm_profiles = ref_adata::normalize_columns(&profiles_gk_raw);
+    let norm_profiles = if args.skip_profile_column_normalize {
+        profiles_gk_raw
+    } else {
+        ref_adata::normalize_columns(&profiles_gk_raw)
+    };
     if cell_type_names.len() != norm_profiles.ncols() {
         bail!("cell type count does not match norm_profiles columns");
     }
-    let numi: Array1<f64> = counts.sum_axis(ndarray::Axis(1));
+    let numi: Array1<f64> = if let Some(ref np) = args.spatial_numi_tsv {
+        load_spatial_numi_tsv(np.as_path(), &spatial_obs_names).context("spatial nUMI TSV")?
+    } else {
+        counts.sum_axis(ndarray::Axis(1))
+    };
+    if numi.len() != counts.nrows() {
+        bail!("nUMI length {} != n_spots {}", numi.len(), counts.nrows());
+    }
     let n_pixels = counts.nrows();
 
-    let q_path = resolve_q_matrices_path(args.q_matrices)?;
-    let (q_map, x_vals) = load_q_matrices_npz(q_path.as_path())?;
-    let q_prefixed = format!("Q_{}", args.sigma);
-    let q_mat = q_map
-        .get(&q_prefixed)
-        .or_else(|| q_map.get(&args.sigma.to_string()))
-        .with_context(|| {
-            format!(
-                "sigma {} not in q_matrices.npz (try keys like Q_{})",
-                args.sigma, args.sigma
-            )
-        })?
-        .clone();
-    let sq_mat = compute_spline_coefficients(&q_mat, &x_vals);
+    let k_usize = args.k_val.max(1) as usize;
+    let (q_mat, sq_mat, x_vals) = if let Some(ref qp) = args.q_matrix_tsv {
+        let q_mat = load_q_matrix_tsv(qp.as_path()).context("load --rctd-q-tsv")?;
+        let x_vals = if let Some(ref xp) = args.x_vals_tsv {
+            load_x_vals_tsv(xp.as_path()).context("load --rctd-x-vals-tsv")?
+        } else {
+            build_x_vals()
+        };
+        if q_mat.ncols() != x_vals.len() {
+            bail!(
+                "Q matrix ncols {} != len(X_vals) {}; pass matching --rctd-x-vals-tsv from spacexr",
+                q_mat.ncols(),
+                x_vals.len()
+            );
+        }
+        let sq_mat = compute_spline_coefficients(&q_mat, &x_vals);
+        (q_mat, sq_mat, x_vals)
+    } else if let Some(sigma_f) = args.sigma_float {
+        let x_vals = build_x_vals();
+        let q_mat = compute_q_matrix(sigma_f, &x_vals, k_usize);
+        let sq_mat = compute_spline_coefficients(&q_mat, &x_vals);
+        (q_mat, sq_mat, x_vals)
+    } else {
+        let q_path = resolve_q_matrices_path(args.q_matrices.clone())?;
+        let (q_map, x_vals) = load_q_matrices_npz(q_path.as_path())?;
+        let q_prefixed = format!("Q_{}", args.sigma);
+        let q_mat = q_map
+            .get(&q_prefixed)
+            .or_else(|| q_map.get(&args.sigma.to_string()))
+            .with_context(|| {
+                format!(
+                    "sigma {} not in q_matrices.npz (try keys like Q_{})",
+                    args.sigma, args.sigma
+                )
+            })?
+            .clone();
+        let sq_mat = compute_spline_coefficients(&q_mat, &x_vals);
+        (q_mat, sq_mat, x_vals)
+    };
 
-    let config = RctdConfig::default();
+    let config = RctdConfig {
+        k_val: args.k_val,
+        ..RctdConfig::default()
+    };
     let data = PreparedData {
         spatial_counts: counts,
         spatial_numi: numi,

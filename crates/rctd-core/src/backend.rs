@@ -91,9 +91,14 @@ pub fn default_device() -> RctdDevice {
 }
 
 #[cfg(feature = "wgpu")]
+static WGPU_INIT: std::sync::Once = std::sync::Once::new();
+
+#[cfg(feature = "wgpu")]
 pub fn init_wgpu(device: &WgpuDevice) {
     use burn_wgpu::graphics::AutoGraphicsApi;
-    burn_wgpu::init_setup::<AutoGraphicsApi>(device, Default::default());
+    WGPU_INIT.call_once(|| {
+        burn_wgpu::init_setup::<AutoGraphicsApi>(device, Default::default());
+    });
 }
 
 #[cfg(feature = "wgpu")]

@@ -438,6 +438,79 @@ struct Cli {
 
     #[cfg(feature = "rctd")]
     #[arg(
+        long = "rctd-obs-subset-file",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "Optional text file: one spatial barcode per line (# comments OK). Restricts RCTD to this puck (e.g. barcodes after spacexr::create.RCTD)."
+    )]
+    rctd_obs_subset_file: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-genes-file",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "One gene per line (# comments OK). For spacexr parity use internal_vars$gene_list_reg (RCTD regression genes), not necessarily all puck rows."
+    )]
+    rctd_genes_file: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-spatial-numi-tsv",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "TSV with header obs<TAB>nUMI; one row per spatial barcode (spacexr puck@nUMI). Matches R when counts are gene-subset but nUMI is total per spot."
+    )]
+    rctd_spatial_numi_tsv: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-sigma-file",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "Single float σ per line: build Q/SQ at runtime (matches spacexr internal_vars$sigma; no q_matrices.npz needed)."
+    )]
+    rctd_sigma_file: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-q-tsv",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "Tab-separated Q_mat from spacexr (internal_vars$Q_mat); overrides --sigma / q_matrices.npz and --rctd-sigma-file."
+    )]
+    rctd_q_tsv: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-x-vals-tsv",
+        value_name = "PATH",
+        help_heading = "RCTD",
+        help = "One X grid value per line (internal_vars$X_vals); required to match R Q_mat column count if it differs from the built-in grid."
+    )]
+    rctd_x_vals_tsv: Option<PathBuf>,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-skip-profile-normalize",
+        action = ArgAction::SetTrue,
+        help_heading = "RCTD",
+        help = "Use reference profiles as-is (no per-type column L1 normalize). Use with spacexr cell_type_info$renorm[[1]] (K×G export) for parity."
+    )]
+    rctd_skip_profile_normalize: bool,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
+        long = "rctd-k-val",
+        default_value_t = 1000,
+        value_name = "K",
+        help_heading = "RCTD",
+        help = "Poisson tail K for Q matrix rows (spacexr config K_val; use 100 to match default spacexr Reference)."
+    )]
+    rctd_k_val: i64,
+
+    #[cfg(feature = "rctd")]
+    #[arg(
         long = "cell-type-col",
         value_name = "NAME",
         help_heading = "RCTD",
@@ -1393,9 +1466,47 @@ fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
     if !reference.is_file() {
         anyhow::bail!("reference not found at {}.", reference.display());
     }
+    let sigma_float: Option<f64> = if let Some(ref p) = cli.rctd_sigma_file {
+        let path = PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()));
+        let t = std::fs::read_to_string(&path)
+            .with_context(|| format!("read --rctd-sigma-file {}", path.display()))?;
+        let line = t
+            .lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim())
+            .find(|l| !l.is_empty())
+            .context("--rctd-sigma-file: no non-empty line")?;
+        Some(
+            line.parse::<f64>()
+                .with_context(|| format!("parse --rctd-sigma-file value {:?}", line))?,
+        )
+    } else {
+        None
+    };
     run_rctd(RctdCliArgs {
         spatial,
         reference,
+        spatial_obs_subset_file: cli.rctd_obs_subset_file.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        gene_subset_file: cli.rctd_genes_file.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        spatial_numi_tsv: cli.rctd_spatial_numi_tsv.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        sigma_float: if cli.rctd_q_tsv.is_some() {
+            None
+        } else {
+            sigma_float
+        },
+        q_matrix_tsv: cli.rctd_q_tsv.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        x_vals_tsv: cli.rctd_x_vals_tsv.as_ref().map(|p| {
+            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+        }),
+        k_val: cli.rctd_k_val,
+        skip_profile_column_normalize: cli.rctd_skip_profile_normalize,
         cell_type_col: cli.rctd_cell_type_col.clone(),
         ref_rows_are_types: cli.rctd_ref_rows_are_types,
         ref_cell_min: cli.rctd_ref_cell_min,
