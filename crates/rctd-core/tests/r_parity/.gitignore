@@ -1,0 +1,3 @@
+# Binary fixture files are regenerated from R; don't track in git.
+fixtures/*.bin
+fixtures/*.csv
