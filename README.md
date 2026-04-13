@@ -11,6 +11,8 @@ curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 
 Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR)
 
+![SpaceTravLR training dashboard UI](data/demo.gif)
+
 Tech Stack:
   - [ratatui](https://github.com/ratatui/ratatui) for User Interface
   - [foyer](https://github.com/foyer-rs/foyer) for In-memory/Disk Cache
@@ -24,7 +26,8 @@ Tech Stack:
 
 ## RCTD spatial deconvolution (optional)
 
-RCTD is integrated as an **opt-in** Cargo feature. The vendored `rctd-core` and helper crate are licensed under **GPL-3.0-or-later**. If you build or distribute a binary that links this code, the **combined work** is subject to the GPL (see `NOTICE`). The rest of the repository remains MIT-licensed when RCTD features are not enabled.
+RCTD is integrated as an **opt-in** Cargo feature. The Rust version also implements GPU optimization. 
+SpaceTravLR's RCTD version is about ~59x faster than the R version.
 
 Build the `spacetravlr` binary with RCTD:
 
@@ -32,20 +35,12 @@ Build the `spacetravlr` binary with RCTD:
 cargo build -p spacetravlr --features rctd
 ```
 
-For GPU (WebGPU / `wgpu`, **f32** inside RCTD; not bit-identical to the CPU **f64** path):
-
-```bash
-cargo build -p spacetravlr --features rctd,rctd-wgpu
-```
-
-Example (spatial and reference AnnData; same gene alignment and Q-matrix flow as upstream `rctd run`):
 
 ```bash
 spacetravlr --rctd --h5ad spatial.h5ad --ref-adata reference.h5ad --rctd-output ./out/deconv
 ```
 
-Use `spacetravlr --help` for flags under the **RCTD** section (`--rctd-mode`, `--sigma`, `--rctd-batch-size`, `--q-matrices`, `--gpu`, etc.). A `spaceship_config.toml` is not required for `--rctd`.
 
 
-![SpaceTravLR training dashboard UI](data/demo.gif)
+
 
