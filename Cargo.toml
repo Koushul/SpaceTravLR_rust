@@ -185,6 +185,10 @@ statrs = "0.18"
 
 [dev-dependencies]
 approx = "0.5"
+anndata = "0.6"
+anndata-hdf5 = "0.5"
+ndarray = "0.16"
+polars = { version = "0.51", default-features = false, features = ["ipc", "parquet"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 statrs = "0.18"

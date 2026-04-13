@@ -607,6 +607,96 @@ struct Cli {
         help = "With `--process-h5ad`: override assumed median k-NN distance in µm (otherwise species default)"
     )]
     spatial_microns_target_um: Option<f64>,
+
+    #[arg(
+        long = "celloracle",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "CellOracle-style TF prior inference: read AnnData .h5ad, run Bayesian ridge GRN (SpaceTravLR priors), write TF-prior Feather (source, target, cell_type) and exit"
+    )]
+    celloracle_h5ad: Option<PathBuf>,
+
+    #[arg(
+        long = "celloracle-output",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "Output Feather path for `--celloracle` (default: <output-dir>/<adata_stem>_celloracle_tf_priors.feather)"
+    )]
+    celloracle_output: Option<PathBuf>,
+
+    #[arg(
+        long = "celloracle-output-dir",
+        value_name = "DIR",
+        help_heading = "Utility",
+        help = "Directory for default `--celloracle` Feather name and for auto preprocess (imputed .h5ad); defaults to cwd or `--process-output-dir` when set"
+    )]
+    celloracle_output_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "celloracle-layer",
+        value_name = "NAME",
+        default_value = "imputed_count",
+        help_heading = "Utility",
+        help = "AnnData layer for expression (`X` if the layer is missing and X is dense/CSR)"
+    )]
+    celloracle_layer: String,
+
+    #[arg(
+        long = "celloracle-skip-preprocess",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Do not auto-impute / patch AnnData before reading (use raw path as-is)"
+    )]
+    celloracle_skip_preprocess: bool,
+
+    #[arg(
+        long = "celloracle-per-cluster",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Infer edges per cell type (or `--celloracle-obs-key` column) instead of one global model"
+    )]
+    celloracle_per_cluster: bool,
+
+    #[arg(
+        long = "celloracle-obs-key",
+        value_name = "NAME",
+        default_value = "cell_type",
+        help_heading = "Utility",
+        help = "obs column for `--celloracle-per-cluster`"
+    )]
+    celloracle_obs_key: String,
+
+    #[arg(
+        long = "celloracle-species",
+        value_name = "SPECIES",
+        help_heading = "Utility",
+        help = "GRN species (`human` / `mouse`); default: infer from gene symbols"
+    )]
+    celloracle_species: Option<String>,
+
+    #[arg(
+        long = "celloracle-network-data-dir",
+        value_name = "DIR",
+        help_heading = "Utility",
+        help = "Directory with `{species}_network.parquet` (overrides config / SPACETRAVLR_DATA_DIR)"
+    )]
+    celloracle_network_data_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "celloracle-p-max",
+        value_name = "P",
+        help_heading = "Utility",
+        help = "Keep only edges with p ≤ this threshold before writing Feather"
+    )]
+    celloracle_p_max: Option<f64>,
+
+    #[arg(
+        long = "celloracle-threads",
+        value_name = "N",
+        help_heading = "Utility",
+        help = "Rayon thread count for `--celloracle` (omit for default)"
+    )]
+    celloracle_threads: Option<usize>,
 }
 
 fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<()> {
@@ -1136,6 +1226,156 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn resolve_celloracle_network_data_dir(cli: &Cli) -> anyhow::Result<Option<String>> {
+    if let Some(p) = cli.celloracle_network_data_dir.as_ref() {
+        return Ok(Some(expand_user_path(p.to_string_lossy().as_ref())));
+    }
+    if let Some(p) = cli.config.as_ref() {
+        let cfg = SpaceshipConfig::from_file(p)
+            .with_context(|| format!("load spaceship config {}", p.display()))?;
+        return Ok(cfg.grn.network_data_dir);
+    }
+    if let Some(p) = SpaceshipConfig::discover_default_path() {
+        if let Ok(cfg) = SpaceshipConfig::from_file(&p) {
+            return Ok(cfg.grn.network_data_dir);
+        }
+    }
+    Ok(None)
+}
+
+fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
+    use std::path::Path;
+    use spacetravlr::celloracle::{
+        filter_links_p_max, infer_grn_per_cluster, infer_grn_whole, scale_gem_no_center,
+        write_links_as_tf_priors_feather,
+    };
+    use spacetravlr::network::{GeneNetwork, infer_species};
+    use spacetravlr::scanpy_preprocess::{
+        SpatialMicronsOptions, ensure_training_adata_ready, resolve_magic_batch_obs_column,
+    };
+    use spacetravlr::{
+        read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
+    };
+
+    let h5ad_arg = cli
+        .celloracle_h5ad
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--celloracle requires a path argument"))?;
+
+    let h5ad_expanded = expand_user_path(h5ad_arg.to_string_lossy().as_ref());
+
+    let out_base = if let Some(p) = cli
+        .celloracle_output_dir
+        .as_ref()
+        .or(cli.process_output_dir.as_ref())
+    {
+        PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
+    } else {
+        std::env::current_dir().context("celloracle output dir (cwd)")?
+    };
+    std::fs::create_dir_all(&out_base).with_context(|| format!("mkdir {:?}", out_base))?;
+
+    let mut adata_path = h5ad_expanded.clone();
+
+    if !cli.celloracle_skip_preprocess {
+        let magic_batch = resolve_magic_batch_obs_column(cli.magic_batch_obs.as_deref(), None);
+        let species_trim = cli.spatial_species.trim().to_lowercase();
+        let spatial_microns = SpatialMicronsOptions {
+            skip: cli.skip_spatial_microns,
+            species: if species_trim.is_empty() {
+                "human".into()
+            } else {
+                species_trim
+            },
+            target_median_nn_um: cli.spatial_microns_target_um,
+        };
+        ensure_training_adata_ready(
+            &mut adata_path,
+            &out_base,
+            Path::new(&h5ad_expanded),
+            magic_batch.as_deref(),
+            spatial_microns,
+        )?;
+    }
+
+    let adata_in = PathBuf::from(expand_user_path(adata_path.trim()));
+    if !adata_in.is_file() {
+        anyhow::bail!("AnnData not found at {}", adata_in.display());
+    }
+
+    let layer = cli.celloracle_layer.trim();
+    let var_names = read_h5ad_var_names(&adata_in).context("read var_names")?;
+    let gem = read_h5ad_expression_dense_f64(&adata_in, layer)
+        .with_context(|| format!("read expression layer {:?}", layer))?;
+    anyhow::ensure!(
+        gem.ncols() == var_names.len(),
+        "expression shape {:?} vs len(var_names) {}",
+        gem.dim(),
+        var_names.len()
+    );
+
+    let species = match cli.celloracle_species.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => infer_species(&var_names).to_string(),
+    };
+
+    let network_data_dir = resolve_celloracle_network_data_dir(cli)?;
+    let network = GeneNetwork::new(
+        species.trim(),
+        &var_names,
+        network_data_dir.as_deref(),
+    )?;
+    let tf_by_target = network.grn_regulators_by_target()?;
+
+    let gem_scaled = scale_gem_no_center(&gem);
+
+    let run_infer = || {
+        if cli.celloracle_per_cluster {
+            let key = cli.celloracle_obs_key.trim();
+            anyhow::ensure!(!key.is_empty(), "--celloracle-obs-key must not be empty");
+            let obs = read_h5ad_obs_column_str(&adata_in, key)
+                .with_context(|| format!("read obs[{key}]"))?;
+            infer_grn_per_cluster(&gem, &gem_scaled, &var_names, &tf_by_target, &obs)
+        } else {
+            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target)
+        }
+    };
+
+    let mut links = if let Some(n) = cli.celloracle_threads.filter(|n| *n > 0) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .context("rayon ThreadPool")?;
+        pool.install(run_infer)?
+    } else {
+        run_infer()?
+    };
+
+    if let Some(pm) = cli.celloracle_p_max {
+        links = filter_links_p_max(links, pm);
+    }
+
+    let feather_out = match &cli.celloracle_output {
+        Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
+        None => {
+            let stem = canonical_adata_stem(&adata_in);
+            out_base.join(format!("{stem}_celloracle_tf_priors.feather"))
+        }
+    };
+    if let Some(parent) = feather_out.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("mkdir {:?}", parent))?;
+    }
+    write_links_as_tf_priors_feather(&feather_out, &links)
+        .with_context(|| format!("write {:?}", feather_out))?;
+    eprintln!(
+        "Wrote CellOracle TF priors ({} edges) to {}",
+        links.len(),
+        feather_out.display()
+    );
+    Ok(())
+}
+
 #[cfg(feature = "rctd")]
 fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
     let h5ad = cli.h5ad.as_ref().ok_or_else(|| {
@@ -1207,6 +1447,10 @@ fn main() -> anyhow::Result<()> {
 
     if cli.impute {
         return run_impute(&cli);
+    }
+
+    if cli.celloracle_h5ad.is_some() {
+        return run_celloracle(&cli);
     }
 
     #[cfg(feature = "rctd")]

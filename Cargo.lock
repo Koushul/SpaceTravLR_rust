@@ -6972,6 +6972,7 @@ dependencies = [
  "ndarray-npy",
  "rand 0.8.5",
  "rayon",
+ "serde",
  "serde_json",
  "statrs",
  "thiserror 2.0.18",
