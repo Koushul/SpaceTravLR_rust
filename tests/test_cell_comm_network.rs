@@ -4,7 +4,10 @@ use std::sync::Mutex;
 
 use ndarray::{Array1, Array2};
 use spacetravlr::betadata::{BetaFrame, Betabase, GeneMatrix};
-use spacetravlr::cell_comm_network::{CellCommNetworkParams, aggregate_lr_tfl_communication_edges};
+use spacetravlr::cell_comm_network::{
+    CellCommNetworkParams, aggregate_lr_tfl_communication_edges, communication_edges_from_receiver,
+    communication_edges_from_sender,
+};
 use spacetravlr::config::SpaceshipConfig;
 use spacetravlr::perturb::PerturbConfig;
 use spacetravlr::perturb_mode::PerturbRuntime;
@@ -171,4 +174,78 @@ fn cell_network_zero_receptor_skips_row() {
     assert_eq!(w[[1, 1]], 0.0);
     assert!(w[[0, 0]] > 0.0);
     assert!(w[[0, 1]] > 0.0);
+}
+
+#[test]
+fn slice_receiver_matches_full_matrix_column() {
+    let n = 3usize;
+    let xy = Array2::from_shape_vec((n, 2), vec![0.0_f64, 0.0, 2.0, 0.0, 1.0, 1.0]).unwrap();
+    let gene_names = vec!["LIG".into(), "REC".into()];
+    let gene_mtx = Array2::from_shape_vec((n, 2), vec![2.0_f64, 3.0, 1.0, 4.0, 2.0, 5.0]).unwrap();
+    let obs_names = vec!["a".into(), "b".into(), "c".into()];
+    let rt = mock_rt_one_lr_target(
+        xy,
+        gene_mtx,
+        gene_names,
+        obs_names,
+        &[0.5_f32, 1.0_f32, -0.25_f32],
+        40.0,
+        1.0,
+        1.0,
+    );
+    let params = CellCommNetworkParams {
+        beta_scale_factor: 1.0,
+        min_expression: 1e-12,
+        edge_threshold_abs: 0.0,
+        include_self_loops: true,
+        ignore_contact_distance: true,
+    };
+    let (w, _) = aggregate_lr_tfl_communication_edges(&rt, &params);
+    for recv in 0..n {
+        let slice = communication_edges_from_receiver(&rt, &params, recv, n);
+        let mut got = vec![0.0_f64; n];
+        for (j, wt) in &slice {
+            got[*j] = *wt;
+        }
+        for j in 0..n {
+            approx::assert_relative_eq!(got[j], w[[recv, j]], epsilon = 1e-8);
+        }
+    }
+}
+
+#[test]
+fn slice_sender_matches_full_matrix_row() {
+    let n = 3usize;
+    let xy = Array2::from_shape_vec((n, 2), vec![0.0_f64, 0.0, 2.0, 0.0, 1.0, 1.0]).unwrap();
+    let gene_names = vec!["LIG".into(), "REC".into()];
+    let gene_mtx = Array2::from_shape_vec((n, 2), vec![2.0_f64, 3.0, 1.0, 4.0, 2.0, 5.0]).unwrap();
+    let obs_names = vec!["a".into(), "b".into(), "c".into()];
+    let rt = mock_rt_one_lr_target(
+        xy,
+        gene_mtx,
+        gene_names,
+        obs_names,
+        &[0.5_f32, 1.0_f32, -0.25_f32],
+        40.0,
+        1.0,
+        1.0,
+    );
+    let params = CellCommNetworkParams {
+        beta_scale_factor: 1.0,
+        min_expression: 1e-12,
+        edge_threshold_abs: 0.0,
+        include_self_loops: true,
+        ignore_contact_distance: true,
+    };
+    let (w, _) = aggregate_lr_tfl_communication_edges(&rt, &params);
+    for sender in 0..n {
+        let slice = communication_edges_from_sender(&rt, &params, sender, n);
+        let mut got = vec![0.0_f64; n];
+        for (i, wt) in &slice {
+            got[*i] = *wt;
+        }
+        for i in 0..n {
+            approx::assert_relative_eq!(got[i], w[[i, sender]], epsilon = 1e-8);
+        }
+    }
 }

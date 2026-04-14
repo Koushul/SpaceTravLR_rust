@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cell communication · SpaceTravLR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      --bg: #0c0e14;
+      --panel: #141824;
+      --panel2: #1a1f2e;
+      --border: #2a3145;
+      --text: #e8ecf4;
+      --muted: #8b95ad;
+      --accent: #5eead4;
+      --accent-dim: #2dd4bf44;
+      --in: #7dd3fc;
+      --out: #fda4af;
+      --warn: #fcd34d;
+      --radius: 12px;
+      --shadow: 0 12px 40px #0006;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: "DM Sans", system-ui, sans-serif; }
+    body { display: grid; grid-template-columns: 1fr min(380px, 100vw); grid-template-rows: auto minmax(0, 1fr); min-height: 100vh; }
+    header {
+      grid-column: 1 / -1;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, var(--panel) 0%, var(--bg) 100%);
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; letter-spacing: -0.02em; }
+    header p { margin: 0; color: var(--muted); font-size: 0.85rem; max-width: 42rem; }
+    .badge { font-family: "JetBrains Mono", monospace; font-size: 0.7rem; padding: 0.2rem 0.5rem; border-radius: 6px; background: var(--accent-dim); color: var(--accent); border: 1px solid #2dd4bf55; }
+    #viz-wrap { position: relative; overflow: hidden; min-height: 0; }
+    #viz { width: 100%; height: 100%; min-height: 420px; cursor: grab; }
+    #viz:active { cursor: grabbing; }
+    aside {
+      border-left: 1px solid var(--border);
+      background: var(--panel);
+      display: flex; flex-direction: column;
+      box-shadow: var(--shadow);
+      z-index: 2;
+    }
+    .panel-scroll { flex: 1; overflow-y: auto; padding: 1rem; }
+    .load-box {
+      padding: 1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel2);
+    }
+    .load-box label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 0.35rem; }
+    .load-box input[type="text"] {
+      width: 100%; padding: 0.55rem 0.65rem; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 0.85rem; font-family: "JetBrains Mono", monospace;
+    }
+    .load-box button {
+      margin-top: 0.5rem; width: 100%; padding: 0.55rem; border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #2dd4bf, #14b8a6); color: #042f2e; font-weight: 600; cursor: pointer;
+    }
+    .load-box button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .stat-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.75rem; color: var(--muted); }
+    .stat-row span { background: var(--bg); padding: 0.2rem 0.45rem; border-radius: 6px; border: 1px solid var(--border); }
+    h2 { margin: 0 0 0.75rem; font-size: 0.95rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .cell-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.25rem; word-break: break-all; }
+    .coords { font-family: "JetBrains Mono", monospace; font-size: 0.8rem; color: var(--muted); margin-bottom: 1rem; }
+    .list { margin: 0; padding: 0; list-style: none; }
+    .list li {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem;
+      padding: 0.45rem 0.5rem; border-radius: 8px; margin-bottom: 0.25rem; cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .list li:hover { background: var(--panel2); border-color: var(--border); }
+    .list li .nm { font-weight: 500; font-size: 0.88rem; }
+    .list li .wt { font-family: "JetBrains Mono", monospace; font-size: 0.75rem; color: var(--accent); }
+    .section-in h3 { color: var(--in); font-size: 0.8rem; margin: 1rem 0 0.4rem; }
+    .section-out h3 { color: var(--out); font-size: 0.8rem; margin: 1rem 0 0.4rem; }
+    .hint { font-size: 0.78rem; color: var(--muted); line-height: 1.45; margin-top: 1rem; }
+    .gene-search { margin-bottom: 1rem; }
+    .gene-search input { width: 100%; padding: 0.45rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
+    .gene-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; max-height: 120px; overflow-y: auto; }
+    .gene-pills button {
+      font-size: 0.72rem; padding: 0.25rem 0.45rem; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--panel2); color: var(--text); cursor: pointer;
+    }
+    .gene-pills button:hover { border-color: var(--accent); color: var(--accent); }
+    .toast { position: fixed; bottom: 1.25rem; left: 50%; transform: translateX(-50%); padding: 0.65rem 1rem; border-radius: 10px; background: #1e293b; border: 1px solid var(--border); font-size: 0.85rem; z-index: 100; display: none; max-width: 90vw; }
+    .toast.err { border-color: #f87171; color: #fecaca; }
+    svg .cell-base { fill: #3d4f6f; stroke: #5a7199; stroke-width: 0.35; }
+    svg .cell-sel { fill: #2dd4bf; stroke: #99f6e4; stroke-width: 0.5; }
+    svg .cell-nei-in { fill: #38bdf8; stroke: #7dd3fc; }
+    svg .cell-nei-out { fill: #fb7185; stroke: #fda4af; }
+    svg .link { fill: none; stroke-linecap: round; mix-blend-mode: screen; }
+    svg .link-in { stroke: #38bdf8aa; }
+    svg .link-out { stroke: #fb7185aa; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Spatial cell communication</h1>
+      <p>Explore how cells couple through trained LR/TFL terms and Gaussian ligand fields. Click a cell for top incoming and outgoing interaction strength.</p>
+    </div>
+    <span class="badge">SpaceTravLR</span>
+  </header>
+  <div id="viz-wrap">
+    <svg id="viz"></svg>
+    <div id="toast" class="toast"></div>
+  </div>
+  <aside>
+    <div class="load-box">
+      <label for="runPath">Run TOML path</label>
+      <input id="runPath" type="text" placeholder="/path/to/spacetravlr_run_repro.toml" autocomplete="off" />
+      <button id="loadBtn" type="button">Load dataset</button>
+      <div class="stat-row" id="stats"></div>
+    </div>
+    <div class="panel-scroll">
+      <div class="gene-search">
+        <label for="geneQ" style="font-size:0.75rem;color:var(--muted);display:block;margin-bottom:0.35rem;">Color by gene (expression)</label>
+        <input id="geneQ" type="search" placeholder="Search gene…" autocomplete="off" />
+        <div class="gene-pills" id="genePills"></div>
+      </div>
+      <div id="detail">
+        <p class="hint">Load a run, then click a cell on the map. Pan/zoom with drag and scroll wheel.</p>
+      </div>
+    </div>
+  </aside>
+  <script>
+(function () {
+  const toast = document.getElementById("toast");
+  function showToast(msg, err) {
+    toast.textContent = msg;
+    toast.className = "toast" + (err ? " err" : "");
+    toast.style.display = "block";
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => { toast.style.display = "none"; }, 4200);
+  }
+
+  let cells = [];
+  let contextTop = 32;
+  let geneExpr = null;
+  let selected = null;
+  let neighborsIn = new Set();
+  let neighborsOut = new Set();
+  let width = 0, height = 0;
+  const svg = d3.select("#viz");
+  const gRoot = svg.append("g");
+  const gLinks = gRoot.append("g").attr("class", "links");
+  const gCells = gRoot.append("g").attr("class", "cells");
+
+  const zoom = d3.zoom().scaleExtent([0.15, 20]).on("zoom", (ev) => {
+    gRoot.attr("transform", ev.transform);
+  });
+  svg.call(zoom);
+
+  function resize() {
+    const wrap = document.getElementById("viz-wrap");
+    width = wrap.clientWidth;
+    height = Math.max(wrap.clientHeight, 420);
+    svg.attr("width", width).attr("height", height);
+  }
+  window.addEventListener("resize", () => { resize(); redraw(); });
+  resize();
+
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+
+  async function refreshMeta() {
+    const m = await api("/api/meta");
+    if (m.context_top) contextTop = Math.max(1, Math.min(256, m.context_top));
+    const el = document.getElementById("stats");
+    if (!m.ready) {
+      el.innerHTML = "";
+      return;
+    }
+    el.innerHTML = `<span>${m.n_cells} cells</span><span>${m.n_genes} genes</span><span>${m.n_targets} models</span>`;
+  }
+
+  async function loadRun(path) {
+    const btn = document.getElementById("loadBtn");
+    btn.disabled = true;
+    try {
+      const j = await api("/api/load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_toml: path }),
+      });
+      if (!j.ok) throw new Error(j.error || "load failed");
+      geneExpr = null;
+      selected = null;
+      neighborsIn = new Set();
+      neighborsOut = new Set();
+      await refreshMeta();
+      await fetchCells();
+      redraw();
+      showToast("Dataset loaded.");
+    } catch (e) {
+      showToast(String(e.message || e), true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function fetchCells() {
+    const d = await api("/api/cells");
+    cells = d.cells || [];
+    if (d.truncated) showToast(`Showing first ${cells.length} of ${d.n_total} cells in the plot.`, false);
+    redraw();
+  }
+
+  function xScale(xs) {
+    const pad = 28;
+    const ext = d3.extent(xs);
+    return d3.scaleLinear().domain(ext).range([pad, width - pad]);
+  }
+  function yScale(ys) {
+    const pad = 28;
+    const ext = d3.extent(ys);
+    return d3.scaleLinear().domain(ext).range([height - pad, pad]);
+  }
+
+  function cellRadius(n) {
+    return Math.max(2.2, Math.min(9, 520 / Math.sqrt(n + 20)));
+  }
+
+  function redraw() {
+    if (!cells.length) {
+      gCells.selectAll("circle").remove();
+      gLinks.selectAll("path").remove();
+      return;
+    }
+    const xs = cells.map((d) => d.x);
+    const ys = cells.map((d) => d.y);
+    const sx = xScale(xs);
+    const sy = yScale(ys);
+    const r = cellRadius(cells.length);
+
+    const join = gCells.selectAll("circle").data(cells, (d) => d.i);
+    join.enter().append("circle")
+      .attr("r", r)
+      .attr("cx", (d) => sx(d.x))
+      .attr("cy", (d) => sy(d.y))
+      .attr("class", "cell-base")
+      .style("cursor", "pointer")
+      .on("click", (_, d) => selectCell(d.i))
+      .merge(join)
+      .attr("r", r)
+      .attr("cx", (d) => sx(d.x))
+      .attr("cy", (d) => sy(d.y))
+      .attr("class", (d) => {
+        if (d.i === selected) return "cell-sel";
+        if (neighborsIn.has(d.i)) return "cell-nei-in";
+        if (neighborsOut.has(d.i)) return "cell-nei-out";
+        return "cell-base";
+      })
+      .attr("fill", (d) => {
+        if (geneExpr && d.i < geneExpr.length) {
+          const ex = geneExpr.map(Number);
+          const dom = d3.extent(ex);
+          const csc = d3.scaleSequential(d3.interpolateViridis).domain(dom[0] === dom[1] ? [0, 1] : dom);
+          if (d.i === selected) return "#2dd4bf";
+          return csc(ex[d.i]);
+        }
+        return null;
+      });
+    join.exit().remove();
+
+    gLinks.selectAll("path").remove();
+    if (selected == null) return;
+    const sel = cells.find((c) => c.i === selected);
+    if (!sel) return;
+    const x0 = sx(sel.x), y0 = sy(sel.y);
+
+    cells.forEach((d) => {
+      if (neighborsIn.has(d.i)) {
+        const x1 = sx(d.x), y1 = sy(d.y);
+        gLinks.append("path")
+          .attr("class", "link link-in")
+          .attr("stroke-width", Math.max(0.8, r * 0.35))
+          .attr("d", `M${x1},${y1} L${x0},${y0}`);
+      }
+      if (neighborsOut.has(d.i)) {
+        const x1 = sx(d.x), y1 = sy(d.y);
+        gLinks.append("path")
+          .attr("class", "link link-out")
+          .attr("stroke-width", Math.max(0.8, r * 0.35))
+          .attr("d", `M${x0},${y0} L${x1},${y1}`);
+      }
+    });
+  }
+
+  async function selectCell(i) {
+    selected = i;
+    neighborsIn = new Set();
+    neighborsOut = new Set();
+    try {
+      const ctx = await api(`/api/cell/${i}/context?top=${contextTop}`);
+      ctx.incoming.forEach((n) => neighborsIn.add(n.i));
+      ctx.outgoing.forEach((n) => neighborsOut.add(n.i));
+      const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
+      let html = `<div class="cell-title">${esc(ctx.id)}</div>`;
+      html += `<div class="coords">x: ${ctx.x.toFixed(3)} · y: ${ctx.y.toFixed(3)}</div>`;
+      html += `<div class="section-in"><h3>Incoming (senders → you)</h3><ul class="list">`;
+      ctx.incoming.slice(0, 16).forEach((n) => {
+        html += `<li data-i="${n.i}"><span class="nm">${esc(n.id)}</span><span class="wt">${n.w.toExponential(2)}</span></li>`;
+      });
+      html += `</ul></div><div class="section-out"><h3>Outgoing (you → receivers)</h3><ul class="list">`;
+      ctx.outgoing.slice(0, 16).forEach((n) => {
+        html += `<li data-i="${n.i}"><span class="nm">${esc(n.id)}</span><span class="wt">${n.w.toExponential(2)}</span></li>`;
+      });
+      html += `</ul></div>`;
+      html += `<p class="hint">Weights sum |β·R·∂WL/∂L| over trained targets and LR/TFL pairs. Click a neighbor name to refocus.</p>`;
+      document.getElementById("detail").innerHTML = html;
+      document.querySelectorAll("#detail .list li").forEach((li) => {
+        li.addEventListener("click", () => selectCell(Number(li.dataset.i)));
+      });
+    } catch (e) {
+      showToast(String(e), true);
+    }
+    redraw();
+  }
+
+  document.getElementById("loadBtn").addEventListener("click", () => {
+    const p = document.getElementById("runPath").value.trim();
+    if (!p) { showToast("Enter path to spacetravlr_run_repro.toml", true); return; }
+    loadRun(p);
+  });
+
+  let geneTimer = null;
+  document.getElementById("geneQ").addEventListener("input", () => {
+    clearTimeout(geneTimer);
+    geneTimer = setTimeout(async () => {
+      const q = document.getElementById("geneQ").value.trim();
+      const genes = await api("/api/genes?q=" + encodeURIComponent(q) + "&limit=24");
+      const box = document.getElementById("genePills");
+      box.innerHTML = "";
+      genes.forEach((g) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = g;
+        b.addEventListener("click", () => loadGeneColor(g));
+        box.appendChild(b);
+      });
+    }, 200);
+  });
+
+  async function loadGeneColor(gene) {
+    try {
+      const r = await fetch("/api/gene/" + encodeURIComponent(gene) + "/expr");
+      if (!r.ok) throw new Error(await r.text());
+      const arr = await r.json();
+      geneExpr = arr.expr;
+      redraw();
+      showToast("Colored by " + gene);
+    } catch (e) {
+      showToast(String(e.message || e), true);
+    }
+  }
+
+  refreshMeta().then(() => fetchCells()).catch(() => {});
+})();
+  </script>
+</body>
+</html>

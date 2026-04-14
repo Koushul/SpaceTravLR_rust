@@ -45,6 +45,41 @@ pub fn received_ligand_jacobian_one_ligand(
     jacobian
 }
 
+/// One row of [`received_ligand_jacobian_one_ligand`]: `out[j] = ∂WL(receiver_idx)/∂L_j`.
+/// By symmetry of the Gaussian kernel, this equals `∂WL_i/∂L_sender` when `receiver_idx == sender`
+/// is used as the fixed index for the other direction.
+pub fn received_ligand_jacobian_row_for_cell(
+    xy: &Array2<f64>,
+    receiver_idx: usize,
+    radius: f64,
+    scale_factor: f64,
+    max_neighbor_distance: Option<f64>,
+) -> Vec<f64> {
+    let n = xy.nrows();
+    let mut out = vec![0.0_f64; n];
+    if n == 0 || receiver_idx >= n {
+        return out;
+    }
+    let inv_2r2 = -1.0 / (2.0 * radius * radius);
+    let d2_cut = max_neighbor_distance
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .map(|m| m * m);
+    let n_inv = 1.0 / n as f64;
+    let scale_n = scale_factor * n_inv;
+    let xi = xy[[receiver_idx, 0]];
+    let yi = xy[[receiver_idx, 1]];
+    for j in 0..n {
+        let dx = xi - xy[[j, 0]];
+        let dy = yi - xy[[j, 1]];
+        let d2 = dx * dx + dy * dy;
+        if d2_cut.is_some_and(|c| d2 > c) {
+            continue;
+        }
+        out[j] = scale_n * (d2 * inv_2r2).exp();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +100,20 @@ mod tests {
                 let d2 = dx * dx + dy * dy;
                 let expected = scale * n_inv * (-d2 / (2.0 * r * r)).exp();
                 assert_relative_eq!(jac[[i, j]], expected, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn jacobian_row_matches_matrix_row() {
+        let xy = Array2::from_shape_vec((4, 2), vec![0.0, 0.0, 2.0, 1.0, -1.0, 3.0, 0.5, 0.5]).unwrap();
+        let r = 30.0_f64;
+        let scale = 1.5_f64;
+        let jac = received_ligand_jacobian_one_ligand(&xy, r, scale, Some(100.0));
+        for recv in 0..xy.nrows() {
+            let row = received_ligand_jacobian_row_for_cell(&xy, recv, r, scale, Some(100.0));
+            for j in 0..xy.nrows() {
+                assert_relative_eq!(row[j], jac[[recv, j]], epsilon = 1e-12);
             }
         }
     }

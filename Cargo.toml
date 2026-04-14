@@ -65,6 +65,13 @@ spatial-viewer = [
     "dep:blake3",
     "dep:tempfile",
 ]
+cell-comm-viewer = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
 self-update = [
     "dep:ureq",
     "dep:tar",
@@ -95,6 +102,11 @@ required-features = ["dev-main"]
 name = "spatial_viewer"
 path = "src/bin/spatial_viewer.rs"
 required-features = ["spatial-viewer"]
+
+[[bin]]
+name = "cell-comm-viewer"
+path = "src/bin/cell_comm_viewer.rs"
+required-features = ["cell-comm-viewer"]
 
 [[example]]
 name = "mock_h5ad_roundtrip"
