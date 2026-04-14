@@ -1916,13 +1916,25 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 work_row[2],
             );
 
-            let total = st.total_genes.max(1) as u64;
-            let pos = if !st.is_demo && Path::new(&st.output_dir).is_dir() {
-                disk_genes_done.min(st.total_genes)
-            } else {
-                st.genes_rounds.min(st.total_genes)
-            } as u64;
-            let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
+            let (total, pos, ratio, celloracle_prog) =
+                if st.celloracle_infer_total > 0 {
+                    let t = st.celloracle_infer_total.max(1) as u64;
+                    let d = st
+                        .celloracle_infer_done
+                        .load(Ordering::Relaxed)
+                        .min(st.celloracle_infer_total) as u64;
+                    let r = (d as f64 / t as f64).clamp(0.0, 1.0);
+                    (t, d, r, true)
+                } else {
+                    let t = st.total_genes.max(1) as u64;
+                    let p = if !st.is_demo && Path::new(&st.output_dir).is_dir() {
+                        disk_genes_done.min(st.total_genes)
+                    } else {
+                        st.genes_rounds.min(st.total_genes)
+                    } as u64;
+                    let r = (p as f64 / t as f64).clamp(0.0, 1.0);
+                    (t, p, r, false)
+                };
             let gene_pct = (ratio * 100.0).round().clamp(0.0, 100.0) as u32;
 
             let rocket_panel = hchunks[1];
@@ -1959,10 +1971,14 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let prog_area = vchunks[2];
             let sky_bold = Style::default().fg(pal.sky).add_modifier(Modifier::BOLD);
             let title_bold = Style::default().fg(pal.title).add_modifier(Modifier::BOLD);
-            let prog_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(pal.sky))
-                .title(Line::from(vec![
+            let prog_title_line = if celloracle_prog {
+                Line::from(vec![
+                    Span::styled(" CellOracle GRN ", sky_bold),
+                    Span::styled(" · ", Style::default().fg(pal.muted)),
+                    Span::styled(format!("{}/{} targets", pos, total), title_bold),
+                ])
+            } else {
+                Line::from(vec![
                     Span::styled(" Gene progress ", sky_bold),
                     Span::styled(" · ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}/{}", pos, total), title_bold),
@@ -1972,7 +1988,12 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Span::styled(format!("{}", st.genes_failed), title_bold),
                     Span::styled("  orphan ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_orphan), title_bold),
-                ]));
+                ])
+            };
+            let prog_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(pal.sky))
+                .title(prog_title_line);
             let prog_inner = prog_block.inner(prog_area);
             f.render_widget(prog_block, prog_area);
             let gauge = LineGauge::default()

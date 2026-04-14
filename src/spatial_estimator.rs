@@ -1935,14 +1935,34 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     let gem_scaled = crate::celloracle::scale_gem_no_center(&gem);
                     let tf_by_target = global_grn.grn_regulators_by_target()?;
                     let celloracle_terminal_progress = hud.is_none();
-                    let links = if cluster_to_cell_type.is_empty() {
+                    let clear_celloracle_hud = || {
+                        if let Some(h) = hud.as_ref() {
+                            if let Ok(mut g) = h.lock() {
+                                g.celloracle_infer_total = 0;
+                                g.celloracle_infer_done.store(0, Ordering::Relaxed);
+                            }
+                        }
+                    };
+                    let infer_res = if cluster_to_cell_type.is_empty() {
+                        let total_jobs = crate::celloracle::infer_target_job_count_whole(
+                            &tf_by_target,
+                            &all_var_names,
+                        );
+                        let hud_done = hud.as_ref().and_then(|h| {
+                            h.lock().ok().map(|mut g| {
+                                g.celloracle_infer_total = total_jobs;
+                                g.celloracle_infer_done.store(0, Ordering::Relaxed);
+                                Arc::clone(&g.celloracle_infer_done)
+                            })
+                        });
                         crate::celloracle::infer_grn_whole(
                             &gem,
                             &gem_scaled,
                             &all_var_names,
                             &tf_by_target,
                             celloracle_terminal_progress,
-                        )?
+                            hud_done,
+                        )
                     } else {
                         let n = clusters.len();
                         let mut obs_cluster: Vec<String> = Vec::with_capacity(n);
@@ -1954,6 +1974,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 .unwrap_or_else(|| "unknown".to_string());
                             obs_cluster.push(ct);
                         }
+                        let total_jobs = crate::celloracle::infer_target_job_count_per_cluster(
+                            &tf_by_target,
+                            &all_var_names,
+                            &obs_cluster,
+                        );
+                        let hud_done = hud.as_ref().and_then(|h| {
+                            h.lock().ok().map(|mut g| {
+                                g.celloracle_infer_total = total_jobs;
+                                g.celloracle_infer_done.store(0, Ordering::Relaxed);
+                                Arc::clone(&g.celloracle_infer_done)
+                            })
+                        });
                         crate::celloracle::infer_grn_per_cluster(
                             &gem,
                             &gem_scaled,
@@ -1961,9 +1993,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             &tf_by_target,
                             &obs_cluster,
                             celloracle_terminal_progress,
-                        )?
+                            hud_done,
+                        )
                     };
-                    crate::celloracle::write_links_as_tf_priors_feather(&co_path, &links)?;
+                    let links = infer_res.inspect_err(|_| clear_celloracle_hud())?;
+                    crate::celloracle::write_links_as_tf_priors_feather(&co_path, &links)
+                        .inspect_err(|_| clear_celloracle_hud())?;
+                    clear_celloracle_hud();
                     log_line(
                         &hud,
                         format!(

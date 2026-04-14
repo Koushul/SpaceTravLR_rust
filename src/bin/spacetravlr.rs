@@ -1529,9 +1529,10 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
                 &tf_by_target,
                 &obs,
                 true,
+                None,
             )
         } else {
-            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true)
+            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true, None)
         }
     };
 

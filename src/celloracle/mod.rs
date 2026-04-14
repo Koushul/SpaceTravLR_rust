@@ -10,6 +10,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub use sklearn_bayesian_ridge::{bayesian_ridge_fit, BayesianRidgeFit};
@@ -90,6 +91,41 @@ fn two_sided_p_celloracle(normal: &Normal, coef_mean: f64, coef_variance: f64) -
     (p, neg)
 }
 
+pub fn targets_for_infer(
+    tf_by_target: &HashMap<String, Vec<String>>,
+    var_names: &[String],
+) -> Vec<String> {
+    let var_set: HashSet<&str> = var_names.iter().map(|s| s.as_str()).collect();
+    tf_by_target
+        .keys()
+        .filter(|t| var_set.contains(t.as_str()))
+        .cloned()
+        .collect()
+}
+
+pub fn infer_target_job_count_whole(
+    tf_by_target: &HashMap<String, Vec<String>>,
+    var_names: &[String],
+) -> usize {
+    targets_for_infer(tf_by_target, var_names).len()
+}
+
+pub fn infer_target_job_count_per_cluster(
+    tf_by_target: &HashMap<String, Vec<String>>,
+    var_names: &[String],
+    obs_cluster: &[String],
+) -> usize {
+    let n_t = targets_for_infer(tf_by_target, var_names).len();
+    if n_t == 0 || obs_cluster.is_empty() {
+        return 0;
+    }
+    let mut uniq: HashSet<&str> = HashSet::new();
+    for s in obs_cluster {
+        uniq.insert(s.as_str());
+    }
+    n_t.saturating_mul(uniq.len())
+}
+
 fn subset_rows(gem: &Array2<f64>, rows: &[usize]) -> Array2<f64> {
     let p = gem.ncols();
     let mut out = Array2::zeros((rows.len(), p));
@@ -107,6 +143,7 @@ pub fn infer_grn_whole(
     var_names: &[String],
     tf_by_target: &HashMap<String, Vec<String>>,
     draw_terminal_progress: bool,
+    hud_target_done: Option<Arc<AtomicUsize>>,
 ) -> anyhow::Result<Vec<LinkRow>> {
     infer_grn_subset(
         gem,
@@ -116,6 +153,7 @@ pub fn infer_grn_whole(
         None,
         "all",
         draw_terminal_progress,
+        hud_target_done,
     )
 }
 
@@ -127,6 +165,7 @@ pub fn infer_grn_subset(
     row_idx: Option<&[usize]>,
     cluster_label: &str,
     draw_terminal_progress: bool,
+    hud_target_done: Option<Arc<AtomicUsize>>,
 ) -> anyhow::Result<Vec<LinkRow>> {
     let n_cells = gem.nrows();
     anyhow::ensure!(
@@ -149,13 +188,8 @@ pub fn infer_grn_subset(
     };
 
     let n_sub = gem_s.nrows();
-    let var_set: HashSet<&str> = var_names.iter().map(|s| s.as_str()).collect();
 
-    let targets: Vec<String> = tf_by_target
-        .keys()
-        .filter(|t| var_set.contains(t.as_str()))
-        .cloned()
-        .collect();
+    let targets: Vec<String> = targets_for_infer(tf_by_target, var_names);
 
     let pb = if draw_terminal_progress {
         let pb = indicatif::ProgressBar::new(targets.len() as u64);
@@ -188,6 +222,9 @@ pub fn infer_grn_subset(
                 &normal,
             );
             pb.inc(1);
+            if let Some(h) = hud_target_done.as_ref() {
+                h.fetch_add(1, Ordering::Relaxed);
+            }
             out.into_iter()
         })
         .collect();
@@ -263,6 +300,7 @@ pub fn infer_grn_per_cluster(
     tf_by_target: &HashMap<String, Vec<String>>,
     obs_cluster: &[String],
     draw_terminal_progress: bool,
+    hud_target_done: Option<Arc<AtomicUsize>>,
 ) -> anyhow::Result<Vec<LinkRow>> {
     anyhow::ensure!(
         obs_cluster.len() == gem.nrows(),
@@ -274,6 +312,7 @@ pub fn infer_grn_per_cluster(
     }
     let pairs: Vec<(String, Vec<usize>)> = by_label.into_iter().collect();
     let subset_progress = draw_terminal_progress && pairs.len() <= 1;
+    let hud_arc = hud_target_done.clone();
     let results: Vec<anyhow::Result<Vec<LinkRow>>> = pairs
         .into_par_iter()
         .map(|(cluster, rows)| {
@@ -285,6 +324,7 @@ pub fn infer_grn_per_cluster(
                 Some(rows.as_slice()),
                 cluster.as_str(),
                 subset_progress,
+                hud_arc.clone(),
             )
         })
         .collect();

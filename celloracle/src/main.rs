@@ -154,9 +154,9 @@ fn main() -> anyhow::Result<()> {
             let key = cli.obs_key.as_deref().unwrap_or("cell_type");
             let obs = read_h5ad_obs_column_str(&adata_in, key)
                 .with_context(|| format!("read obs[{key}]"))?;
-            infer_grn_per_cluster(&gem, &gem_scaled, &var_names, &tf_by_target, &obs, true)
+            infer_grn_per_cluster(&gem, &gem_scaled, &var_names, &tf_by_target, &obs, true, None)
         } else {
-            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true)
+            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true, None)
         }
     };
 

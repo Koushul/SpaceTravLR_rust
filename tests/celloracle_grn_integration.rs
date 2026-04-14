@@ -68,7 +68,7 @@ fn infer_grn_whole_runs_on_synthetic_gem() {
 
     let gem_scaled = scale_gem_no_center(&gem);
     let links =
-        infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true).expect("infer");
+        infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true, None).expect("infer");
 
     assert!(
         !links.is_empty(),

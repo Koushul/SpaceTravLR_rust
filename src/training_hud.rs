@@ -2,7 +2,7 @@ use crate::config::{CnnTrainingMode, SpaceshipConfig};
 use crate::estimator::ClusterTrainingSummary;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -138,6 +138,10 @@ pub struct TrainingHudState {
     pub condition_split_progress: Option<(usize, usize)>,
     /// `spacetravlr --demo`: synthetic run; TUI uses `genes_rounds` for progress (no output dir scan).
     pub is_demo: bool,
+    /// CellOracle GRN inference: total Bayesian-ridge target fits (0 = not in CellOracle phase).
+    pub celloracle_infer_total: usize,
+    /// Completed target fits during CellOracle; updated from Rayon without holding the HUD mutex.
+    pub celloracle_infer_done: Arc<AtomicUsize>,
 }
 
 impl TrainingHudState {
@@ -179,6 +183,8 @@ impl TrainingHudState {
             current_condition_value: None,
             condition_split_progress: None,
             is_demo: false,
+            celloracle_infer_total: 0,
+            celloracle_infer_done: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -219,6 +225,8 @@ impl TrainingHudState {
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
         self.gene_train_times.clear();
         self.is_demo = false;
+        self.celloracle_infer_total = 0;
+        self.celloracle_infer_done.store(0, Ordering::Relaxed);
     }
 
     pub fn record_gene_time(&mut self, gene: &str, secs: f64) {
