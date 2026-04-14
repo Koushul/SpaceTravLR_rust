@@ -5,6 +5,10 @@
 //! Requires [**uv**](https://docs.astral.sh/uv/) on `PATH`, or **`UV_BIN`**.
 //! Child processes clear **`PYTHONPATH`** and set **`PYTHONNOUSERSITE=1`** so Conda/base site-packages
 //! do not leak into the isolated env.
+//! **`uv`** children also cap **`OPENBLAS_NUM_THREADS`**, **`OMP_NUM_THREADS`**, **`MKL_NUM_THREADS`**,
+//! **`NUMEXPR_NUM_THREADS`**, and **`VECLIB_MAXIMUM_THREADS`** (default **`1`**) so inherited huge
+//! thread counts do not trigger OpenBLAS “NUM_THREADS exceeded” / bad unallocation; override with
+//! **`SPACETRAVLR_UV_BLAS_THREADS`** (1–64) or **`SPACETRAVLR_PRESERVE_BLAS_THREADS=1`** to skip.
 //!
 //! **Input `X`:** Before normalizing, the embedded Scanpy script infers whether **`X` is already
 //! `log1p`-transformed** (Scanpy **`uns['log1p']`**, plus value heuristics) or **raw / linear
@@ -163,10 +167,32 @@ fn uv_executable() -> OsString {
         .unwrap_or_else(|| "uv".into())
 }
 
+fn apply_blas_thread_caps_for_uv_child(cmd: &mut Command) {
+    if env::var("SPACETRAVLR_PRESERVE_BLAS_THREADS").ok().as_deref() == Some("1") {
+        return;
+    }
+    let n = env::var("SPACETRAVLR_UV_BLAS_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&k| (1..=64).contains(&k))
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| "1".into());
+    for k in [
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ] {
+        cmd.env(k, &n);
+    }
+}
+
 fn uv_command_base() -> Command {
     let mut c = Command::new(uv_executable());
     c.env_remove("PYTHONPATH");
     c.env("PYTHONNOUSERSITE", "1");
+    apply_blas_thread_caps_for_uv_child(&mut c);
     c
 }
 
