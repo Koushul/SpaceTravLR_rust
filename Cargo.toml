@@ -44,7 +44,7 @@ lto = "thin"
 codegen-units = 1
 
 [features]
-default = ["tui", "self-update"]
+default = ["tui", "self-update", "rctd"]
 tui = [
     "dep:ratatui",
     "dep:ratatui-themes",
