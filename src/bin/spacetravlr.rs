@@ -1522,9 +1522,16 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
             anyhow::ensure!(!key.is_empty(), "--celloracle-obs-key must not be empty");
             let obs = read_h5ad_obs_column_str(&adata_in, key)
                 .with_context(|| format!("read obs[{key}]"))?;
-            infer_grn_per_cluster(&gem, &gem_scaled, &var_names, &tf_by_target, &obs)
+            infer_grn_per_cluster(
+                &gem,
+                &gem_scaled,
+                &var_names,
+                &tf_by_target,
+                &obs,
+                true,
+            )
         } else {
-            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target)
+            infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true)
         }
     };
 

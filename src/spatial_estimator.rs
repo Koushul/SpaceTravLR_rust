@@ -1934,12 +1934,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     let gem = read_h5ad_expression_dense_f64(Path::new(adata_path), layer)?;
                     let gem_scaled = crate::celloracle::scale_gem_no_center(&gem);
                     let tf_by_target = global_grn.grn_regulators_by_target()?;
+                    let celloracle_terminal_progress = hud.is_none();
                     let links = if cluster_to_cell_type.is_empty() {
                         crate::celloracle::infer_grn_whole(
                             &gem,
                             &gem_scaled,
                             &all_var_names,
                             &tf_by_target,
+                            celloracle_terminal_progress,
                         )?
                     } else {
                         let n = clusters.len();
@@ -1958,6 +1960,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             &all_var_names,
                             &tf_by_target,
                             &obs_cluster,
+                            celloracle_terminal_progress,
                         )?
                     };
                     crate::celloracle::write_links_as_tf_priors_feather(&co_path, &links)?;

@@ -106,8 +106,17 @@ pub fn infer_grn_whole(
     gem_scaled: &Array2<f64>,
     var_names: &[String],
     tf_by_target: &HashMap<String, Vec<String>>,
+    draw_terminal_progress: bool,
 ) -> anyhow::Result<Vec<LinkRow>> {
-    infer_grn_subset(gem, gem_scaled, var_names, tf_by_target, None, "all")
+    infer_grn_subset(
+        gem,
+        gem_scaled,
+        var_names,
+        tf_by_target,
+        None,
+        "all",
+        draw_terminal_progress,
+    )
 }
 
 pub fn infer_grn_subset(
@@ -117,6 +126,7 @@ pub fn infer_grn_subset(
     tf_by_target: &HashMap<String, Vec<String>>,
     row_idx: Option<&[usize]>,
     cluster_label: &str,
+    draw_terminal_progress: bool,
 ) -> anyhow::Result<Vec<LinkRow>> {
     let n_cells = gem.nrows();
     anyhow::ensure!(
@@ -147,13 +157,18 @@ pub fn infer_grn_subset(
         .cloned()
         .collect();
 
-    let pb = indicatif::ProgressBar::new(targets.len() as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} genes {msg}")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
+    let pb = if draw_terminal_progress {
+        let pb = indicatif::ProgressBar::new(targets.len() as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} genes {msg}")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        pb
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
 
     let cluster: Arc<str> = Arc::from(cluster_label);
     let normal = Normal::new(0.0, 1.0).expect("std normal");
@@ -247,6 +262,7 @@ pub fn infer_grn_per_cluster(
     var_names: &[String],
     tf_by_target: &HashMap<String, Vec<String>>,
     obs_cluster: &[String],
+    draw_terminal_progress: bool,
 ) -> anyhow::Result<Vec<LinkRow>> {
     anyhow::ensure!(
         obs_cluster.len() == gem.nrows(),
@@ -257,6 +273,7 @@ pub fn infer_grn_per_cluster(
         by_label.entry(lab.clone()).or_default().push(i);
     }
     let pairs: Vec<(String, Vec<usize>)> = by_label.into_iter().collect();
+    let subset_progress = draw_terminal_progress && pairs.len() <= 1;
     let results: Vec<anyhow::Result<Vec<LinkRow>>> = pairs
         .into_par_iter()
         .map(|(cluster, rows)| {
@@ -267,6 +284,7 @@ pub fn infer_grn_per_cluster(
                 tf_by_target,
                 Some(rows.as_slice()),
                 cluster.as_str(),
+                subset_progress,
             )
         })
         .collect();
