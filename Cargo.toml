@@ -79,6 +79,10 @@ name = "spacetravlr"
 path = "src/bin/spacetravlr.rs"
 
 [[bin]]
+name = "spacetravlr-cell-network"
+path = "src/bin/spacetravlr_cell_network.rs"
+
+[[bin]]
 name = "spacetravlr-perturb"
 path = "src/bin/spacetravlr_perturb.rs"
 
