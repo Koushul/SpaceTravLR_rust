@@ -1322,7 +1322,12 @@ pub fn cache_received_ligands_uns_for_processed_h5ad(
 
     let adata = AnnData::<H5>::open(H5::open(processed_h5ad)?)?;
     let all_var_names = adata.var_names().into_vec();
-    let species = crate::network::infer_species(&all_var_names);
+    let species = crate::network::infer_species(&all_var_names).with_context(|| {
+        format!(
+            "could not infer human vs mouse from var_names in {}; set [data].spatial_species or use explicit GRN paths",
+            processed_h5ad.display()
+        )
+    })?;
     let grn = crate::network::GeneNetwork::new(
         species,
         &all_var_names,
@@ -1668,7 +1673,11 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         max_ligands: Option<usize>,
     ) -> anyhow::Result<Self> {
         let adata_var_names = adata.var_names().into_vec();
-        let species = crate::network::infer_species(&adata_var_names);
+        let species = crate::network::infer_species(&adata_var_names).ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not infer human vs mouse from AnnData var_names (set explicit species if needed)"
+            )
+        })?;
         let grn = Arc::new(crate::network::GeneNetwork::new(
             species,
             &adata_var_names,
@@ -1892,7 +1901,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
 
             let t_grn = pipeline_step_begin(&hud, "load GRN (network parquet / priors)");
-            let species = crate::network::infer_species(&all_var_names);
+            let species = crate::network::infer_species(&all_var_names).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer human vs mouse from var_names; set [data].spatial_species or ensure var uses HGNC or MGI-style symbols"
+                )
+            })?;
             let global_grn = Arc::new(crate::network::GeneNetwork::new(
                 species,
                 &all_var_names,

@@ -8,9 +8,10 @@
 //!
 //! **Input `X`:** Before normalizing, the embedded Scanpy script infers whether **`X` is already
 //! `log1p`-transformed** (Scanpy **`uns['log1p']`**, plus value heuristics) or **raw / linear
-//! counts**. Raw path: `normalize_total` → **`layers["normalized_count"]`** → `log1p`. Log path:
-//! preserve incoming expression in **`layers["log1p_incoming"]`**, **`expm1(X)`** as a linear
-//! approximation, `normalize_total`, store **`normalized_count`**, then `log1p` again for HVG/PCA.
+//! counts**. Raw path: `normalize_total` → **`layers["normalized_count"]`** → `log1p`. If **`X`**
+//! is classified as already log-normalized, **`X` is not expm1’d or re-logged**: a dense copy is
+//! stored in **`layers["normalized_count"]`** and **`X`** is left as-is for **`scale` / HVG /
+//! PCA** (avoids double transform and Scanpy **`normalize_total`** warnings on log-like data).
 //!
 //! Scanpy then runs through Leiden. **Clusterwise Markov imputation** on `normalized_count` uses
 //! isolated **`uv`** with [**magic-impute**](https://pypi.org/project/magic-impute/) (one
@@ -54,6 +55,7 @@ use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
 use crate::config::expand_user_path;
+use serde_json::json;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,6 +80,40 @@ const UV_WITH_SCANPY: &[&str] = &[
     "igraph",
 ];
 
+// #region agent log
+const DEBUG_AGENT_LOG_PATH: &str = "/Users/koush/Projects/SpaceTravLR_rust/.cursor/debug-f9143e.log";
+const DEBUG_AGENT_SESSION: &str = "f9143e";
+
+pub fn agent_debug_ndjson(
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    run_id: &str,
+    data: serde_json::Value,
+) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let line = json!({
+        "sessionId": DEBUG_AGENT_SESSION,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": ts,
+        "runId": run_id,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DEBUG_AGENT_LOG_PATH)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+// #endregion
+
 /// Options for heuristic **`obsm['spatial']` → microns** in the Scanpy embed ([`full_preprocess_maybe_log`]).
 #[derive(Clone, Debug)]
 pub struct SpatialMicronsOptions {
@@ -90,10 +126,35 @@ impl Default for SpatialMicronsOptions {
     fn default() -> Self {
         Self {
             skip: false,
-            species: "human".into(),
+            species: String::new(),
             target_median_nn_um: None,
         }
     }
+}
+
+fn read_h5ad_var_names_for_infer(path: &Path) -> anyhow::Result<Vec<String>> {
+    let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(adata.var_names().into_vec())
+}
+
+/// When **`spatial_microns.species`** is empty and microns are not skipped, set it from
+/// [`crate::network::infer_species`] on this `.h5ad`’s `var_names`.
+pub fn resolve_spatial_microns_species_for_h5ad(
+    mut opt: SpatialMicronsOptions,
+    adata_path: &Path,
+) -> anyhow::Result<SpatialMicronsOptions> {
+    if opt.skip || !opt.species.trim().is_empty() {
+        return Ok(opt);
+    }
+    let names = read_h5ad_var_names_for_infer(adata_path)?;
+    let s = crate::network::infer_species(&names).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not infer human vs mouse from var_names in {}; set [data].spatial_species or --spatial-species (human|mouse)",
+            adata_path.display()
+        )
+    })?;
+    opt.species = s.to_string();
+    Ok(opt)
 }
 
 fn uv_executable() -> OsString {
@@ -380,14 +441,6 @@ def _infer_x_is_log1p(adata) -> bool:
     return False
 
 
-def _expm1_x(X):
-    if sp.issparse(X):
-        out = X.tocsr().copy()
-        out.data = np.expm1(out.data)
-        return out
-    return np.expm1(np.asarray(X, dtype=np.float64))
-
-
 src = Path(sys.argv[1])
 out_partial = Path(sys.argv[2])
 if src.suffix.lower() != ".h5ad":
@@ -499,15 +552,15 @@ x_is_log1p = _infer_x_is_log1p(adata)
 print("spacetravlr_preprocess x_space", "log1p" if x_is_log1p else "counts", file=sys.stderr)
 
 if x_is_log1p:
-    adata.layers["log1p_incoming"] = adata.X.copy()
-    adata.X = _expm1_x(adata.X)
-    sc.pp.normalize_total(adata, target_sum=1e4)
+    print(
+        "spacetravlr_preprocess: X classified as log1p-space; copying X -> layers['normalized_count'] (no expm1/normalize_total/log1p)",
+        file=sys.stderr,
+    )
     nc = adata.X.copy()
     if hasattr(nc, "toarray"):
         adata.layers["normalized_count"] = nc.toarray()
     else:
         adata.layers["normalized_count"] = np.asarray(nc, dtype=np.float64)
-    sc.pp.log1p(adata)
 else:
     adata.layers["raw_count"] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=1e4)
@@ -878,7 +931,8 @@ pub fn plan_training_prep(
 /// column (use the same name as **`[data].condition`** when training is split by that column).
 ///
 /// **`spatial_microns`**: heuristic **`obsm['spatial']` → µm** during full Scanpy preprocess only
-/// ([`TrainingPrepPlan::FullPreprocess`]); use **[`SpatialMicronsOptions::default`]** to match CLI defaults.
+/// ([`TrainingPrepPlan::FullPreprocess`]); empty **`species`** is resolved via
+/// [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
 ///
 /// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_adata_stem`] on
 /// the pre-prep path for **`original_input_for_stem`** so filenames match the user's dataset stem.
@@ -906,7 +960,27 @@ pub fn ensure_training_adata_ready(
 
     let stem = crate::config::canonical_adata_stem(original_input_for_stem);
     let r = probe_adata_training_readiness(&p)?;
-    match plan_training_prep(&r, output_dir, &stem)? {
+    let plan = plan_training_prep(&r, output_dir, &stem)?;
+    // #region agent log
+    agent_debug_ndjson(
+        "F",
+        "scanpy_preprocess.rs:ensure_training_adata_ready",
+        "training auto-prep plan; spatial_microns only in FullPreprocess",
+        "preprocess",
+        json!({
+            "adata_in": p.to_string_lossy(),
+            "plan": format!("{plan:?}"),
+            "has_cell_type": r.has_cell_type,
+            "has_imputed_count": r.has_imputed_count,
+            "has_normalized_count": r.has_normalized_count,
+            "has_leiden": r.has_leiden,
+            "spatial_microns_skip": spatial_microns.skip,
+            "spatial_microns_species": spatial_microns.species,
+            "spatial_microns_target_um": spatial_microns.target_median_nn_um,
+        }),
+    );
+    // #endregion
+    match plan {
         TrainingPrepPlan::Noop => {
             *adata_path = expanded;
         }
@@ -986,8 +1060,17 @@ fn run_uv_scanpy_to_scratch(
         .with_context(|| format!("scratch path must be UTF-8: {}", scratch_out.display()))?;
     let skip = if spatial_microns.skip { "1" } else { "0" };
     let species_trim = spatial_microns.species.trim();
-    let species_arg = if species_trim.is_empty() {
-        "human"
+    let species_arg = if spatial_microns.skip {
+        if species_trim.is_empty() {
+            "human"
+        } else {
+            species_trim
+        }
+    } else if species_trim.is_empty() {
+        bail!(
+            "internal: spatial microns species empty for {}; call resolve_spatial_microns_species_for_h5ad first",
+            adata_in.display()
+        );
     } else {
         species_trim
     };
@@ -995,6 +1078,21 @@ fn run_uv_scanpy_to_scratch(
         .target_median_nn_um
         .map(|x| x.to_string())
         .unwrap_or_default();
+    // #region agent log
+    agent_debug_ndjson(
+        "B",
+        "scanpy_preprocess.rs:run_uv_scanpy_to_scratch",
+        "embedded scanpy argv: skip_microns species target_um",
+        "preprocess",
+        json!({
+            "adata_in": adata_in.to_string_lossy(),
+            "scratch_out": scratch_out.to_string_lossy(),
+            "skip_microns": skip,
+            "species_arg": species_arg,
+            "target_um_arg": target_um,
+        }),
+    );
+    // #endregion
     uv_python_stdin(
         UV_WITH_SCANPY,
         SCANPY_BASIC_PREPROCESS_PY,
@@ -1041,6 +1139,7 @@ pub fn full_preprocess_maybe_log(
     if !adata_str.to_lowercase().ends_with(".h5ad") {
         bail!("expected input path ending in .h5ad");
     }
+    let spatial_microns = resolve_spatial_microns_species_for_h5ad(spatial_microns, adata_in)?;
     let expected_out = dest_processed.to_path_buf();
     if let Some(parent) = expected_out.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -1449,7 +1548,11 @@ a.write_h5ad(p)
             &dest,
             true,
             None,
-            SpatialMicronsOptions::default(),
+            SpatialMicronsOptions {
+                skip: false,
+                species: "human".into(),
+                target_median_nn_um: None,
+            },
         )
         .expect("preprocess");
         let log = log.expect("captured");
@@ -1460,12 +1563,12 @@ a.write_h5ad(p)
 
         let ad = AnnData::<H5>::open(H5::open(&out).expect("open out")).expect("read");
         assert!(
-            ad.layers().get("log1p_incoming").is_some(),
-            "log1p path should store layers[\"log1p_incoming\"]"
+            log.contains("copying X -> layers['normalized_count']"),
+            "log1p-classified path should log direct copy:\n{log}"
         );
         assert!(
             ad.layers().get("normalized_count").is_some(),
-            "log1p-classified input should still get layers[\"normalized_count\"]"
+            "log1p-classified input should get layers[\"normalized_count\"] from X"
         );
         assert!(
             ad.layers().get("imputed_count").is_some(),

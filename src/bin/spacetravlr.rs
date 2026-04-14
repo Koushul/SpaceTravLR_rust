@@ -616,12 +616,28 @@ struct Cli {
     rctd_gpu: bool,
 
     #[arg(
+        long = "infer-species",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Print inferred species (human or mouse) from var gene symbols and exit (requires `--h5ad`)"
+    )]
+    infer_species: bool,
+
+    #[arg(
         long = "plot-h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
         help = "Print terminal spatial scatter (obsm spatial, obs colored by cluster column) and exit"
     )]
     plot_h5ad: bool,
+
+    #[arg(
+        long = "plot-umap",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Auto-preprocess if needed, then print terminal UMAP scatter (obsm X_umap, obs colored by cluster) and exit (requires `--h5ad`)"
+    )]
+    plot_umap: bool,
 
     #[arg(
         long = "process-h5ad",
@@ -667,11 +683,10 @@ struct Cli {
     #[arg(
         long = "spatial-species",
         value_name = "SPECIES",
-        default_value = "human",
         help_heading = "Utility",
-        help = "With `--process-h5ad`: species prior for spatial → micron scaling (`human` or `mouse`)"
+        help = "With `--process-h5ad` / `--celloracle` preprocess: `human` or `mouse` for spatial → µm prior; omit to infer from var gene symbols (see infer_species)"
     )]
-    spatial_species: String,
+    spatial_species: Option<String>,
 
     #[arg(
         long = "spatial-microns-target-um",
@@ -1246,9 +1261,28 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let batch = batch_owned.as_deref();
     let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
         skip: cli.skip_spatial_microns,
-        species: cli.spatial_species.trim().to_lowercase(),
+        species: cli
+            .spatial_species
+            .as_deref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default(),
         target_median_nn_um: cli.spatial_microns_target_um,
     };
+    // #region agent log
+    spacetravlr::scanpy_preprocess::agent_debug_ndjson(
+        "B",
+        "spacetravlr.rs:run_process_h5ad",
+        "CLI --process-h5ad spatial microns before full_preprocess",
+        "preprocess",
+        serde_json::json!({
+            "h5ad": h5ad.to_string_lossy(),
+            "spatial_species_cli": cli.spatial_species.as_deref().unwrap_or(""),
+            "spatial_microns_skip": cli.skip_spatial_microns,
+            "spatial_microns_target_um_cli": cli.spatial_microns_target_um,
+        }),
+    );
+    // #endregion
     let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
         &h5ad,
         &dest,
@@ -1297,6 +1331,79 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
     let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
        eprint!("{log}");
     Ok(())
+}
+
+fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
+    let h5ad = cli
+        .h5ad
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+        .filter(|p| p.is_file());
+    let h5ad = match h5ad {
+        Some(p) => p,
+        None => {
+            anyhow::bail!(
+                "--plot-umap requires --h5ad PATH pointing to an existing .h5ad file."
+            );
+        }
+    };
+
+    let has_umap = {
+        use anndata::{AnnDataOp, AxisArraysOp, Backend};
+        let a = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(&h5ad)?)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let found = a.obsm().keys().iter().any(|k| k == "X_umap" || k == "umap");
+        a.close()?;
+        found
+    };
+
+    let plot_path = if has_umap {
+        eprintln!(
+            "obsm already has UMAP in {}; plotting directly.",
+            h5ad.display()
+        );
+        h5ad.clone()
+    } else {
+        eprintln!(
+            "No UMAP in obsm — running full Scanpy preprocess on {} …",
+            h5ad.display()
+        );
+        let out_dir = match &cli.process_output_dir {
+            Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
+            None => std::env::temp_dir(),
+        };
+        std::fs::create_dir_all(&out_dir)?;
+        let stem = canonical_adata_stem(&h5ad);
+        let dest =
+            spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
+        let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
+            skip: cli.skip_spatial_microns,
+            species: cli
+                .spatial_species
+                .as_deref()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default(),
+            target_median_nn_um: cli.spatial_microns_target_um,
+        };
+        let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
+            cli.magic_batch_obs.as_deref(),
+            cli.condition.as_deref(),
+        );
+        let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+            &h5ad,
+            &dest,
+            true,
+            batch_owned.as_deref(),
+            spatial_microns,
+        )?;
+        if let Some(l) = log {
+            eprint!("{l}");
+        }
+        out
+    };
+
+    spacetravlr::adata_terminal_scatter::print_h5ad_umap_scatter(&plot_path)
 }
 
 fn resolve_celloracle_network_data_dir(cli: &Cli) -> anyhow::Result<Option<String>> {
@@ -1352,14 +1459,15 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
 
     if !cli.celloracle_skip_preprocess {
         let magic_batch = resolve_magic_batch_obs_column(cli.magic_batch_obs.as_deref(), None);
-        let species_trim = cli.spatial_species.trim().to_lowercase();
+        let species_trim = cli
+            .spatial_species
+            .as_deref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
         let spatial_microns = SpatialMicronsOptions {
             skip: cli.skip_spatial_microns,
-            species: if species_trim.is_empty() {
-                "human".into()
-            } else {
-                species_trim
-            },
+            species: species_trim,
             target_median_nn_um: cli.spatial_microns_target_um,
         };
         ensure_training_adata_ready(
@@ -1389,7 +1497,13 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
 
     let species = match cli.celloracle_species.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => s.to_string(),
-        None => infer_species(&var_names).to_string(),
+        None => infer_species(&var_names)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer GRN species from var_names; pass --celloracle-species human or mouse"
+                )
+            })?
+            .to_string(),
     };
 
     let network_data_dir = resolve_celloracle_network_data_dir(cli)?;
@@ -1552,6 +1666,37 @@ fn main() -> anyhow::Result<()> {
         return run_demo_mode(&cli);
     }
 
+    if cli.infer_species {
+        let h5ad = cli
+            .h5ad
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+            .filter(|p| p.is_file());
+        let h5ad = match h5ad {
+            Some(p) => p,
+            None => {
+                anyhow::bail!("--infer-species requires --h5ad PATH pointing to an existing .h5ad file.");
+            }
+        };
+        let var_names = spacetravlr::read_h5ad_var_names(&h5ad)
+            .with_context(|| format!("read var_names from {}", h5ad.display()))?;
+        let n = var_names.len();
+        match spacetravlr::network::infer_species(&var_names) {
+            Some(species) => {
+                println!("{species}");
+                eprintln!("inferred species={species} from {n} var_names in {}", h5ad.display());
+            }
+            None => {
+                eprintln!(
+                    "could not determine species from {n} var_names in {} — set --spatial-species or [data].spatial_species explicitly",
+                    h5ad.display()
+                );
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     if cli.process_h5ad {
         return run_process_h5ad(&cli);
     }
@@ -1581,10 +1726,11 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("--plot-h5ad requires --h5ad PATH pointing to an existing .h5ad file.");
             }
         };
-        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(
-            &h5ad,
-            cli.spatial_species.trim(),
-        );
+        return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(&h5ad, "cell_type");
+    }
+
+    if cli.plot_umap {
+        return run_plot_umap(&cli);
     }
 
     let (mut cfg, join_training) = load_config_for_main(&cli)?;
@@ -1700,13 +1846,27 @@ fn main() -> anyhow::Result<()> {
             species: {
                 let s = cfg.data.spatial_species.trim().to_lowercase();
                 if s.is_empty() {
-                    "human".into()
+                    String::new()
                 } else {
                     s
                 }
             },
             target_median_nn_um: cfg.data.spatial_median_nn_target_um,
         };
+        // #region agent log
+        spacetravlr::scanpy_preprocess::agent_debug_ndjson(
+            "A",
+            "spacetravlr.rs:training_auto_adata_prep",
+            "[data].spatial_species from config -> SpatialMicronsOptions",
+            "preprocess",
+            serde_json::json!({
+                "cfg_data_spatial_species_raw": cfg.data.spatial_species,
+                "resolved_species_for_scanpy": spatial_microns.species,
+                "spatial_median_nn_target_um": cfg.data.spatial_median_nn_target_um,
+                "adata_path": cfg.data.adata_path,
+            }),
+        );
+        // #endregion
         spacetravlr::scanpy_preprocess::ensure_training_adata_ready(
             &mut cfg.data.adata_path,
             &output_dir_pb,

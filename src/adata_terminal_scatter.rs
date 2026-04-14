@@ -608,6 +608,121 @@ pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Re
     resolve_plot_h5ad_color_column_from_root(&h5, fallback)
 }
 
+const UMAP_OBSM_KEYS: &[&str] = &["X_umap", "umap"];
+
+fn h5ad_umap_obsm_key(obsm: &Group) -> anyhow::Result<String> {
+    for key in UMAP_OBSM_KEYS {
+        if !obsm.link_exists(key) {
+            continue;
+        }
+        if let Ok(m) = h5ad_obsm_xy_two_cols(obsm, key) {
+            if m.nrows() > 0 {
+                return Ok((*key).to_string());
+            }
+        }
+    }
+    let keys = obsm.member_names().unwrap_or_default();
+    anyhow::bail!(
+        "no usable 2D UMAP in obsm (tried {:?}). obsm keys: {keys:?}",
+        UMAP_OBSM_KEYS
+    )
+}
+
+/// Print a terminal UMAP scatter from a preprocessed `.h5ad` (obsm `X_umap` or `umap`).
+pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
+    use colored::Colorize;
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+
+    let obsm = h5
+        .group("obsm")
+        .context("h5ad: missing obsm group — cannot plot without UMAP coordinates")?;
+    let umap_key = h5ad_umap_obsm_key(&obsm)?;
+    let xy = h5ad_obsm_xy_two_cols(&obsm, &umap_key)
+        .with_context(|| format!("failed to read obsm['{umap_key}']"))?;
+    let n_obs = xy.nrows();
+    anyhow::ensure!(n_obs > 0, "obsm['{umap_key}'] is empty");
+
+    let color_col = resolve_plot_h5ad_color_column_opt(&h5)
+        .or_else(|| {
+            let obs = h5.group("obs").ok()?;
+            for fallback in ["cell_type", "leiden"] {
+                if obs.link_exists(fallback) {
+                    return Some(fallback.to_string());
+                }
+            }
+            None
+        });
+
+    let labels: Vec<String> = if let Some(ref col) = color_col {
+        let obs = h5.group("obs").context("h5ad: missing obs group")?;
+        match h5ad_obs_labels(&obs, col) {
+            Ok(l) if l.len() == n_obs => l,
+            _ => vec!["cell".to_string(); n_obs],
+        }
+    } else {
+        vec!["cell".to_string(); n_obs]
+    };
+
+    let mut points: Vec<(f64, f64)> = Vec::with_capacity(n_obs);
+    for i in 0..n_obs {
+        points.push((xy[[i, 0]], xy[[i, 1]]));
+    }
+
+    let term = terminal_size::terminal_size();
+    let cols = term.map(|(w, _)| w.0 as usize).unwrap_or(100).max(60);
+    let rows = term.map(|(_, h)| h.0 as usize).unwrap_or(32);
+    let margin = 4usize;
+    let legend_gap = 2usize;
+    let border_cols = 2usize;
+    let legend_budget = legend_plain_width_budget(&labels, n_obs);
+    let max_chart_w = cols
+        .saturating_sub(margin)
+        .saturating_sub(legend_gap)
+        .saturating_sub(legend_budget)
+        .saturating_sub(border_cols)
+        .clamp(15, 90);
+    let max_chart_h = rows.saturating_sub(10).clamp(8, 48);
+    let (cw, ch) = chart_size_square_pixels(max_chart_w, max_chart_h);
+
+    let color_label = color_col
+        .as_deref()
+        .filter(|_| labels.iter().any(|l| l != "cell"))
+        .unwrap_or("(none)");
+
+    let (_, canvas, legend_map) =
+        draw_spatial_scatter_canvas_from_points(&points, &labels, cw, ch)?;
+    let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
+    legend.sort_by(|a, b| a.0.cmp(&b.0));
+
+    println!(
+        "{}  {}  n={}  obsm[{umap_key}]  color=obs[{color_label}]",
+        "AnnData UMAP".bold(),
+        path.display(),
+        n_obs,
+    );
+    let mut label_counts: HashMap<&str, usize> = HashMap::new();
+    for l in &labels {
+        *label_counts.entry(l.as_str()).or_insert(0) += 1;
+    }
+    let legend_lines: Vec<String> = legend
+        .iter()
+        .map(|(name, c)| {
+            let cnt = label_counts.get(name.as_str()).copied().unwrap_or(0);
+            let (r, g, b) = match c {
+                Color::TrueColor { r, g, b } => (*r, *g, *b),
+                _ => (255, 255, 255),
+            };
+            format!(
+                "{} {}",
+                name.as_str().truecolor(r, g, b),
+                cnt.to_string().dimmed()
+            )
+        })
+        .collect();
+    print!("{}", zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines));
+    Ok(())
+}
+
 /// Opens the `.h5ad` **once** (read-only HDF5), reads only `obsm` (two columns) and optionally one
 /// `obs` column for coloring. No `AnnData` open, no expression data, no preprocessing.
 ///

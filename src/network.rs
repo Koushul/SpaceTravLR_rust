@@ -223,40 +223,71 @@ pub struct GeneNetwork {
     pub network_df: DataFrame,
 }
 
-pub fn infer_species(var_names: &[String]) -> &'static str {
-    use rand::seq::SliceRandom;
-    let mut rng = rand::thread_rng();
+/// Infer **`human`** vs **`mouse`** from `var_names` using **gene symbol capitalization**
+/// (HGNC-style all caps vs MGI-style title case), **Ensembl ID prefixes**, and common **mouse
+/// RIKEN / mt-** patterns. Scans **all** symbols (deterministic; no random subsampling).
+///
+/// Returns **`None`** when the list is empty or scores tie / no symbol matched any rule (set
+/// `[data].spatial_species` / `--spatial-species` / `--celloracle-species` explicitly).
+pub fn infer_species(var_names: &[String]) -> Option<&'static str> {
+    if var_names.is_empty() {
+        return None;
+    }
 
-    let sample_size = std::cmp::min(100, var_names.len());
-    let sample: Vec<&String> = var_names.choose_multiple(&mut rng, sample_size).collect();
+    let mut mouse = 0i64;
+    let mut human = 0i64;
 
-    let mut mouse_count = 0;
-    let mut human_count = 0;
-
-    for gene in sample {
-        let chars: Vec<char> = gene.chars().collect();
-        if chars.is_empty() {
+    for gene in var_names {
+        let g = gene.trim();
+        if g.is_empty() {
             continue;
         }
 
-        let mouse_match = chars.len() > 1
-            && chars[0].is_uppercase()
-            && chars[1..].iter().all(|c| !c.is_uppercase());
-        if mouse_match {
-            mouse_count += 1;
+        let upper = g.to_ascii_uppercase();
+        let base = upper.split('.').next().unwrap_or(&upper);
+
+        if base.starts_with("ENSMUSG") {
+            mouse += 100;
+            continue;
+        }
+        if base.starts_with("ENSG") {
+            human += 100;
+            continue;
         }
 
-        let human_match = chars.iter().all(|c| c.is_uppercase() || !c.is_alphabetic())
-            && chars.iter().any(|c| c.is_uppercase());
-        if human_match {
-            human_count += 1;
+        if upper.ends_with("RIK") {
+            mouse += 5;
+            continue;
+        }
+
+        let gl = g.to_ascii_lowercase();
+        if gl.starts_with("mt-") || gl.starts_with("mt_") {
+            mouse += 3;
+            continue;
+        }
+
+        let letters: Vec<char> = g.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if letters.len() < 2 {
+            continue;
+        }
+
+        let all_caps = letters.iter().all(|c| c.is_ascii_uppercase());
+        let title_mouse = letters[0].is_ascii_uppercase()
+            && letters[1..].iter().all(|c| c.is_ascii_lowercase());
+
+        if all_caps {
+            human += 1;
+        } else if title_mouse {
+            mouse += 1;
         }
     }
 
-    if mouse_count > human_count {
-        "mouse"
+    if mouse > human {
+        Some("mouse")
+    } else if human > mouse {
+        Some("human")
     } else {
-        "human"
+        None
     }
 }
 
@@ -640,7 +671,7 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect();
-        assert_eq!(infer_species(&genes), "mouse");
+        assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]
@@ -652,7 +683,7 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect();
-        assert_eq!(infer_species(&genes), "human");
+        assert_eq!(infer_species(&genes), Some("human"));
     }
 
     #[test]
@@ -664,25 +695,173 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect();
-        assert_eq!(infer_species(&genes), "mouse");
+        assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]
-    fn infer_species_empty_defaults_human() {
+    fn infer_species_empty_is_none() {
         let genes: Vec<String> = vec![];
-        let result = infer_species(&genes);
-        assert_eq!(result, "human");
+        assert_eq!(infer_species(&genes), None);
     }
 
     #[test]
-    fn infer_species_numeric_genes() {
-        // Genes with numbers like "123" → no uppercase letters
+    fn infer_species_numeric_genes_is_none() {
         let genes: Vec<String> = vec!["123", "456", "789"]
             .into_iter()
             .map(String::from)
             .collect();
-        let result = infer_species(&genes);
-        assert!(result == "human" || result == "mouse");
+        assert_eq!(infer_species(&genes), None);
+    }
+
+    #[test]
+    fn infer_species_ensembl_prefers_mouse() {
+        let genes = vec![
+            "ENSMUSG00000000001".to_string(),
+            "GAPDH".to_string(),
+        ];
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_ensembl_prefers_human() {
+        let genes = vec![
+            "ENSG00000139618".to_string(),
+            "Gapdh".to_string(),
+        ];
+        assert_eq!(infer_species(&genes), Some("human"));
+    }
+
+    #[test]
+    fn infer_species_riken_mouse() {
+        let genes: Vec<String> = vec![
+            "1700001C02Rik", "A230050P20Rik", "Gapdh", "BRCA1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_mt_prefix_mouse() {
+        let genes: Vec<String> = vec![
+            "mt-Co1", "mt-Nd1", "mt-Cytb", "ACTB", "SOX2",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_human_with_mt_uppercase() {
+        let genes: Vec<String> = vec![
+            "MT-CO1", "MT-ND1", "GAPDH", "ACTB", "SOX2", "TP53",
+            "BRCA1", "EGFR", "MYC", "KRAS",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("human"));
+    }
+
+    #[test]
+    fn infer_species_mouse_large_set() {
+        let genes: Vec<String> = vec![
+            "Gapdh", "Actb", "Sox2", "Pou5f1", "Nanog", "Klf4", "Myc",
+            "Bmp4", "Fgf2", "Wnt3a", "Shh", "Notch1", "Dll1", "Jag1",
+            "Hes1", "Hes5", "Hey1", "Hey2", "Neurog2", "Ascl1",
+            "Pax6", "Tbr1", "Tbr2", "Dcx", "Map2", "Tubb3", "Rbfox3",
+            "Gfap", "Aldh1l1", "Olig2", "Mbp", "Pdgfra", "Cspg4",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_human_large_set() {
+        let genes: Vec<String> = vec![
+            "GAPDH", "ACTB", "SOX2", "POU5F1", "NANOG", "KLF4", "MYC",
+            "BMP4", "FGF2", "WNT3A", "SHH", "NOTCH1", "DLL1", "JAG1",
+            "HES1", "HES5", "HEY1", "HEY2", "NEUROG2", "ASCL1",
+            "PAX6", "TBR1", "EOMES", "DCX", "MAP2", "TUBB3", "RBFOX3",
+            "GFAP", "ALDH1L1", "OLIG2", "MBP", "PDGFRA", "CSPG4",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("human"));
+    }
+
+    #[test]
+    fn infer_species_all_ensembl_mouse() {
+        let genes: Vec<String> = vec![
+            "ENSMUSG00000000001", "ENSMUSG00000000028", "ENSMUSG00000000031",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_all_ensembl_human() {
+        let genes: Vec<String> = vec![
+            "ENSG00000139618", "ENSG00000141510", "ENSG00000171862",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("human"));
+    }
+
+    #[test]
+    fn infer_species_mixed_ensembl_and_symbols() {
+        let genes: Vec<String> = vec![
+            "Gapdh", "Actb", "ENSMUSG00000000001", "BRCA1", "TP53",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_whitespace_and_edge_cases() {
+        let genes: Vec<String> = vec![
+            "  Gapdh  ", "", "  ", "Actb", "Sox2",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_single_gene_mouse() {
+        let genes = vec!["Gapdh".to_string()];
+        assert_eq!(infer_species(&genes), Some("mouse"));
+    }
+
+    #[test]
+    fn infer_species_single_gene_human() {
+        let genes = vec!["GAPDH".to_string()];
+        assert_eq!(infer_species(&genes), Some("human"));
+    }
+
+    #[test]
+    fn infer_species_stereoseq_mouse_style() {
+        let genes: Vec<String> = vec![
+            "Apoe", "Alb", "Serpina1a", "Hpx", "Fga", "Fgb", "Fgg",
+            "Hp", "Itih4", "Orm1", "Orm2", "Saa1", "Saa2", "Lcn2",
+            "Cyp2e1", "Cyp2f2", "Cyp3a11", "Cyp1a2", "Glul", "Oat",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]

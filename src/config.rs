@@ -90,6 +90,7 @@ pub struct DataConfig {
     /// When set, perturbation loads only these rows (expression, spatial, betadata alignment). Results apply to this ROI only.
     pub perturb_obs_subset_file: Option<String>,
     /// Prior for heuristic `obsm['spatial']` → micron scaling during full Scanpy preprocess (`human` or `mouse`).
+    /// Empty: infer from `var` gene symbol capitalization / Ensembl IDs (see [`crate::network::infer_species`]).
     #[serde(default = "default_data_spatial_species")]
     pub spatial_species: String,
     /// Override median k-NN target distance (µm) for spatial scaling; omit to use the species default.
@@ -344,7 +345,7 @@ pub struct ModelExportConfig {
 }
 
 fn default_data_spatial_species() -> String {
-    "human".into()
+    String::new()
 }
 
 impl Default for DataConfig {

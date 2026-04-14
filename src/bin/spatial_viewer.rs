@@ -1499,9 +1499,8 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         .network_dir
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
-    let species = infer_species(vn.as_ref());
-    let grn: Option<Arc<GeneNetwork>> =
-        match GeneNetwork::new(species, vn.as_ref(), net_dir.as_deref()) {
+    let grn: Option<Arc<GeneNetwork>> = match infer_species(vn.as_ref()) {
+        Some(species) => match GeneNetwork::new(species, vn.as_ref(), net_dir.as_deref()) {
             Ok(g) => {
                 tracing::info!("loaded GRN species={} path={}", g.species, g.network_path);
                 Some(Arc::new(g))
@@ -1510,7 +1509,14 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
                 tracing::warn!("GRN not available: {}", e);
                 None
             }
-        };
+        },
+        None => {
+            tracing::warn!(
+                "could not infer human vs mouse from var_names; GRN disabled (set symbols or use a run TOML with explicit species)"
+            );
+            None
+        }
+    };
     let (perturb_runtime, betadata_dir) =
         if let (Some(rtp), Some(cfg)) = (&inputs.run_toml, &run_spaceship_cfg) {
             let bd = cfg.resolve_training_output_dir(rtp.as_path());

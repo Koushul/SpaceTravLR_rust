@@ -7,7 +7,7 @@ use spacetravlr::celloracle::{
     write_coef_matrix_exports, write_links_csv, write_links_parquet,
 };
 use spacetravlr::config::{canonical_adata_stem, expand_user_path};
-use spacetravlr::network::GeneNetwork;
+use spacetravlr::network::{GeneNetwork, infer_species};
 use spacetravlr::scanpy_preprocess::{
     SpatialMicronsOptions, ensure_training_adata_ready, resolve_magic_batch_obs_column,
 };
@@ -22,8 +22,8 @@ struct Cli {
     #[arg(long)]
     h5ad: PathBuf,
 
-    #[arg(long, default_value = "mouse")]
-    species: String,
+    #[arg(long, help = "GRN species (human|mouse); omit to infer from var gene symbols")]
+    species: Option<String>,
 
     #[arg(long)]
     network_data_dir: Option<String>,
@@ -87,21 +87,33 @@ fn main() -> anyhow::Result<()> {
 
     let mut adata_path = h5ad_expanded.clone();
 
+    let h5ad_for_read = PathBuf::from(expand_user_path(adata_path.trim()));
+    if !h5ad_for_read.is_file() {
+        anyhow::bail!("AnnData not found at {}", h5ad_for_read.display());
+    }
+    let var_names_infer = read_h5ad_var_names(&h5ad_for_read).context("read var_names")?;
+
+    let grn_species: String = match cli.species.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_lowercase(),
+        None => infer_species(&var_names_infer)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer GRN species from var_names; pass --species human or mouse"
+                )
+            })?
+            .to_string(),
+    };
+
     if !cli.skip_preprocess {
         let magic_batch = resolve_magic_batch_obs_column(cli.magic_batch_obs.as_deref(), None);
-        let species_trim = cli
+        let spatial_species_cli = cli
             .spatial_species
             .as_deref()
-            .unwrap_or(&cli.species)
-            .trim()
-            .to_lowercase();
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
         let spatial_microns = SpatialMicronsOptions {
             skip: cli.skip_spatial_microns,
-            species: if species_trim.is_empty() {
-                "human".into()
-            } else {
-                species_trim
-            },
+            species: spatial_species_cli.unwrap_or_else(|| grn_species.clone()),
             target_median_nn_um: cli.spatial_median_nn_target_um,
         };
         ensure_training_adata_ready(
@@ -129,7 +141,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let network = GeneNetwork::new(
-        cli.species.trim(),
+        grn_species.as_str(),
         &var_names,
         cli.network_data_dir.as_deref(),
     )?;
