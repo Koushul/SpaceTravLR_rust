@@ -138,6 +138,8 @@ a.write_h5ad(p)
             "--process-h5ad",
             "--h5ad",
             in_str,
+            "--spatial-species",
+            "human",
             "--process-output-dir",
             dir_str,
         ])
@@ -225,6 +227,8 @@ a.write_h5ad(p)
             "--process-h5ad",
             "--h5ad",
             raw_str,
+            "--spatial-species",
+            "human",
             "--process-output-dir",
             dir_str,
         ])
