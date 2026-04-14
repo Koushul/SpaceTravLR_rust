@@ -213,7 +213,7 @@ fn uv_python_stdin(
     let mut cmd = uv_command_base();
     #[cfg(test)]
     cmd.env("SPACETRAVLR_TEST_FAST_UV", "1");
-    cmd.arg("run").arg("--isolated");
+    cmd.arg("run").arg("--isolated").arg("--no-cache-dir");
     for w in with_packages {
         cmd.args(["--with", w]);
     }
