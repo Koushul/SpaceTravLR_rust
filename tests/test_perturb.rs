@@ -2,7 +2,7 @@ use ndarray::{Array2, Zip, array};
 use rayon::prelude::*;
 use spacetravlr::betadata::{BetaFrame, Betabase, GeneMatrix};
 use spacetravlr::ligand::calculate_weighted_ligands;
-use spacetravlr::perturb::{PerturbConfig, PerturbTarget, perturb, perturb_with_targets};
+use spacetravlr::perturb::{PerturbConfig, PerturbInputs, PerturbTarget, perturb, perturb_with_targets};
 use spacetravlr::perturb_mode::compute_initial_weighted_ligands;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -157,17 +157,18 @@ fn test_perturb_knockout_propagates() {
         n_propagation: 2,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 0.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 0.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     // A should be 0
     for i in 0..n_cells {
@@ -201,17 +202,18 @@ fn test_perturb_knockout_negative_control_unwired_gene_unchanged() {
         n_propagation: 4,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 0.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 0.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     let max_abs_z = (0..n_cells)
         .map(|i| result.delta[[i, z_idx]].abs())
@@ -255,17 +257,18 @@ fn test_perturb_knockout_isolated_gene_only_self_changes() {
         n_propagation: 4,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("Z".to_string(), 0.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("Z".to_string(), 0.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     for g in 0..n_genes {
         if g == z_idx {
@@ -300,17 +303,18 @@ fn test_perturb_no_change_when_target_at_original() {
         n_propagation: 2,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 1.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 1.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     let max_delta = result.delta.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
     assert!(
@@ -330,17 +334,18 @@ fn test_perturb_result_clipped_nonnegative() {
         n_propagation: 3,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 0.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 0.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     for &v in result.simulated.iter() {
         assert!(
@@ -370,28 +375,30 @@ fn test_perturb_grid_vs_exact_consistency() {
         ..Default::default()
     };
 
-    let exact = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &targets,
-        &config_exact,
-        &lr_radii,
-    );
-    let grid = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &targets,
-        &config_grid,
-        &lr_radii,
-    );
+    let exact = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &targets,
+        config: &config_exact,
+        lr_radii: &lr_radii,
+    });
+
+    let grid = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &targets,
+        config: &config_grid,
+        lr_radii: &lr_radii,
+    });
+
 
     let max_diff = exact
         .simulated
@@ -427,17 +434,18 @@ fn test_perturb_overexpression() {
         n_propagation: 2,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 5.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 5.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     for i in 0..n_cells {
         assert!((result.simulated[[i, 0]] - 5.0).abs() < 1e-10);
@@ -459,17 +467,18 @@ fn test_perturb_shape_preserved() {
         n_propagation: 1,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 0.0)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 0.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
 
     assert_eq!(result.simulated.shape(), gene_mtx.shape());
     assert_eq!(result.delta.shape(), gene_mtx.shape());
@@ -714,17 +723,18 @@ fn test_transition_ko_vs_oe_opposite_direction() {
         ..Default::default()
     };
 
-    let ko_result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 0.0)],
-        &config,
-        &lr_radii,
-    );
+    let ko_result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 0.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
     let ko_grid = compute_umap_transition_grid(&gene_mtx, &ko_result.delta, &umap, &params);
 
     // Overexpress A to 5.0 in a setup with room for increase
@@ -740,17 +750,18 @@ fn test_transition_ko_vs_oe_opposite_direction() {
             .mapv(|v| v as f32),
         vec!["B".to_string()],
     );
-    let oe_result = perturb(
-        &bb,
-        &gene_mtx_varied,
-        &gene_names,
-        &xy,
-        &rw_oe,
-        &rw_tfligands,
-        &[("A".to_string(), 5.0)],
-        &config,
-        &lr_radii,
-    );
+    let oe_result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx_varied,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_oe,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 5.0)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
     let oe_grid = compute_umap_transition_grid(&gene_mtx_varied, &oe_result.delta, &umap, &params);
 
     // Compute mean vector direction for KO and OE
@@ -824,17 +835,18 @@ fn test_transition_magnitude_monotonic_with_perturbation_strength() {
             n_propagation: 2,
             ..Default::default()
         };
-        let result = perturb(
-            &bb,
-            &gene_mtx,
-            &gene_names,
-            &xy,
-            &rw_ligands,
-            &rw_tfligands,
-            &[("A".to_string(), level)],
-            &config,
-            &lr_radii,
-        );
+        let result = perturb(PerturbInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &[("A".to_string(), level)],
+            config: &config,
+            lr_radii: &lr_radii,
+        });
+
         let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);
 
         let total_mag: f64 = grid
@@ -878,17 +890,17 @@ fn test_transition_no_perturbation_no_vectors() {
         n_propagation: 2,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("A".to_string(), 1.0)], // no change (original = 1.0)
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("A".to_string(), 1.0)], // no change (original = 1.0)
+        config: &config,
+        lr_radii: &lr_radii,
+    });
 
     let params = TransitionUmapParams {
         n_neighbors: 8,
@@ -933,17 +945,17 @@ fn test_transition_isolated_gene_no_field() {
         n_propagation: 4,
         ..Default::default()
     };
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[("Z".to_string(), 0.0)], // Z is unwired
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[("Z".to_string(), 0.0)], // Z is unwired
+        config: &config,
+        lr_radii: &lr_radii,
+    });
 
     let params = TransitionUmapParams {
         n_neighbors: 8,
@@ -1284,17 +1296,18 @@ fn test_perturb_from_tmp_betas() {
     };
 
     let t0 = std::time::Instant::now();
-    let result = perturb(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[(target.clone(), target_gene_expr)],
-        &config,
-        &lr_radii,
-    );
+    let result = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_ligands,
+        rw_tfligands_init: &rw_tfligands,
+        targets: &[(target.clone(), target_gene_expr)],
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
     let elapsed = t0.elapsed();
 
     // Save result
@@ -1401,57 +1414,61 @@ fn bench_perturb() {
         let targets = vec![(target.clone(), 0.0)];
 
         // Warmup both
-        let _ = perturb(
-            &bb,
-            &gene_mtx,
-            &gene_names,
-            &xy,
-            &rw_ligands,
-            &rw_tfligands,
-            &targets,
-            &config_exact,
-            &lr_radii,
-        );
-        let _ = perturb(
-            &bb,
-            &gene_mtx,
-            &gene_names,
-            &xy,
-            &rw_ligands,
-            &rw_tfligands,
-            &targets,
-            &config_grid,
-            &lr_radii,
-        );
+        let _ = perturb(PerturbInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config_exact,
+            lr_radii: &lr_radii,
+        });
+
+        let _ = perturb(PerturbInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config_grid,
+            lr_radii: &lr_radii,
+        });
+
 
         // Exact
         let t0 = Instant::now();
-        let result_exact = perturb(
-            &bb,
-            &gene_mtx,
-            &gene_names,
-            &xy,
-            &rw_ligands,
-            &rw_tfligands,
-            &targets,
-            &config_exact,
-            &lr_radii,
-        );
+        let result_exact = perturb(PerturbInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config_exact,
+            lr_radii: &lr_radii,
+        });
+
         let exact_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Grid
         let t0 = Instant::now();
-        let result_grid = perturb(
-            &bb,
-            &gene_mtx,
-            &gene_names,
-            &xy,
-            &rw_ligands,
-            &rw_tfligands,
-            &targets,
-            &config_grid,
-            &lr_radii,
-        );
+        let result_grid = perturb(PerturbInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config_grid,
+            lr_radii: &lr_radii,
+        });
+
         let grid_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Accuracy: compare simulated outputs
@@ -1875,28 +1892,30 @@ fn perturb_spatial_knobs_change_simulated() {
         ..Default::default()
     };
     let ko = vec![("A".to_string(), 0.0)];
-    let g_exact = perturb(
-        &bb2,
-        &gene_mtx2,
-        &gene_names2,
-        &xy2,
-        &rw_shared,
-        &rw_tfl2,
-        &ko,
-        &cfg_exact,
-        &lr_radii2,
-    );
-    let g_grid = perturb(
-        &bb2,
-        &gene_mtx2,
-        &gene_names2,
-        &xy2,
-        &rw_shared,
-        &rw_tfl2,
-        &ko,
-        &cfg_grid,
-        &lr_radii2,
-    );
+    let g_exact = perturb(PerturbInputs {
+        bb: &bb2,
+        gene_mtx: &gene_mtx2,
+        gene_names: &gene_names2,
+        xy: &xy2,
+        rw_ligands_init: &rw_shared,
+        rw_tfligands_init: &rw_tfl2,
+        targets: &ko,
+        config: &cfg_exact,
+        lr_radii: &lr_radii2,
+    });
+
+    let g_grid = perturb(PerturbInputs {
+        bb: &bb2,
+        gene_mtx: &gene_mtx2,
+        gene_names: &gene_names2,
+        xy: &xy2,
+        rw_ligands_init: &rw_shared,
+        rw_tfligands_init: &rw_tfl2,
+        targets: &ko,
+        config: &cfg_grid,
+        lr_radii: &lr_radii2,
+    });
+
     let g_diff = sim_diff(&g_exact.simulated, &g_grid.simulated);
     assert!(
         g_diff > 1e-6,

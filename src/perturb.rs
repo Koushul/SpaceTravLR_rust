@@ -78,6 +78,19 @@ pub struct PerturbResult {
     pub delta: Array2<f64>,
 }
 
+/// Argument bundle for [`perturb`] (same fields as the previous nine-parameter API).
+pub struct PerturbInputs<'a> {
+    pub bb: &'a Betabase,
+    pub gene_mtx: &'a Array2<f64>,
+    pub gene_names: &'a [String],
+    pub xy: &'a Array2<f64>,
+    pub rw_ligands_init: &'a GeneMatrix,
+    pub rw_tfligands_init: &'a GeneMatrix,
+    pub targets: &'a [(String, f64)],
+    pub config: &'a PerturbConfig,
+    pub lr_radii: &'a HashMap<String, f64>,
+}
+
 /// Rebuild [`PerturbResult::simulated`] from baseline expression and final δ (matches the end of [`perturb_with_targets`]).
 pub fn perturb_result_from_delta(
     gene_mtx: &Array2<f64>,
@@ -116,18 +129,9 @@ pub fn perturb_result_from_delta(
 /// derivatives, recomputes spatially-weighted ligands for the updated expression,
 /// swaps direct ligand deltas with received-ligand deltas, then applies
 /// delta × splash to propagate effects to all downstream genes.
-pub fn perturb(
-    bb: &Betabase,
-    gene_mtx: &Array2<f64>,
-    gene_names: &[String],
-    xy: &Array2<f64>,
-    rw_ligands_init: &GeneMatrix,
-    rw_tfligands_init: &GeneMatrix,
-    targets: &[(String, f64)],
-    config: &PerturbConfig,
-    lr_radii: &HashMap<String, f64>,
-) -> PerturbResult {
-    let scoped_targets: Vec<PerturbTarget> = targets
+pub fn perturb(inputs: PerturbInputs<'_>) -> PerturbResult {
+    let scoped_targets: Vec<PerturbTarget> = inputs
+        .targets
         .iter()
         .map(|(gene, desired_expr)| PerturbTarget {
             gene: gene.clone(),
@@ -137,15 +141,15 @@ pub fn perturb(
         .collect();
     let mut no_timings: Option<PerturbTimings> = None;
     perturb_with_targets(
-        bb,
-        gene_mtx,
-        gene_names,
-        xy,
-        rw_ligands_init,
-        rw_tfligands_init,
+        inputs.bb,
+        inputs.gene_mtx,
+        inputs.gene_names,
+        inputs.xy,
+        inputs.rw_ligands_init,
+        inputs.rw_tfligands_init,
         &scoped_targets,
-        config,
-        lr_radii,
+        inputs.config,
+        inputs.lr_radii,
         None,
         None,
         None,

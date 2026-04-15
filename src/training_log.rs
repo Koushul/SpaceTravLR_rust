@@ -225,18 +225,32 @@ pub fn scan_gene_training_logs(log_dir: &Path) -> anyhow::Result<Vec<GeneTrainin
     Ok(out)
 }
 
-pub fn write_gene_training_log(
-    log_path: &Path,
-    gene: &str,
-    seed_only: bool,
-    per_cell_cnn_export: bool,
-    epochs: usize,
-    learning_rate: f64,
-    lasso_n_iter_max: usize,
-    lasso_tol: f64,
-    summaries: &[ClusterTrainingSummary],
-    gate: Option<&CnnGateDecision>,
-) -> std::io::Result<()> {
+pub struct WriteGeneTrainingLogArgs<'a> {
+    pub log_path: &'a Path,
+    pub gene: &'a str,
+    pub seed_only: bool,
+    pub per_cell_cnn_export: bool,
+    pub cnn_epochs_config: usize,
+    pub learning_rate: f64,
+    pub lasso_n_iter_max: usize,
+    pub lasso_tol: f64,
+    pub summaries: &'a [ClusterTrainingSummary],
+    pub gate: Option<&'a CnnGateDecision>,
+}
+
+pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::Result<()> {
+    let WriteGeneTrainingLogArgs {
+        log_path,
+        gene,
+        seed_only,
+        per_cell_cnn_export,
+        cnn_epochs_config,
+        learning_rate,
+        lasso_n_iter_max,
+        lasso_tol,
+        summaries,
+        gate,
+    } = args;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -247,7 +261,7 @@ pub fn write_gene_training_log(
     writeln!(w, "gene\t{}", gene)?;
     writeln!(w, "seed_only\t{}", seed_only)?;
     writeln!(w, "per_cell_cnn_export\t{}", per_cell_cnn_export)?;
-    writeln!(w, "cnn_epochs_config\t{}", epochs)?;
+    writeln!(w, "cnn_epochs_config\t{}", cnn_epochs_config)?;
     writeln!(w, "learning_rate\t{}", learning_rate)?;
     writeln!(w, "lasso_n_iter_max\t{}", lasso_n_iter_max)?;
     writeln!(w, "lasso_tol\t{}", lasso_tol)?;

@@ -367,12 +367,12 @@ fn resolve_rctd_device(gpu: bool) -> Result<RctdDevice> {
 
 fn heuristic_progress_len(n_pixels: usize, mode: DeconvMode, batch_size: usize) -> u64 {
     let bs = batch_size.max(1);
-    let full_batches = (n_pixels + bs - 1) / bs;
+    let full_batches = n_pixels.div_ceil(bs);
     match mode {
         DeconvMode::Full => full_batches as u64,
         DeconvMode::Doublet => {
-            let triple_est = (n_pixels * 3 + bs - 1) / bs;
-            let single_est = (n_pixels * 2 + bs - 1) / bs;
+            let triple_est = (n_pixels * 3).div_ceil(bs);
+            let single_est = (n_pixels * 2).div_ceil(bs);
             (full_batches + triple_est + single_est + full_batches * 2) as u64
         }
         DeconvMode::Multi => ((full_batches * 8) as u64).max(n_pixels as u64),

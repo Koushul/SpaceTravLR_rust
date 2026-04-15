@@ -5,9 +5,15 @@ fn spacetravlr_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_spacetravlr"))
 }
 
+fn spacetravlr_cmd() -> Command {
+    let mut c = Command::new(spacetravlr_exe());
+    c.env("SPACETRAVLR_UV_ALLOW_CACHE", "1");
+    c
+}
+
 #[test]
 fn help_lists_process_h5ad_and_impute() {
-    let out = Command::new(spacetravlr_exe())
+    let out = spacetravlr_cmd()
         .arg("--help")
         .output()
         .expect("spawn spacetravlr --help");
@@ -34,7 +40,7 @@ fn help_lists_process_h5ad_and_impute() {
 
 #[test]
 fn process_h5ad_requires_h5ad_flag() {
-    let out = Command::new(spacetravlr_exe())
+    let out = spacetravlr_cmd()
         .arg("--process-h5ad")
         .output()
         .expect("spawn");
@@ -48,7 +54,7 @@ fn process_h5ad_requires_h5ad_flag() {
 
 #[test]
 fn process_h5ad_errors_on_missing_file() {
-    let out = Command::new(spacetravlr_exe())
+    let out = spacetravlr_cmd()
         .args([
             "--process-h5ad",
             "--h5ad",
@@ -66,7 +72,7 @@ fn process_h5ad_errors_on_missing_file() {
 
 #[test]
 fn process_h5ad_hidden_alias_still_works() {
-    let out = Command::new(spacetravlr_exe())
+    let out = spacetravlr_cmd()
         .arg("--process_h5ad")
         .output()
         .expect("spawn");
@@ -133,7 +139,7 @@ a.write_h5ad(p)
     assert!(toy_status.success(), "uv toy h5ad failed: {toy_status}");
 
     let dir_str = dir.to_str().expect("utf-8 dir");
-    let out_bin = Command::new(spacetravlr_exe())
+    let out_bin = spacetravlr_cmd()
         .args([
             "--process-h5ad",
             "--h5ad",
@@ -222,7 +228,7 @@ a.write_h5ad(p)
     assert!(toy_status.success(), "uv toy failed: {toy_status}");
 
     let dir_str = dir.to_str().expect("utf-8");
-    let proc_out = Command::new(spacetravlr_exe())
+    let proc_out = spacetravlr_cmd()
         .args([
             "--process-h5ad",
             "--h5ad",
@@ -243,7 +249,7 @@ a.write_h5ad(p)
     let processed = dir.join("chain_processed.h5ad");
     assert!(processed.is_file(), "missing {}", processed.display());
 
-    let imp_out = Command::new(spacetravlr_exe())
+    let imp_out = spacetravlr_cmd()
         .args([
             "--impute",
             "--h5ad",

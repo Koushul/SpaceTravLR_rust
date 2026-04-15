@@ -5,6 +5,8 @@
 //! Requires [**uv**](https://docs.astral.sh/uv/) on `PATH`, or **`UV_BIN`**.
 //! Child processes clear **`PYTHONPATH`** and set **`PYTHONNOUSERSITE=1`** so Conda/base site-packages
 //! do not leak into the isolated env.
+//! **`--no-cache-dir`** is passed to **`uv run`** unless **`cfg(test)`** is enabled or **`SPACETRAVLR_UV_ALLOW_CACHE`**
+//! is set to **`1`**, **`true`**, or **`yes`** (trimmed, ASCII case-insensitive). Unit tests and opt-in callers can reuse wheels.
 //! **`uv`** children also cap **`OPENBLAS_NUM_THREADS`**, **`OMP_NUM_THREADS`**, **`MKL_NUM_THREADS`**,
 //! **`NUMEXPR_NUM_THREADS`**, and **`VECLIB_MAXIMUM_THREADS`** (default **`1`**) so inherited huge
 //! thread counts do not trigger OpenBLAS “NUM_THREADS exceeded” / bad unallocation; override with
@@ -196,6 +198,18 @@ fn uv_command_base() -> Command {
     c
 }
 
+fn uv_allow_wheel_cache() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    env::var("SPACETRAVLR_UV_ALLOW_CACHE")
+        .map(|s| {
+            let t = s.trim().to_ascii_lowercase();
+            matches!(t.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
+}
+
 /// `uv run --isolated` + `python -` reading **`stdin_script`**, with **`--with`** deps, then **`argv`** after `python -`.
 fn uv_python_stdin(
     with_packages: &[&str],
@@ -213,7 +227,10 @@ fn uv_python_stdin(
     let mut cmd = uv_command_base();
     #[cfg(test)]
     cmd.env("SPACETRAVLR_TEST_FAST_UV", "1");
-    cmd.arg("run").arg("--isolated").arg("--no-cache-dir");
+    cmd.arg("run").arg("--isolated");
+    if !uv_allow_wheel_cache() {
+        cmd.arg("--no-cache-dir");
+    }
     for w in with_packages {
         cmd.args(["--with", w]);
     }
@@ -825,6 +842,20 @@ pub fn ensure_h5ad_csr_layers_on_path(
     Ok(())
 }
 
+fn ensure_magic_batch_obs_column_exists(
+    source_h5ad: &Path,
+    batch_col: &str,
+) -> anyhow::Result<()> {
+    let adata =
+        AnnData::<H5>::open(H5::open(source_h5ad)?).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let obs = adata.read_obs().map_err(|e| anyhow::anyhow!("{}", e))?;
+    if obs.column(batch_col).is_err() {
+        bail!("magic batch obs column not found: {:?}", batch_col);
+    }
+    adata.close().map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(())
+}
+
 /// Writes **`dest_h5ad`**: clusterwise [**magic-impute**](https://pypi.org/project/magic-impute/) on
 /// **`layers["normalized_count"]`** (one MAGIC fit per `cell_type` or `leiden` label), then CSR-sparsify **`X`** and all **`layers`** (isolated **`uv`**).
 ///
@@ -846,6 +877,9 @@ pub fn magic_impute_and_attach_batch(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    if let Some(b) = &batch_owned {
+        ensure_magic_batch_obs_column_exists(source_h5ad, b)?;
+    }
     let log = match &batch_owned {
         None => uv_python_stdin(
             UV_WITH_MAGIC_IMPUTE,

@@ -3004,16 +3004,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     let log_path =
                                         format!("{}/log/{}.log", training_dir, safe_gene);
                                     let _ = crate::training_log::write_gene_training_log(
-                                        std::path::Path::new(&log_path),
-                                        &gene,
-                                        !export_per_cell,
-                                        export_per_cell,
-                                        epochs,
-                                        learning_rate,
-                                        n_iter,
-                                        tol,
-                                        &est.cluster_training_summaries,
-                                        gate_record.as_ref(),
+                                        crate::training_log::WriteGeneTrainingLogArgs {
+                                            log_path: std::path::Path::new(&log_path),
+                                            gene: &gene,
+                                            seed_only: !export_per_cell,
+                                            per_cell_cnn_export: export_per_cell,
+                                            cnn_epochs_config: epochs,
+                                            learning_rate,
+                                            lasso_n_iter_max: n_iter,
+                                            lasso_tol: tol,
+                                            summaries: &est.cluster_training_summaries,
+                                            gate: gate_record.as_ref(),
+                                        },
                                     );
                                     if let Some(ref h) = hud {
                                         if let Ok(mut g) = h.lock() {
