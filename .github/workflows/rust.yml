@@ -16,10 +16,18 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # mold lowers peak link RAM vs GNU ld; avoids ld SIGBUS on large bins (burn/wgpu/RCTD) on ubuntu-latest.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - name: spacetravlr binary compile env (env! in spacetravlr.rs)
         run: |
@@ -32,11 +40,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Build
+      - name: Build workspace (default features incl. RCTD)
         run: cargo --config 'build.rustc-wrapper=""' build
-
-      - name: Build (default features incl. RCTD)
-        run: cargo --config 'build.rustc-wrapper=""' build -p spacetravlr
 
       - name: Run tests
         run: cargo --config 'build.rustc-wrapper=""' test
