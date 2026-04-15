@@ -17,3 +17,24 @@ results/
 
 retro_synthesis/
 data/h5ad/
+
+# Ignore build artifacts and auto-generated files/directories from ReadTheDocs and Sphinx
+docs/_build/
+docs/.doctrees/
+docs/.buildinfo
+docs/.env/
+docs/.tox/
+docs/.coverage
+docs/.pytest_cache/
+docs/_static/
+docs/_autosummary/
+# You may also want to ignore Sphinx cache and notebook output if present:
+docs/.ipynb_checkpoints/
+# If using Sphinx Gallery
+docs/auto_examples/
+# Ignore API doc output if generated in-place
+docs/api/
+# If using JupyterBook or MyST-NB
+docs/_jupyter_cache/
+# If using ReadTheDocs config lock
+.readthedocs.lock
