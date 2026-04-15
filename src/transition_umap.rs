@@ -174,25 +174,25 @@ fn softmax_rows_dense(corr: &Array2<f64>, temperature: f64) -> Array2<f64> {
     p_flat.par_chunks_mut(n).enumerate().for_each(|(i, p_row)| {
         let c_row = &corr_flat[i * n..(i + 1) * n];
         let mut max_c = f64::NEG_INFINITY;
-        for j in 0..n {
-            if j != i && c_row[j] > max_c {
-                max_c = c_row[j];
+        for (j, &cv) in c_row.iter().enumerate() {
+            if j != i && cv > max_c {
+                max_c = cv;
             }
         }
         let mut sum = 0.0_f64;
-        for j in 0..n {
+        for (j, (&cv, pj)) in c_row.iter().zip(p_row.iter_mut()).enumerate() {
             if j == i {
                 continue;
             }
-            let wt = ((c_row[j] - max_c) / t).exp();
-            p_row[j] = wt;
+            let wt = ((cv - max_c) / t).exp();
+            *pj = wt;
             sum += wt;
         }
         if sum > 0.0 {
             let inv = 1.0 / sum;
-            for j in 0..n {
+            for (j, pj) in p_row.iter_mut().enumerate() {
                 if j != i {
-                    p_row[j] *= inv;
+                    *pj *= inv;
                 }
             }
         }
@@ -248,21 +248,21 @@ fn subtract_null_dense(p_sig: &Array2<f64>, p_null: &Array2<f64>) -> Array2<f64>
         .for_each(|(i, o_row)| {
             let base = i * n;
             let mut sum = 0.0_f64;
-            for j in 0..n {
+            for (j, oj) in o_row.iter_mut().enumerate() {
                 if j == i {
                     continue;
                 }
                 let d = sig_flat[base + j] - null_flat[base + j];
                 if d > 0.0 {
-                    o_row[j] = d;
+                    *oj = d;
                     sum += d;
                 }
             }
             if sum > 0.0 {
                 let inv = 1.0 / sum;
-                for j in 0..n {
+                for (j, oj) in o_row.iter_mut().enumerate() {
                     if j != i {
-                        o_row[j] *= inv;
+                        *oj *= inv;
                     }
                 }
             }
@@ -462,15 +462,10 @@ impl Default for SignatureUmapParams {
 }
 
 fn build_grid_points_xy(grid_x: &[f64], grid_y: &[f64]) -> Vec<[f64; 2]> {
-    let nx = grid_x.len();
-    let ny = grid_y.len();
-    let mut out = Vec::with_capacity(nx * ny);
-    for ix in 0..nx {
-        for iy in 0..ny {
-            out.push([grid_x[ix], grid_y[iy]]);
-        }
-    }
-    out
+    grid_x
+        .iter()
+        .flat_map(|&gx| grid_y.iter().map(move |&gy| [gx, gy]))
+        .collect()
 }
 
 /// Mean of `values` over the `k` nearest UMAP neighbors of each query point (uniform weights).
@@ -668,10 +663,8 @@ fn aggregate_grid_cartography(
     };
 
     let mut out = vec![[0.0_f64; 2]; nx * ny];
-    for ix in 0..nx {
-        let gx = grid_x[ix];
-        for iy in 0..ny {
-            let gy = grid_y[iy];
+    for (ix, &gx) in grid_x.iter().enumerate() {
+        for (iy, &gy) in grid_y.iter().enumerate() {
             let mut sx = 0.0_f64;
             let mut sy = 0.0_f64;
             for i in 0..n {
@@ -688,6 +681,11 @@ fn aggregate_grid_cartography(
     out
 }
 
+struct UmapTransitionP {
+    p_sparse: Vec<Vec<(usize, f64)>>,
+    p_dense_opt: Option<Array2<f64>>,
+}
+
 pub fn compute_umap_transition_grid(
     expr: &Array2<f64>,
     delta: &Array2<f64>,
@@ -701,34 +699,39 @@ pub fn compute_umap_transition_grid(
     let mut delta_w = delta * params.delta_rescale;
     round_delta_inplace(&mut delta_w, 3);
 
-    let (p_sparse, p_dense_opt): (Vec<Vec<(usize, f64)>>, Option<Array2<f64>>) =
-        if params.use_full_graph && n <= params.full_graph_max_cells {
-            let corr = col_delta_cor(expr, &delta_w);
-            let mut p = softmax_rows_dense(&corr, params.temperature);
-            if params.remove_null {
-                let zero_delta = Array2::<f64>::zeros(delta_w.dim());
-                let corr0 = col_delta_cor(expr, &zero_delta);
-                let p0 = softmax_rows_dense(&corr0, params.temperature);
-                p = subtract_null_dense(&p, &p0);
-            }
-            (vec![], Some(p))
-        } else {
-            let neighbors = umap_knn_indices(umap, params.n_neighbors);
-            let corr_sparse = col_delta_cor_partial_sparse(expr, &delta_w, &neighbors);
-            let mut p = softmax_rows_from_sparse_corr(&corr_sparse, params.temperature);
-            if params.remove_null {
-                let zero_delta = Array2::<f64>::zeros(delta_w.dim());
-                let corr0 = col_delta_cor_partial_sparse(expr, &zero_delta, &neighbors);
-                let p0 = softmax_rows_from_sparse_corr(&corr0, params.temperature);
-                p = subtract_null_sparse(p, &p0);
-            }
-            (p, None)
-        };
+    let p = if params.use_full_graph && n <= params.full_graph_max_cells {
+        let corr = col_delta_cor(expr, &delta_w);
+        let mut p_dense = softmax_rows_dense(&corr, params.temperature);
+        if params.remove_null {
+            let zero_delta = Array2::<f64>::zeros(delta_w.dim());
+            let corr0 = col_delta_cor(expr, &zero_delta);
+            let p0 = softmax_rows_dense(&corr0, params.temperature);
+            p_dense = subtract_null_dense(&p_dense, &p0);
+        }
+        UmapTransitionP {
+            p_sparse: vec![],
+            p_dense_opt: Some(p_dense),
+        }
+    } else {
+        let neighbors = umap_knn_indices(umap, params.n_neighbors);
+        let corr_sparse = col_delta_cor_partial_sparse(expr, &delta_w, &neighbors);
+        let mut p_sparse = softmax_rows_from_sparse_corr(&corr_sparse, params.temperature);
+        if params.remove_null {
+            let zero_delta = Array2::<f64>::zeros(delta_w.dim());
+            let corr0 = col_delta_cor_partial_sparse(expr, &zero_delta, &neighbors);
+            let p0 = softmax_rows_from_sparse_corr(&corr0, params.temperature);
+            p_sparse = subtract_null_sparse(p_sparse, &p0);
+        }
+        UmapTransitionP {
+            p_sparse,
+            p_dense_opt: None,
+        }
+    };
 
-    let v_cell: Vec<[f64; 2]> = if let Some(ref pd) = p_dense_opt {
+    let v_cell: Vec<[f64; 2]> = if let Some(ref pd) = p.p_dense_opt {
         project_dense(umap, pd, params.unit_directions)
     } else {
-        project_sparse(umap, &p_sparse, params.unit_directions)
+        project_sparse(umap, &p.p_sparse, params.unit_directions)
     };
 
     let (grid_x, grid_y) = umap_grid_axes(umap, params.grid_scale);
@@ -1466,10 +1469,8 @@ mod tests {
         } else {
             1.0
         };
-        for ix in 0..nx {
-            let gx = grid_x[ix];
-            for iy in 0..ny {
-                let gy = grid_y[iy];
+        for (ix, &gx) in grid_x.iter().enumerate() {
+            for (iy, &gy) in grid_y.iter().enumerate() {
                 let mut sx = 0.0_f64;
                 let mut sy = 0.0_f64;
                 for i in 0..n {

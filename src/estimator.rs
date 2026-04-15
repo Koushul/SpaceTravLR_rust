@@ -69,6 +69,41 @@ pub struct ClusterTrainingSummary {
     pub cnn_train_mse_epochs: Vec<f32>,
 }
 
+pub struct FittedClusterResult<B: AutodiffBackend> {
+    pub cluster_id: usize,
+    pub model: CellularNicheNetwork<B>,
+    pub r2: f64,
+    pub lasso_coef: Array2<f64>,
+    pub intercept: f64,
+}
+
+pub struct ClusteredGcnNwrFitInputs<'a, 'd, B: AutodiffBackend> {
+    pub x: &'a Array2<f64>,
+    pub y: &'a Array1<f64>,
+    pub xy: &'a Array2<f64>,
+    pub clusters: &'a Array1<usize>,
+    pub num_clusters: usize,
+    pub device: &'d B::Device,
+    pub epochs: usize,
+    pub learning_rate: f64,
+    pub seed_only: bool,
+    pub cnn: &'a CnnConfig,
+    pub cached_spatial: Option<&'a CachedSpatialData>,
+}
+
+pub struct ClusteredGcnNwrCnnRefineInputs<'a, 'd, B: AutodiffBackend> {
+    pub x: &'a Array2<f64>,
+    pub y: &'a Array1<f64>,
+    pub xy: &'a Array2<f64>,
+    pub clusters: &'a Array1<usize>,
+    pub num_clusters: usize,
+    pub device: &'d B::Device,
+    pub epochs: usize,
+    pub learning_rate: f64,
+    pub cnn: &'a CnnConfig,
+    pub cached_spatial: Option<&'a CachedSpatialData>,
+}
+
 pub struct ClusteredGCNNWR<B: AutodiffBackend> {
     pub params: GroupLassoParams,
     pub spatial_dim: usize,
@@ -100,19 +135,22 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
 
     pub fn fit<F: FnMut(usize, usize)>(
         &mut self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        xy: &Array2<f64>,
-        clusters: &Array1<usize>,
-        num_clusters: usize,
-        device: &B::Device,
-        epochs: usize,
-        learning_rate: f64,
-        seed_only: bool,
-        cnn: &CnnConfig,
-        cached_spatial: Option<&CachedSpatialData>,
+        inputs: ClusteredGcnNwrFitInputs<'_, '_, B>,
         mut lasso_progress: F,
     ) {
+        let ClusteredGcnNwrFitInputs {
+            x,
+            y,
+            xy,
+            clusters,
+            num_clusters,
+            device,
+            epochs,
+            learning_rate,
+            seed_only,
+            cnn,
+            cached_spatial,
+        } = inputs;
         let n_samples = x.nrows();
         let to_fit: Vec<usize> = (0..num_clusters)
             .filter(|&c_id| (0..n_samples).any(|i| clusters[i] == c_id))
@@ -140,13 +178,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         let mut training_summaries: Vec<ClusterTrainingSummary> = Vec::new();
 
         lasso_progress(0, n_celltypes);
-        let mut fitted_results: Vec<(usize, CellularNicheNetwork<B>, f64, Array2<f64>, f64)> =
-            Vec::new();
+        let mut fitted_results: Vec<FittedClusterResult<B>> = Vec::new();
         let mut done_lasso = 0usize;
 
         for &c_id in &to_fit {
-            let fitted_one: Option<(usize, CellularNicheNetwork<B>, f64, Array2<f64>, f64)> =
-                (|| {
+            let fitted_one: Option<FittedClusterResult<B>> = (|| {
                     let indices: Vec<usize> =
                         (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
                     if indices.is_empty() {
@@ -239,7 +275,13 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                             lasso_converged,
                             cnn_train_mse_epochs: Vec::new(),
                         });
-                        return Some((c_id, model, r2, lasso_coef, intercept));
+                        return Some(FittedClusterResult {
+                            cluster_id: c_id,
+                            model,
+                            r2,
+                            lasso_coef,
+                            intercept,
+                        });
                     }
 
                     let x_tensor = Tensor::<B, 2>::from_data(
@@ -312,7 +354,13 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         cnn_train_mse_epochs,
                     });
 
-                    Some((c_id, model, r2, lasso_coef, intercept))
+                    Some(FittedClusterResult {
+                        cluster_id: c_id,
+                        model,
+                        r2,
+                        lasso_coef,
+                        intercept,
+                    })
                 })();
             if let Some(t) = fitted_one {
                 fitted_results.push(t);
@@ -323,27 +371,30 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
 
         self.cluster_training_summaries = training_summaries;
 
-        for (id, model, r2, coef, intercept) in fitted_results {
-            self.models.insert(id, model);
-            self.r2_scores.insert(id, r2);
-            self.lasso_coefficients.insert(id, coef);
-            self.lasso_intercepts.insert(id, intercept);
+        for fit in fitted_results {
+            self.models.insert(fit.cluster_id, fit.model);
+            self.r2_scores.insert(fit.cluster_id, fit.r2);
+            self.lasso_coefficients.insert(fit.cluster_id, fit.lasso_coef);
+            self.lasso_intercepts.insert(fit.cluster_id, fit.intercept);
         }
     }
 
     pub fn fit_cnn_refinement(
         &mut self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        xy: &Array2<f64>,
-        clusters: &Array1<usize>,
-        num_clusters: usize,
-        device: &B::Device,
-        epochs: usize,
-        learning_rate: f64,
-        cnn: &CnnConfig,
-        cached_spatial: Option<&CachedSpatialData>,
+        inputs: ClusteredGcnNwrCnnRefineInputs<'_, '_, B>,
     ) {
+        let ClusteredGcnNwrCnnRefineInputs {
+            x,
+            y,
+            xy,
+            clusters,
+            num_clusters,
+            device,
+            epochs,
+            learning_rate,
+            cnn,
+            cached_spatial,
+        } = inputs;
         let n_samples = x.nrows();
 
         let owned_sf;

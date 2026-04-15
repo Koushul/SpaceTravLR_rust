@@ -335,7 +335,7 @@ pub fn resolve_q_matrices_path(arg: Option<PathBuf>) -> Result<PathBuf> {
     );
     let response = ureq::get(Q_MATRICES_URL)
         .call()
-        .map_err(|e| anyhow::Error::new(io::Error::new(io::ErrorKind::Other, format!("{e}"))))
+        .map_err(|e| anyhow::Error::new(io::Error::other(format!("{e}"))))
         .context("download q_matrices.npz")?;
 
     let mut reader = response.into_reader();

@@ -22,12 +22,13 @@ use crate::betadata::BetadataUiProgress;
 use crate::config::expand_user_path;
 use std::path::Path;
 use crate::perturb::{
-    PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, perturb_with_targets,
+    PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, PerturbWithTargetsInputs,
+    perturb_with_targets,
 };
 use crate::perturb_mode::{
-    GeneCellTypeScopes, JointCellsCsvExportSummary, ObsColumnsCsv, PerturbRuntime,
-    export_joint_perturb_result, merge_csv_and_type_cell_indices, parse_obs_columns_csv,
-    single_perturb_target,
+    ExportJointPerturbArgs, GeneCellTypeScopes, JointCellsCsvExportSummary, ObsColumnsCsv,
+    PerturbRuntime, export_joint_perturb_result, merge_csv_and_type_cell_indices,
+    parse_obs_columns_csv, single_perturb_target,
 };
 use crate::tui_theme::TuiColors;
 
@@ -123,11 +124,11 @@ enum Screen {
 enum BgMsg {
     Loaded {
         generation: u64,
-        result: Result<PerturbRuntime, String>,
+        result: Result<Box<PerturbRuntime>, String>,
     },
     JobDone {
         id: u64,
-        outcome: Result<PerturbOutcome, String>,
+        outcome: Result<Box<PerturbOutcome>, String>,
     },
 }
 
@@ -238,7 +239,8 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                 Some(dummy_ui),
                 overlay.as_ref(),
             )
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
+                .map(Box::new);
             let _ = tx.send(BgMsg::Loaded {
                 generation: load_gen,
                 result,
@@ -262,7 +264,8 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                         continue;
                     }
                     match result {
-                        Ok(mut rt) => {
+                        Ok(rt_box) => {
+                            let mut rt = *rt_box;
                             if let Some(n) = app.load_applied_n_prop {
                                 rt.perturb_cfg.n_propagation = n;
                             }
@@ -307,7 +310,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                     app.active_jobs.retain(|j| j.id != id);
                     match outcome {
                         Ok(out) => {
-                            let lines = app.format_outcome(&out);
+                            let lines = app.format_outcome(out.as_ref());
                             app.append_job_log(lines);
                             app.last_perturb_scroll = 0;
                             app.verbose = app.pending_verbose;
@@ -479,35 +482,39 @@ impl App {
                             None
                         };
                         let res = perturb_with_targets(
-                            &rt_t.bb,
-                            &rt_t.gene_mtx,
-                            &rt_t.gene_names,
-                            &rt_t.xy,
-                            &rt_t.rw_ligands_init,
-                            &rt_t.rw_tfligands_init,
-                            &spec.targets,
-                            &spec.config,
-                            &rt_t.lr_radii,
-                            Some(&job_p),
-                            Some(&job_m),
-                            Some(cancel.as_ref()),
-                            Some(&rt_t.baseline_splash_cache),
+                            &PerturbWithTargetsInputs {
+                                bb: &rt_t.bb,
+                                gene_mtx: &rt_t.gene_mtx,
+                                gene_names: &rt_t.gene_names,
+                                xy: &rt_t.xy,
+                                rw_ligands_init: &rt_t.rw_ligands_init,
+                                rw_tfligands_init: &rt_t.rw_tfligands_init,
+                                targets: &spec.targets,
+                                config: &spec.config,
+                                lr_radii: &rt_t.lr_radii,
+                                job_progress: Some(&job_p),
+                                job_message: Some(&job_m),
+                                cancel: Some(cancel.as_ref()),
+                                baseline_splash_cache: Some(&rt_t.baseline_splash_cache),
+                            },
                             &mut timings,
                         );
                         let elapsed = t0.elapsed();
                         match res {
-                            Ok(result) => {
+                            Some(result) => {
                                 let genes = spec.genes.clone();
                                 let joint_csv = spec.joint_csv_summary;
                                 let (export_dir, export_err) = match export_joint_perturb_result(
-                                    rt_t.as_ref(),
-                                    &result.simulated,
-                                    &genes,
-                                    spec.desired_expr,
-                                    spec.n_propagation,
-                                    &spec.scopes,
-                                    joint_csv,
-                                    Some(id),
+                                    ExportJointPerturbArgs {
+                                        runtime: rt_t.as_ref(),
+                                        simulated: &result.simulated,
+                                        selected_genes: &genes,
+                                        desired_expr: spec.desired_expr,
+                                        n_propagation: spec.n_propagation,
+                                        selected_cell_types_per_gene: &spec.scopes,
+                                        cells_csv_summary: joint_csv,
+                                        job_id: Some(id),
+                                    },
                                 ) {
                                     Ok(p) => (Some(p), None),
                                     Err(e) => (None, Some(e.to_string())),
@@ -524,7 +531,7 @@ impl App {
                                     export_err,
                                 })
                             }
-                            Err(()) => {
+                            None => {
                                 let msg = if cancel.load(Ordering::Relaxed) {
                                     "canceled".into()
                                 } else {
@@ -536,7 +543,7 @@ impl App {
                     },
                 ));
                 let outcome = match outcome {
-                    Ok(r) => r,
+                    Ok(inner) => inner.map(Box::new),
                     Err(_) => Err("job panicked".into()),
                 };
                 let _ = tx.send(BgMsg::JobDone { id, outcome });
@@ -815,7 +822,7 @@ impl App {
     }
 
     fn open_cell_scope_editor(&mut self, gene: String, rt: &PerturbRuntime) {
-        let mut cell_types: Vec<usize> = rt.cell_types.iter().copied().collect();
+        let mut cell_types: Vec<usize> = rt.cell_types.to_vec();
         cell_types.sort_unstable();
         cell_types.dedup();
         let all_set: HashSet<usize> = cell_types.iter().copied().collect();
@@ -1295,10 +1302,7 @@ impl App {
             0
         };
         let jobs_h = if show_jobs {
-            let want = 3u16
-                .saturating_add(self.active_jobs.len() as u16)
-                .min(10)
-                .max(3);
+            let want = (3u16.saturating_add(self.active_jobs.len() as u16)).clamp(3, 10);
             want.min(area.height.saturating_sub(summary_h).saturating_sub(4))
         } else {
             0
@@ -1689,7 +1693,8 @@ impl App {
                                     Some(dummy_ui),
                                     None,
                                 )
-                                .map_err(|e| e.to_string());
+                                .map_err(|e| e.to_string())
+                                .map(Box::new);
                                 let _ = tx.send(BgMsg::Loaded {
                                     generation: load_gen,
                                     result,

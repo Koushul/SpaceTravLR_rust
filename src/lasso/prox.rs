@@ -45,10 +45,9 @@ pub fn l2_prox_inplace(block: &mut ndarray::ArrayViewMut1<f64>, reg: f64) {
 /// Apply the ℓ₂ proximal operator independently to each group of rows.
 ///
 /// # Arguments
-/// * `w`      – coefficient matrix **(num_features × num_targets)**
-/// * `groups` – slice of boolean masks, each of length `num_features`;
-///              `groups[k][i] == true` means feature `i` belongs to group `k`
-/// * `regs`   – per-group regularisation strengths (same length as `groups`)
+/// * `w` – coefficient matrix **(num_features × num_targets)**
+/// * `groups` – slice of boolean masks, each of length `num_features`; `groups[k][i] == true` means feature `i` belongs to group `k`
+/// * `regs` – per-group regularisation strengths (same length as `groups`)
 pub fn group_l2_prox(w: &Array2<f64>, groups: &[Vec<bool>], regs: &[f64]) -> Array2<f64> {
     assert_eq!(groups.len(), regs.len());
     let mut out = w.clone();

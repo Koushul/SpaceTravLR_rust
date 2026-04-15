@@ -1,7 +1,7 @@
 use ndarray::{Array2, array};
 use spacetravlr::betadata::{
-    BetaFrame, Betabase, GeneMatrix, betadata_feather_per_cell_column, betadata_pair_lr_parallel,
-    write_betadata_feather,
+    BetaFrame, BetaFrameFromParts, Betabase, GeneMatrix, betadata_feather_per_cell_column,
+    betadata_pair_lr_parallel, write_betadata_feather,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -25,19 +25,19 @@ fn resolve_betadata_key_column_matches_cluster_annot() {
 }
 
 fn make_test_betaframe() -> BetaFrame {
-    BetaFrame::from_parts(
-        "target1".to_string(),
-        vec!["0".to_string(), "1".to_string()],
-        array![1.0, 2.0],
-        array![[0.5, -0.3], [0.8, 0.1]],
-        vec!["A".to_string(), "B".to_string()],
-        array![[0.2], [-0.1]],
-        vec!["C".to_string()],
-        vec!["D".to_string()],
-        array![[0.1], [0.4]],
-        vec!["C".to_string()],
-        vec!["A".to_string()],
-    )
+    BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "target1".to_string(),
+        row_labels: vec!["0".to_string(), "1".to_string()],
+        intercepts: array![1.0, 2.0],
+        tf_betas: array![[0.5, -0.3], [0.8, 0.1]],
+        tfs: vec!["A".to_string(), "B".to_string()],
+        lr_betas: array![[0.2], [-0.1]],
+        ligands: vec!["C".to_string()],
+        receptors: vec!["D".to_string()],
+        tfl_betas: array![[0.1], [0.4]],
+        tfl_ligands: vec!["C".to_string()],
+        tfl_regulators: vec!["A".to_string()],
+    })
 }
 
 fn make_test_matrices() -> (GeneMatrix, GeneMatrix, GeneMatrix) {
@@ -287,19 +287,19 @@ fn betadata_per_cell_column_cellid_ignores_cluster_key_collisions() {
 
 #[test]
 fn test_betaframe_tf_only() {
-    let bf = BetaFrame::from_parts(
-        "simple".to_string(),
-        vec!["c0".to_string(), "c1".to_string()],
-        array![0.0, 0.0],
-        array![[1.0, 2.0], [3.0, 4.0]],
-        vec!["X".to_string(), "Y".to_string()],
-        Array2::zeros((2, 0)),
-        vec![],
-        vec![],
-        Array2::zeros((2, 0)),
-        vec![],
-        vec![],
-    );
+    let bf = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "simple".to_string(),
+        row_labels: vec!["c0".to_string(), "c1".to_string()],
+        intercepts: array![0.0, 0.0],
+        tf_betas: array![[1.0, 2.0], [3.0, 4.0]],
+        tfs: vec!["X".to_string(), "Y".to_string()],
+        lr_betas: Array2::zeros((2, 0)),
+        ligands: vec![],
+        receptors: vec![],
+        tfl_betas: Array2::zeros((2, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+    });
 
     let empty = GeneMatrix::new(Array2::zeros((2, 0)), vec![]);
     let gex = GeneMatrix::new(

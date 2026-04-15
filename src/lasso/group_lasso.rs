@@ -144,6 +144,8 @@ impl std::fmt::Display for GroupLassoError {
 
 impl std::error::Error for GroupLassoError {}
 
+type ClusterLassoPredictRowResult = Result<(Vec<usize>, Array2<f64>), GroupLassoError>;
+
 // ── Fitted state ──────────────────────────────────────────────────────────────
 
 /// Coefficients learned by `fit`.
@@ -729,7 +731,7 @@ impl ClusteredGroupLasso {
         }
 
         // Predict in parallel per cluster
-        let results: Vec<Result<(Vec<usize>, Array2<f64>), GroupLassoError>> = cluster_indices
+        let results: Vec<ClusterLassoPredictRowResult> = cluster_indices
             .into_par_iter()
             .map(|(id, indices)| {
                 let model = self.models.get(&id).ok_or(GroupLassoError::NotFitted)?;

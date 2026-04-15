@@ -8,6 +8,20 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
+pub struct CnnGateGeneInputs<'a> {
+    pub gene: &'a str,
+    pub summaries: &'a [crate::estimator::ClusterTrainingSummary],
+    pub n_regulators: usize,
+    pub n_lr_pairs: usize,
+    pub n_tfl_pairs: usize,
+    pub residuals: &'a [f64],
+    pub neighbors: &'a [Vec<usize>],
+    pub force_genes: &'a HashSet<String>,
+    pub skip_genes: &'a HashSet<String>,
+    pub mean_target_expression: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CnnGateDecision {
     pub use_cnn: bool,
     pub reason: String,
@@ -151,55 +165,23 @@ fn moran_permutation_p_value(
 pub fn decide_cnn_for_gene(
     cfg: &HybridCnnGatingConfig,
     min_mean_lasso_r2: f64,
-    gene: &str,
-    summaries: &[crate::estimator::ClusterTrainingSummary],
-    n_regulators: usize,
-    n_lr_pairs: usize,
-    n_tfl_pairs: usize,
-    residuals: &[f64],
-    neighbors: &[Vec<usize>],
-    force_genes: &HashSet<String>,
-    skip_genes: &HashSet<String>,
-    mean_target_expression: Option<f64>,
+    inputs: &CnnGateGeneInputs<'_>,
 ) -> CnnGateDecision {
-    decide_cnn_for_gene_with_rng(
-        cfg,
-        min_mean_lasso_r2,
-        gene,
-        summaries,
-        n_regulators,
-        n_lr_pairs,
-        n_tfl_pairs,
-        residuals,
-        neighbors,
-        force_genes,
-        skip_genes,
-        mean_target_expression,
-        &mut thread_rng(),
-    )
+    decide_cnn_for_gene_with_rng(cfg, min_mean_lasso_r2, inputs, &mut thread_rng())
 }
 
 pub(crate) fn decide_cnn_for_gene_with_rng(
     cfg: &HybridCnnGatingConfig,
     min_mean_lasso_r2: f64,
-    gene: &str,
-    summaries: &[crate::estimator::ClusterTrainingSummary],
-    n_regulators: usize,
-    n_lr_pairs: usize,
-    n_tfl_pairs: usize,
-    residuals: &[f64],
-    neighbors: &[Vec<usize>],
-    force_genes: &HashSet<String>,
-    skip_genes: &HashSet<String>,
-    mean_target_expression: Option<f64>,
+    inputs: &CnnGateGeneInputs<'_>,
     rng: &mut impl Rng,
 ) -> CnnGateDecision {
     let min_r2_gate = cfg.effective_min_mean_lasso_r2(min_mean_lasso_r2);
     let moran_p_max = cfg.effective_moran_p_max();
     let moran_p_strict = cfg.effective_moran_p_strict();
-    let n_mods = n_regulators + n_lr_pairs + n_tfl_pairs;
+    let n_mods = inputs.n_regulators + inputs.n_lr_pairs + inputs.n_tfl_pairs;
     let frac = if n_mods > 0 {
-        (n_lr_pairs + n_tfl_pairs) as f64 / n_mods as f64
+        (inputs.n_lr_pairs + inputs.n_tfl_pairs) as f64 / n_mods as f64
     } else {
         0.0
     };
@@ -207,50 +189,59 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
     let mut blocked = false;
     let mut forced = false;
 
-    if skip_genes.contains(gene) {
+    if inputs.skip_genes.contains(inputs.gene) {
         blocked = true;
         return finish_decision(
             false,
             "blocked_by_skip_list".to_string(),
-            summaries,
+            inputs.summaries,
             n_mods,
-            n_lr_pairs,
-            n_tfl_pairs,
+            inputs.n_lr_pairs,
+            inputs.n_tfl_pairs,
             frac,
             0.0,
             1.0,
             cfg.moran_permutations,
             forced,
             blocked,
-            mean_target_expression,
+            inputs.mean_target_expression,
             cfg,
         );
     }
 
-    let (i_obs, p_val) =
-        moran_permutation_p_value(residuals, neighbors, cfg.moran_permutations, rng);
+    let (i_obs, p_val) = moran_permutation_p_value(
+        inputs.residuals,
+        inputs.neighbors,
+        cfg.moran_permutations,
+        rng,
+    );
 
-    if force_genes.contains(gene) {
+    if inputs.force_genes.contains(inputs.gene) {
         forced = true;
         return finish_decision(
             true,
             "forced_by_allowlist".to_string(),
-            summaries,
+            inputs.summaries,
             n_mods,
-            n_lr_pairs,
-            n_tfl_pairs,
+            inputs.n_lr_pairs,
+            inputs.n_tfl_pairs,
             frac,
             i_obs,
             p_val,
             cfg.moran_permutations,
             forced,
             blocked,
-            mean_target_expression,
+            inputs.mean_target_expression,
             cfg,
         );
     }
 
-    let min_cells = summaries.iter().map(|s| s.n_cells).min().unwrap_or(0);
+    let min_cells = inputs
+        .summaries
+        .iter()
+        .map(|s| s.n_cells)
+        .min()
+        .unwrap_or(0);
     if min_cells < cfg.min_cells_per_cluster_for_cnn {
         let reason = format!(
             "min_cells_per_cluster {} < {}",
@@ -259,85 +250,88 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
         return finish_decision(
             false,
             reason,
-            summaries,
+            inputs.summaries,
             n_mods,
-            n_lr_pairs,
-            n_tfl_pairs,
+            inputs.n_lr_pairs,
+            inputs.n_tfl_pairs,
             frac,
             i_obs,
             p_val,
             cfg.moran_permutations,
             forced,
             blocked,
-            mean_target_expression,
+            inputs.mean_target_expression,
             cfg,
         );
     }
 
-    let all_conv = summaries.iter().all(|s| s.lasso_converged);
+    let all_conv = inputs
+        .summaries
+        .iter()
+        .all(|s| s.lasso_converged);
     if cfg.require_all_clusters_lasso_converged && !all_conv {
         let reason = "lasso_not_converged_all_clusters".to_string();
         return finish_decision(
             false,
             reason,
-            summaries,
+            inputs.summaries,
             n_mods,
-            n_lr_pairs,
-            n_tfl_pairs,
+            inputs.n_lr_pairs,
+            inputs.n_tfl_pairs,
             frac,
             i_obs,
             p_val,
             cfg.moran_permutations,
             forced,
             blocked,
-            mean_target_expression,
+            inputs.mean_target_expression,
             cfg,
         );
     }
 
-    let mean_r2: f64 = if summaries.is_empty() {
+    let mean_r2: f64 = if inputs.summaries.is_empty() {
         0.0
     } else {
-        summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64
+        inputs.summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / inputs.summaries.len() as f64
     };
     if mean_r2 < min_r2_gate {
         let reason = format!("mean_lasso_r2 {:.4} < {:.4} (gate)", mean_r2, min_r2_gate);
         return finish_decision(
             false,
             reason,
-            summaries,
+            inputs.summaries,
             n_mods,
-            n_lr_pairs,
-            n_tfl_pairs,
+            inputs.n_lr_pairs,
+            inputs.n_tfl_pairs,
             frac,
             i_obs,
             p_val,
             cfg.moran_permutations,
             forced,
             blocked,
-            mean_target_expression,
+            inputs.mean_target_expression,
             cfg,
         );
     }
 
     if let Some(min_expr) = cfg.min_mean_target_expression_for_cnn {
-        if let Some(m) = mean_target_expression {
+        if let Some(m) = inputs.mean_target_expression {
             if m < min_expr {
                 let reason = format!("mean_target_expr {:.4} < {:.4}", m, min_expr);
                 return finish_decision(
                     false,
                     reason,
-                    summaries,
+                    inputs.summaries,
                     n_mods,
-                    n_lr_pairs,
-                    n_tfl_pairs,
+                    inputs.n_lr_pairs,
+                    inputs.n_tfl_pairs,
                     frac,
                     i_obs,
                     p_val,
                     cfg.moran_permutations,
                     forced,
                     blocked,
-                    mean_target_expression,
+                    inputs.mean_target_expression,
                     cfg,
                 );
             }
@@ -359,17 +353,17 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
             return finish_decision(
                 false,
                 reason,
-                summaries,
+                inputs.summaries,
                 n_mods,
-                n_lr_pairs,
-                n_tfl_pairs,
+                inputs.n_lr_pairs,
+                inputs.n_tfl_pairs,
                 frac,
                 i_obs,
                 p_val,
                 cfg.moran_permutations,
                 forced,
                 blocked,
-                mean_target_expression,
+                inputs.mean_target_expression,
                 cfg,
             );
         }
@@ -378,17 +372,17 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
         return finish_decision(
             false,
             reason,
-            summaries,
+            inputs.summaries,
             n_mods,
-            n_lr_pairs,
-            n_tfl_pairs,
+            inputs.n_lr_pairs,
+            inputs.n_tfl_pairs,
             frac,
             i_obs,
             p_val,
             cfg.moran_permutations,
             forced,
             blocked,
-            mean_target_expression,
+            inputs.mean_target_expression,
             cfg,
         );
     }
@@ -404,21 +398,22 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
     finish_decision(
         true,
         reason,
-        summaries,
+        inputs.summaries,
         n_mods,
-        n_lr_pairs,
-        n_tfl_pairs,
+        inputs.n_lr_pairs,
+        inputs.n_tfl_pairs,
         frac,
         i_obs,
         p_val,
         cfg.moran_permutations,
         forced,
         blocked,
-        mean_target_expression,
+        inputs.mean_target_expression,
         cfg,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_decision(
     use_cnn: bool,
     reason: String,
@@ -523,21 +518,19 @@ mod tests {
         let xy = Array2::from_shape_fn((8, 2), |(i, j)| if j == 0 { i as f64 } else { 0.0 });
         let nb = build_neighbors(&xy, 3);
         let res = vec![0.0_f64; 8];
-        let d = decide_cnn_for_gene_with_rng(
-            &cfg,
-            0.0,
-            "X",
-            &[summary(0.5, 100)],
-            1,
-            1,
-            1,
-            &res,
-            &nb,
-            &HashSet::new(),
-            &skip,
-            None,
-            &mut StdRng::seed_from_u64(0),
-        );
+        let inputs = CnnGateGeneInputs {
+            gene: "X",
+            summaries: &[summary(0.5, 100)],
+            n_regulators: 1,
+            n_lr_pairs: 1,
+            n_tfl_pairs: 1,
+            residuals: &res,
+            neighbors: &nb,
+            force_genes: &HashSet::new(),
+            skip_genes: &skip,
+            mean_target_expression: None,
+        };
+        let d = decide_cnn_for_gene_with_rng(&cfg, 0.0, &inputs, &mut StdRng::seed_from_u64(0));
         assert!(!d.use_cnn);
         assert!(d.blocked_by_denylist);
     }
@@ -550,21 +543,19 @@ mod tests {
         let xy = Array2::from_shape_fn((8, 2), |(i, j)| if j == 0 { i as f64 } else { 0.0 });
         let nb = build_neighbors(&xy, 3);
         let res = vec![0.0_f64; 8];
-        let d = decide_cnn_for_gene_with_rng(
-            &cfg,
-            1.0,
-            "Y",
-            &[summary(0.0, 100)],
-            1,
-            1,
-            1,
-            &res,
-            &nb,
-            &force,
-            &HashSet::new(),
-            None,
-            &mut StdRng::seed_from_u64(0),
-        );
+        let inputs = CnnGateGeneInputs {
+            gene: "Y",
+            summaries: &[summary(0.0, 100)],
+            n_regulators: 1,
+            n_lr_pairs: 1,
+            n_tfl_pairs: 1,
+            residuals: &res,
+            neighbors: &nb,
+            force_genes: &force,
+            skip_genes: &HashSet::new(),
+            mean_target_expression: None,
+        };
+        let d = decide_cnn_for_gene_with_rng(&cfg, 1.0, &inputs, &mut StdRng::seed_from_u64(0));
         assert!(d.use_cnn);
         assert!(d.forced_by_allowlist);
     }
@@ -579,21 +570,19 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
 
         cfg.hybrid_cnn_permissiveness = 0.0;
-        let d_strict = decide_cnn_for_gene_with_rng(
-            &cfg,
-            0.1,
-            "G",
-            &summaries,
-            5,
-            2,
-            1,
-            &res,
-            &nb,
-            &HashSet::new(),
-            &HashSet::new(),
-            None,
-            &mut rng,
-        );
+        let inputs_strict = CnnGateGeneInputs {
+            gene: "G",
+            summaries: &summaries,
+            n_regulators: 5,
+            n_lr_pairs: 2,
+            n_tfl_pairs: 1,
+            residuals: &res,
+            neighbors: &nb,
+            force_genes: &HashSet::new(),
+            skip_genes: &HashSet::new(),
+            mean_target_expression: None,
+        };
+        let d_strict = decide_cnn_for_gene_with_rng(&cfg, 0.1, &inputs_strict, &mut rng);
         assert!(
             !d_strict.use_cnn,
             "expected mean_r2 gate fail: {:?}",
@@ -602,21 +591,19 @@ mod tests {
 
         cfg.hybrid_cnn_permissiveness = 1.0;
         let mut rng = StdRng::seed_from_u64(42);
-        let d_loose = decide_cnn_for_gene_with_rng(
-            &cfg,
-            0.1,
-            "G",
-            &summaries,
-            5,
-            2,
-            1,
-            &res,
-            &nb,
-            &HashSet::new(),
-            &HashSet::new(),
-            None,
-            &mut rng,
-        );
+        let inputs_loose = CnnGateGeneInputs {
+            gene: "G",
+            summaries: &summaries,
+            n_regulators: 5,
+            n_lr_pairs: 2,
+            n_tfl_pairs: 1,
+            residuals: &res,
+            neighbors: &nb,
+            force_genes: &HashSet::new(),
+            skip_genes: &HashSet::new(),
+            mean_target_expression: None,
+        };
+        let d_loose = decide_cnn_for_gene_with_rng(&cfg, 0.1, &inputs_loose, &mut rng);
         assert!(d_loose.use_cnn, "expected pass: {:?}", d_loose.reason);
     }
 

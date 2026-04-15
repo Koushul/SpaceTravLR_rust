@@ -145,28 +145,40 @@ pub fn infer_grn_whole(
     draw_terminal_progress: bool,
     hud_target_done: Option<Arc<AtomicUsize>>,
 ) -> anyhow::Result<Vec<LinkRow>> {
-    infer_grn_subset(
+    infer_grn_subset(InferGrnSubsetArgs {
         gem,
         gem_scaled,
         var_names,
         tf_by_target,
-        None,
-        "all",
+        row_idx: None,
+        cluster_label: "all",
         draw_terminal_progress,
         hud_target_done,
-    )
+    })
 }
 
-pub fn infer_grn_subset(
-    gem: &Array2<f64>,
-    gem_scaled: &Array2<f64>,
-    var_names: &[String],
-    tf_by_target: &HashMap<String, Vec<String>>,
-    row_idx: Option<&[usize]>,
-    cluster_label: &str,
-    draw_terminal_progress: bool,
-    hud_target_done: Option<Arc<AtomicUsize>>,
-) -> anyhow::Result<Vec<LinkRow>> {
+pub struct InferGrnSubsetArgs<'a> {
+    pub gem: &'a Array2<f64>,
+    pub gem_scaled: &'a Array2<f64>,
+    pub var_names: &'a [String],
+    pub tf_by_target: &'a HashMap<String, Vec<String>>,
+    pub row_idx: Option<&'a [usize]>,
+    pub cluster_label: &'a str,
+    pub draw_terminal_progress: bool,
+    pub hud_target_done: Option<Arc<AtomicUsize>>,
+}
+
+pub fn infer_grn_subset(args: InferGrnSubsetArgs<'_>) -> anyhow::Result<Vec<LinkRow>> {
+    let InferGrnSubsetArgs {
+        gem,
+        gem_scaled,
+        var_names,
+        tf_by_target,
+        row_idx,
+        cluster_label,
+        draw_terminal_progress,
+        hud_target_done,
+    } = args;
     let n_cells = gem.nrows();
     anyhow::ensure!(
         gem_scaled.nrows() == n_cells && gem.ncols() == gem_scaled.ncols(),
@@ -207,20 +219,21 @@ pub fn infer_grn_subset(
     let cluster: Arc<str> = Arc::from(cluster_label);
     let normal = Normal::new(0.0, 1.0).expect("std normal");
 
+    let ctx = InferOneTargetCtx {
+        gene_to_idx: &gene_to_idx,
+        tf_by_target,
+        var_names,
+        gem_s: gem_s.as_ref(),
+        gem_sc: gem_sc.as_ref(),
+        n_sub,
+        cluster: &cluster,
+        normal: &normal,
+    };
+
     let links: Vec<LinkRow> = targets
         .par_iter()
         .flat_map_iter(|target| {
-            let out = infer_one_target(
-                &gene_to_idx,
-                tf_by_target,
-                var_names,
-                &gem_s,
-                &gem_sc,
-                n_sub,
-                target,
-                &cluster,
-                &normal,
-            );
+            let out = infer_one_target(&ctx, target);
             pb.inc(1);
             if let Some(h) = hud_target_done.as_ref() {
                 h.fetch_add(1, Ordering::Relaxed);
@@ -233,21 +246,22 @@ pub fn infer_grn_subset(
     Ok(links)
 }
 
-fn infer_one_target(
-    gene_to_idx: &HashMap<&str, usize>,
-    tf_by_target: &HashMap<String, Vec<String>>,
-    var_names: &[String],
-    gem_s: &Cow<'_, Array2<f64>>,
-    gem_sc: &Cow<'_, Array2<f64>>,
+struct InferOneTargetCtx<'a> {
+    gene_to_idx: &'a HashMap<&'a str, usize>,
+    tf_by_target: &'a HashMap<String, Vec<String>>,
+    var_names: &'a [String],
+    gem_s: &'a Array2<f64>,
+    gem_sc: &'a Array2<f64>,
     n_sub: usize,
-    target: &String,
-    cluster: &Arc<str>,
-    normal: &Normal,
-) -> Vec<LinkRow> {
-    let Some(&ti) = gene_to_idx.get(target.as_str()) else {
+    cluster: &'a Arc<str>,
+    normal: &'a Normal,
+}
+
+fn infer_one_target(ctx: &InferOneTargetCtx<'_>, target: &String) -> Vec<LinkRow> {
+    let Some(&ti) = ctx.gene_to_idx.get(target.as_str()) else {
         return Vec::new();
     };
-    let Some(regs) = tf_by_target.get(target) else {
+    let Some(regs) = ctx.tf_by_target.get(target) else {
         return Vec::new();
     };
     let mut reggenes: Vec<usize> = regs
@@ -256,18 +270,18 @@ fn infer_one_target(
             if g == target {
                 return None;
             }
-            gene_to_idx.get(g.as_str()).copied()
+            ctx.gene_to_idx.get(g.as_str()).copied()
         })
         .collect();
     reggenes.sort_unstable();
     reggenes.dedup();
-    if reggenes.is_empty() || n_sub <= reggenes.len() {
+    if reggenes.is_empty() || ctx.n_sub <= reggenes.len() {
         return Vec::new();
     }
 
     let p_feat = reggenes.len();
-    let x = nalgebra::DMatrix::from_fn(n_sub, p_feat, |i, j| gem_sc[[i, reggenes[j]]]);
-    let yv = nalgebra::DVector::from_iterator(n_sub, (0..n_sub).map(|i| gem_s[[i, ti]]));
+    let x = nalgebra::DMatrix::from_fn(ctx.n_sub, p_feat, |i, j| ctx.gem_sc[[i, reggenes[j]]]);
+    let yv = nalgebra::DVector::from_iterator(ctx.n_sub, (0..ctx.n_sub).map(|i| ctx.gem_s[[i, ti]]));
 
     let Some(fit) = sklearn_bayesian_ridge::bayesian_ridge_fit(&x, &yv) else {
         return Vec::new();
@@ -278,11 +292,11 @@ fn infer_one_target(
         let coef_mean = fit.coef[j];
         let v = fit.sigma_diag[j].max(0.0);
         let coef_abs = coef_mean.abs();
-        let (p, neg_log_p) = two_sided_p_celloracle(normal, coef_mean, v);
+        let (p, neg_log_p) = two_sided_p_celloracle(ctx.normal, coef_mean, v);
         rows.push(LinkRow {
-            source: var_names[gj].clone(),
+            source: ctx.var_names[gj].clone(),
             target: target.clone(),
-            cluster: cluster.clone(),
+            cluster: ctx.cluster.clone(),
             coef_mean,
             coef_abs,
             coef_variance: v,
@@ -316,16 +330,16 @@ pub fn infer_grn_per_cluster(
     let results: Vec<anyhow::Result<Vec<LinkRow>>> = pairs
         .into_par_iter()
         .map(|(cluster, rows)| {
-            infer_grn_subset(
+            infer_grn_subset(InferGrnSubsetArgs {
                 gem,
                 gem_scaled,
                 var_names,
                 tf_by_target,
-                Some(rows.as_slice()),
-                cluster.as_str(),
-                subset_progress,
-                hud_arc.clone(),
-            )
+                row_idx: Some(rows.as_slice()),
+                cluster_label: cluster.as_str(),
+                draw_terminal_progress: subset_progress,
+                hud_target_done: hud_arc.clone(),
+            })
         })
         .collect();
     let mut all = Vec::new();
@@ -336,7 +350,7 @@ pub fn infer_grn_per_cluster(
 }
 
 fn sorted_link_rows(rows: &[LinkRow]) -> Vec<LinkRow> {
-    let mut v: Vec<LinkRow> = rows.iter().cloned().collect();
+    let mut v: Vec<LinkRow> = rows.to_vec();
     v.sort_by(|a, b| {
         (&a.source, &a.target, a.cluster.as_ref()).cmp(&(&b.source, &b.target, b.cluster.as_ref()))
     });

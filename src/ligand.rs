@@ -182,14 +182,13 @@ pub fn calculate_weighted_ligands_grid_with_cutoff(
                 }
                 let w = scale_factor * (d2 * inv_2r2).exp();
                 let base = j * n_ligands;
-                for k in 0..n_ligands {
-                    unsafe {
-                        *row.get_unchecked_mut(k) += w * *lig_flat.get_unchecked(base + k);
-                    }
+                let src = &lig_flat[base..base + n_ligands];
+                for (slot, &lv) in row.iter_mut().zip(src.iter()) {
+                    *slot += w * lv;
                 }
             }
-            for k in 0..n_ligands {
-                row[k] *= n_inv;
+            for v in row.iter_mut() {
+                *v *= n_inv;
             }
         });
 

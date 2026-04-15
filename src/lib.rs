@@ -18,6 +18,7 @@ pub mod model;
 mod modulator_scale;
 pub mod network;
 pub mod perturb;
+pub use perturb::{ComputeSplashAllProgressArgs, PerturbWithTargetsInputs};
 pub mod perturb_batch;
 pub mod perturb_mode;
 #[cfg(feature = "tui")]
@@ -37,8 +38,8 @@ pub mod training_tui;
 pub mod tui_theme;
 pub mod transition_umap;
 pub use betadata::{
-    BetaFrame, Betabase, BetadataCollectAggregate, CollectedInteraction, GeneMatrix,
-    TopBetaCoefficient, betadata_collect_interactions_parallel, write_betadata_feather,
+    BetaFrame, BetaFrameFromParts, Betabase, BetadataCollectAggregate, CollectedInteraction,
+    GeneMatrix, TopBetaCoefficient, betadata_collect_interactions_parallel, write_betadata_feather,
     write_betadata_feather_to_writer,
 };
 pub use cnn_gating::CnnGateDecision;
@@ -48,7 +49,11 @@ pub use config::{
     default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
     normalize_ui_path, resolve_training_target_genes,
 };
-pub use estimator::{CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR};
+pub use estimator::{
+    CachedSpatialData, ClusterTrainingSummary, ClusteredGcnNwrCnnRefineInputs,
+    ClusteredGcnNwrFitInputs, ClusteredGCNNWR, FittedClusterResult,
+};
+pub use cnn_gating::CnnGateGeneInputs;
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{

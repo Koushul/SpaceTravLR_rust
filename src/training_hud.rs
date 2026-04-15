@@ -32,17 +32,29 @@ pub struct RunConfigSummary {
     pub condition_split: String,
 }
 
+pub struct RunConfigSummaryBuildArgs<'a> {
+    pub config_path: Option<&'a Path>,
+    pub compute_backend: &'a str,
+    pub compute_device_detail: &'a str,
+    pub compute_notice: &'a str,
+    pub cfg: &'a SpaceshipConfig,
+    pub max_genes: Option<usize>,
+    pub gene_filter: Option<&'a [String]>,
+    pub condition_split: Option<&'a str>,
+}
+
 impl RunConfigSummary {
-    pub fn build(
-        config_path: Option<&Path>,
-        compute_backend: &str,
-        compute_device_detail: &str,
-        compute_notice: &str,
-        cfg: &SpaceshipConfig,
-        max_genes: Option<usize>,
-        gene_filter: Option<&[String]>,
-        condition_split: Option<&str>,
-    ) -> Self {
+    pub fn build(args: RunConfigSummaryBuildArgs<'_>) -> Self {
+        let RunConfigSummaryBuildArgs {
+            config_path,
+            compute_backend,
+            compute_device_detail,
+            compute_notice,
+            cfg,
+            max_genes,
+            gene_filter,
+            condition_split,
+        } = args;
         let config_source = config_path
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "spaceship_config.toml (search path)".to_string());

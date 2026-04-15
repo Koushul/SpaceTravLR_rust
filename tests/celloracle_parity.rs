@@ -47,9 +47,9 @@ fn standard_scale_no_mean(x: &[Vec<f64>], scale: &[f64]) -> Vec<Vec<f64>> {
 fn parity_standard_scaler_no_mean() {
     let f: StandardScalerFixture = read_json("standard_scaler_no_mean");
     let got = standard_scale_no_mean(&f.x, &f.scale_);
-    for i in 0..got.len() {
-        for j in 0..got[i].len() {
-            assert_relative_eq!(got[i][j], f.x_transformed[i][j], max_relative = 1e-12);
+    for (got_row, exp_row) in got.iter().zip(&f.x_transformed) {
+        for (got_val, exp_val) in got_row.iter().zip(exp_row) {
+            assert_relative_eq!(*got_val, *exp_val, max_relative = 1e-12);
         }
     }
 }

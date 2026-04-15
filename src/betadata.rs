@@ -184,6 +184,74 @@ pub struct BetaFrame {
     pub join_by_obs_name: bool,
 }
 
+pub struct BetaFrameFromParts {
+    pub gene_name: String,
+    pub row_labels: Vec<String>,
+    pub intercepts: Array1<f32>,
+    pub tf_betas: Array2<f32>,
+    pub tfs: Vec<String>,
+    pub lr_betas: Array2<f32>,
+    pub ligands: Vec<String>,
+    pub receptors: Vec<String>,
+    pub tfl_betas: Array2<f32>,
+    pub tfl_ligands: Vec<String>,
+    pub tfl_regulators: Vec<String>,
+}
+
+impl BetaFrameFromParts {
+    #[must_use]
+    pub fn into_beta_frame(self) -> BetaFrame {
+        self.into()
+    }
+}
+
+impl From<BetaFrameFromParts> for BetaFrame {
+    fn from(parts: BetaFrameFromParts) -> Self {
+        let BetaFrameFromParts {
+            gene_name,
+            row_labels,
+            intercepts,
+            tf_betas,
+            tfs,
+            lr_betas,
+            ligands,
+            receptors,
+            tfl_betas,
+            tfl_ligands,
+            tfl_regulators,
+        } = parts;
+        let n = row_labels.len();
+        let modulator_genes = Self::compute_modulator_genes(
+            &tfs,
+            &ligands,
+            &receptors,
+            &tfl_ligands,
+            &tfl_regulators,
+        );
+
+        Self {
+            gene_name,
+            n_beta_rows: n,
+            cell_labels: Arc::new(row_labels.clone()),
+            cell_to_beta_row: Arc::new((0..n).collect()),
+            n_cells: n,
+            row_labels,
+            intercepts,
+            tf_betas,
+            lr_betas,
+            tfl_betas,
+            tfs,
+            ligands,
+            receptors,
+            tfl_ligands,
+            tfl_regulators,
+            modulator_genes,
+            modulator_gene_indices: None,
+            join_by_obs_name: false,
+        }
+    }
+}
+
 /// Write betadata as Feather-compatible Arrow IPC (LZ4). `id_col` is `Cluster` (seed-only) or `CellID` (per-cell CNN).
 pub fn write_betadata_feather_to_writer<W: std::io::Write>(
     writer: W,
@@ -285,49 +353,10 @@ impl BetaFrame {
     }
 
     /// Construct directly from typed arrays (useful for tests and programmatic construction).
+    /// Same as `BetaFrame::from(parts)` for a [`BetaFrameFromParts`].
     /// Starts with an identity cell→beta mapping (n_cells == n_beta_rows).
-    pub fn from_parts(
-        gene_name: String,
-        row_labels: Vec<String>,
-        intercepts: Array1<f32>,
-        tf_betas: Array2<f32>,
-        tfs: Vec<String>,
-        lr_betas: Array2<f32>,
-        ligands: Vec<String>,
-        receptors: Vec<String>,
-        tfl_betas: Array2<f32>,
-        tfl_ligands: Vec<String>,
-        tfl_regulators: Vec<String>,
-    ) -> Self {
-        let n = row_labels.len();
-        let modulator_genes = Self::compute_modulator_genes(
-            &tfs,
-            &ligands,
-            &receptors,
-            &tfl_ligands,
-            &tfl_regulators,
-        );
-
-        Self {
-            gene_name,
-            n_beta_rows: n,
-            cell_labels: Arc::new(row_labels.clone()),
-            cell_to_beta_row: Arc::new((0..n).collect()),
-            n_cells: n,
-            row_labels,
-            intercepts,
-            tf_betas,
-            lr_betas,
-            tfl_betas,
-            tfs,
-            ligands,
-            receptors,
-            tfl_ligands,
-            tfl_regulators,
-            modulator_genes,
-            modulator_gene_indices: None,
-            join_by_obs_name: false,
-        }
+    pub fn from_parts(parts: BetaFrameFromParts) -> Self {
+        Self::from(parts)
     }
 
     /// Given obs_names and per-cell cluster assignments, build the mapping from

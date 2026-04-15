@@ -19,7 +19,7 @@ use spacetravlr::grn_extra;
 use spacetravlr::training_demo::{
     prepare_demo_hud, run_demo_training, DEMO_KIDNEY_SLIDETAGS_H5AD, DEMO_OUTPUT_DIR_LABEL,
 };
-use spacetravlr::training_hud::RunConfigSummary;
+use spacetravlr::training_hud::{RunConfigSummary, RunConfigSummaryBuildArgs};
 #[cfg(feature = "tui")]
 use spacetravlr::training_hud::TrainingHudState;
 #[cfg(feature = "tui")]
@@ -1174,16 +1174,16 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     let demo_total = cfg.training.max_genes.unwrap_or(24).clamp(1, 512);
 
     let config_path_ref = cli.config.as_deref();
-    let run_summary = RunConfigSummary::build(
-        config_path_ref,
-        "demo",
-        "— (demo; no accelerator)",
-        "Demo mode — kidney slide-tags path is display-only; obsm['spatial'] from embedded cache; simulated genes/workers; no AnnData load, no betadata export, no training backend.",
-        &cfg,
-        Some(demo_total),
-        gene_filter.as_deref(),
-        None,
-    );
+    let run_summary = RunConfigSummary::build(RunConfigSummaryBuildArgs {
+        config_path: config_path_ref,
+        compute_backend: "demo",
+        compute_device_detail: "— (demo; no accelerator)",
+        compute_notice: "Demo mode — kidney slide-tags path is display-only; obsm['spatial'] from embedded cache; simulated genes/workers; no AnnData load, no betadata export, no training backend.",
+        cfg: &cfg,
+        max_genes: Some(demo_total),
+        gene_filter: gene_filter.as_deref(),
+        condition_split: None,
+    });
 
     let full_cnn = cfg.full_cnn();
     let epochs = cfg.training.epochs;
@@ -1921,16 +1921,16 @@ fn main() -> anyhow::Result<()> {
         .build_global();
 
     let config_path_ref = cli.config.as_deref();
-    let run_summary = RunConfigSummary::build(
-        config_path_ref,
-        compute.label(),
-        &compute_hardware_details(&compute),
-        &compute_notice_text(&compute),
-        &cfg,
+    let run_summary = RunConfigSummary::build(RunConfigSummaryBuildArgs {
+        config_path: config_path_ref,
+        compute_backend: compute.label(),
+        compute_device_detail: &compute_hardware_details(&compute),
+        compute_notice: &compute_notice_text(&compute),
+        cfg: &cfg,
         max_genes,
-        gene_filter.as_deref(),
-        condition_column.as_deref(),
-    );
+        gene_filter: gene_filter.as_deref(),
+        condition_split: condition_column.as_deref(),
+    });
 
     if !use_dashboard {
         print_compute_notice(&compute);

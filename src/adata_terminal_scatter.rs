@@ -11,6 +11,14 @@ use termplot_rs::ChartContext;
 
 pub const SPATIAL_OBSM_KEYS: &[&str] = &["spatial", "X_spatial", "spatial_loc"];
 
+pub struct SpatialScatterCanvas {
+    pub n_obs: usize,
+    pub obsm_key: String,
+    pub canvas_no_border: String,
+    pub canvas_with_border: String,
+    pub legend: Vec<(String, Color)>,
+}
+
 pub const CELL_TYPE_PALETTE_RGB: [(u8, u8, u8); 13] = [
     (97, 214, 214),
     (214, 97, 214),
@@ -167,7 +175,7 @@ fn h5ad_obs_labels(obs: &Group, col: &str) -> anyhow::Result<Vec<String>> {
 fn h5ad_read_obsm_xy_two_cols(ds: &H5Dataset) -> anyhow::Result<Array2<f64>> {
     let sh = ds.shape();
     anyhow::ensure!(sh.len() == 2, "expected 2d obsm matrix, got shape {:?}", sh);
-    let ncols = sh[1] as usize;
+    let ncols = sh[1];
     anyhow::ensure!(ncols >= 2, "obsm matrix needs ≥2 columns, got {ncols}");
     if ncols == 2 {
         if let Ok(a) = ds.read_2d::<f32>() {
@@ -228,7 +236,7 @@ fn h5ad_spatial_obsm_key(obsm: &Group, forced: Option<&str>) -> anyhow::Result<S
 fn assign_colors(labels: &[String]) -> (HashMap<String, Color>, Vec<Color>) {
     let mut uniq: Vec<String> = Vec::new();
     for s in labels {
-        if !uniq.iter().any(|u| u == s) {
+        if !uniq.contains(s) {
             uniq.push(s.clone());
         }
     }
@@ -261,13 +269,14 @@ fn char_term_display_width(ch: char) -> usize {
     }
 }
 
+#[allow(clippy::while_let_on_iterator)]
 fn ansi_stripped_display_width(s: &str) -> usize {
     let mut total = 0usize;
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
         if c == '\x1b' && it.peek() == Some(&'[') {
             it.next();
-            while let Some(ch) = it.next() {
+            for ch in it.by_ref() {
                 if ch == 'm' {
                     break;
                 }
@@ -291,7 +300,7 @@ fn pad_right_ansi_to_display_width(line: &str, target: usize) -> String {
 fn legend_plain_width_budget(labels: &[String], n_obs: usize) -> usize {
     let mut uniq: Vec<&str> = Vec::new();
     for s in labels {
-        if !uniq.iter().any(|u| *u == s.as_str()) {
+        if !uniq.contains(&s.as_str()) {
             uniq.push(s.as_str());
         }
     }
@@ -349,7 +358,7 @@ fn draw_spatial_scatter_canvas_from_points(
         labels.len()
     );
     let n_obs = points.len();
-    let (xr, yr) = ChartContext::get_auto_range(&points.to_vec(), 0.04);
+    let (xr, yr) = ChartContext::get_auto_range(points, 0.04);
     let (legend_map, colors) = assign_colors(labels);
 
     let mut chart = ChartContext::new(chart_w, chart_h);
@@ -403,7 +412,7 @@ fn build_spatial_scatter_canvas_fixed_dims_from_root(
     chart_w: usize,
     chart_h: usize,
     obsm_key: Option<&str>,
-) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
+) -> anyhow::Result<SpatialScatterCanvas> {
     let obsm = root.group("obsm").context("h5ad: missing obsm group")?;
     let key = h5ad_spatial_obsm_key(&obsm, obsm_key)?;
     let xy = h5ad_obsm_xy_two_cols(&obsm, &key).with_context(|| format!("read obsm[{key}]"))?;
@@ -425,7 +434,13 @@ fn build_spatial_scatter_canvas_fixed_dims_from_root(
         draw_spatial_scatter_canvas_from_points(&points, &labels, chart_w, chart_h)?;
     let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
     legend.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok((n_obs, key, canvas_no_border, canvas_with_border, legend))
+    Ok(SpatialScatterCanvas {
+        n_obs,
+        obsm_key: key,
+        canvas_no_border,
+        canvas_with_border,
+        legend,
+    })
 }
 
 fn build_spatial_scatter_canvas_fixed_dims(
@@ -434,7 +449,7 @@ fn build_spatial_scatter_canvas_fixed_dims(
     chart_w: usize,
     chart_h: usize,
     obsm_key: Option<&str>,
-) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
+) -> anyhow::Result<SpatialScatterCanvas> {
     let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
     build_spatial_scatter_canvas_fixed_dims_from_root(&h5, color_by, chart_w, chart_h, obsm_key)
 }
@@ -445,14 +460,14 @@ pub fn build_spatial_scatter_canvas(
     max_chart_w: usize,
     max_chart_h: usize,
     obsm_key: Option<&str>,
-) -> anyhow::Result<(usize, String, String, String, Vec<(String, Color)>)> {
+) -> anyhow::Result<SpatialScatterCanvas> {
     let (cw, ch) = chart_size_square_pixels(max_chart_w, max_chart_h);
     build_spatial_scatter_canvas_fixed_dims(path, color_by, cw, ch, obsm_key)
 }
 
 #[cfg(feature = "tui")]
 pub fn ansi_braille_to_lines(s: &str) -> Vec<ratatui::text::Line<'static>> {
-    s.lines().map(|line| ansi_line_to_line(line)).collect()
+    s.lines().map(ansi_line_to_line).collect()
 }
 
 #[cfg(feature = "tui")]
@@ -546,14 +561,14 @@ pub fn spatial_scatter_lines_for_tui(
     obsm_key: Option<&str>,
 ) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
     let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let (_n, _key, canvas, _, _) = build_spatial_scatter_canvas_fixed_dims_from_root(
+    let c = build_spatial_scatter_canvas_fixed_dims_from_root(
         &h5,
         color_by,
         chart_w,
         chart_h,
         obsm_key,
     )?;
-    Ok(ansi_braille_to_lines(&canvas))
+    Ok(ansi_braille_to_lines(&c.canvas_no_border))
 }
 
 #[cfg(feature = "tui")]

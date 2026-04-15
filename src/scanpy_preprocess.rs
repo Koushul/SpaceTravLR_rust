@@ -122,21 +122,13 @@ pub fn agent_debug_ndjson(
 
 /// Options for heuristic **`obsm['spatial']` → microns** in the Scanpy embed ([`full_preprocess_maybe_log`]).
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct SpatialMicronsOptions {
     pub skip: bool,
     pub species: String,
     pub target_median_nn_um: Option<f64>,
 }
 
-impl Default for SpatialMicronsOptions {
-    fn default() -> Self {
-        Self {
-            skip: false,
-            species: String::new(),
-            target_median_nn_um: None,
-        }
-    }
-}
 
 fn read_h5ad_var_names_for_infer(path: &Path) -> anyhow::Result<Vec<String>> {
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;

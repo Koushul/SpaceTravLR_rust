@@ -41,8 +41,8 @@ use spacetravlr::foyer_perturb_cache::{
 use spacetravlr::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use spacetravlr::network::{GeneNetwork, infer_species};
 use spacetravlr::perturb::{
-    PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, compute_splash_all_progress,
-    perturb_with_targets,
+    ComputeSplashAllProgressArgs, PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings,
+    PerturbWithTargetsInputs, compute_splash_all_progress, perturb_with_targets,
 };
 use spacetravlr::perturb_batch::{
     effective_parallelism, expand_prepared_jobs, load_batch_file,
@@ -910,28 +910,30 @@ async fn direct_grn_perturb_result(
     job_p: Arc<AtomicU32>,
     job_msg: Arc<Mutex<String>>,
     cancel: Arc<AtomicBool>,
-) -> Result<PerturbResult, ()> {
+) -> Option<PerturbResult> {
     tokio::task::spawn_blocking(move || {
         let mut no_timings: Option<PerturbTimings> = None;
         perturb_with_targets(
-            &rt.bb,
-            &rt.gene_mtx,
-            &rt.gene_names,
-            &rt.xy,
-            &rt.rw_ligands_init,
-            &rt.rw_tfligands_init,
-            &targets,
-            &cfg,
-            &rt.lr_radii,
-            Some(&job_p),
-            Some(&job_msg),
-            Some(&*cancel),
-            Some(&rt.baseline_splash_cache),
+            &PerturbWithTargetsInputs {
+                bb: &rt.bb,
+                gene_mtx: &rt.gene_mtx,
+                gene_names: &rt.gene_names,
+                xy: &rt.xy,
+                rw_ligands_init: &rt.rw_ligands_init,
+                rw_tfligands_init: &rt.rw_tfligands_init,
+                targets: &targets,
+                config: &cfg,
+                lr_radii: &rt.lr_radii,
+                job_progress: Some(&job_p),
+                job_message: Some(&job_msg),
+                cancel: Some(&*cancel),
+                baseline_splash_cache: Some(&rt.baseline_splash_cache),
+            },
             &mut no_timings,
         )
     })
     .await
-    .unwrap_or(Err(()))
+    .unwrap_or(None)
 }
 
 async fn cached_grn_perturb_result(
@@ -945,7 +947,7 @@ async fn cached_grn_perturb_result(
     job_p: Arc<AtomicU32>,
     job_msg: Arc<Mutex<String>>,
     cancel: Arc<AtomicBool>,
-) -> Result<PerturbResult, ()> {
+) -> Option<PerturbResult> {
     let est = perturb_matrix_payload_est_bytes(n_cells, n_genes);
     if !should_use_foyer_perturb_cache(est) {
         return direct_grn_perturb_result(rt, targets, cfg, job_p, job_msg, cancel).await;
@@ -970,40 +972,41 @@ async fn cached_grn_perturb_result(
                 let pr = tokio::task::spawn_blocking(move || {
                     let mut no_timings: Option<PerturbTimings> = None;
                     perturb_with_targets(
-                        &rt_c.bb,
-                        &rt_c.gene_mtx,
-                        &rt_c.gene_names,
-                        &rt_c.xy,
-                        &rt_c.rw_ligands_init,
-                        &rt_c.rw_tfligands_init,
-                        &targets_c,
-                        &cfg_c,
-                        &rt_c.lr_radii,
-                        Some(&job_p_c),
-                        Some(&job_msg_c),
-                        Some(&*cancel_c),
-                        Some(&rt_c.baseline_splash_cache),
+                        &PerturbWithTargetsInputs {
+                            bb: &rt_c.bb,
+                            gene_mtx: &rt_c.gene_mtx,
+                            gene_names: &rt_c.gene_names,
+                            xy: &rt_c.xy,
+                            rw_ligands_init: &rt_c.rw_ligands_init,
+                            rw_tfligands_init: &rt_c.rw_tfligands_init,
+                            targets: &targets_c,
+                            config: &cfg_c,
+                            lr_radii: &rt_c.lr_radii,
+                            job_progress: Some(&job_p_c),
+                            job_message: Some(&job_msg_c),
+                            cancel: Some(&*cancel_c),
+                            baseline_splash_cache: Some(&rt_c.baseline_splash_cache),
+                        },
                         &mut no_timings,
                     )
-                    .map_err(|_| anyhow!("perturbation cancelled"))
+                    .ok_or_else(|| anyhow!("perturbation cancelled"))
                 })
                 .await
-                .map_err(|e| anyhow!("{e}"))?
-                .map_err(|e| e)?;
+                .map_err(|e| anyhow!("{e}"))??;
                 let enc =
                     foyer_perturb_cache::encode_perturb_result(&pr).map_err(|e| anyhow!("{e}"))?;
                 Ok::<Vec<u8>, anyhow::Error>(enc)
             }
         })
         .await
-        .map_err(|_| ())?;
+        .ok()?;
     foyer_perturb_cache::decode_perturb_cache_entry(
         entry.value(),
         &rt.gene_mtx,
         &rt.gene_names,
         &targets,
     )
-    .map_err(|_| ())
+    .ok()
 }
 
 fn spawn_perturb_background_load(state: SharedState) {
@@ -3048,16 +3051,16 @@ fn compute_splash_network(
     }
     let gex_f32 = rt.gene_mtx.mapv(|v| v as f32);
     let gex_df = GeneMatrix::new(gex_f32, rt.gene_names.clone());
-    let splashed = compute_splash_all_progress(
-        &rt.bb,
-        &rt.rw_ligands_init,
-        &rt.rw_tfligands_init,
-        &gex_df,
-        rt.perturb_cfg.beta_scale_factor as f32,
-        rt.perturb_cfg.beta_cap.map(|c| c as f32),
-        progress.as_deref(),
-        None,
-    )
+    let splashed = compute_splash_all_progress(ComputeSplashAllProgressArgs {
+        bb: &rt.bb,
+        rw_ligands: &rt.rw_ligands_init,
+        rw_tfligands: &rt.rw_tfligands_init,
+        gex_df: &gex_df,
+        beta_scale_factor: rt.perturb_cfg.beta_scale_factor as f32,
+        beta_cap: rt.perturb_cfg.beta_cap.map(|c| c as f32),
+        progress: progress.as_deref(),
+        cancel: None,
+    })
     .expect("compute_splash_all_progress without cancel must return Some");
     if let Some(p) = progress.as_ref() {
         p.store(760, Ordering::Relaxed);
@@ -3444,7 +3447,7 @@ async fn api_perturb_preview(
         Arc::clone(&cancel),
     )
     .await
-    .map_err(|_| {
+    .ok_or_else(|| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
@@ -3533,7 +3536,7 @@ async fn api_perturb_export_feather(
         Arc::clone(&cancel),
     )
     .await
-    .map_err(|_| {
+    .ok_or_else(|| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
@@ -4134,7 +4137,7 @@ async fn api_perturb_umap_field(
             Arc::clone(&cancel),
         )
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             job_p.store(0, Ordering::Relaxed);
             (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
         })?;
@@ -4451,7 +4454,7 @@ async fn api_umap_signature_field(
                     cancel,
                 )
                 .await
-                .map_err(|_| (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into()))?;
+                .ok_or((StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into()))?;
                 Some(pr.delta)
             }
         } else {
@@ -4484,22 +4487,24 @@ async fn api_umap_signature_field(
                 } else {
                     let mut no_timings: Option<PerturbTimings> = None;
                     perturb_with_targets(
-                        &rt.bb,
-                        &rt.gene_mtx,
-                        &rt.gene_names,
-                        &rt.xy,
-                        &rt.rw_ligands_init,
-                        &rt.rw_tfligands_init,
-                        &targets,
-                        &cfg,
-                        &rt.lr_radii,
-                        None,
-                        None,
-                        None,
-                        Some(&rt.baseline_splash_cache),
+                        &PerturbWithTargetsInputs {
+                            bb: &rt.bb,
+                            gene_mtx: &rt.gene_mtx,
+                            gene_names: &rt.gene_names,
+                            xy: &rt.xy,
+                            rw_ligands_init: &rt.rw_ligands_init,
+                            rw_tfligands_init: &rt.rw_tfligands_init,
+                            targets: &targets,
+                            config: &cfg,
+                            lr_radii: &rt.lr_radii,
+                            job_progress: None,
+                            job_message: None,
+                            cancel: None,
+                            baseline_splash_cache: Some(&rt.baseline_splash_cache),
+                        },
                         &mut no_timings,
                     )
-                    .map_err(|_| "GRN perturbation failed (mask field)".to_string())?
+                    .ok_or("GRN perturbation failed (mask field)".to_string())?
                     .delta
                 };
                 let tparams = TransitionUmapParams::default();
@@ -4650,7 +4655,7 @@ async fn api_perturb_summary(
         Arc::clone(&cancel),
     )
     .await
-    .map_err(|_| {
+    .ok_or_else(|| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
@@ -4881,7 +4886,7 @@ async fn api_perturb_reference_similarity(
         Arc::clone(&cancel),
     )
     .await
-    .map_err(|_| {
+    .ok_or_else(|| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;
@@ -5176,7 +5181,7 @@ async fn api_perturb_neighbor_sanity(
         Arc::clone(&cancel),
     )
     .await
-    .map_err(|_| {
+    .ok_or_else(|| {
         job_p.store(0, Ordering::Relaxed);
         (StatusCode::REQUEST_TIMEOUT, "Perturbation cancelled".into())
     })?;

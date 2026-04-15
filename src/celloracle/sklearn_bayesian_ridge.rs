@@ -119,9 +119,8 @@ pub fn bayesian_ridge_fit(x_celloracle: &DMatrix<f64>, y: &DVector<f64>) -> Opti
     }
 
     let mut eigen_full = vec![0.0_f64; n_features];
-    for i in 0..k.min(n_features) {
-        eigen_full[i] = eigen_vals[i];
-    }
+    let take = k.min(n_features);
+    eigen_full[..take].copy_from_slice(&eigen_vals[..take]);
 
     let mut coef_old: Option<DVector<f64>> = None;
     let mut coef = DVector::zeros(n_features);

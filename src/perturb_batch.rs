@@ -7,9 +7,12 @@ use serde::Deserialize;
 
 use crate::config::{SPACESHIP_MERGE_SECTIONS, expand_user_path};
 use crate::betadata::{GeneMatrix, write_betadata_feather};
-use crate::perturb::{PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets};
+use crate::perturb::{
+    PerturbConfig, PerturbTarget, PerturbTimings, PerturbWithTargetsInputs, perturb_with_targets,
+};
 use crate::perturb_mode::{
-    PerturbRuntime, compute_initial_weighted_ligands, parse_obs_columns_csv,
+    ComputeInitialWeightedLigandsArgs, PerturbRuntime, compute_initial_weighted_ligands,
+    parse_obs_columns_csv,
     perturb_obs_indices_from_file, validate_perturb_simulated_matrix,
 };
 use std::collections::HashMap;
@@ -516,28 +519,28 @@ fn run_one_job(runtime: &PerturbRuntime, job: PreparedPerturbJob, verbose: bool)
             lr_store = lr_radii;
             let lr_ligands: Vec<String> = runtime.bb.ligands_set.iter().cloned().collect();
             let tfl_ligands: Vec<String> = runtime.bb.tfl_ligands_set.iter().cloned().collect();
-            rw_lr_store = compute_initial_weighted_ligands(
-                &runtime.gene_mtx,
-                &runtime.gene_names,
-                &lr_ligands,
-                &runtime.xy,
-                &lr_store,
-                runtime.perturb_cfg.scale_factor,
-                runtime.perturb_cfg.min_expression,
-                ligand_grid,
-                contact,
-            );
-            rw_tfl_store = compute_initial_weighted_ligands(
-                &runtime.gene_mtx,
-                &runtime.gene_names,
-                &tfl_ligands,
-                &runtime.xy,
-                &lr_store,
-                runtime.perturb_cfg.scale_factor,
-                runtime.perturb_cfg.min_expression,
-                ligand_grid,
-                contact,
-            );
+            rw_lr_store = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+                gene_mtx: &runtime.gene_mtx,
+                gene_names: &runtime.gene_names,
+                ligand_names: &lr_ligands,
+                xy: &runtime.xy,
+                lr_radii: &lr_store,
+                weighted_ligand_scale: runtime.perturb_cfg.scale_factor,
+                min_expression: runtime.perturb_cfg.min_expression,
+                grid_factor: ligand_grid,
+                contact_distance: contact,
+            });
+            rw_tfl_store = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+                gene_mtx: &runtime.gene_mtx,
+                gene_names: &runtime.gene_names,
+                ligand_names: &tfl_ligands,
+                xy: &runtime.xy,
+                lr_radii: &lr_store,
+                weighted_ligand_scale: runtime.perturb_cfg.scale_factor,
+                min_expression: runtime.perturb_cfg.min_expression,
+                grid_factor: ligand_grid,
+                contact_distance: contact,
+            });
             (&rw_lr_store, &rw_tfl_store, &lr_store)
         } else {
             (
@@ -558,22 +561,24 @@ fn run_one_job(runtime: &PerturbRuntime, job: PreparedPerturbJob, verbose: bool)
         Some(&runtime.baseline_splash_cache)
     };
     let result = perturb_with_targets(
-        &runtime.bb,
-        &runtime.gene_mtx,
-        &runtime.gene_names,
-        &runtime.xy,
-        rw_ligands_ref,
-        rw_tfl_ref,
-        &targets,
-        &cfg,
-        lr_radii_ref,
-        None,
-        None,
-        None,
-        baseline_cache,
+        &PerturbWithTargetsInputs {
+            bb: &runtime.bb,
+            gene_mtx: &runtime.gene_mtx,
+            gene_names: &runtime.gene_names,
+            xy: &runtime.xy,
+            rw_ligands_init: rw_ligands_ref,
+            rw_tfligands_init: rw_tfl_ref,
+            targets: &targets,
+            config: &cfg,
+            lr_radii: lr_radii_ref,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: baseline_cache,
+        },
         &mut timings,
     )
-    .map_err(|_| anyhow::anyhow!("perturbation failed for gene {}", job.gene))?;
+    .ok_or_else(|| anyhow::anyhow!("perturbation failed for gene {}", job.gene))?;
     let cell_scope = job.cell_indices.as_deref();
     validate_perturb_simulated_matrix(
         &runtime.gene_mtx,

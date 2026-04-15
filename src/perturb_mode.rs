@@ -8,7 +8,8 @@ use crate::ligand::{
     calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
 };
 use crate::perturb::{
-    CachedBaselineSplash, PerturbConfig, PerturbTarget, PerturbTimings, perturb_with_targets,
+    CachedBaselineSplash, PerturbConfig, PerturbTarget, PerturbTimings, PerturbWithTargetsInputs,
+    perturb_with_targets,
 };
 use crate::spatial_estimator::{load_spatial_coords_f64, read_expression_matrix_dense_f64};
 
@@ -131,17 +132,30 @@ fn request_output_dir(
         .join(format!("genes_{hash:016x}_value_{}", sanitize_float(value)))
 }
 
-pub fn compute_initial_weighted_ligands(
-    gene_mtx: &Array2<f64>,
-    gene_names: &[String],
-    ligand_names: &[String],
-    xy: &Array2<f64>,
-    lr_radii: &HashMap<String, f64>,
-    weighted_ligand_scale: f64,
-    min_expression: f64,
-    grid_factor: Option<f64>,
-    contact_distance: Option<f64>,
-) -> GeneMatrix {
+pub struct ComputeInitialWeightedLigandsArgs<'a> {
+    pub gene_mtx: &'a Array2<f64>,
+    pub gene_names: &'a [String],
+    pub ligand_names: &'a [String],
+    pub xy: &'a Array2<f64>,
+    pub lr_radii: &'a HashMap<String, f64>,
+    pub weighted_ligand_scale: f64,
+    pub min_expression: f64,
+    pub grid_factor: Option<f64>,
+    pub contact_distance: Option<f64>,
+}
+
+pub fn compute_initial_weighted_ligands(args: ComputeInitialWeightedLigandsArgs<'_>) -> GeneMatrix {
+    let ComputeInitialWeightedLigandsArgs {
+        gene_mtx,
+        gene_names,
+        ligand_names,
+        xy,
+        lr_radii,
+        weighted_ligand_scale,
+        min_expression,
+        grid_factor,
+        contact_distance,
+    } = args;
     let n_cells = gene_mtx.nrows();
     let gene_to_idx: HashMap<&str, usize> = gene_names
         .iter()
@@ -373,30 +387,30 @@ impl PerturbRuntime {
         let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
         set_msg("Weighted ligand precomputation (LR)…");
         set_p(830);
-        let rw_ligands_init = compute_initial_weighted_ligands(
-            &gene_mtx,
-            &gene_names,
-            &lr_ligands,
-            &xy,
-            &lr_radii,
-            wl_scale,
+        let rw_ligands_init = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            ligand_names: &lr_ligands,
+            xy: &xy,
+            lr_radii: &lr_radii,
+            weighted_ligand_scale: wl_scale,
             min_expression,
-            grid,
-            None,
-        );
+            grid_factor: grid,
+            contact_distance: None,
+        });
         set_msg("Weighted ligand precomputation (TFL)…");
         set_p(910);
-        let rw_tfligands_init = compute_initial_weighted_ligands(
-            &gene_mtx,
-            &gene_names,
-            &tfl_ligands,
-            &xy,
-            &lr_radii,
-            wl_scale,
+        let rw_tfligands_init = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            ligand_names: &tfl_ligands,
+            xy: &xy,
+            lr_radii: &lr_radii,
+            weighted_ligand_scale: wl_scale,
             min_expression,
-            grid,
-            None,
-        );
+            grid_factor: grid,
+            contact_distance: None,
+        });
 
         let perturb_cfg = PerturbConfig {
             n_propagation: cfg.perturbation.n_propagation,
@@ -656,18 +670,30 @@ struct JointPerturbExportSummary {
     job_id: Option<u64>,
 }
 
+pub struct ExportJointPerturbArgs<'a> {
+    pub runtime: &'a PerturbRuntime,
+    pub simulated: &'a Array2<f64>,
+    pub selected_genes: &'a [String],
+    pub desired_expr: f64,
+    pub n_propagation: usize,
+    pub selected_cell_types_per_gene: &'a GeneCellTypeScopes,
+    pub cells_csv_summary: Option<JointCellsCsvExportSummary>,
+    pub job_id: Option<u64>,
+}
+
 /// Writes full **joint** `simulated` matrix (one `perturb_with_targets` call with all genes),
 /// unlike [`execute_marked_perturbations`] which runs separate jobs per gene.
-pub fn export_joint_perturb_result(
-    runtime: &PerturbRuntime,
-    simulated: &Array2<f64>,
-    selected_genes: &[String],
-    desired_expr: f64,
-    n_propagation: usize,
-    selected_cell_types_per_gene: &GeneCellTypeScopes,
-    cells_csv_summary: Option<JointCellsCsvExportSummary>,
-    job_id: Option<u64>,
-) -> anyhow::Result<PathBuf> {
+pub fn export_joint_perturb_result(args: ExportJointPerturbArgs<'_>) -> anyhow::Result<PathBuf> {
+    let ExportJointPerturbArgs {
+        runtime,
+        simulated,
+        selected_genes,
+        desired_expr,
+        n_propagation,
+        selected_cell_types_per_gene,
+        cells_csv_summary,
+        job_id,
+    } = args;
     if selected_genes.is_empty() {
         anyhow::bail!("No selected genes to export.");
     }
@@ -785,19 +811,21 @@ pub fn execute_marked_perturbations(
             }];
             let mut no_timings: Option<PerturbTimings> = None;
             let result = perturb_with_targets(
-                &runtime.bb,
-                &runtime.gene_mtx,
-                &runtime.gene_names,
-                &runtime.xy,
-                &runtime.rw_ligands_init,
-                &runtime.rw_tfligands_init,
-                &targets,
-                &runtime.perturb_cfg,
-                &runtime.lr_radii,
-                None,
-                None,
-                None,
-                Some(&runtime.baseline_splash_cache),
+                &PerturbWithTargetsInputs {
+                    bb: &runtime.bb,
+                    gene_mtx: &runtime.gene_mtx,
+                    gene_names: &runtime.gene_names,
+                    xy: &runtime.xy,
+                    rw_ligands_init: &runtime.rw_ligands_init,
+                    rw_tfligands_init: &runtime.rw_tfligands_init,
+                    targets: &targets,
+                    config: &runtime.perturb_cfg,
+                    lr_radii: &runtime.lr_radii,
+                    job_progress: None,
+                    job_message: None,
+                    cancel: None,
+                    baseline_splash_cache: Some(&runtime.baseline_splash_cache),
+                },
                 &mut no_timings,
             )
             .expect("perturb batch");

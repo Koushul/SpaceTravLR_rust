@@ -391,13 +391,15 @@ impl Default for GrnConfig {
     }
 }
 
+pub type ResolvedExtraModulatorsAndLr = (Vec<String>, Vec<(String, String)>);
+
 impl GrnConfig {
     /// Merge TOML `extra_modulators` / `extra_lr` with optional files. Paths are expanded (`~`);
     /// relative paths resolve against `config_file_parent` when provided.
     pub fn resolve_extra_modulators_and_lr(
         &self,
         config_file_parent: Option<&Path>,
-    ) -> anyhow::Result<(Vec<String>, Vec<(String, String)>)> {
+    ) -> anyhow::Result<ResolvedExtraModulatorsAndLr> {
         let resolve_path = |raw: &str| -> PathBuf {
             let exp = expand_user_path(raw.trim());
             let pb = Path::new(&exp);

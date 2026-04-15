@@ -1,12 +1,27 @@
 use ndarray::{Array2, Zip, array};
 use rayon::prelude::*;
-use spacetravlr::betadata::{BetaFrame, Betabase, GeneMatrix};
+use spacetravlr::betadata::{BetaFrame, BetaFrameFromParts, Betabase, GeneMatrix};
 use spacetravlr::ligand::calculate_weighted_ligands;
-use spacetravlr::perturb::{PerturbConfig, PerturbInputs, PerturbTarget, perturb, perturb_with_targets};
-use spacetravlr::perturb_mode::compute_initial_weighted_ligands;
+use spacetravlr::perturb::{
+    PerturbConfig, PerturbInputs, PerturbTarget, PerturbWithTargetsInputs, perturb,
+    perturb_with_targets,
+};
+use spacetravlr::perturb_mode::{
+    ComputeInitialWeightedLigandsArgs, compute_initial_weighted_ligands,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
+
+type SyntheticPerturbInputs = (
+    Betabase,
+    Array2<f64>,
+    Vec<String>,
+    Array2<f64>,
+    GeneMatrix,
+    GeneMatrix,
+    HashMap<String, f64>,
+);
 
 // ── Self-contained perturb tests (no /tmp/betas needed) ─────────────────────
 
@@ -26,34 +41,34 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
     let rows = vec!["0".to_string()]; // single cluster
 
     // D = f(A_tf, B_lr_C) → A is TF, B$C is LR pair
-    let mut bf_d = BetaFrame::from_parts(
-        "D".into(),
-        rows.clone(),
-        array![0.0],
-        array![[0.5]],
-        vec!["A".into()], // TF: A with beta=0.5
-        array![[0.3]],
-        vec!["B".into()],
-        vec!["C".into()], // LR: B$C with beta=0.3
-        ndarray::Array2::zeros((1, 0)),
-        vec![],
-        vec![], // no TFL
-    );
+    let mut bf_d = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "D".into(),
+        row_labels: rows.clone(),
+        intercepts: array![0.0],
+        tf_betas: array![[0.5]],
+        tfs: vec!["A".into()], // TF: A with beta=0.5
+        lr_betas: array![[0.3]],
+        ligands: vec!["B".into()],
+        receptors: vec!["C".into()], // LR: B$C with beta=0.3
+        tfl_betas: ndarray::Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![], // no TFL
+    });
 
     // E = f(A_tf, D_tf) → both A and D are TFs for E (creates cascade)
-    let mut bf_e = BetaFrame::from_parts(
-        "E".into(),
-        rows.clone(),
-        array![0.0],
-        array![[0.4, 0.6]],
-        vec!["A".into(), "D".into()],
-        ndarray::Array2::zeros((1, 0)),
-        vec![],
-        vec![],
-        ndarray::Array2::zeros((1, 0)),
-        vec![],
-        vec![],
-    );
+    let mut bf_e = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "E".into(),
+        row_labels: rows.clone(),
+        intercepts: array![0.0],
+        tf_betas: array![[0.4, 0.6]],
+        tfs: vec!["A".into(), "D".into()],
+        lr_betas: ndarray::Array2::zeros((1, 0)),
+        ligands: vec![],
+        receptors: vec![],
+        tfl_betas: ndarray::Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+    });
 
     // Expand to cells (all cells = cluster 0)
     let obs: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
@@ -100,17 +115,7 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
     (bb, gene_names, gene2index)
 }
 
-fn make_synthetic_inputs(
-    n_cells: usize,
-) -> (
-    Betabase,
-    Array2<f64>,
-    Vec<String>,
-    Array2<f64>,
-    GeneMatrix,
-    GeneMatrix,
-    HashMap<String, f64>,
-) {
+fn make_synthetic_inputs(n_cells: usize) -> SyntheticPerturbInputs {
     let (bb, gene_names, _) = make_synthetic_betabase(n_cells);
 
     // Gene expression: all genes at 1.0
@@ -251,7 +256,6 @@ fn test_perturb_knockout_isolated_gene_only_self_changes() {
         .iter()
         .position(|g| g == "Z")
         .expect("Z in gene list");
-    let n_genes = gene_names.len();
 
     let config = PerturbConfig {
         n_propagation: 4,
@@ -270,7 +274,7 @@ fn test_perturb_knockout_isolated_gene_only_self_changes() {
     });
 
 
-    for g in 0..n_genes {
+    for (g, name) in gene_names.iter().enumerate() {
         if g == z_idx {
             continue;
         }
@@ -280,7 +284,7 @@ fn test_perturb_knockout_isolated_gene_only_self_changes() {
         assert!(
             mx < 1e-9,
             "KO(Z): gene {} must be unaffected (no model uses Z); max|Δ|={:.3e}",
-            gene_names[g],
+            name,
             mx
         );
     }
@@ -496,24 +500,27 @@ fn test_perturb_with_target_cell_subset() {
     };
     let target_cells = vec![0usize, 1usize, 2usize];
     let mut no_timings: Option<spacetravlr::perturb::PerturbTimings> = None;
+    let targets = [PerturbTarget {
+        gene: "A".to_string(),
+        desired_expr: 0.0,
+        cell_indices: Some(target_cells.clone()),
+    }];
     let result = perturb_with_targets(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[PerturbTarget {
-            gene: "A".to_string(),
-            desired_expr: 0.0,
-            cell_indices: Some(target_cells.clone()),
-        }],
-        &config,
-        &lr_radii,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config,
+            lr_radii: &lr_radii,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut no_timings,
     )
     .unwrap();
@@ -539,19 +546,19 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         .collect();
 
     let row_labels = vec!["0".to_string()];
-    let mut bf_target = BetaFrame::from_parts(
-        "TARGET".to_string(),
-        row_labels.clone(),
-        array![0.0],
-        array![[0.1]], // TF1 -> TARGET
-        vec!["TF1".to_string()],
-        array![[0.05]], // (LIG$REC) -> TARGET
-        vec!["LIG".to_string()],
-        vec!["REC".to_string()],
-        ndarray::Array2::zeros((1, 0)),
-        vec![],
-        vec![],
-    );
+    let mut bf_target = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "TARGET".to_string(),
+        row_labels: row_labels.clone(),
+        intercepts: array![0.0],
+        tf_betas: array![[0.1]], // TF1 -> TARGET
+        tfs: vec!["TF1".to_string()],
+        lr_betas: array![[0.05]], // (LIG$REC) -> TARGET
+        ligands: vec!["LIG".to_string()],
+        receptors: vec!["REC".to_string()],
+        tfl_betas: ndarray::Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+    });
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
     let cluster_keys = vec!["0".to_string(), "0".to_string()];
@@ -602,31 +609,34 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         ..Default::default()
     };
     let mut no_timings: Option<spacetravlr::perturb::PerturbTimings> = None;
+    let targets = [
+        PerturbTarget {
+            gene: "TF1".to_string(),
+            desired_expr: 0.0,
+            cell_indices: Some(vec![0]),
+        },
+        PerturbTarget {
+            gene: "LIG".to_string(),
+            desired_expr: 0.0,
+            cell_indices: Some(vec![0]),
+        },
+    ];
     let result = perturb_with_targets(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &[
-            PerturbTarget {
-                gene: "TF1".to_string(),
-                desired_expr: 0.0,
-                cell_indices: Some(vec![0]),
-            },
-            PerturbTarget {
-                gene: "LIG".to_string(),
-                desired_expr: 0.0,
-                cell_indices: Some(vec![0]),
-            },
-        ],
-        &config,
-        &lr_radii,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config,
+            lr_radii: &lr_radii,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut no_timings,
     )
     .unwrap();
@@ -995,15 +1005,7 @@ fn build_perturb_inputs(
     betas_dir: &str,
     n_cells: usize,
     n_clusters: usize,
-) -> (
-    Betabase,
-    Array2<f64>,
-    Vec<String>,
-    Array2<f64>,
-    GeneMatrix,
-    GeneMatrix,
-    HashMap<String, f64>,
-) {
+) -> SyntheticPerturbInputs {
     let obs_names: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = (0..n_cells).map(|i| i % n_clusters).collect();
     let cluster_keys: Vec<String> = clusters.iter().map(|c| c.to_string()).collect();
@@ -1148,19 +1150,33 @@ fn compute_initial_wl(
     GeneMatrix::new(result, lig_names)
 }
 
-/// Save inputs to /tmp/perturb_compare/ so the Python script can load them.
-fn save_inputs_for_python(
-    gene_mtx: &Array2<f64>,
-    gene_names: &[String],
-    xy: &Array2<f64>,
-    rw_ligands: &GeneMatrix,
-    rw_tfligands: &GeneMatrix,
-    lr_radii: &HashMap<String, f64>,
-    target: &str,
+struct SaveInputsForPythonArgs<'a> {
+    gene_mtx: &'a Array2<f64>,
+    gene_names: &'a [String],
+    xy: &'a Array2<f64>,
+    rw_ligands: &'a GeneMatrix,
+    rw_tfligands: &'a GeneMatrix,
+    lr_radii: &'a HashMap<String, f64>,
+    target: &'a str,
     gene_expr: f64,
     n_propagation: usize,
-    out_dir: &str,
-) {
+    out_dir: &'a str,
+}
+
+/// Save inputs to /tmp/perturb_compare/ so the Python script can load them.
+fn save_inputs_for_python(args: SaveInputsForPythonArgs<'_>) {
+    let SaveInputsForPythonArgs {
+        gene_mtx,
+        gene_names,
+        xy,
+        rw_ligands,
+        rw_tfligands,
+        lr_radii,
+        target,
+        gene_expr,
+        n_propagation,
+        out_dir,
+    } = args;
     std::fs::create_dir_all(out_dir).unwrap();
 
     // gene_names
@@ -1277,18 +1293,18 @@ fn test_perturb_from_tmp_betas() {
     );
 
     let out_dir = "/tmp/perturb_compare";
-    save_inputs_for_python(
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_ligands,
-        &rw_tfligands,
-        &lr_radii,
-        &target,
-        target_gene_expr,
+    save_inputs_for_python(SaveInputsForPythonArgs {
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands: &rw_ligands,
+        rw_tfligands: &rw_tfligands,
+        lr_radii: &lr_radii,
+        target: &target,
+        gene_expr: target_gene_expr,
         n_propagation,
         out_dir,
-    );
+    });
 
     let config = PerturbConfig {
         n_propagation,
@@ -1626,19 +1642,19 @@ fn two_cell_tf_lr_perturb_bundle() -> (
         .collect();
 
     let row_labels = vec!["0".to_string()];
-    let mut bf_target = BetaFrame::from_parts(
-        "TARGET".to_string(),
-        row_labels.clone(),
-        array![0.0],
-        array![[0.1]],
-        vec!["TF1".to_string()],
-        array![[0.05]],
-        vec!["LIG".to_string()],
-        vec!["REC".to_string()],
-        ndarray::Array2::zeros((1, 0)),
-        vec![],
-        vec![],
-    );
+    let mut bf_target = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "TARGET".to_string(),
+        row_labels: row_labels.clone(),
+        intercepts: array![0.0],
+        tf_betas: array![[0.1]],
+        tfs: vec!["TF1".to_string()],
+        lr_betas: array![[0.05]],
+        ligands: vec!["LIG".to_string()],
+        receptors: vec!["REC".to_string()],
+        tfl_betas: ndarray::Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+    });
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
     let cluster_keys = vec!["0".to_string(), "0".to_string()];
@@ -1714,28 +1730,28 @@ fn perturb_spatial_knobs_change_simulated() {
 
     let mut lr_close = HashMap::new();
     lr_close.insert("LIG".to_string(), 1.0);
-    let rw_no_cut = compute_initial_weighted_ligands(
-        &gene_mtx,
-        &gene_names,
-        &lig_names,
-        &xy,
-        &lr_close,
-        scale,
-        min_e,
-        None,
-        None,
-    );
-    let rw_cut = compute_initial_weighted_ligands(
-        &gene_mtx,
-        &gene_names,
-        &lig_names,
-        &xy,
-        &lr_close,
-        scale,
-        min_e,
-        None,
-        Some(0.5),
-    );
+    let rw_no_cut = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        ligand_names: &lig_names,
+        xy: &xy,
+        lr_radii: &lr_close,
+        weighted_ligand_scale: scale,
+        min_expression: min_e,
+        grid_factor: None,
+        contact_distance: None,
+    });
+    let rw_cut = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        ligand_names: &lig_names,
+        xy: &xy,
+        lr_radii: &lr_close,
+        weighted_ligand_scale: scale,
+        min_expression: min_e,
+        grid_factor: None,
+        contact_distance: Some(0.5),
+    });
     let cfg_open = PerturbConfig {
         n_propagation: 1,
         contact_distance: None,
@@ -1748,38 +1764,42 @@ fn perturb_spatial_knobs_change_simulated() {
     };
     let mut t0 = None;
     let s_open = perturb_with_targets(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_no_cut,
-        &rw_tfl,
-        &targets,
-        &cfg_open,
-        &lr_close,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_no_cut,
+            rw_tfligands_init: &rw_tfl,
+            targets: &targets,
+            config: &cfg_open,
+            lr_radii: &lr_close,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut t0,
     )
     .unwrap()
     .simulated;
     let mut t1 = None;
     let s_contact = perturb_with_targets(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_cut,
-        &rw_tfl,
-        &targets,
-        &cfg_contact,
-        &lr_close,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_cut,
+            rw_tfligands_init: &rw_tfl,
+            targets: &targets,
+            config: &cfg_contact,
+            lr_radii: &lr_close,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut t1,
     )
     .unwrap()
@@ -1793,66 +1813,70 @@ fn perturb_spatial_knobs_change_simulated() {
     lr_tight.insert("LIG".to_string(), 0.08);
     let mut lr_wide = HashMap::new();
     lr_wide.insert("LIG".to_string(), 8.0);
-    let rw_tight = compute_initial_weighted_ligands(
-        &gene_mtx,
-        &gene_names,
-        &lig_names,
-        &xy,
-        &lr_tight,
-        scale,
-        min_e,
-        None,
-        None,
-    );
-    let rw_wide = compute_initial_weighted_ligands(
-        &gene_mtx,
-        &gene_names,
-        &lig_names,
-        &xy,
-        &lr_wide,
-        scale,
-        min_e,
-        None,
-        None,
-    );
+    let rw_tight = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        ligand_names: &lig_names,
+        xy: &xy,
+        lr_radii: &lr_tight,
+        weighted_ligand_scale: scale,
+        min_expression: min_e,
+        grid_factor: None,
+        contact_distance: None,
+    });
+    let rw_wide = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        ligand_names: &lig_names,
+        xy: &xy,
+        lr_radii: &lr_wide,
+        weighted_ligand_scale: scale,
+        min_expression: min_e,
+        grid_factor: None,
+        contact_distance: None,
+    });
     let cfg_r = PerturbConfig {
         n_propagation: 1,
         ..Default::default()
     };
     let mut t2 = None;
     let s_tight = perturb_with_targets(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_tight,
-        &rw_tfl,
-        &targets,
-        &cfg_r,
-        &lr_tight,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_tight,
+            rw_tfligands_init: &rw_tfl,
+            targets: &targets,
+            config: &cfg_r,
+            lr_radii: &lr_tight,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut t2,
     )
     .unwrap()
     .simulated;
     let mut t3 = None;
     let s_wide = perturb_with_targets(
-        &bb,
-        &gene_mtx,
-        &gene_names,
-        &xy,
-        &rw_wide,
-        &rw_tfl,
-        &targets,
-        &cfg_r,
-        &lr_wide,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_wide,
+            rw_tfligands_init: &rw_tfl,
+            targets: &targets,
+            config: &cfg_r,
+            lr_radii: &lr_wide,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut t3,
     )
     .unwrap()
@@ -1870,17 +1894,17 @@ fn perturb_spatial_knobs_change_simulated() {
         gene_mtx2[[i, b_idx]] = 1.0 + (i as f64) * 0.02;
     }
     let lig_b = vec!["B".to_string()];
-    let rw_shared = compute_initial_weighted_ligands(
-        &gene_mtx2,
-        &gene_names2,
-        &lig_b,
-        &xy2,
-        &lr_radii2,
-        scale,
-        min_e,
-        None,
-        None,
-    );
+    let rw_shared = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+        gene_mtx: &gene_mtx2,
+        gene_names: &gene_names2,
+        ligand_names: &lig_b,
+        xy: &xy2,
+        lr_radii: &lr_radii2,
+        weighted_ligand_scale: scale,
+        min_expression: min_e,
+        grid_factor: None,
+        contact_distance: None,
+    });
     let cfg_exact = PerturbConfig {
         n_propagation: 6,
         ligand_grid_factor: None,

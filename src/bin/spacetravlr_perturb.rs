@@ -1,6 +1,6 @@
 use clap::Parser;
 use spacetravlr::betadata::write_betadata_feather;
-use spacetravlr::perturb::{PerturbTarget, PerturbTimings, perturb_with_targets};
+use spacetravlr::perturb::{PerturbTarget, PerturbTimings, PerturbWithTargetsInputs, perturb_with_targets};
 use spacetravlr::perturb_batch::{
     PerturbBatchFile, batch_from_perturb_table, effective_parallelism, expand_prepared_jobs,
     load_batch_file, load_perturb_cli_toml, resolve_effective_run_toml,
@@ -341,22 +341,24 @@ fn main() -> anyhow::Result<()> {
     };
     let t_perturb = Instant::now();
     let result = perturb_with_targets(
-        &runtime.bb,
-        &runtime.gene_mtx,
-        &runtime.gene_names,
-        &runtime.xy,
-        &runtime.rw_ligands_init,
-        &runtime.rw_tfligands_init,
-        &targets,
-        &runtime.perturb_cfg,
-        &runtime.lr_radii,
-        None,
-        None,
-        None,
-        Some(&runtime.baseline_splash_cache),
+        &PerturbWithTargetsInputs {
+            bb: &runtime.bb,
+            gene_mtx: &runtime.gene_mtx,
+            gene_names: &runtime.gene_names,
+            xy: &runtime.xy,
+            rw_ligands_init: &runtime.rw_ligands_init,
+            rw_tfligands_init: &runtime.rw_tfligands_init,
+            targets: &targets,
+            config: &runtime.perturb_cfg,
+            lr_radii: &runtime.lr_radii,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: Some(&runtime.baseline_splash_cache),
+        },
         &mut timings,
     )
-    .map_err(|_| anyhow::anyhow!("perturbation failed"))?;
+    .ok_or_else(|| anyhow::anyhow!("perturbation failed"))?;
     validate_perturb_simulated_matrix(
         &runtime.gene_mtx,
         &runtime.gene_names,

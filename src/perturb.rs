@@ -35,6 +35,7 @@ pub struct PerturbConfig {
     pub contact_distance: Option<f64>,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for PerturbConfig {
     fn default() -> Self {
         Self {
@@ -91,6 +92,22 @@ pub struct PerturbInputs<'a> {
     pub lr_radii: &'a HashMap<String, f64>,
 }
 
+pub struct PerturbWithTargetsInputs<'a> {
+    pub bb: &'a Betabase,
+    pub gene_mtx: &'a Array2<f64>,
+    pub gene_names: &'a [String],
+    pub xy: &'a Array2<f64>,
+    pub rw_ligands_init: &'a GeneMatrix,
+    pub rw_tfligands_init: &'a GeneMatrix,
+    pub targets: &'a [PerturbTarget],
+    pub config: &'a PerturbConfig,
+    pub lr_radii: &'a HashMap<String, f64>,
+    pub job_progress: Option<&'a Arc<AtomicU32>>,
+    pub job_message: Option<&'a Arc<Mutex<String>>>,
+    pub cancel: Option<&'a AtomicBool>,
+    pub baseline_splash_cache: Option<&'a Mutex<Option<CachedBaselineSplash>>>,
+}
+
 /// Rebuild [`PerturbResult::simulated`] from baseline expression and final δ (matches the end of [`perturb_with_targets`]).
 pub fn perturb_result_from_delta(
     gene_mtx: &Array2<f64>,
@@ -141,22 +158,24 @@ pub fn perturb(inputs: PerturbInputs<'_>) -> PerturbResult {
         .collect();
     let mut no_timings: Option<PerturbTimings> = None;
     perturb_with_targets(
-        inputs.bb,
-        inputs.gene_mtx,
-        inputs.gene_names,
-        inputs.xy,
-        inputs.rw_ligands_init,
-        inputs.rw_tfligands_init,
-        &scoped_targets,
-        inputs.config,
-        inputs.lr_radii,
-        None,
-        None,
-        None,
-        None,
+        &PerturbWithTargetsInputs {
+            bb: inputs.bb,
+            gene_mtx: inputs.gene_mtx,
+            gene_names: inputs.gene_names,
+            xy: inputs.xy,
+            rw_ligands_init: inputs.rw_ligands_init,
+            rw_tfligands_init: inputs.rw_tfligands_init,
+            targets: &scoped_targets,
+            config: inputs.config,
+            lr_radii: inputs.lr_radii,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
         &mut no_timings,
     )
-    .expect("cancel is only used by spatial viewer")
+    .expect("perturb_with_targets completes without cancel when job hooks are unset")
 }
 
 #[inline]
@@ -177,21 +196,22 @@ fn report_perturb_step(
 }
 
 pub fn perturb_with_targets(
-    bb: &Betabase,
-    gene_mtx: &Array2<f64>,
-    gene_names: &[String],
-    xy: &Array2<f64>,
-    rw_ligands_init: &GeneMatrix,
-    rw_tfligands_init: &GeneMatrix,
-    targets: &[PerturbTarget],
-    config: &PerturbConfig,
-    lr_radii: &HashMap<String, f64>,
-    job_progress: Option<&Arc<AtomicU32>>,
-    job_message: Option<&Arc<Mutex<String>>>,
-    cancel: Option<&AtomicBool>,
-    baseline_splash_cache: Option<&Mutex<Option<CachedBaselineSplash>>>,
+    inputs: &PerturbWithTargetsInputs<'_>,
     timings: &mut Option<PerturbTimings>,
-) -> Result<PerturbResult, ()> {
+) -> Option<PerturbResult> {
+    let bb = inputs.bb;
+    let gene_mtx = inputs.gene_mtx;
+    let gene_names = inputs.gene_names;
+    let xy = inputs.xy;
+    let rw_ligands_init = inputs.rw_ligands_init;
+    let rw_tfligands_init = inputs.rw_tfligands_init;
+    let targets = inputs.targets;
+    let config = inputs.config;
+    let lr_radii = inputs.lr_radii;
+    let job_progress = inputs.job_progress;
+    let job_message = inputs.job_message;
+    let cancel = inputs.cancel;
+    let baseline_splash_cache = inputs.baseline_splash_cache;
     let n_cells = gene_mtx.nrows();
     let n_genes = gene_mtx.ncols();
     let gene_to_idx: HashMap<&str, usize> = gene_names
@@ -273,7 +293,7 @@ pub fn perturb_with_targets(
 
     for iter in 0..n_prop {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-            return Err(());
+            return None;
         }
         if job_progress.is_none() && job_message.is_none() {
             eprintln!("  perturb iteration {}/{}", iter + 1, n_prop);
@@ -308,19 +328,16 @@ pub fn perturb_with_targets(
                             config.min_expression,
                             gene_names,
                         );
-                        let Some(map) = compute_splash_all_progress(
+                        let map = compute_splash_all_progress(ComputeSplashAllProgressArgs {
                             bb,
-                            &rw_lr_for_splash,
-                            rw_tfligands_init,
-                            &gex_gm,
-                            config.beta_scale_factor as f32,
-                            config.beta_cap.map(|c| c as f32),
-                            job_progress.map(|p| p.as_ref()),
+                            rw_ligands: &rw_lr_for_splash,
+                            rw_tfligands: rw_tfligands_init,
+                            gex_df: &gex_gm,
+                            beta_scale_factor: config.beta_scale_factor as f32,
+                            beta_cap: config.beta_cap.map(|c| c as f32),
+                            progress: job_progress.map(|p| p.as_ref()),
                             cancel,
-                        ) else {
-                            drop(guard);
-                            return Err(());
-                        };
+                        })?;
                         let arc = Arc::new(map);
                         *guard = Some(CachedBaselineSplash {
                             key: splash_key,
@@ -334,19 +351,16 @@ pub fn perturb_with_targets(
                         config.min_expression,
                         gene_names,
                     );
-                    let Some(map) = compute_splash_all_progress(
+                    let map = compute_splash_all_progress(ComputeSplashAllProgressArgs {
                         bb,
-                        &rw_lr_for_splash,
-                        rw_tfligands_init,
-                        &gex_gm,
-                        config.beta_scale_factor as f32,
-                        config.beta_cap.map(|c| c as f32),
-                        job_progress.map(|p| p.as_ref()),
+                        rw_ligands: &rw_lr_for_splash,
+                        rw_tfligands: rw_tfligands_init,
+                        gex_df: &gex_gm,
+                        beta_scale_factor: config.beta_scale_factor as f32,
+                        beta_cap: config.beta_cap.map(|c| c as f32),
+                        progress: job_progress.map(|p| p.as_ref()),
                         cancel,
-                    ) else {
-                        drop(guard);
-                        return Err(());
-                    };
+                    })?;
                     let arc = Arc::new(map);
                     *guard = Some(CachedBaselineSplash {
                         key: splash_key,
@@ -360,18 +374,16 @@ pub fn perturb_with_targets(
                     config.min_expression,
                     gene_names,
                 );
-                let Some(map) = compute_splash_all_progress(
+                let map = compute_splash_all_progress(ComputeSplashAllProgressArgs {
                     bb,
-                    &rw_lr_for_splash,
-                    rw_tfligands_init,
-                    &gex_gm,
-                    config.beta_scale_factor as f32,
-                    config.beta_cap.map(|c| c as f32),
-                    job_progress.map(|p| p.as_ref()),
+                    rw_ligands: &rw_lr_for_splash,
+                    rw_tfligands: rw_tfligands_init,
+                    gex_df: &gex_gm,
+                    beta_scale_factor: config.beta_scale_factor as f32,
+                    beta_cap: config.beta_cap.map(|c| c as f32),
+                    progress: job_progress.map(|p| p.as_ref()),
                     cancel,
-                ) else {
-                    return Err(());
-                };
+                })?;
                 Arc::new(map)
             }
         } else {
@@ -380,25 +392,23 @@ pub fn perturb_with_targets(
                 config.min_expression,
                 gene_names,
             );
-            let Some(map) = compute_splash_all_progress(
+            let map = compute_splash_all_progress(ComputeSplashAllProgressArgs {
                 bb,
-                &rw_lr_for_splash,
-                rw_tfligands_init,
-                &gex_gm,
-                config.beta_scale_factor as f32,
-                config.beta_cap.map(|c| c as f32),
-                job_progress.map(|p| p.as_ref()),
+                rw_ligands: &rw_lr_for_splash,
+                rw_tfligands: rw_tfligands_init,
+                gex_df: &gex_gm,
+                beta_scale_factor: config.beta_scale_factor as f32,
+                beta_cap: config.beta_cap.map(|c| c as f32),
+                progress: job_progress.map(|p| p.as_ref()),
                 cancel,
-            ) else {
-                return Err(());
-            };
+            })?;
             Arc::new(map)
         };
         if let Some(t) = timings.as_mut() {
             t.record(format!("iter{}/splash", iter + 1), t_splash.elapsed());
         }
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-            return Err(());
+            return None;
         }
         report_perturb_step(
             job_progress,
@@ -413,20 +423,18 @@ pub fn perturb_with_targets(
         let gene_mtx_1 = gene_mtx_work.as_ref().expect("gene_mtx_work set above");
 
         // 3. Recompute weighted ligands
-        let Some(w_lr_new) = recompute_weighted_ligands(
-            gene_mtx_1,
-            &gene_to_idx,
-            &lr_ligands,
+        let w_lr_new = recompute_weighted_ligands(RecomputeWeightedLigandsArgs {
+            gene_mtx: gene_mtx_1,
+            gene_to_idx: &gene_to_idx,
+            ligand_names: &lr_ligands,
             xy,
             lr_radii,
-            config.scale_factor,
-            config.min_expression,
-            config.ligand_grid_factor,
-            config.contact_distance,
+            scale_factor: config.scale_factor,
+            min_expression: config.min_expression,
+            grid_factor: config.ligand_grid_factor,
+            contact_distance: config.contact_distance,
             cancel,
-        ) else {
-            return Err(());
-        };
+        })?;
         if let Some(t) = timings.as_mut() {
             t.record(
                 format!("iter{}/weighted_ligands_lr", iter + 1),
@@ -440,20 +448,18 @@ pub fn perturb_with_targets(
             &format!("{msg_prefix} · spatial ligands (TFL)"),
         );
         let t_tfl = Instant::now();
-        let Some(w_tfl_new) = recompute_weighted_ligands(
-            gene_mtx_1,
-            &gene_to_idx,
-            &tfl_ligands,
+        let w_tfl_new = recompute_weighted_ligands(RecomputeWeightedLigandsArgs {
+            gene_mtx: gene_mtx_1,
+            gene_to_idx: &gene_to_idx,
+            ligand_names: &tfl_ligands,
             xy,
             lr_radii,
-            config.scale_factor,
-            config.min_expression,
-            config.ligand_grid_factor,
-            config.contact_distance,
+            scale_factor: config.scale_factor,
+            min_expression: config.min_expression,
+            grid_factor: config.ligand_grid_factor,
+            contact_distance: config.contact_distance,
             cancel,
-        ) else {
-            return Err(());
-        };
+        })?;
         if let Some(t) = timings.as_mut() {
             t.record(
                 format!("iter{}/weighted_ligands_tfl", iter + 1),
@@ -569,7 +575,7 @@ pub fn perturb_with_targets(
         "GRN perturbation · complete",
     );
 
-    Ok(out)
+    Some(out)
 }
 
 /// Copy **LR received-ligand** channels from a full `scatter_max` matrix into the narrow
@@ -639,6 +645,18 @@ fn gene_matrix_masked_f32_from_expr(
     GeneMatrix::new(out, gene_names.to_vec())
 }
 
+/// Arguments for [`compute_splash_all_progress`].
+pub struct ComputeSplashAllProgressArgs<'a> {
+    pub bb: &'a Betabase,
+    pub rw_ligands: &'a GeneMatrix,
+    pub rw_tfligands: &'a GeneMatrix,
+    pub gex_df: &'a GeneMatrix,
+    pub beta_scale_factor: f32,
+    pub beta_cap: Option<f32>,
+    pub progress: Option<&'a AtomicU32>,
+    pub cancel: Option<&'a AtomicBool>,
+}
+
 /// Partial derivatives ∂(target)/∂(modulator) for every trained target (baseline WL + expression).
 pub fn compute_splash_all(
     bb: &Betabase,
@@ -648,16 +666,16 @@ pub fn compute_splash_all(
     beta_scale_factor: f32,
     beta_cap: Option<f32>,
 ) -> HashMap<String, GeneMatrix> {
-    compute_splash_all_progress(
+    compute_splash_all_progress(ComputeSplashAllProgressArgs {
         bb,
         rw_ligands,
         rw_tfligands,
         gex_df,
         beta_scale_factor,
         beta_cap,
-        None,
-        None,
-    )
+        progress: None,
+        cancel: None,
+    })
     .expect("compute_splash_all_progress without cancel must return Some")
 }
 
@@ -666,16 +684,18 @@ pub fn compute_splash_all(
 ///
 /// Returns `None` when `cancel` is set and becomes true during computation.
 pub fn compute_splash_all_progress(
-    bb: &Betabase,
-    rw_ligands: &GeneMatrix,
-    rw_tfligands: &GeneMatrix,
-    gex_df: &GeneMatrix,
-    beta_scale_factor: f32,
-    beta_cap: Option<f32>,
-    progress: Option<&std::sync::atomic::AtomicU32>,
-    cancel: Option<&AtomicBool>,
+    args: ComputeSplashAllProgressArgs<'_>,
 ) -> Option<HashMap<String, GeneMatrix>> {
-    use std::sync::atomic::Ordering;
+    let ComputeSplashAllProgressArgs {
+        bb,
+        rw_ligands,
+        rw_tfligands,
+        gex_df,
+        beta_scale_factor,
+        beta_cap,
+        progress,
+        cancel,
+    } = args;
     let n = bb.data.len().max(1);
     let step = (n / 28).max(1);
     let mut out = HashMap::with_capacity(bb.data.len());
@@ -761,19 +781,34 @@ fn perturb_all_cells_into(
         });
 }
 
-fn recompute_weighted_ligands(
-    gene_mtx: &Array2<f64>,
-    gene_to_idx: &HashMap<&str, usize>,
-    ligand_names: &[String],
-    xy: &Array2<f64>,
-    lr_radii: &HashMap<String, f64>,
+struct RecomputeWeightedLigandsArgs<'a> {
+    gene_mtx: &'a Array2<f64>,
+    gene_to_idx: &'a HashMap<&'a str, usize>,
+    ligand_names: &'a [String],
+    xy: &'a Array2<f64>,
+    lr_radii: &'a HashMap<String, f64>,
     scale_factor: f64,
     min_expression: f64,
     grid_factor: Option<f64>,
     contact_distance: Option<f64>,
-    cancel: Option<&AtomicBool>,
-) -> Option<GeneMatrix> {
+    cancel: Option<&'a AtomicBool>,
+}
+
+fn recompute_weighted_ligands(args: RecomputeWeightedLigandsArgs<'_>) -> Option<GeneMatrix> {
     use std::sync::atomic::Ordering;
+
+    let RecomputeWeightedLigandsArgs {
+        gene_mtx,
+        gene_to_idx,
+        ligand_names,
+        xy,
+        lr_radii,
+        scale_factor,
+        min_expression,
+        grid_factor,
+        contact_distance,
+        cancel,
+    } = args;
 
     let n_cells = gene_mtx.nrows();
     if ligand_names.is_empty() {

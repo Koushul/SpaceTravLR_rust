@@ -105,16 +105,28 @@ fn rocket_vertical_pad(gene_ratio: f64, inner_h: usize) -> usize {
     ROCKET_MIN_TOP_MARGIN + ((1.0 - eased) * max_top_extra as f64).round() as usize
 }
 
-fn rocket_lines(
+struct RocketLinesArgs<'a> {
     frame: usize,
     gene_ratio: f64,
     gene_pct: u32,
     inner_w: usize,
     inner_h: usize,
     now: Instant,
-    falling_sheep: &[Instant],
+    falling_sheep: &'a [Instant],
     pal: TuiColors,
-) -> Vec<Line<'static>> {
+}
+
+fn rocket_lines(args: RocketLinesArgs<'_>) -> Vec<Line<'static>> {
+    let RocketLinesArgs {
+        frame,
+        gene_ratio,
+        gene_pct,
+        inner_w,
+        inner_h,
+        now,
+        falling_sheep,
+        pal,
+    } = args;
     let f = frame % 4;
     let shimmer = (frame / 3) % BODY_TEXT.len();
     let win_c = if frame % 8 < 4 {
@@ -225,7 +237,7 @@ fn rocket_lines(
 }
 
 fn apply_rocket_sheep_overlays(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut [Line<'static>],
     inner_w: usize,
     top_pad: usize,
     now: Instant,
@@ -1073,6 +1085,9 @@ fn is_theme_cycle_key(key: &event::KeyEvent) -> bool {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+type ScatterPanelCachePayload = (String, u16, u16, usize, Vec<Line<'static>>);
+type ScatterPanelCache = RefCell<Option<ScatterPanelCachePayload>>;
+
 pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashboardExit> {
     enable_raw_mode()?;
     let mut out = stdout();
@@ -1125,8 +1140,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         "—".to_string(),
         "—".to_string(),
     ));
-    let scatter_panel_cache: RefCell<Option<(String, u16, u16, usize, Vec<Line<'static>>)>> =
-        RefCell::new(None);
+    let scatter_panel_cache: ScatterPanelCache = RefCell::new(None);
 
     let mut prev_genes_rounds_heartbeat = 0usize;
     let mut heart_beat_until: Option<Instant> = None;
@@ -1948,16 +1962,16 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
             // ── Rocket ────────────────────────────────────────────────────────
             f.render_widget(
-                Paragraph::new(rocket_lines(
+                Paragraph::new(rocket_lines(RocketLinesArgs {
                     frame,
-                    ratio,
+                    gene_ratio: ratio,
                     gene_pct,
-                    rocket_inner_w,
-                    rocket_inner_h,
-                    now_rocket,
-                    &sheep_snapshot,
+                    inner_w: rocket_inner_w,
+                    inner_h: rocket_inner_h,
+                    now: now_rocket,
+                    falling_sheep: &sheep_snapshot,
                     pal,
-                ))
+                }))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)

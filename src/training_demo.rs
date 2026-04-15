@@ -33,7 +33,10 @@ const DEMO_KIDNEY_CELL_TYPE_BY_CODE: [&str; 12] = [
     "Podocyte",
 ];
 
-pub fn parse_demo_kidney_obsm_cache() -> anyhow::Result<(Vec<(f64, f64)>, Vec<String>)> {
+pub type DemoKidneySpatialPoint = (f64, f64);
+pub type DemoKidneyObsmCache = (Vec<DemoKidneySpatialPoint>, Vec<String>);
+
+pub fn parse_demo_kidney_obsm_cache() -> anyhow::Result<DemoKidneyObsmCache> {
     let data: &[u8] = include_bytes!("demo_kidney_obsm_cache.bin");
     anyhow::ensure!(data.len() >= 12, "demo kidney spatial cache: truncated header");
     anyhow::ensure!(

@@ -1,13 +1,17 @@
 use anyhow::Context;
 use crate::betadata::write_betadata_feather;
 use crate::cnn_gating::{
-    CnnGateDecision, build_neighbors, decide_cnn_for_gene, load_gene_set_file, predict_lasso_y,
+    CnnGateDecision, CnnGateGeneInputs, build_neighbors, decide_cnn_for_gene, load_gene_set_file,
+    predict_lasso_y,
 };
 use crate::config::{
     CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, RUN_REPRO_TOML_FILENAME,
     SpaceshipConfig, expand_user_path,
 };
-use crate::estimator::{CachedSpatialData, ClusteredGCNNWR, finite_or_zero_f64};
+use crate::estimator::{
+    CachedSpatialData, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs, ClusteredGCNNWR,
+    finite_or_zero_f64,
+};
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use crate::modulator_scale::{
@@ -345,10 +349,8 @@ fn clusters_array1_from_obs_column(
                 .str()
                 .map_err(|e| anyhow::anyhow!("obs column {:?} as string: {}", cluster_annot, e))?;
             let mut seen = HashSet::<String>::new();
-            for opt in ca.into_iter() {
-                if let Some(x) = opt {
-                    seen.insert(x.to_string());
-                }
+            for x in ca.into_iter().flatten() {
+                seen.insert(x.to_string());
             }
             let mut uniq: Vec<String> = seen.into_iter().collect();
             uniq.sort();
@@ -553,6 +555,7 @@ fn build_spatial_maps_flat_csr(
         .map_err(|e| anyhow::anyhow!("build CSR for spatial maps failed: {}", e))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_minimal_repro_adata_with_cache(
     src: &AnnData<H5>,
     output_dir: &str,
@@ -1334,7 +1337,7 @@ pub fn cache_received_ligands_uns_for_processed_h5ad(
         network_dd.as_deref(),
     )?;
     let max_lig = cfg.grn.max_ligands;
-    let gene_mean = if max_lig.map_or(false, |k| k > 0) {
+    let gene_mean = if max_lig.is_some_and(|k| k > 0) {
         Some(compute_gene_mean_expression(&adata, layer, None)?)
     } else {
         None
@@ -1498,6 +1501,7 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_metadata(
         adata: Arc<AnnData<AnB>>,
         target_gene: String,
@@ -2113,7 +2117,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 && hybrid_gating.min_mean_target_expression_for_cnn.is_some();
 
             let gene_mean_arc: Option<Arc<HashMap<String, f64>>> =
-                if max_ligands.map_or(false, |k| k > 0) || compute_mean_for_hybrid {
+                if max_ligands.is_some_and(|k| k > 0) || compute_mean_for_hybrid {
                     let t_m =
                         pipeline_step_begin(&hud, "per-gene mean expression (full matrix pass)");
                     let gm = compute_gene_mean_expression(
@@ -2672,16 +2676,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     decide_cnn_for_gene(
                                                         &hybrid_cfg,
                                                         min_mean_r2,
-                                                        &gene,
-                                                        &summaries_snapshot,
-                                                        estimator.regulators.len(),
-                                                        estimator.lr_pairs.len(),
-                                                        estimator.tfl_pairs.len(),
-                                                        &residuals,
-                                                        neighbors_w.as_ref(),
-                                                        &force_w,
-                                                        &skip_w,
-                                                        mean_tgt,
+                                                        &CnnGateGeneInputs {
+                                                            gene: gene.as_str(),
+                                                            summaries: &summaries_snapshot,
+                                                            n_regulators: estimator.regulators.len(),
+                                                            n_lr_pairs: estimator.lr_pairs.len(),
+                                                            n_tfl_pairs: estimator.tfl_pairs.len(),
+                                                            residuals: &residuals,
+                                                            neighbors: neighbors_w.as_ref(),
+                                                            force_genes: &force_w,
+                                                            skip_genes: &skip_w,
+                                                            mean_target_expression: mean_tgt,
+                                                        },
                                                     )
                                                 });
                                             if let Some(decision) = decision_opt {
@@ -2701,16 +2707,20 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     if let Some(inn) = estimator.estimator.as_mut()
                                                     {
                                                         inn.fit_cnn_refinement(
-                                                            &x_mat,
-                                                            &y_vec,
-                                                            &xy,
-                                                            &clusters,
-                                                            num_clusters,
-                                                            &device,
-                                                            epochs,
-                                                            learning_rate,
-                                                            &cnn_w,
-                                                            Some(cached_spatial.as_ref()),
+                                                            ClusteredGcnNwrCnnRefineInputs {
+                                                                x: &x_mat,
+                                                                y: &y_vec,
+                                                                xy: &xy,
+                                                                clusters: &clusters,
+                                                                num_clusters,
+                                                                device: &device,
+                                                                epochs,
+                                                                learning_rate,
+                                                                cnn: &cnn_w,
+                                                                cached_spatial: Some(
+                                                                    cached_spatial.as_ref(),
+                                                                ),
+                                                            },
                                                         );
                                                     }
                                                     export_per_cell = true;
@@ -3362,6 +3372,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         Ok((x_modulators, target_expr))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn fit_with_cache<F: FnMut(usize, usize)>(
         &mut self,
         xy: &Array2<f64>,
@@ -3390,19 +3401,10 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         }
 
         if self.estimator.is_none() {
-            let mut groups = Vec::new();
-            for _ in 0..self.regulators.len() {
-                groups.push(0);
-            }
-            for _ in 0..self.lr_pairs.len() {
-                groups.push(1);
-            }
-            for _ in 0..self.tfl_pairs.len() {
-                groups.push(2);
-            }
-            for _ in 0..self.extra_modulators.len() {
-                groups.push(3);
-            }
+            let mut groups: Vec<i64> = vec![0; self.regulators.len()];
+            groups.extend(std::iter::repeat_n(1i64, self.lr_pairs.len()));
+            groups.extend(std::iter::repeat_n(2i64, self.tfl_pairs.len()));
+            groups.extend(std::iter::repeat_n(3i64, self.extra_modulators.len()));
 
             let params = GroupLassoParams {
                 l1_reg,
@@ -3421,23 +3423,26 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         if let Some(est) = &mut self.estimator {
             est.fit(
-                &x_modulators,
-                &target_expr,
-                xy,
-                clusters,
-                num_clusters,
-                device,
-                epochs,
-                learning_rate,
-                self.seed_only,
-                cnn,
-                cached_spatial,
+                ClusteredGcnNwrFitInputs {
+                    x: &x_modulators,
+                    y: &target_expr,
+                    xy,
+                    clusters,
+                    num_clusters,
+                    device,
+                    epochs,
+                    learning_rate,
+                    seed_only: self.seed_only,
+                    cnn,
+                    cached_spatial,
+                },
                 lasso_progress,
             );
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn fit(
         &mut self,
         epochs: usize,
