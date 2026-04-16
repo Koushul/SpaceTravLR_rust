@@ -24,6 +24,7 @@ Apply when helping with:
 | --------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `spacetravlr`         | `tui`                 | Train all targets; TUI dashboard unless `--plain`; optional `run-summary` subcommand                                 |
 | `spacetravlr-perturb` | `tui`                 | Perturbation only; TUI by default, `**--export` / `--out`** single-gene batch, or `**--batch-toml**` multi-job batch |
+| `spacetravlr-alignment` | default             | **Batch CSV**: UMAP transition alignment vs pseudotime-gradient reference (Rust `transition_umap`; no Python/velocyto). `cargo build --bin spacetravlr-alignment` |
 
 
 Install: `cargo install --path . --locked` or `cargo run --bin …`.

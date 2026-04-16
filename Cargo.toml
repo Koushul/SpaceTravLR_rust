@@ -83,6 +83,10 @@ name = "spacetravlr-perturb"
 path = "src/bin/spacetravlr_perturb.rs"
 
 [[bin]]
+name = "spacetravlr-alignment"
+path = "src/bin/spacetravlr_alignment.rs"
+
+[[bin]]
 name = "spacetravlr-dev"
 path = "src/main.rs"
 required-features = ["dev-main"]
@@ -182,6 +186,7 @@ colored = "2.2"
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
 statrs = "0.18"
+csv = "1.3"
 
 [dev-dependencies]
 approx = "0.5"

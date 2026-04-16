@@ -201,6 +201,15 @@ pub fn read_h5ad_var_names(path: &Path) -> anyhow::Result<Vec<String>> {
 }
 
 /// String values for one `adata.obs` column (e.g. `cell_type`, `leiden`).
+/// Read `obsm[key]` as dense `f64` with automatic `f32`/`f64` handling (same as training / perturb).
+pub fn read_h5ad_obsm_dense_f64(path: &Path, key: &str) -> anyhow::Result<Array2<f64>> {
+    let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let m = obsm_get_dense_matrix_f64(&adata, key)?
+        .ok_or_else(|| anyhow::anyhow!("obsm key {:?} missing or unreadable", key))?;
+    adata.close()?;
+    Ok(m)
+}
+
 pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<String>> {
     use polars::prelude::*;
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;

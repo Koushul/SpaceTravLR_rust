@@ -437,6 +437,163 @@ pub struct TransitionGrid {
     pub cell_vectors: Vec<[f64; 2]>,
 }
 
+/// KNN mean on UMAP (same as [`knn_mean_on_embedding`]) but exposed for alignment / diagnostics.
+pub fn knn_mean_umap_values(
+    umap: &[[f64; 2]],
+    values_per_cell: &[f64],
+    queries: &[[f64; 2]],
+    k: usize,
+) -> Vec<f64> {
+    knn_mean_on_embedding(umap, values_per_cell, queries, k)
+}
+
+/// `VirtualTissue.compute_vector_alignment` cosine scores on the UMAP grid: cos(v, ref) where `ref`
+/// is the sqrt-normalized gradient of a KNN-smoothed scalar field on the grid (see `signature2gradient`).
+/// `base_field_for_mask` should be the same vector field used to zero ref where arrows are zero (Python masks on `vector_field`).
+pub fn grid_cosine_alignment_to_signature_gradient(
+    umap: &[[f64; 2]],
+    vector_field: &[[f64; 2]],
+    signature_per_cell: &[f64],
+    base_field_for_mask: &[[f64; 2]],
+    signature_knn: usize,
+    sig_params: &SignatureUmapParams,
+) -> Vec<f64> {
+    assert_eq!(umap.len(), signature_per_cell.len());
+    assert_eq!(vector_field.len(), base_field_for_mask.len());
+    let (grid_x, grid_y) = umap_grid_axes(umap, sig_params.grid_scale);
+    let nx = grid_x.len();
+    let ny = grid_y.len();
+    let queries = build_grid_points_xy(&grid_x, &grid_y);
+    assert_eq!(queries.len(), vector_field.len());
+    let sig_on_grid = knn_mean_on_embedding(umap, signature_per_cell, &queries, signature_knn);
+    let mut grad = gradient_2d_umap_physical(&sig_on_grid, nx, ny, &grid_x, &grid_y);
+    normalize_gradient_sqrt(&mut grad);
+    let mean_l2 = if grad.is_empty() {
+        1.0
+    } else {
+        let s: f64 = grad
+            .iter()
+            .map(|g| (g[0] * g[0] + g[1] * g[1]).sqrt())
+            .sum::<f64>()
+            / grad.len() as f64;
+        s.max(1e-18)
+    };
+    let scale = 1.0 / mean_l2;
+    let gain = sig_params.gradient_gain;
+    for g in &mut grad {
+        g[0] *= gain * scale;
+        g[1] *= gain * scale;
+    }
+    for (k, g) in grad.iter_mut().enumerate() {
+        let b = base_field_for_mask[k];
+        if b[0] * b[0] + b[1] * b[1] < 1e-20 {
+            *g = [0.0, 0.0];
+        }
+    }
+    let eps = 1e-8_f64;
+    vector_field
+        .iter()
+        .zip(grad.iter())
+        .map(|(&v, &r)| {
+            let ip = v[0] * r[0] + v[1] * r[1];
+            let nv = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            let nr = (r[0] * r[0] + r[1] * r[1]).sqrt();
+            ip / (nv * nr + eps)
+        })
+        .collect()
+}
+
+/// Flattened UMAP grid coordinates (same layout as [`compute_umap_transition_grid`] / Python `plot_arrows`).
+pub fn umap_grid_points(umap: &[[f64; 2]], grid_scale: f64) -> Vec<[f64; 2]> {
+    let (gx, gy) = umap_grid_axes(umap, grid_scale);
+    build_grid_points_xy(&gx, &gy)
+}
+
+/// Nearest grid cosine sample per cell (1-NN in UMAP space), matching `VirtualTissue.calculate_cell_type_alignment`.
+pub fn per_cell_alignment_from_grid(
+    umap: &[[f64; 2]],
+    grid_points: &[[f64; 2]],
+    grid_cosine: &[f64],
+) -> Vec<f64> {
+    assert_eq!(grid_points.len(), grid_cosine.len());
+    let tree = ImmutableKdTree::<f64, 2>::new_from_slice(grid_points);
+    umap
+        .iter()
+        .map(|p| {
+            let nn = tree.nearest_one::<SquaredEuclidean>(p);
+            let idx = nn.item as usize;
+            grid_cosine.get(idx).copied().unwrap_or(0.0)
+        })
+        .collect()
+}
+
+/// Normal-approximation two-sided *p*-value for Wilcoxon rank-sum (Mann–Whitney U) comparing `a` vs `b`.
+pub fn mann_whitney_u_normal_two_sided(a: &[f64], b: &[f64]) -> f64 {
+    use statrs::distribution::{ContinuousCDF, Normal};
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let n1 = a.len();
+    let n2 = b.len();
+    let mut pairs: Vec<(f64, u8)> = Vec::with_capacity(n1 + n2);
+    for &x in a {
+        pairs.push((x, 0));
+    }
+    for &x in b {
+        pairs.push((x, 1));
+    }
+    pairs.sort_by(|u, v| u.0.partial_cmp(&v.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n = pairs.len();
+    let mut ranks = vec![0.0_f64; n];
+    let mut i = 0usize;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && (pairs[j].0 - pairs[i].0).abs() < 1e-15 {
+            j += 1;
+        }
+        let rank_lo = (i + 1) as f64;
+        let rank_hi = j as f64;
+        let avg = 0.5 * (rank_lo + rank_hi);
+        for k in i..j {
+            ranks[k] = avg;
+        }
+        i = j;
+    }
+    let mut r1 = 0.0_f64;
+    for k in 0..n {
+        if pairs[k].1 == 0 {
+            r1 += ranks[k];
+        }
+    }
+    let u1 = r1 - (n1 as f64) * (n1 as f64 + 1.0) / 2.0;
+    let mean_u = (n1 as f64) * (n2 as f64) / 2.0;
+    let n12 = (n1 + n2) as f64;
+    let mut tie_sum = 0.0_f64;
+    i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && (pairs[j].0 - pairs[i].0).abs() < 1e-15 {
+            j += 1;
+        }
+        let t = (j - i) as f64;
+        if t > 1.0 {
+            tie_sum += t * t * t - t;
+        }
+        i = j;
+    }
+    let var_u = (n1 as f64)
+        * (n2 as f64)
+        / (n12 * (n12 - 1.0))
+        * ((n12 * n12 * n12 - n12) / 12.0 - tie_sum / 12.0);
+    if var_u <= 1e-18 {
+        return f64::NAN;
+    }
+    let z = (u1 - mean_u) / var_u.sqrt();
+    let nrm = Normal::new(0.0, 1.0).unwrap();
+    let p_one = 1.0 - nrm.cdf(z.abs());
+    (2.0 * p_one).min(1.0)
+}
+
 /// Parameters for [`compute_signature_umap_grid`] (Python `signature2gradient` + quiver scaling).
 #[derive(Clone, Debug)]
 pub struct SignatureUmapParams {
@@ -1201,6 +1358,19 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
+    fn mann_whitney_two_sided_symmetric() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [1.0, 2.0, 3.0];
+        let p = mann_whitney_u_normal_two_sided(&a, &b);
+        assert!(p.is_finite());
+        assert!(p > 0.9, "identical groups p={}", p);
+        let p2 = mann_whitney_u_normal_two_sided(
+            &[0.0_f64, 0.1, 0.2, 0.15, 0.05],
+            &[10.0_f64, 11.0, 10.5, 12.0, 9.8],
+        );
+        assert!(p2 < 0.01, "well-separated groups p={}", p2);
+    }
+
     fn transition_zero_delta_zero_vectors() {
         let n = 8;
         let expr = Array2::from_shape_fn((n, 3), |(i, k)| (i as f64 * 0.5) + k as f64);

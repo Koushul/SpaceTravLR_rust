@@ -7,10 +7,11 @@ BIN_PERTURB="$REPO/target/release/spacetravlr-perturb"
 EXP="$REPO/experiments/il21_bcl6_ablation"
 RUNS="$EXP/runs"
 OVER="$EXP/overlays"
+H5AD_SRC="/ix/djishnu/shared/djishnu_kor11/training_data_revision/snrna_human_tonsil.h5ad"
 export SPACETRAVLR_FORCE_CPU="${SPACETRAVLR_FORCE_CPU:-1}"
 
 if [[ ! -x "$BIN_TRAIN" ]]; then
-  echo "Build release first: cargo build --release --bin spacetravlr --bin spacetravlr-perturb" >&2
+  echo "Build release first: cargo build --release --bin spacetravlr --bin spacetravlr-perturb --bin spacetravlr-alignment" >&2
   exit 1
 fi
 
@@ -66,15 +67,18 @@ for d in "$RUNS"/*; do
   done
 done
 
-echo "=== Alignment (optional; needs SpaceTravLR Python + cellrank + velocyto) ==="
-if python3 "$REPO/scripts/ablation_il21_bcl6_alignment.py" \
-  --adata "$EXP/analysis/tonsil_with_pseudotime.h5ad" \
-  --manifest "$MAN" \
-  --out-csv "$EXP/analysis/alignment_per_celltype.csv" \
-  --restrict-to "Naive CD4 T,T_follicular_helper,Th2,Th1" 2>/dev/null; then
-  echo "Alignment OK -> $EXP/analysis/alignment_per_celltype.csv"
+echo "=== Alignment (Rust; no Python/velocyto) ==="
+if [[ -x "$REPO/target/release/spacetravlr-alignment" ]] || [[ -x "$REPO/target/debug/spacetravlr-alignment" ]]; then
+  ALIGN_BIN="$REPO/target/release/spacetravlr-alignment"
+  [[ -x "$ALIGN_BIN" ]] || ALIGN_BIN="$REPO/target/debug/spacetravlr-alignment"
+  "$ALIGN_BIN" \
+    --h5ad "$H5AD_SRC" \
+    --manifest "$MAN" \
+    --out-csv "$EXP/analysis/alignment_rust_per_celltype.csv" \
+    --annot cell_type
+  echo "Wrote $EXP/analysis/alignment_rust_per_celltype.csv"
 else
-  echo "Alignment skipped (install SpaceTravLR src on PYTHONPATH + cellrank + velocyto)" >&2
+  echo "Build alignment binary: cargo build --bin spacetravlr-alignment" >&2
 fi
 
 echo "=== Summarize L2 delta norms ==="
