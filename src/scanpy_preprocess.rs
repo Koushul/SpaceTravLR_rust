@@ -711,6 +711,27 @@ pub fn probe_adata_training_readiness(path: &Path) -> anyhow::Result<AdataTraini
     })
 }
 
+/// Training auto-prep is unnecessary when **`cell_type`**, **`layers["imputed_count"]`**, and
+/// **`layers["normalized_count"]`** are all present.
+pub fn training_h5ad_is_fully_prepared(path: &Path) -> anyhow::Result<bool> {
+    let r = probe_adata_training_readiness(path)?;
+    Ok(r.has_cell_type && r.has_imputed_count && r.has_normalized_count)
+}
+
+/// **`candidate`** can replace a full preprocess when it exists, is at least as new as **`source`**
+/// (mtime), and [`training_h5ad_is_fully_prepared`] is true for **`candidate`**.
+pub fn prepared_training_output_is_reusable(source: &Path, candidate: &Path) -> anyhow::Result<bool> {
+    if !candidate.is_file() {
+        return Ok(false);
+    }
+    let src_mtime = source.metadata()?.modified()?;
+    let out_mtime = candidate.metadata()?.modified()?;
+    if out_mtime < src_mtime {
+        return Ok(false);
+    }
+    training_h5ad_is_fully_prepared(candidate)
+}
+
 fn sibling_h5ad_with_suffix(adata: &Path, suffix_before_ext: &str) -> anyhow::Result<PathBuf> {
     let name = adata
         .file_name()
@@ -770,7 +791,7 @@ pub fn write_cell_type_from_leiden_echo_uv_to_stderr(
     Ok(())
 }
 
-/// `{stem}_processed.h5ad` under **`output_dir`** (stem from [`crate::config::canonical_adata_stem`]).
+/// `{stem}_processed.h5ad` under **`output_dir`** (stem from [`crate::config::canonical_training_prep_stem`]).
 pub fn training_processed_h5ad_path(output_dir: &Path, stem: &str) -> PathBuf {
     output_dir.join(format!("{stem}_processed.h5ad"))
 }
@@ -1023,7 +1044,7 @@ pub fn plan_training_prep(
 /// ([`TrainingPrepPlan::FullPreprocess`]); empty **`species`** is resolved via
 /// [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
 ///
-/// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_adata_stem`] on
+/// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_training_prep_stem`] on
 /// the pre-prep path for **`original_input_for_stem`** so filenames match the user's dataset stem.
 pub fn ensure_training_adata_ready(
     adata_path: &mut String,
@@ -1047,7 +1068,7 @@ pub fn ensure_training_adata_ready(
         return Ok(());
     }
 
-    let stem = crate::config::canonical_adata_stem(original_input_for_stem);
+    let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
     let r = probe_adata_training_readiness(&p)?;
     let plan = plan_training_prep(&r, output_dir, &stem)?;
     // #region agent log
@@ -1069,6 +1090,24 @@ pub fn ensure_training_adata_ready(
         }),
     );
     // #endregion
+    let reuse_out: Option<PathBuf> = match &plan {
+        TrainingPrepPlan::Noop => None,
+        TrainingPrepPlan::PatchCellType { out } => Some(out.clone()),
+        TrainingPrepPlan::ImputeOnly { out } => Some(out.clone()),
+        TrainingPrepPlan::PatchThenImpute { out, .. } => Some(out.clone()),
+        TrainingPrepPlan::FullPreprocess { out } => Some(out.clone()),
+    };
+    if let Some(out) = reuse_out {
+        if prepared_training_output_is_reusable(&p, &out)? {
+            eprintln!(
+                "spacetravlr: reusing existing training-prep output {} (>= mtime of {})",
+                out.display(),
+                p.display()
+            );
+            *adata_path = expand_user_path(out.to_string_lossy().as_ref());
+            return Ok(());
+        }
+    }
     match plan {
         TrainingPrepPlan::Noop => {
             *adata_path = expanded;

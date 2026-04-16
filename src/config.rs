@@ -694,36 +694,8 @@ mod normalize_ui_path_tests {
     }
 }
 
-/// Default training output directory: current working directory + `{adata_stem}_{YYYY-MM-DD}`.
-/// `adata_stem` is the `.h5ad` file stem; `/` and `\\` in the stem are replaced with `_`.
-pub fn default_output_dir_for_adata_path(adata_path: impl AsRef<Path>) -> anyhow::Result<String> {
-    let adata_path = adata_path.as_ref();
-    let stem = adata_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .trim();
-    let stem = if stem.is_empty() {
-        "spacetravlr_run"
-    } else {
-        stem
-    };
-    let stem: String = stem
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | '\0' => '_',
-            c => c,
-        })
-        .collect();
-
-    let date = chrono::Local::now().format("%Y-%m-%d");
-    let dir_name = format!("{}_{}", stem, date);
-    let cwd =
-        std::env::current_dir().context("default output_dir: could not read current directory")?;
-    Ok(cwd.join(dir_name).to_string_lossy().to_string())
-}
-
-/// Sanitized `.h5ad` stem for canonical output filenames (same rules as [`default_output_dir_for_adata_path`]).
+/// Sanitized `.h5ad` stem for general output filenames (same character rules as
+/// [`default_output_dir_for_adata_path`]).
 pub fn canonical_adata_stem(adata_path: &std::path::Path) -> String {
     let stem = adata_path
         .file_stem()
@@ -741,6 +713,65 @@ pub fn canonical_adata_stem(adata_path: &std::path::Path) -> String {
             c => c,
         })
         .collect()
+}
+
+/// Stem for run artifacts such as `{stem}_processed.h5ad` under `output_dir`.
+///
+/// Trailing `_processed` segments (ASCII case-insensitive) are removed so a file named
+/// `dataset_processed.h5ad` maps to `dataset_processed.h5ad`, not `dataset_processed_processed.h5ad`.
+pub fn canonical_training_prep_stem(adata_path: &Path) -> String {
+    const SUF: &str = "_processed";
+    let mut s = canonical_adata_stem(adata_path);
+    while s.len() > SUF.len() && s.to_lowercase().ends_with(SUF) {
+        s.truncate(s.len() - SUF.len());
+    }
+    if s.is_empty() {
+        "spacetravlr_run".to_string()
+    } else {
+        s
+    }
+}
+
+/// Default training output directory: current working directory + `{stem}_{YYYY-MM-DD}`.
+/// `stem` is [`canonical_training_prep_stem`] of the `.h5ad` path.
+pub fn default_output_dir_for_adata_path(adata_path: impl AsRef<Path>) -> anyhow::Result<String> {
+    let adata_path = adata_path.as_ref();
+    let stem = canonical_training_prep_stem(adata_path);
+    let date = chrono::Local::now().format("%Y-%m-%d");
+    let dir_name = format!("{}_{}", stem, date);
+    let cwd =
+        std::env::current_dir().context("default output_dir: could not read current directory")?;
+    Ok(cwd.join(dir_name).to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod canonical_training_prep_stem_tests {
+    use super::{canonical_adata_stem, canonical_training_prep_stem};
+    use std::path::Path;
+
+    #[test]
+    fn strips_one_processed_suffix() {
+        assert_eq!(
+            canonical_training_prep_stem(Path::new("/tmp/SlideTags_human_tonsil_processed.h5ad")),
+            "SlideTags_human_tonsil"
+        );
+    }
+
+    #[test]
+    fn strips_chained_processed_suffixes() {
+        assert_eq!(
+            canonical_training_prep_stem(Path::new("/x/foo_processed_processed.h5ad")),
+            "foo"
+        );
+    }
+
+    #[test]
+    fn plain_stem_unchanged() {
+        assert_eq!(
+            canonical_training_prep_stem(Path::new("/data/foo.h5ad")),
+            canonical_adata_stem(Path::new("/data/foo.h5ad"))
+        );
+    }
 }
 
 impl SpaceshipConfig {

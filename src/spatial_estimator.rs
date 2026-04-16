@@ -1449,7 +1449,8 @@ pub fn patch_adata_var_mean_lasso_r2(
     Ok(())
 }
 
-/// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers.
+/// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers
+/// (`stem` from [`crate::config::canonical_training_prep_stem`]).
 /// Drops any persisted `spacetravlr_received_ligands` / `_meta` keys so a stale on-disk cache is not reused;
 /// [`SpatialCellularProgramsEstimator::fit_all_genes`] recomputes and writes them to `adata.uns` when training starts (full-obs runs only).
 pub fn materialize_canonical_training_adata(
@@ -1473,16 +1474,28 @@ pub fn materialize_canonical_training_adata(
         *adata_path = expanded;
         return Ok(());
     }
-    let stem = crate::config::canonical_adata_stem(original_input_for_stem);
+    let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
     let canonical = crate::scanpy_preprocess::training_processed_h5ad_path(output_dir, &stem);
     if current != canonical {
-        let _ = std::fs::remove_file(&canonical);
-        if crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
-            std::fs::copy(&current, &canonical)?;
+        let reuse_canonical = canonical.is_file()
+            && crate::scanpy_preprocess::training_h5ad_is_fully_prepared(&canonical)?
+            && crate::scanpy_preprocess::adata_x_and_layers_are_csr(&canonical)?
+            && canonical.metadata()?.modified()? >= current.metadata()?.modified()?;
+        if reuse_canonical {
+            *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         } else {
-            crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &canonical, false)?;
+            let _ = std::fs::remove_file(&canonical);
+            if crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
+                std::fs::copy(&current, &canonical)?;
+            } else {
+                crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(
+                    &current,
+                    &canonical,
+                    false,
+                )?;
+            }
+            *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         }
-        *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
     } else if !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
         crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &current, false)?;
     }

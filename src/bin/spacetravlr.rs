@@ -12,7 +12,8 @@ use serde_json::Value;
 use spacetravlr::condition_split::{prepare_condition_splits, scan_condition_status};
 use spacetravlr::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
-    canonical_adata_stem, default_output_dir_for_adata_path, expand_user_path,
+    canonical_adata_stem, canonical_training_prep_stem, default_output_dir_for_adata_path,
+    expand_user_path,
 };
 use spacetravlr::grn_extra;
 #[cfg(feature = "tui")]
@@ -1285,7 +1286,7 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
         None => std::env::current_dir().context("process-output-dir default (cwd)")?,
     };
     std::fs::create_dir_all(&out_dir)?;
-    let stem = canonical_adata_stem(&h5ad);
+    let stem = canonical_training_prep_stem(&h5ad);
     let dest =
         spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
     let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
@@ -1317,6 +1318,25 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
         }),
     );
     // #endregion
+    if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)? {
+        eprintln!(
+            "spacetravlr: reusing existing {} (>= mtime of {})",
+            dest.display(),
+            h5ad.display()
+        );
+        match spacetravlr::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad(
+            dest.as_path(),
+            &cfg,
+        ) {
+            Ok(true) => eprintln!("Wrote uns['spacetravlr_received_ligands'] (+ _meta)."),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "Warning: could not write uns['spacetravlr_received_ligands']: {}",
+                e
+            ),
+        }
+        return Ok(());
+    }
     let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
         &h5ad,
         &dest,
@@ -1363,7 +1383,7 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
         cli.condition.as_deref(),
     );
     let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
-       eprint!("{log}");
+    eprint!("{log}");
     Ok(())
 }
 
@@ -1382,14 +1402,19 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
         }
     };
 
-    let has_umap = {
+    fn h5ad_obsm_has_umap(path: &Path) -> anyhow::Result<bool> {
+        if !path.is_file() {
+            return Ok(false);
+        }
         use anndata::{AnnDataOp, AxisArraysOp, Backend};
-        let a = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(&h5ad)?)
+        let a = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(path)?)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let found = a.obsm().keys().iter().any(|k| k == "X_umap" || k == "umap");
         a.close()?;
-        found
-    };
+        Ok(found)
+    }
+
+    let has_umap = h5ad_obsm_has_umap(&h5ad)?;
 
     let plot_path = if has_umap {
         eprintln!(
@@ -1407,7 +1432,7 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
             None => std::env::temp_dir(),
         };
         std::fs::create_dir_all(&out_dir)?;
-        let stem = canonical_adata_stem(&h5ad);
+        let stem = canonical_training_prep_stem(&h5ad);
         let dest =
             spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
         let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
@@ -1424,16 +1449,28 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
             cli.magic_batch_obs.as_deref(),
             cli.condition.as_deref(),
         );
-        let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
-            &h5ad,
-            &dest,
-            true,
-            batch_owned.as_deref(),
-            spatial_microns,
-        )?;
-        if let Some(l) = log {
-            eprint!("{l}");
-        }
+        let out = if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)?
+            && h5ad_obsm_has_umap(&dest)?
+        {
+            eprintln!(
+                "spacetravlr: reusing existing {} (>= mtime of {})",
+                dest.display(),
+                h5ad.display()
+            );
+            dest
+        } else {
+            let (written, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+                &h5ad,
+                &dest,
+                true,
+                batch_owned.as_deref(),
+                spatial_microns,
+            )?;
+            if let Some(l) = log {
+                eprint!("{l}");
+            }
+            written
+        };
         out
     };
 

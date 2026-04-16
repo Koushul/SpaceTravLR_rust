@@ -61,7 +61,8 @@ pub use cnn_gating::CnnGateDecision;
 pub use config::{
     CnnConfig, CnnOutputActivation, CnnTrainingMode, HybridCnnGatingConfig,
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem,
-    default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
+    canonical_training_prep_stem, default_output_dir_for_adata_path, expand_user_path,
+    filter_training_var_names,
     normalize_ui_path, resolve_training_target_genes,
 };
 pub use estimator::{
