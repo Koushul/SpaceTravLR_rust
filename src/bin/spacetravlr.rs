@@ -1682,6 +1682,7 @@ fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    spacetravlr::ensure_hdf5_no_file_locking();
     let cli = Cli::parse();
 
     if cli.update {

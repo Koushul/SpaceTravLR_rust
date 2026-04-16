@@ -1,3 +1,18 @@
+/// Ensure HDF5 file locking is disabled so `.h5ad` opens succeed on network
+/// filesystems (NFS, Lustre, GPFS) that do not support POSIX advisory locks.
+/// Safe to call more than once; only the first call sets the variable.
+pub fn ensure_hdf5_no_file_locking() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("HDF5_USE_FILE_LOCKING").is_none() {
+            unsafe {
+                std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+            }
+        }
+    });
+}
+
 #[cfg(feature = "spatial-viewer")]
 pub mod adata_query;
 pub mod adata_terminal_scatter;
