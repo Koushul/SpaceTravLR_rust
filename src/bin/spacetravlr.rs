@@ -906,6 +906,79 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     Ok(())
 }
 
+fn validate_join_cli_against_repro(
+    cli: &Cli,
+    cfg: &SpaceshipConfig,
+    repro: &Path,
+    err_prefix: &str,
+) -> anyhow::Result<()> {
+    if let Some(cli_k) = cli.max_ligands {
+        let expected = cli_k.max(1);
+        if cfg.grn.max_ligands != Some(expected) {
+            anyhow::bail!(
+                "{err_prefix} --max-ligands / --max-lr {} does not match [grn].max_ligands ({:?}) in {}.\n\
+                 Join-style training uses the repro TOML as the single source of truth; omit those flags, or set [grn].max_ligands the same on the leader run.",
+                expected,
+                cfg.grn.max_ligands,
+                repro.display()
+            );
+        }
+    }
+    let repro_file_condition = cfg.data.condition.clone();
+    if let Some(cli_raw) = cli.condition.as_deref() {
+        let cli_c = cli_raw.trim();
+        if !cli_c.is_empty() {
+            if let Some(ref file_c) = repro_file_condition {
+                if !cli_c.eq_ignore_ascii_case(file_c.trim()) {
+                    anyhow::bail!(
+                        "{err_prefix} --condition {:?} does not match [data].condition = {:?} in {}; omit --condition to use the file, or fix the mismatch.",
+                        cli_c,
+                        file_c,
+                        repro.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eprint_join_style_resume_cli_notes(cli: &Cli, repro: &Path, explicit_join_flag: bool) {
+    let via = if explicit_join_flag {
+        "--join-output-dir"
+    } else {
+        "existing output directory"
+    };
+    if cli.config.is_some() {
+        eprintln!(
+            "Note: {via}: training uses {} (--config ignored for training settings).",
+            repro.display()
+        );
+    }
+    if cli.max_genes.is_some() || cli.genes.is_some() {
+        eprintln!(
+            "Note: {via}: [training] genes / max_genes come from {}; --genes and --max-genes are ignored.",
+            repro.display()
+        );
+    }
+    if cli.epochs.is_some()
+        || cli.lr.is_some()
+        || cli.l1_reg.is_some()
+        || cli.group_reg.is_some()
+        || cli.n_iter.is_some()
+        || cli.tol.is_some()
+        || cli.training_mode.is_some()
+        || cli.output_dir.is_some()
+        || cli.cnn_output_activation.is_some()
+        || cli.weighted_ligand_scale_factor.is_some()
+        || cli.train_modulators.is_some()
+    {
+        eprintln!(
+            "Note: {via}: hyperparameter / output CLI flags are ignored except --parallel (using repro TOML)."
+        );
+    }
+}
+
 fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
     if let Some(j) = cli.join_output_dir.as_ref() {
         let jexp = expand_user_path(j.to_string_lossy().as_ref());
@@ -917,63 +990,10 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             );
         }
         let mut cfg = SpaceshipConfig::from_file(&repro)?;
-        if let Some(cli_k) = cli.max_ligands {
-            let expected = cli_k.max(1);
-            if cfg.grn.max_ligands != Some(expected) {
-                anyhow::bail!(
-                    "--join-output-dir: --max-ligands / --max-lr {} does not match [grn].max_ligands ({:?}) in {}.\n\
-                     Join training uses the repro TOML as the single source of truth; omit those flags, or set [grn].max_ligands the same on the leader run.",
-                    expected,
-                    cfg.grn.max_ligands,
-                    repro.display()
-                );
-            }
-        }
-        let repro_file_condition = cfg.data.condition.clone();
-        if let Some(cli_raw) = cli.condition.as_deref() {
-            let cli_c = cli_raw.trim();
-            if !cli_c.is_empty() {
-                if let Some(ref file_c) = repro_file_condition {
-                    if !cli_c.eq_ignore_ascii_case(file_c.trim()) {
-                        anyhow::bail!(
-                            "--condition {:?} does not match [data].condition = {:?} in {}; omit --condition to use the file, or fix the mismatch.",
-                            cli_c,
-                            file_c,
-                            repro.display()
-                        );
-                    }
-                }
-            }
-        }
+        validate_join_cli_against_repro(cli, &cfg, &repro, "--join-output-dir:")?;
         cfg.execution.output_dir = jexp;
         apply_cli_join_overrides(cli, &mut cfg)?;
-        if cli.config.is_some() {
-            eprintln!(
-                "Note: --join-output-dir ignores --config for training settings (using repro TOML)."
-            );
-        }
-        if cli.max_genes.is_some() || cli.genes.is_some() {
-            eprintln!(
-                "Note: --join-output-dir uses [training] genes / max_genes from {}; --genes and --max-genes on this command are ignored.",
-                repro.display()
-            );
-        }
-        if cli.epochs.is_some()
-            || cli.lr.is_some()
-            || cli.l1_reg.is_some()
-            || cli.group_reg.is_some()
-            || cli.n_iter.is_some()
-            || cli.tol.is_some()
-            || cli.training_mode.is_some()
-            || cli.output_dir.is_some()
-            || cli.cnn_output_activation.is_some()
-            || cli.weighted_ligand_scale_factor.is_some()
-            || cli.train_modulators.is_some()
-        {
-            eprintln!(
-                "Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML)."
-            );
-        }
+        eprint_join_style_resume_cli_notes(cli, &repro, true);
         Ok((cfg, true))
     } else {
         let mut cfg = match &cli.config {
@@ -1755,39 +1775,7 @@ fn main() -> anyhow::Result<()> {
         return run_plot_umap(&cli);
     }
 
-    let (mut cfg, join_training) = load_config_for_main(&cli)?;
-
-    let config_source_path: Option<PathBuf> = if join_training {
-        Some(
-            PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()))
-                .join(RUN_REPRO_TOML_FILENAME),
-        )
-    } else {
-        cli.config
-            .as_ref()
-            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
-            .or_else(SpaceshipConfig::discover_default_path)
-    };
-
-    let max_genes = cfg.training.max_genes;
-    let gene_filter = cfg.training.genes.clone();
-    let condition_column = cli
-        .condition
-        .clone()
-        .or_else(|| cfg.data.condition.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    if join_training
-        && condition_column.is_none()
-        && Path::new(&cfg.execution.output_dir)
-            .join(spacetravlr::condition_split::CONDITION_RUNS_SUBDIR)
-            .is_dir()
-    {
-        eprintln!(
-            "Warning: --join-output-dir points at a run with a `conditions/` subtree, but neither --condition nor [data].condition in the repro TOML is set; training will use a single output directory (not per-condition). Pass --condition <obs_column> if you meant to resume condition splits."
-        );
-    }
+    let (mut cfg, mut join_training) = load_config_for_main(&cli)?;
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
     let compute = select_compute_backend();
@@ -1824,13 +1812,13 @@ fn main() -> anyhow::Result<()> {
     let mut path = expand_user_path(&cfg.data.adata_path);
     cfg.data.adata_path = path.clone();
 
-    let network_data_dir: Option<String> = cfg
+    let mut network_data_dir: Option<String> = cfg
         .grn
         .network_data_dir
         .as_ref()
         .map(|s| expand_user_path(s.trim()))
         .filter(|s| !s.is_empty());
-    let tf_priors_feather: Option<String> = cfg
+    let mut tf_priors_feather: Option<String> = cfg
         .grn
         .tf_priors_feather
         .as_ref()
@@ -1842,7 +1830,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("Dataset not found at {}.", path);
     }
 
-    let adata_path_for_stem = path.clone();
+    let mut adata_path_for_stem = path.clone();
 
     if cfg.execution.output_dir.trim().is_empty() {
         cfg.execution.output_dir =
@@ -1851,6 +1839,71 @@ fn main() -> anyhow::Result<()> {
     let output_dir_pb = PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()));
     std::fs::create_dir_all(&output_dir_pb)?;
     cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
+
+    if !join_training {
+        let repro_pb = output_dir_pb.join(RUN_REPRO_TOML_FILENAME);
+        if repro_pb.is_file() {
+            eprintln!(
+                "Note: {} already exists under {} — loading it (same training contract as --join-output-dir).",
+                RUN_REPRO_TOML_FILENAME,
+                output_dir_pb.display()
+            );
+            join_training = true;
+            cfg = SpaceshipConfig::from_file(&repro_pb)?;
+            cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
+            validate_join_cli_against_repro(&cli, &cfg, &repro_pb, "Resume:")?;
+            apply_cli_join_overrides(&cli, &mut cfg)?;
+            eprint_join_style_resume_cli_notes(&cli, &repro_pb, false);
+            path = expand_user_path(cfg.data.adata_path.trim());
+            cfg.data.adata_path = path.clone();
+            if !Path::new(&path).exists() {
+                anyhow::bail!("Dataset not found at {}.", path);
+            }
+            adata_path_for_stem = path.clone();
+            network_data_dir = cfg
+                .grn
+                .network_data_dir
+                .as_ref()
+                .map(|s| expand_user_path(s.trim()))
+                .filter(|s| !s.is_empty());
+            tf_priors_feather = cfg
+                .grn
+                .tf_priors_feather
+                .as_ref()
+                .map(|s| expand_user_path(s.trim()))
+                .filter(|s| !s.is_empty());
+            cfg.grn.tf_priors_feather = tf_priors_feather.clone();
+        }
+    }
+
+    let max_genes = cfg.training.max_genes;
+    let gene_filter = cfg.training.genes.clone();
+    let condition_column = cli
+        .condition
+        .clone()
+        .or_else(|| cfg.data.condition.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let config_source_path: Option<PathBuf> = if join_training {
+        Some(output_dir_pb.join(RUN_REPRO_TOML_FILENAME))
+    } else {
+        cli.config
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+            .or_else(SpaceshipConfig::discover_default_path)
+    };
+
+    if join_training
+        && condition_column.is_none()
+        && Path::new(&cfg.execution.output_dir)
+            .join(spacetravlr::condition_split::CONDITION_RUNS_SUBDIR)
+            .is_dir()
+    {
+        eprintln!(
+            "Warning: --join-output-dir points at a run with a `conditions/` subtree, but neither --condition nor [data].condition in the repro TOML is set; training will use a single output directory (not per-condition). Pass --condition <obs_column> if you meant to resume condition splits."
+        );
+    }
 
     if !cli.skip_auto_adata_prep
         && Path::new(&path)
