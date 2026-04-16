@@ -319,9 +319,7 @@ pub fn run_multi_mode(
 
     let mut final_tasks: BTreeMap<usize, Vec<(usize, Vec<usize>)>> = BTreeMap::new();
     for (pix, ct_list) in cell_type_lists.iter_mut().enumerate() {
-        let mut k_sub = ct_list.len();
-        if k_sub == 0 {
-            k_sub = 1;
+        if ct_list.is_empty() {
             let row = w_sel.row(pix);
             let mut best = 0usize;
             let mut best_v = row[0];
