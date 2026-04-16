@@ -1,0 +1,29 @@
+IL21 / BCL6 ablation experiment (human tonsil snRNA, 5778 x 3333, genes IL21+BCL6 only, max_ligands=40, CPU).
+
+Design
+- Modulators: tf_only, tf_lr, tf_lr_ltfl, lr_only, ltfl_only × training mode seed vs full (12 CNN epochs).
+- cluster_annot = cell_type_int (required so betadata Cluster keys match obs; using cell_type alone maps no cells).
+- Perturbations: IL21 KO/OE1.5, BCL6 KO/OE1.5, joint KO/OE, asymmetric joint (8 scenarios), n_propagation=4.
+
+Training (mean_lasso_r2 on processed h5ad)
+- IL21/BCL6 R² identical for lr_only vs tf_lr vs tf_lr_ltfl (~0.31 / ~0.71); tf_only slightly lower BCL6 R².
+- ltfl_only: orphan targets → NaN R² (no usable modulators for these genes under TFL-only).
+
+Perturbation outcome (critical)
+- After fixing cluster_annot, all 10 runs still produced *byte-identical* perturb feathers for matched scenarios
+  (e.g. IL21_KO_perturb_expr.feather same md5 across tf_only__seed, tf_lr__seed, lr_only__seed, and same across full runs).
+- Pairwise max abs diff vs tf_only__seed for IL21 KO across all runs = 0 (see analyze_perturb_identity.py).
+
+Interpretation
+- For this gene pair on this dataset, forward in-silico perturbation did not separate GRN ablations: either splash
+  uses a path that collapses when only two targets are trained, or betas that differ in the feather do not change the
+  propagated state under these settings. Do not use these perturb deltas to claim LR vs TF effects without further
+  diagnosis (e.g. more targets, inspect Betabase.splash per gene, or assert non-zero delta from KO).
+
+Alignment metric (embeds2perturb / VirtualTissue.compute_vector_alignment)
+- Not run here: velocyto + SpaceTravLR Python deps missing in this environment. Use scripts/ablation_il21_bcl6_alignment.py
+  after installing SpaceTravLR + cellrank + velocyto; add obs['pseudotime'] (prepare_analysis_h5ad.py uses UMAP1).
+
+Artifacts
+- runs/<config>/{IL21,BCL6}_betadata.feather, spacetravlr_run_repro.toml, perturb_feathers/*.feather
+- analysis/training_mean_lasso_r2.csv, analysis/l2_delta_summary.csv

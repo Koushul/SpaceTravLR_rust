@@ -1,0 +1,5 @@
+parallelism = 2
+genes = ["IL21"]
+desired_expr = 0.0
+n_propagation = 4
+out = "perturb_feathers/IL21_KO_perturb_expr.feather"

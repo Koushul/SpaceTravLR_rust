@@ -1,0 +1,5 @@
+parallelism = 2
+genes = ["BCL6"]
+desired_expr = 1.5
+n_propagation = 4
+out = "perturb_feathers/BCL6_OE1p5_perturb_expr.feather"

@@ -1,0 +1,5 @@
+parallelism = 2
+compound_genes = ["IL21", "BCL6"]
+desired_expr = [0.0, 0.0]
+n_propagation = 4
+out = "perturb_feathers/IL21_BCL6_joint_KO_perturb_expr.feather"
