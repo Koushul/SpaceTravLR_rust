@@ -80,6 +80,8 @@ def main() -> None:
     _df_pst = pd.concat(pseudo_frames).fillna(0).sum(axis=1).to_frame()
     _df_pst.columns = ["pseudotime"]
     _df_pst = _df_pst.groupby(_df_pst.index).mean()
+    # Full obs order (Rust alignment matches training on all cells); outside subgraphs → 0 like absent branches.
+    _df_pst = _df_pst.reindex(adata.obs_names.astype(str)).fillna(0.0)
 
     out = pd.DataFrame({"obs_name": _df_pst.index.astype(str), "pseudotime": _df_pst["pseudotime"].values})
     out.to_csv(args.out_csv, index=False)

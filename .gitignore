@@ -19,6 +19,7 @@ retro_synthesis/
 
 # Local IL21/BCL6 ablation runs (large processed h5ad + feathers); keep scripts under experiments/il21_bcl6_ablation/
 experiments/il21_bcl6_ablation/runs/
+experiments/il21_bcl6_ablation/ko_feathers_export/
 
 docs/_build/
 docs/.doctrees/
