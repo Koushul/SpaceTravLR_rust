@@ -1,5 +1,5 @@
 use anyhow::Context;
-use crate::betadata::write_betadata_feather;
+use crate::betadata::{build_cluster_id_to_betadata_cluster_key_map, write_betadata_feather};
 use crate::cnn_gating::{
     CnnGateDecision, CnnGateGeneInputs, build_neighbors, decide_cnn_for_gene, load_gene_set_file,
     predict_lasso_y,
@@ -41,6 +41,29 @@ use std::time::{Duration, SystemTime};
 
 const LARGE_DATASET_GRID_AUTO_CELLS: usize = 15_000;
 const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
+
+/// `use_tf_modulators` is on and every fitted TF coefficient column is zero (column indices
+/// `1..=n_tf` in per-cell β; column 0 is intercept).
+fn per_cell_all_tf_beta_columns_zero(all_betas: &Array2<f64>, n_tf: usize) -> bool {
+    if n_tf == 0 {
+        return false;
+    }
+    (1..=n_tf).all(|j| {
+        j < all_betas.ncols()
+            && !all_betas
+                .column(j)
+                .iter()
+                .any(|&v| finite_or_zero_f64(v) != 0.0)
+    })
+}
+
+/// Same as [`per_cell_all_tf_beta_columns_zero`] for cluster-rows export (`[intercept, β…]` per row).
+fn cluster_rows_all_tf_coef_columns_zero(rows: &[Vec<f64>], n_tf: usize) -> bool {
+    if n_tf == 0 {
+        return false;
+    }
+    (1..=n_tf).all(|j| !rows.iter().any(|r| j < r.len() && r[j] != 0.0))
+}
 
 /// Remove `*.lock` files in `dir` whose modification time is at least `stale_secs` old.
 /// Returns how many files were deleted. No-op if `stale_secs == 0` or `dir` is not a directory.
@@ -1498,6 +1521,10 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// When set, only these obs rows are read from the backing AnnData (read-only; no disk writes).
     pub obs_row_subset: Option<Arc<[usize]>>,
     pub modulator_scales: Option<Array1<f64>>,
+    /// Only when `[grn].use_tf_modulators` is **false**: target had TF-only GRN/prior support but
+    /// no LR/TFL/extra columns — written as `.tf_ablated`, not `.orphan`. When TF modulators are
+    /// on, missing or all-zero TF support uses `.orphan` like any other orphan.
+    pub gene_excluded_tf_modulators_ablation: bool,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -1529,14 +1556,17 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         let var_set: HashSet<String> = adata.var_names().into_vec().into_iter().collect();
 
-        let modulators = grn
-            .get_modulators(
-                &target_gene_str,
-                tf_ligand_cutoff,
-                max_ligands,
-                gene_mean_expression.as_deref(),
-            )?
-            .apply_modulator_mask(use_tf_modulators, use_lr_modulators, use_tfl_modulators);
+        let full = grn.get_modulators(
+            &target_gene_str,
+            tf_ligand_cutoff,
+            max_ligands,
+            gene_mean_expression.as_deref(),
+        )?;
+        let modulators = full.clone().apply_modulator_mask(
+            use_tf_modulators,
+            use_lr_modulators,
+            use_tfl_modulators,
+        );
 
         let mut ligands = modulators.ligands.clone();
         let mut receptors = modulators.receptors.clone();
@@ -1607,6 +1637,31 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             }
         }
 
+        if use_tfl_modulators && tfl_pairs.is_empty() && !full.ligands.is_empty() {
+            let regs_for_nn: Vec<String> = if !full.regulators.is_empty() {
+                full.regulators.clone()
+            } else if let Some(priors) = tf_priors.as_ref() {
+                priors
+                    .tfs_for_target_any(&target_gene_str)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !regs_for_nn.is_empty() {
+                let (nl, nr, np) = grn.nichenet_tfl_pairs_for_regulators(
+                    &regs_for_nn,
+                    tf_ligand_cutoff,
+                    &full.ligands,
+                )?;
+                if !np.is_empty() {
+                    tfl_ligands = nl;
+                    tfl_regulators = nr;
+                    tfl_pairs = np;
+                }
+            }
+        }
+
         let mut occupied: HashSet<String> = HashSet::new();
         occupied.insert(target_gene_str.clone());
         for g in regulators
@@ -1636,6 +1691,14 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         modulators_genes_ordered.extend(tfl_pairs.iter().cloned());
         modulators_genes_ordered.extend(extra_modulators_accepted.iter().cloned());
 
+        let gene_excluded_tf_modulators_ablation = !use_tf_modulators
+            && modulators_genes_ordered.is_empty()
+            && (!full.regulators.is_empty()
+                || tf_priors
+                    .as_ref()
+                    .and_then(|p| p.tfs_for_target_any(&target_gene_str))
+                    .is_some_and(|v| !v.is_empty()));
+
         Ok(Self {
             adata,
             target_gene,
@@ -1664,6 +1727,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             weighted_ligand_scale_factor,
             obs_row_subset,
             modulator_scales: None,
+            gene_excluded_tf_modulators_ablation,
         })
     }
 
@@ -1887,6 +1951,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 .unwrap_or(1);
             let cluster_to_cell_type =
                 Arc::new(build_cluster_to_cell_type_map(&obs_df, cluster_annot)?);
+            let cluster_betadata_row_keys = Arc::new(build_cluster_id_to_betadata_cluster_key_map(
+                &obs_df,
+                cluster_annot,
+                clusters.as_ref(),
+            )?);
             pipeline_step_end(&hud, "build cluster labels & cell-type map", t_cl);
             if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
                 log_line(
@@ -2347,6 +2416,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let global_grn = global_grn.clone();
                 let tf_priors = tf_priors.clone();
                 let cluster_to_cell_type = cluster_to_cell_type.clone();
+                let cluster_betadata_row_keys = cluster_betadata_row_keys.clone();
                 let cluster_annot_w = cluster_annot_for_workers.clone();
                 let hud = hud.clone();
                 let pb = pb_opt.clone();
@@ -2414,11 +2484,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             let feather_path =
                                 format!("{}/{}_betadata.feather", training_dir, gene);
                             let orphan_path = format!("{}/{}.orphan", training_dir, gene);
+                            let tf_ablated_path =
+                                format!("{}/{}.tf_ablated", training_dir, gene);
                             let lock_path = format!("{}/{}.lock", training_dir, gene);
 
                             // Skip already-done
                             if std::path::Path::new(&feather_path).exists()
                                 || std::path::Path::new(&orphan_path).exists()
+                                || std::path::Path::new(&tf_ablated_path).exists()
                             {
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
@@ -2563,17 +2636,47 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             }
 
-                            if n_mods == 0 {
-                                let _ =
-                                    fs::File::create(format!("{}/{}.orphan", training_dir, gene));
-                                if let Some(ref h) = hud {
-                                    if let Ok(mut g) = h.lock() {
-                                        g.genes_orphan += 1;
-                                        g.remove_gene(&gene);
-                                        g.genes_rounds += 1;
+                            let absent_tf_when_required =
+                                use_tf_modulators && estimator.regulators.is_empty();
+
+                            if n_mods == 0 || absent_tf_when_required {
+                                if n_mods == 0
+                                    && estimator.gene_excluded_tf_modulators_ablation
+                                {
+                                    let _ = fs::File::create(&tf_ablated_path);
+                                    if let Some(ref h) = hud {
+                                        if let Ok(mut g) = h.lock() {
+                                            g.genes_tf_ablated += 1;
+                                            g.remove_gene(&gene);
+                                            g.genes_rounds += 1;
+                                        }
                                     }
+                                    log_line(
+                                        &hud,
+                                        format!(
+                                            ">> tf_ablated (TF modulators off; had TF-only GRN/prior support) {}",
+                                            gene
+                                        ),
+                                    );
+                                } else {
+                                    let _ = fs::File::create(&orphan_path);
+                                    if let Some(ref h) = hud {
+                                        if let Ok(mut g) = h.lock() {
+                                            g.genes_orphan += 1;
+                                            g.remove_gene(&gene);
+                                            g.genes_rounds += 1;
+                                        }
+                                    }
+                                    let msg = if absent_tf_when_required {
+                                        format!(
+                                            ">> orphan (use_tf_modulators on but no TF regulators for target) {}",
+                                            gene
+                                        )
+                                    } else {
+                                        format!(">> orphan (no modulators) {}", gene)
+                                    };
+                                    log_line(&hud, msg);
                                 }
-                                log_line(&hud, format!(">> orphan (no modulators) {}", gene));
                                 if let Some(ref p) = pb {
                                     p.inc(1);
                                 }
@@ -2824,7 +2927,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         n_betadata_beta_columns =
                                             Some(keep.iter().filter(|&&j| j >= 1).count());
 
-                                        if !keep.iter().any(|&j| j >= 1) {
+                                        let n_tf = estimator.regulators.len();
+                                        let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
+                                        let all_tf_betas_zero =
+                                            per_cell_all_tf_beta_columns_zero(&all_betas, n_tf);
+
+                                        if !has_any_mod_beta || all_tf_betas_zero {
                                             let _ = fs::File::create(format!(
                                                 "{}/{}.orphan",
                                                 training_dir, gene
@@ -2835,13 +2943,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     g.genes_orphan += 1;
                                                 }
                                             }
-                                            log_line(
-                                                &hud,
+                                            let orphan_msg = if !has_any_mod_beta {
                                                 format!(
                                                     ">> orphan (no non-zero modulator betas) {}",
                                                     gene
-                                                ),
-                                            );
+                                                )
+                                            } else {
+                                                format!(
+                                                    ">> orphan (all TF modulator betas are zero) {}",
+                                                    gene
+                                                )
+                                            };
+                                            log_line(&hud, orphan_msg);
                                         } else {
                                             let n_rows = obs_names.len();
                                             let n_keep = keep.len();
@@ -2917,7 +3030,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         n_betadata_beta_columns =
                                             Some(keep.iter().filter(|&&j| j >= 1).count());
 
-                                        if !keep.iter().any(|&j| j >= 1) {
+                                        let n_tf = estimator.regulators.len();
+                                        let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
+                                        let all_tf_betas_zero =
+                                            cluster_rows_all_tf_coef_columns_zero(&rows, n_tf);
+
+                                        if !has_any_mod_beta || all_tf_betas_zero {
                                             let _ = fs::File::create(format!(
                                                 "{}/{}.orphan",
                                                 training_dir, gene
@@ -2928,13 +3046,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     g.genes_orphan += 1;
                                                 }
                                             }
-                                            log_line(
-                                                &hud,
+                                            let orphan_msg = if !has_any_mod_beta {
                                                 format!(
                                                     ">> orphan (no non-zero modulator betas) {}",
                                                     gene
-                                                ),
-                                            );
+                                                )
+                                            } else {
+                                                format!(
+                                                    ">> orphan (all TF modulator betas are zero) {}",
+                                                    gene
+                                                )
+                                            };
+                                            log_line(&hud, orphan_msg);
                                         } else {
                                             let n_rows = rows.len();
                                             let n_keep = keep.len();
@@ -2944,8 +3067,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     mat[[i, new_j]] = row_vals[j];
                                                 }
                                             }
-                                            let ids: Vec<String> =
-                                                cluster_ids.iter().map(|c| c.to_string()).collect();
+                                            let ids: Vec<String> = cluster_ids
+                                                .iter()
+                                                .map(|&c| {
+                                                    cluster_betadata_row_keys
+                                                        .get(&c)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| c.to_string())
+                                                })
+                                                .collect();
                                             let data_cols: Vec<String> = keep
                                                 .iter()
                                                 .map(|&j| col_names[j].clone())

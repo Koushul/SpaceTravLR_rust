@@ -12,12 +12,13 @@ pub struct ConditionDirStatus {
     pub output_dir: PathBuf,
     pub n_feathers: usize,
     pub n_orphans: usize,
+    pub n_tf_ablated: usize,
     pub n_locks: usize,
 }
 
 impl ConditionDirStatus {
     pub fn n_done(&self) -> usize {
-        self.n_feathers + self.n_orphans
+        self.n_feathers + self.n_orphans + self.n_tf_ablated
     }
 }
 
@@ -46,6 +47,7 @@ pub fn scan_condition_status(output_root: &str) -> anyhow::Result<Vec<ConditionD
 
         let mut n_feathers = 0usize;
         let mut n_orphans = 0usize;
+        let mut n_tf_ablated = 0usize;
         let mut n_locks = 0usize;
         if let Ok(files) = fs::read_dir(&dir_path) {
             for f in files.filter_map(|f| f.ok()) {
@@ -55,6 +57,8 @@ pub fn scan_condition_status(output_root: &str) -> anyhow::Result<Vec<ConditionD
                     n_feathers += 1;
                 } else if name.ends_with(".orphan") {
                     n_orphans += 1;
+                } else if name.ends_with(".tf_ablated") {
+                    n_tf_ablated += 1;
                 } else if name.ends_with(".lock") {
                     n_locks += 1;
                 }
@@ -67,6 +71,7 @@ pub fn scan_condition_status(output_root: &str) -> anyhow::Result<Vec<ConditionD
             output_dir: dir_path,
             n_feathers,
             n_orphans,
+            n_tf_ablated,
             n_locks,
         });
     }

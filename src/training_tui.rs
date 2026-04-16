@@ -619,7 +619,10 @@ fn scan_output_metrics(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.ends_with(".feather") || name.ends_with(".orphan") {
+        if name.ends_with(".feather")
+            || name.ends_with(".orphan")
+            || name.ends_with(".tf_ablated")
+        {
             disk_done += 1;
         } else if name.ends_with(".lock") {
             let stem = name.strip_suffix(".lock").unwrap_or(name);
@@ -2002,6 +2005,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Span::styled(format!("{}", st.genes_failed), title_bold),
                     Span::styled("  orphan ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_orphan), title_bold),
+                    Span::styled("  tf_ablated ", Style::default().fg(pal.muted)),
+                    Span::styled(format!("{}", st.genes_tf_ablated), title_bold),
                 ])
             };
             let prog_block = Block::default()

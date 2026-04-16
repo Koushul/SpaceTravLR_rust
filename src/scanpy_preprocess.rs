@@ -7,6 +7,7 @@
 //! do not leak into the isolated env.
 //! **`--no-cache-dir`** is passed to **`uv run`** unless **`cfg(test)`** is enabled or **`SPACETRAVLR_UV_ALLOW_CACHE`**
 //! is set to **`1`**, **`true`**, or **`yes`** (trimmed, ASCII case-insensitive). Unit tests and opt-in callers can reuse wheels.
+//! On failure, the same invocation is retried once with global **`uv --no-cache`** (disables uv’s cache entirely) to recover from bad cache state.
 //! **`uv`** children also cap **`OPENBLAS_NUM_THREADS`**, **`OMP_NUM_THREADS`**, **`MKL_NUM_THREADS`**,
 //! **`NUMEXPR_NUM_THREADS`**, and **`VECLIB_MAXIMUM_THREADS`** (default **`1`**) so inherited huge
 //! thread counts do not trigger OpenBLAS “NUM_THREADS exceeded” / bad unallocation; override with
@@ -210,6 +211,39 @@ fn uv_python_stdin(
     capture_output: bool,
     spawn_hint: &str,
 ) -> anyhow::Result<String> {
+    match uv_python_stdin_once(
+        false,
+        with_packages,
+        stdin_script,
+        argv_after_dash,
+        capture_output,
+        spawn_hint,
+    ) {
+        Ok(s) => Ok(s),
+        Err(first) => uv_python_stdin_once(
+            true,
+            with_packages,
+            stdin_script,
+            argv_after_dash,
+            capture_output,
+            spawn_hint,
+        )
+        .map_err(|second| {
+            anyhow::anyhow!(
+                "uv run failed ({spawn_hint}); retry with `uv --no-cache` also failed.\n--- first attempt ---\n{first}\n--- retry ---\n{second}"
+            )
+        }),
+    }
+}
+
+fn uv_python_stdin_once(
+    global_no_cache: bool,
+    with_packages: &[&str],
+    stdin_script: &str,
+    argv_after_dash: &[&str],
+    capture_output: bool,
+    spawn_hint: &str,
+) -> anyhow::Result<String> {
     let (stdout, stderr) = if capture_output {
         (Stdio::piped(), Stdio::piped())
     } else {
@@ -219,6 +253,9 @@ fn uv_python_stdin(
     let mut cmd = uv_command_base();
     #[cfg(test)]
     cmd.env("SPACETRAVLR_TEST_FAST_UV", "1");
+    if global_no_cache {
+        cmd.arg("--no-cache");
+    }
     cmd.arg("run").arg("--isolated");
     if !uv_allow_wheel_cache() {
         cmd.arg("--no-cache-dir");
@@ -1263,6 +1300,20 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
+    fn uv_run_status_retry_no_cache(
+        mut build: impl FnMut(bool) -> Command,
+    ) -> anyhow::Result<std::process::ExitStatus> {
+        let s = build(false)
+            .status()
+            .context("spawn uv (first attempt)")?;
+        if s.success() {
+            return Ok(s);
+        }
+        build(true)
+            .status()
+            .context("spawn uv (--no-cache retry)")
+    }
+
     #[test]
     fn processed_h5ad_path_stem() {
         let p = PathBuf::from("/tmp/foo.h5ad");
@@ -1301,17 +1352,21 @@ mod tests {
 
     fn write_minimal_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .arg("python")
+                .arg("-c")
+                .arg(
+                    r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -1328,27 +1383,32 @@ a.obs_names = [f"c{i}" for i in range(n_obs)]
 a.var_names = [f"GEN{i}" for i in range(n_var)]
 a.write_h5ad(p)
 "#,
-            )
-            .arg(path_str)
-            .status()
-            .context("spawn uv to write toy h5ad")?;
+                )
+                .arg(path_str);
+            c
+        })
+        .context("uv to write toy h5ad")?;
         anyhow::ensure!(status.success(), "uv toy h5ad write failed: {status}");
         Ok(())
     }
 
     fn write_spatial_grid_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .arg("python")
+                .arg("-c")
+                .arg(
+                    r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -1373,10 +1433,11 @@ a.var_names = [f"GEN{i}" for i in range(n_var)]
 a.obsm["spatial"] = spatial
 a.write_h5ad(p)
 "#,
-            )
-            .arg(path_str)
-            .status()
-            .context("spawn uv to write spatial grid h5ad")?;
+                )
+                .arg(path_str);
+            c
+        })
+        .context("uv to write spatial grid h5ad")?;
         anyhow::ensure!(status.success(), "uv spatial grid h5ad write failed: {status}");
         Ok(())
     }
@@ -1546,17 +1607,21 @@ a.write_h5ad(p)
 
     fn write_log1p_like_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .arg("python")
+                .arg("-c")
+                .arg(
+                    r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -1571,10 +1636,11 @@ a.obs_names = [f"c{i}" for i in range(60)]
 a.var_names = [f"G{i}" for i in range(300)]
 a.write_h5ad(p)
 "#,
-            )
-            .arg(path_str)
-            .status()
-            .context("spawn uv to write log1p-like h5ad")?;
+                )
+                .arg(path_str);
+            c
+        })
+        .context("uv to write log1p-like h5ad")?;
         anyhow::ensure!(status.success(), "uv log1p toy write failed: {status}");
         Ok(())
     }
@@ -1754,20 +1820,25 @@ a.write_h5ad(out)
 "#,
             py_body = py_body
         );
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .args(["--with", "scipy"])
-            .arg("python")
-            .arg("-c")
-            .arg(&script)
-            .arg(path_str)
-            .status()
-            .context("spawn uv fixture h5ad")?;
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .args(["--with", "scipy"])
+                .arg("python")
+                .arg("-c")
+                .arg(&script)
+                .arg(path_str);
+            c
+        })
+        .context("uv fixture h5ad")?;
         anyhow::ensure!(status.success(), "uv fixture h5ad failed: {status}");
         Ok(())
     }

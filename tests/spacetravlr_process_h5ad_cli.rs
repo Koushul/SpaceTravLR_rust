@@ -1,5 +1,15 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
+
+fn uv_status_retry_no_cache(
+    mut build: impl FnMut(bool) -> Command,
+) -> std::io::Result<ExitStatus> {
+    let s = build(false).status()?;
+    if s.success() {
+        return Ok(s);
+    }
+    build(true).status()
+}
 
 fn spacetravlr_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_spacetravlr"))
@@ -108,14 +118,18 @@ fn process_h5ad_end_to_end_writes_processed_sibling() {
     let in_path = dir.join("toy_cli.h5ad");
     let in_str = in_path.to_str().expect("utf-8 path");
 
-    let toy_status = Command::new(&uv)
-        .env_remove("PYTHONPATH")
-        .env("PYTHONNOUSERSITE", "1")
-        .args(["run", "--isolated", "--with", "numpy<2", "--with", "anndata>=0.11"])
-        .arg("python")
-        .arg("-c")
-        .arg(
-            r#"
+    let toy_status = uv_status_retry_no_cache(|no_cache| {
+        let mut c = Command::new(&uv);
+        c.env_remove("PYTHONPATH")
+            .env("PYTHONNOUSERSITE", "1");
+        if no_cache {
+            c.arg("--no-cache");
+        }
+        c.args(["run", "--isolated", "--with", "numpy<2", "--with", "anndata>=0.11"])
+            .arg("python")
+            .arg("-c")
+            .arg(
+                r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -132,10 +146,11 @@ a.obs_names = [f"c{i}" for i in range(n_obs)]
 a.var_names = [f"G{i}" for i in range(n_var)]
 a.write_h5ad(p)
 "#,
-        )
-        .arg(in_str)
-        .status()
-        .expect("uv toy h5ad");
+            )
+            .arg(in_str);
+        c
+    })
+    .expect("uv toy h5ad");
     assert!(toy_status.success(), "uv toy h5ad failed: {toy_status}");
 
     let dir_str = dir.to_str().expect("utf-8 dir");
@@ -197,14 +212,18 @@ fn impute_writes_imputed_sibling_after_process_h5ad() {
     let raw_path = dir.join("chain.h5ad");
     let raw_str = raw_path.to_str().expect("utf-8");
 
-    let toy_status = Command::new(&uv)
-        .env_remove("PYTHONPATH")
-        .env("PYTHONNOUSERSITE", "1")
-        .args(["run", "--isolated", "--with", "numpy<2", "--with", "anndata>=0.11"])
-        .arg("python")
-        .arg("-c")
-        .arg(
-            r#"
+    let toy_status = uv_status_retry_no_cache(|no_cache| {
+        let mut c = Command::new(&uv);
+        c.env_remove("PYTHONPATH")
+            .env("PYTHONNOUSERSITE", "1");
+        if no_cache {
+            c.arg("--no-cache");
+        }
+        c.args(["run", "--isolated", "--with", "numpy<2", "--with", "anndata>=0.11"])
+            .arg("python")
+            .arg("-c")
+            .arg(
+                r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -221,10 +240,11 @@ a.obs_names = [f"c{i}" for i in range(n_obs)]
 a.var_names = [f"G{i}" for i in range(n_var)]
 a.write_h5ad(p)
 "#,
-        )
-        .arg(raw_str)
-        .status()
-        .expect("uv toy");
+            )
+            .arg(raw_str);
+        c
+    })
+    .expect("uv toy");
     assert!(toy_status.success(), "uv toy failed: {toy_status}");
 
     let dir_str = dir.to_str().expect("utf-8");

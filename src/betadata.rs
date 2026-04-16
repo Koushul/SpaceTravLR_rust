@@ -110,6 +110,29 @@ pub fn betadata_cluster_keys_from_obs_dataframe(
     Ok(keys)
 }
 
+/// Maps each training cluster id (same indexing as Lasso / seed betadata rows) to the
+/// per-cell string used in [`betadata_cluster_keys_from_obs_dataframe`] for that cluster,
+/// so seed `*_betadata.feather` **`Cluster`** values match perturbation / viewer join keys
+/// (e.g. `cell_type` names instead of internal `0..K-1` codes for string columns).
+pub fn build_cluster_id_to_betadata_cluster_key_map(
+    obs: &DataFrame,
+    cluster_annot: &str,
+    clusters: &Array1<usize>,
+) -> Result<HashMap<usize, String>> {
+    let keys = betadata_cluster_keys_from_obs_dataframe(obs, cluster_annot)?;
+    anyhow::ensure!(
+        keys.len() == clusters.len(),
+        "cluster key len {} != clusters len {}",
+        keys.len(),
+        clusters.len()
+    );
+    let mut out = HashMap::new();
+    for (i, &cid) in clusters.iter().enumerate() {
+        out.entry(cid).or_insert_with(|| keys[i].clone());
+    }
+    Ok(out)
+}
+
 /// `usize` cluster codes for UI / colormap grouping (Float64 cast + round). For betadata row
 /// matching use [`betadata_cluster_keys_from_obs_dataframe`] instead when the column is categorical.
 pub fn clusters_usize_from_obs_dataframe(

@@ -461,68 +461,8 @@ impl GeneNetwork {
             }
         }
 
-        // --- 3. NicheNet Pairs (edge_type == "nichenet") ---
-        let regs_len = regulators.len() as u32;
-        let mut tfl_ligands = Vec::new();
-        let mut tfl_regulators = Vec::new();
-        let mut tfl_pairs = Vec::new();
-
-        if regs_len > 0 {
-            let nn_df = lf
-                .clone()
-                .filter(
-                    col("edge_type")
-                        .cast(DataType::String)
-                        .eq(lit("nichenet"))
-                        .and(
-                            col("weight")
-                                .cast(DataType::Float64)
-                                .gt(lit(tf_ligand_cutoff)),
-                        ),
-                )
-                .select([col("source"), col("target"), col("weight")])
-                .collect()?;
-
-            if let (Ok(l_col), Ok(tf_col), Ok(w_col)) = (
-                nn_df.column("source")?.cast(&DataType::String)?.str(),
-                nn_df.column("target")?.cast(&DataType::String)?.str(),
-                nn_df.column("weight")?.cast(&DataType::Float64)?.f64(),
-            ) {
-                let ligands_set: HashSet<&String> = ligands.iter().collect();
-                let regs_set: HashSet<&String> = regulators.iter().collect();
-
-                let mut tf_candidates: HashMap<String, Vec<(String, f64)>> = HashMap::new();
-
-                for i in 0..nn_df.height() {
-                    if let (Some(l), Some(tf), Some(w)) =
-                        (l_col.get(i), tf_col.get(i), w_col.get(i))
-                    {
-                        let l_string = l.to_string();
-                        let tf_string = tf.to_string();
-                        if ligands_set.contains(&l_string) && regs_set.contains(&tf_string) {
-                            tf_candidates
-                                .entry(tf_string)
-                                .or_default()
-                                .push((l_string, w));
-                        }
-                    }
-                }
-
-                // Sort top 5 for each TF
-                for reg in regulators.iter() {
-                    if let Some(mut candidates) = tf_candidates.remove(reg) {
-                        candidates.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        for (l, _w) in candidates.into_iter().take(5) {
-                            tfl_ligands.push(l.clone());
-                            tfl_regulators.push(reg.clone());
-                            tfl_pairs.push(format!("{}#{}", l, reg));
-                        }
-                    }
-                }
-            }
-        }
+        let (tfl_ligands, tfl_regulators, tfl_pairs) =
+            self.nichenet_tfl_pairs_for_regulators(&regulators, tf_ligand_cutoff, &ligands)?;
 
         Ok(Modulators {
             regulators,
@@ -533,6 +473,77 @@ impl GeneNetwork {
             lr_pairs,
             tfl_pairs,
         })
+    }
+
+    /// NicheNet ligand–TF modulator triples for `regulators` (TFs), using `lr_ligands` as the
+    /// allowed ligand pool — same rule as inside [`GeneNetwork::get_modulators`].
+    pub fn nichenet_tfl_pairs_for_regulators(
+        &self,
+        regulators: &[String],
+        tf_ligand_cutoff: f64,
+        lr_ligands: &[String],
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        if regulators.is_empty() {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+        let lf = self.network_df.clone().lazy();
+        let nn_df = lf
+            .filter(
+                col("edge_type")
+                    .cast(DataType::String)
+                    .eq(lit("nichenet"))
+                    .and(
+                        col("weight")
+                            .cast(DataType::Float64)
+                            .gt(lit(tf_ligand_cutoff)),
+                    ),
+            )
+            .select([col("source"), col("target"), col("weight")])
+            .collect()?;
+
+        let mut tfl_ligands = Vec::new();
+        let mut tfl_regulators = Vec::new();
+        let mut tfl_pairs = Vec::new();
+
+        if let (Ok(l_col), Ok(tf_col), Ok(w_col)) = (
+            nn_df.column("source")?.cast(&DataType::String)?.str(),
+            nn_df.column("target")?.cast(&DataType::String)?.str(),
+            nn_df.column("weight")?.cast(&DataType::Float64)?.f64(),
+        ) {
+            let ligands_set: HashSet<&String> = lr_ligands.iter().collect();
+            let regs_set: HashSet<&String> = regulators.iter().collect();
+
+            let mut tf_candidates: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+
+            for i in 0..nn_df.height() {
+                if let (Some(l), Some(tf), Some(w)) = (l_col.get(i), tf_col.get(i), w_col.get(i))
+                {
+                    let l_string = l.to_string();
+                    let tf_string = tf.to_string();
+                    if ligands_set.contains(&l_string) && regs_set.contains(&tf_string) {
+                        tf_candidates
+                            .entry(tf_string)
+                            .or_default()
+                            .push((l_string, w));
+                    }
+                }
+            }
+
+            for reg in regulators.iter() {
+                if let Some(mut candidates) = tf_candidates.remove(reg) {
+                    candidates.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for (l, _w) in candidates.into_iter().take(5) {
+                        tfl_ligands.push(l.clone());
+                        tfl_regulators.push(reg.clone());
+                        tfl_pairs.push(format!("{}#{}", l, reg));
+                    }
+                }
+            }
+        }
+
+        Ok((tfl_ligands, tfl_regulators, tfl_pairs))
     }
 
     /// All GRN edges (`edge_type == "grn"`) as **target → deduplicated regulator list** (TF-only priors).

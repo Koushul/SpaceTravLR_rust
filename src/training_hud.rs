@@ -128,6 +128,9 @@ pub struct TrainingHudState {
     pub genes_skipped: usize,
     pub genes_failed: usize,
     pub genes_orphan: usize,
+    /// TF modulators disabled (`[grn].use_tf_modulators = false`) but target had TF-only GRN/prior
+    /// support — written as `GENE.tf_ablated`, not counted as GRN orphan.
+    pub genes_tf_ablated: usize,
     pub genes_rounds: usize,
     pub active_genes: HashMap<String, String>,
     /// Per-gene LASSO progress: clusters (cell types) completed / total, for TUI only.
@@ -180,6 +183,7 @@ impl TrainingHudState {
             genes_skipped: 0,
             genes_failed: 0,
             genes_orphan: 0,
+            genes_tf_ablated: 0,
             genes_rounds: 0,
             active_genes: HashMap::new(),
             gene_lasso_cluster_progress: HashMap::new(),
@@ -225,6 +229,7 @@ impl TrainingHudState {
         self.genes_skipped = 0;
         self.genes_failed = 0;
         self.genes_orphan = 0;
+        self.genes_tf_ablated = 0;
         self.genes_rounds = 0;
         self.active_genes.clear();
         self.gene_lasso_cluster_progress.clear();
@@ -387,7 +392,11 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
     if g.genes_rounds < g.total_genes {
         return;
     }
-    if g.genes_failed == 0 && g.genes_orphan == 0 && g.genes_skipped >= g.total_genes {
+    if g.genes_failed == 0
+        && g.genes_orphan == 0
+        && g.genes_tf_ablated == 0
+        && g.genes_skipped >= g.total_genes
+    {
         eprintln!(
             "\nNote: no new *_betadata.feather files were written — every gene was skipped (outputs already exist or another process holds a .lock)."
         );
@@ -403,6 +412,10 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
     eprintln!(
         "  orphan (no modulators in GRN for that target): {}",
         g.genes_orphan
+    );
+    eprintln!(
+        "  tf_ablated (TF modulators off; TF-only target per GRN/priors): {}",
+        g.genes_tf_ablated
     );
     eprintln!(
         "Typical fixes: set [data].layer and [data].cluster_annot to match the .h5ad; ensure obsm has spatial / X_spatial / spatial_loc (≥2 cols); verify species/GRN covers your gene symbols; relax --genes filter."

@@ -24,6 +24,23 @@ fn resolve_betadata_key_column_matches_cluster_annot() {
     );
 }
 
+#[test]
+fn cluster_betadata_row_keys_match_string_cell_type_labels() {
+    use ndarray::Array1;
+    use polars::prelude::*;
+    use spacetravlr::betadata::build_cluster_id_to_betadata_cluster_key_map;
+    let df = DataFrame::new(vec![Series::new(
+        "cell_type".into(),
+        &["Tfh", "Tfh", "B cell"],
+    )
+    .into()])
+    .unwrap();
+    let clusters = Array1::from_vec(vec![1usize, 1, 0]);
+    let m = build_cluster_id_to_betadata_cluster_key_map(&df, "cell_type", &clusters).unwrap();
+    assert_eq!(m.get(&0), Some(&"B cell".to_string()));
+    assert_eq!(m.get(&1), Some(&"Tfh".to_string()));
+}
+
 fn make_test_betaframe() -> BetaFrame {
     BetaFrame::from_parts(BetaFrameFromParts {
         gene_name: "target1".to_string(),

@@ -122,8 +122,8 @@ pub struct GrnConfig {
     pub tf_ligand_cutoff: f64,
     /// Keep only DB L–R pairs whose **ligand** is among the top `max_ligands` by mean expression
     /// (uses `[data].layer`, e.g. `imputed_count`). Requires per-gene mean map when training.
-    /// Deserialize accepts legacy TOML key `max_lr_pairs`.
-    #[serde(alias = "max_lr_pairs")]
+    /// Deserialize accepts TOML keys `max_lr` (matches CLI `--max-lr`) and legacy `max_lr_pairs`.
+    #[serde(alias = "max_lr_pairs", alias = "max_lr")]
     pub max_ligands: Option<usize>,
     #[serde(default = "default_true")]
     pub use_tf_modulators: bool,
@@ -131,6 +131,11 @@ pub struct GrnConfig {
     pub use_lr_modulators: bool,
     #[serde(default = "default_true")]
     pub use_tfl_modulators: bool,
+    /// When set, replaces `use_tf_modulators`, `use_lr_modulators`, and `use_tfl_modulators` after
+    /// load: comma-separated tokens `tf`, `lr`, `tfl` (alias `ltf`). Omitted means use those three
+    /// booleans as written. Not written back to repro TOML (effective flags are serialized).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train_modulators: Option<String>,
     /// Genes to add as raw-expression modulators (fourth Lasso group). Excludes target and any gene
     /// already used as TF / LR / TFL (see `resolve_extra_modulators_and_lr`).
     #[serde(default)]
@@ -383,6 +388,7 @@ impl Default for GrnConfig {
             use_tf_modulators: true,
             use_lr_modulators: true,
             use_tfl_modulators: true,
+            train_modulators: None,
             extra_modulators: Vec::new(),
             extra_modulators_file: None,
             extra_lr: Vec::new(),
@@ -391,9 +397,56 @@ impl Default for GrnConfig {
     }
 }
 
+/// Parse `[grn].train_modulators` / `--train-modulators`: comma- or whitespace-separated
+/// `tf`, `lr`, `tfl` (alias `ltf`). Returns `(use_tf, use_lr, use_tfl)`.
+pub fn parse_train_modulators_tokens(raw: &str) -> anyhow::Result<(bool, bool, bool)> {
+    let mut tf = false;
+    let mut lr = false;
+    let mut tfl = false;
+    for tok in raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let t = tok.to_ascii_lowercase();
+        match t.as_str() {
+            "tf" => tf = true,
+            "lr" => lr = true,
+            "tfl" | "ltf" => tfl = true,
+            _ => anyhow::bail!(
+                "unknown train_modulators token {tok:?} (expected tf, lr, tfl or ltf; comma- or space-separated)"
+            ),
+        }
+    }
+    Ok((tf, lr, tfl))
+}
+
 pub type ResolvedExtraModulatorsAndLr = (Vec<String>, Vec<(String, String)>);
 
 impl GrnConfig {
+    /// Applies [`GrnConfig::train_modulators`] when set (overwrites the three `use_*_modulators`
+    /// flags), then clears that field. Errors if no modulator family remains enabled.
+    pub fn apply_train_modulators_shorthand(&mut self) -> anyhow::Result<()> {
+        if let Some(raw) = self.train_modulators.take() {
+            let t = raw.trim();
+            if t.is_empty() {
+                anyhow::bail!(
+                    "[grn].train_modulators is empty; omit the key or use tokens: tf, lr, tfl (or ltf)"
+                );
+            }
+            let (use_tf, use_lr, use_tfl) = parse_train_modulators_tokens(t)?;
+            self.use_tf_modulators = use_tf;
+            self.use_lr_modulators = use_lr;
+            self.use_tfl_modulators = use_tfl;
+        }
+        if !self.use_tf_modulators && !self.use_lr_modulators && !self.use_tfl_modulators {
+            anyhow::bail!(
+                "at least one GRN modulator family must be enabled (TF targets, ligand–receptor, or TF–ligand / NicheNet-style); set [grn].train_modulators or the use_*_modulators flags"
+            );
+        }
+        Ok(())
+    }
+
     /// Merge TOML `extra_modulators` / `extra_lr` with optional files. Paths are expanded (`~`);
     /// relative paths resolve against `config_file_parent` when provided.
     pub fn resolve_extra_modulators_and_lr(
@@ -693,7 +746,8 @@ pub fn canonical_adata_stem(adata_path: &std::path::Path) -> String {
 impl SpaceshipConfig {
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path.as_ref())?;
-        let config: SpaceshipConfig = toml::from_str(&contents)?;
+        let mut config: SpaceshipConfig = toml::from_str(&contents)?;
+        config.grn.apply_train_modulators_shorthand()?;
         Ok(config)
     }
 
@@ -711,12 +765,14 @@ impl SpaceshipConfig {
         if let Some(ov) = overlay_root {
             merge_spaceship_overlay_into_toml(&mut root, ov);
         }
-        <SpaceshipConfig as Deserialize>::deserialize(root).with_context(|| {
+        let mut cfg = <SpaceshipConfig as Deserialize>::deserialize(root).with_context(|| {
             format!(
                 "deserialize merged SpaceshipConfig from {} (after overlay)",
                 path.display()
             )
-        })
+        })?;
+        cfg.grn.apply_train_modulators_shorthand()?;
+        Ok(cfg)
     }
 
     pub fn to_toml_pretty(&self) -> anyhow::Result<String> {
@@ -866,6 +922,21 @@ mod resolve_training_output_dir_tests {
     }
 
     #[test]
+    fn grn_max_lr_toml_alias_deserializes_to_max_ligands() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[grn]
+max_lr = 42
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.grn.max_ligands, Some(42));
+    }
+
+    #[test]
     fn repro_toml_deserialize_without_training_genes_defaults_none() {
         let toml = r#"
 [data]
@@ -882,6 +953,93 @@ score_threshold = 0.1
         let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
         assert!(cfg.training.genes.is_none());
         assert!(cfg.training.max_genes.is_none());
+    }
+}
+
+#[cfg(test)]
+mod train_modulators_config_tests {
+    use super::{parse_train_modulators_tokens, SpaceshipConfig};
+    use std::fs;
+
+    #[test]
+    fn parse_accepts_ltf_alias_and_whitespace() {
+        let (tf, lr, tfl) = parse_train_modulators_tokens(" TF \n ltf ").unwrap();
+        assert!(tf);
+        assert!(!lr);
+        assert!(tfl);
+    }
+
+    #[test]
+    fn parse_comma_combo() {
+        let (tf, lr, tfl) = parse_train_modulators_tokens("tf,lr").unwrap();
+        assert!(tf);
+        assert!(lr);
+        assert!(!tfl);
+    }
+
+    #[test]
+    fn parse_unknown_token_errors() {
+        assert!(parse_train_modulators_tokens("tf,x").is_err());
+    }
+
+    #[test]
+    fn from_file_applies_train_modulators_shorthand() {
+        let tmp = std::env::temp_dir().join(format!(
+            "spacetravlr_train_mod_test_{}.toml",
+            std::process::id()
+        ));
+        let body = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 1
+learning_rate = 0.001
+score_threshold = 0.1
+
+[grn]
+train_modulators = "lr"
+use_tf_modulators = true
+use_tfl_modulators = true
+"#;
+        fs::write(&tmp, body).unwrap();
+        let cfg = SpaceshipConfig::from_file(&tmp).unwrap();
+        let _ = fs::remove_file(&tmp);
+        assert!(!cfg.grn.use_tf_modulators);
+        assert!(cfg.grn.use_lr_modulators);
+        assert!(!cfg.grn.use_tfl_modulators);
+        assert!(cfg.grn.train_modulators.is_none());
+    }
+
+    #[test]
+    fn from_file_errors_when_no_modulators_enabled() {
+        let tmp = std::env::temp_dir().join(format!(
+            "spacetravlr_train_mod_none_{}.toml",
+            std::process::id()
+        ));
+        let body = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 1
+learning_rate = 0.001
+score_threshold = 0.1
+
+[grn]
+use_tf_modulators = false
+use_lr_modulators = false
+use_tfl_modulators = false
+"#;
+        fs::write(&tmp, body).unwrap();
+        assert!(SpaceshipConfig::from_file(&tmp).is_err());
+        let _ = fs::remove_file(&tmp);
     }
 }
 

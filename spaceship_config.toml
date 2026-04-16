@@ -33,34 +33,25 @@ weighted_ligand_scale_factor = 1.0
 # If omitted and use_tf_modulators is true, training writes celloracle_tf_priors.feather in the output dir.
 # tf_priors_feather = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/SlideTagsKidney/xenium_skin_links.feather"
 # Minimum score for a TF to be included as a ligand-mediated regulator
-tf_ligand_cutoff = 0.15
-# Optional: keep only DB L–R pairs whose ligand is in the top N by per-gene mean expression
-# using [data].layer (e.g. imputed_count). Omit = no cap. TOML may still use legacy key:
-# max_lr_pairs = 50
-# Keys like top_lr_pairs_by_mean_expression are ignored if present (removed option).
-# Subset modulator groups (default all true). Set false to ablate TF / LR / TF–ligand (NicheNet) features.
-# use_tf_modulators = true
-# use_lr_modulators = true
-# use_tfl_modulators = true
-# Extra genes as a fourth group-lasso block (raw expression); target + TF/LR/TFL genes excluded automatically.
+tf_ligand_cutoff = 0.1
+max_lr = 200
+use_tf_modulators = true
+use_lr_modulators = true
+use_tfl_modulators = true
+# Shorthand (overwrites the three flags when set): comma-separated tf, lr, tfl (alias ltf). Example LR-only ablation:
+# train_modulators = "tf,lr"
 # extra_modulators = ["GENE1", "GENE2"]
 # extra_modulators_file = "path/to/extra_genes.txt"
-# Extra L–R pairs (LIG$REC or LIG,REC strings); merged after DB LRs; target never ligand/receptor.
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
-# CLI: --extra-modulators GENE,…  --extra-lr PAIRS (see spacetravlr --help)
 
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)
 adam_beta_1 = 0.9
 adam_beta_2 = 0.999
 adam_epsilon = 1e-5
-# L2 weight decay on CNN params (omit or comment out for none)
-# weight_decay = 1e-4
-# Clip gradient L2 norm (omit for no clipping)
-# grad_clip_norm = 1.0
 # Radius passed to create_spatial_features for CNN inputs (coordinate units)
-spatial_feature_radius = 200.0
+spatial_feature_radius = 300.0
 # After final head linear, before lasso-anchor scaling: identity | sigmoid | tanh | sigmoidx2 (2·sigmoid, (0,2))
 output_activation = "sigmoidx2"
 
@@ -75,7 +66,7 @@ n_iter    = 100
 tol       = 1e-4
 # Column-wise scaling of modulator features (divide by std, no mean subtraction).
 # Matches CellOracle StandardScaler(with_mean=false). Default true.
-scale_modulators = false
+scale_modulators = true
 # When scale_modulators is true, divide exported betas by column std (original expression units).
 # Set false to export scaled-space betas (CellOracle-style). Default true.
 unscale_betas_on_export = false
@@ -92,23 +83,7 @@ score_threshold = 0.1
 # genes = ["GENE1", "GENE2"]
 # max_genes = 500
 
-# Hybrid gating (only when mode = "hybrid"); see src/cnn_gating.rs / log gate_* fields
-[training.hybrid]
-min_cells_per_cluster_for_cnn = 80
-max_modulators_soft_for_cnn = 600
-moran_k_neighbors = 8
-moran_permutations = 99
-moran_p_value_max = 0.05
-moran_p_value_max_when_over_modulator_cap = 0.01
-require_all_clusters_lasso_converged = true
-# min_mean_lasso_r2_for_cnn = 0.15
-# min_mean_target_expression_for_cnn = 0.01
-hybrid_modulator_spatial_weight = 1.0
-# 0 = stricter gates (fewer CNNs), 1 = looser; 0.5 matches pre-knob behavior (default if omitted)
-hybrid_cnn_permissiveness = 1
-# cnn_force_genes_file = "path/to/allow.txt"
-# cnn_skip_genes_file = "path/to/skip.txt"
-# hybrid_cnn_top_k = 50
+
 
 [execution]
 # Number of parallel gene-training workers
@@ -144,3 +119,21 @@ save_cnn_weights = false
 compressed_npz = true
 # Subdirectory under [execution].output_dir for CNN .npz exports
 output_subdir = "CNN_weights"
+
+# Hybrid gating (only when mode = "hybrid"); see src/cnn_gating.rs / log gate_* fields
+[training.hybrid]
+min_cells_per_cluster_for_cnn = 80
+max_modulators_soft_for_cnn = 600
+moran_k_neighbors = 8
+moran_permutations = 99
+moran_p_value_max = 0.05
+moran_p_value_max_when_over_modulator_cap = 0.01
+require_all_clusters_lasso_converged = true
+# min_mean_lasso_r2_for_cnn = 0.15
+# min_mean_target_expression_for_cnn = 0.01
+hybrid_modulator_spatial_weight = 1.0
+# 0 = stricter gates (fewer CNNs), 1 = looser; 0.5 matches pre-knob behavior (default if omitted)
+hybrid_cnn_permissiveness = 1
+# cnn_force_genes_file = "path/to/allow.txt"
+# cnn_skip_genes_file = "path/to/skip.txt"
+# hybrid_cnn_top_k = 50

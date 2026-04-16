@@ -361,6 +361,7 @@ fn apply_demo_hud_baseline(g: &mut TrainingHudState, total_genes: usize) {
     g.genes_skipped = 0;
     g.genes_failed = 0;
     g.genes_orphan = 0;
+    g.genes_tf_ablated = 0;
     g.genes_rounds = 0;
     g.genes_exported_seed_only = 0;
     g.genes_exported_cnn = 0;

@@ -260,6 +260,7 @@ struct Cli {
 
     #[arg(
         long = "max-ligands",
+        visible_alias = "max-lr",
         value_name = "N",
         help_heading = "Gene list & GRN extras",
         help = "Keep only DB L–R pairs whose ligand ranks in the top N by mean expression ([data].layer)"
@@ -281,6 +282,14 @@ struct Cli {
         help = "Extra ligand→receptor pairs, merged with [grn].extra_lr / *_file. Forms: L1$R1,L2$R2  or  L1,R1;L2,R2  or  single L1,R1"
     )]
     extra_lr: Option<String>,
+
+    #[arg(
+        long = "train-modulators",
+        value_name = "LIST",
+        help_heading = "Gene list & GRN extras",
+        help = "Ablation / subset: which GRN modulator groups to train (comma-separated). Tokens: tf (TF→target), lr (ligand–receptor), tfl or ltf (TF–ligand / NicheNet-style). Overrides [grn].use_*_modulators when set (same as [grn].train_modulators in TOML)"
+    )]
+    train_modulators: Option<String>,
 
     #[arg(
         long,
@@ -890,6 +899,10 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     if let Some(n) = cli.max_genes {
         cfg.training.max_genes = Some(n);
     }
+    if let Some(raw) = cli.train_modulators.as_deref() {
+        cfg.grn.train_modulators = Some(raw.trim().to_string());
+    }
+    cfg.grn.apply_train_modulators_shorthand()?;
     Ok(())
 }
 
@@ -908,8 +921,8 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             let expected = cli_k.max(1);
             if cfg.grn.max_ligands != Some(expected) {
                 anyhow::bail!(
-                    "--join-output-dir: --max-ligands {} does not match [grn].max_ligands ({:?}) in {}.\n\
-                     Join training uses the repro TOML as the single source of truth; omit --max-ligands, or set [grn].max_ligands the same on the leader run.",
+                    "--join-output-dir: --max-ligands / --max-lr {} does not match [grn].max_ligands ({:?}) in {}.\n\
+                     Join training uses the repro TOML as the single source of truth; omit those flags, or set [grn].max_ligands the same on the leader run.",
                     expected,
                     cfg.grn.max_ligands,
                     repro.display()
@@ -955,6 +968,7 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             || cli.output_dir.is_some()
             || cli.cnn_output_activation.is_some()
             || cli.weighted_ligand_scale_factor.is_some()
+            || cli.train_modulators.is_some()
         {
             eprintln!(
                 "Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML)."
@@ -1980,11 +1994,12 @@ fn main() -> anyhow::Result<()> {
                             "not started"
                         };
                         println!(
-                            "  {}: {} done ({} feather + {} orphan), {} active locks [{}]",
+                            "  {}: {} done ({} feather + {} orphan + {} tf_ablated), {} active locks [{}]",
                             cs.label,
                             cs.n_done(),
                             cs.n_feathers,
                             cs.n_orphans,
+                            cs.n_tf_ablated,
                             cs.n_locks,
                             status,
                         );
