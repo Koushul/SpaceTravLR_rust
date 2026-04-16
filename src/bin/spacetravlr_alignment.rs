@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anndata::{AnnData, AnnDataOp, Backend};
 use anndata_hdf5::H5;
@@ -24,7 +25,7 @@ use spacetravlr::transition_umap::{
 #[derive(Parser, Debug)]
 #[command(
     name = "spacetravlr-alignment",
-    about = "VirtualTissue-style UMAP alignment (Rust): transition quiver vs pseudotime-gradient reference + random null (no Python/velocyto)."
+    about = "VirtualTissue-style UMAP alignment (Rust): transition quiver vs pseudotime-gradient reference + random null. Default pseudotime matches embeds2perturb.ipynb (Palantir branched) via scripts/compute_branched_pseudotime_notebook.py."
 )]
 struct Cli {
     #[arg(long, help = "AnnData .h5ad (same cells/order as training)")]
@@ -35,15 +36,60 @@ struct Cli {
     umap_key: String,
     #[arg(
         long,
-        default_value = "cell_type",
-        help = "obs column for per-cell-type summaries (e.g. cell_type)"
+        default_value = "cell_type_2",
+        help = "obs column for per-cell-type summaries (embeds2perturb uses cell_type_2)"
     )]
     annot: String,
     #[arg(
         long,
-        help = "obs column for pseudotime (smoothed on UMAP before ref gradient). If omitted, uses UMAP dim 0."
+        help = "obs column for pseudotime (smoothed on UMAP before ref gradient). Mutually exclusive with --pseudotime-csv / --notebook-branched-pseudotime."
     )]
     pseudotime_key: Option<String>,
+    #[arg(
+        long,
+        help = "CSV with columns obs_name,pseudotime (e.g. from scripts/compute_branched_pseudotime_notebook.py). Rows must cover AnnData obs order."
+    )]
+    pseudotime_csv: Option<PathBuf>,
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "Use UMAP x as pseudotime (no Palantir). Default is embeds2perturb-style Palantir branched pseudotime."
+    )]
+    pseudotime_umap_x: bool,
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        help = "If --branched-pseudotime-csv exists, load it instead of re-running Palantir."
+    )]
+    reuse_branched_pseudotime: bool,
+    #[arg(long, default_value = "python3")]
+    palantir_python: String,
+    #[arg(
+        long,
+        help = "Write / reuse branched pseudotime CSV when using --notebook-branched-pseudotime (default: <temp>/spacetravlr_branched_pseudotime.csv)"
+    )]
+    branched_pseudotime_csv: Option<PathBuf>,
+    #[arg(long, default_value = "cell_type_2")]
+    branched_annot: String,
+    #[arg(long, default_value = "Naive CD4 T")]
+    branched_source_cell_type: String,
+    #[arg(
+        long = "branched-pair",
+        value_name = "A|B",
+        default_values = [
+            "Naive CD4 T|T_follicular_helper",
+            "Naive CD4 T|Th1",
+            "Naive CD4 T|Th2",
+        ],
+        help = "Palantir subgraph pair A|B (repeat flag for more; defaults match embeds2perturb.ipynb)."
+    )]
+    branched_pairs: Vec<String>,
+    #[arg(long, default_value_t = 1usize)]
+    branched_n_source_cells: usize,
+    #[arg(long, default_value_t = 10usize)]
+    palantir_knn: usize,
+    #[arg(long, default_value_t = 5usize)]
+    palantir_n_components: usize,
     #[arg(long, default_value_t = 300usize)]
     smooth_k: usize,
     #[arg(long, default_value = "manifest.csv")]
@@ -133,6 +179,79 @@ fn read_perturb_matrix(
     Ok(mat)
 }
 
+fn notebook_script_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/compute_branched_pseudotime_notebook.py")
+}
+
+fn load_pseudotime_csv(path: &Path, obs_order: &[String]) -> anyhow::Result<Vec<f64>> {
+    let mut rdr = csv::Reader::from_path(path)
+        .with_context(|| format!("open pseudotime csv {:?}", path))?;
+    let mut map: HashMap<String, f64> = HashMap::new();
+    for rec in rdr.records() {
+        let rec = rec.with_context(|| format!("parse row in {:?}", path))?;
+        if rec.len() < 2 {
+            continue;
+        }
+        let name = rec[0].trim().to_string();
+        let v: f64 = rec[1].trim().parse().unwrap_or(f64::NAN);
+        map.insert(name, v);
+    }
+    let mut out = Vec::with_capacity(obs_order.len());
+    let mut missing = 0usize;
+    for id in obs_order {
+        if let Some(&v) = map.get(id) {
+            out.push(v);
+        } else {
+            missing += 1;
+            out.push(f64::NAN);
+        }
+    }
+    if missing > 0 {
+        eprintln!(
+            "warning: {} obs_names missing from pseudotime CSV {:?}",
+            missing,
+            path
+        );
+    }
+    Ok(out)
+}
+
+fn run_notebook_branched_pseudotime(cli: &Cli, csv_out: &Path) -> anyhow::Result<()> {
+    let script = notebook_script_path();
+    anyhow::ensure!(
+        script.is_file(),
+        "missing script {:?} (clone full repo)",
+        script
+    );
+    let mut cmd = Command::new(&cli.palantir_python);
+    cmd.arg(&script)
+        .arg("--h5ad")
+        .arg(&cli.h5ad)
+        .arg("--out-csv")
+        .arg(csv_out)
+        .arg("--annot")
+        .arg(&cli.branched_annot)
+        .arg("--source-cell-type")
+        .arg(&cli.branched_source_cell_type)
+        .arg("--n-source-cells")
+        .arg(cli.branched_n_source_cells.to_string())
+        .arg("--palantir-knn")
+        .arg(cli.palantir_knn.to_string())
+        .arg("--palantir-n-components")
+        .arg(cli.palantir_n_components.to_string());
+    for p in &cli.branched_pairs {
+        cmd.arg("--pairs").arg(p);
+    }
+    let st = cmd.status().with_context(|| {
+        format!(
+            "failed to run {:?} {:?} (need Python + scanpy.external / Palantir)",
+            cli.palantir_python, script
+        )
+    })?;
+    anyhow::ensure!(st.success(), "Palantir script exited {:?}", st);
+    Ok(())
+}
+
 fn smooth_on_umap(values: &[f64], umap: &[[f64; 2]], k: usize) -> Vec<f64> {
     let n = umap.len();
     if n == 0 {
@@ -165,6 +284,13 @@ fn smooth_on_umap(values: &[f64], umap: &[[f64; 2]], k: usize) -> Vec<f64> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let n_pt_sources = (cli.pseudotime_key.is_some() as usize)
+        + (cli.pseudotime_csv.is_some() as usize)
+        + (cli.pseudotime_umap_x as usize);
+    anyhow::ensure!(
+        n_pt_sources <= 1,
+        "choose at most one of --pseudotime-key, --pseudotime-csv, --pseudotime-umap-x"
+    );
     let gene_names = read_h5ad_var_names(&cli.h5ad)?;
     let obs_order = obs_names_in_order(&cli.h5ad)?;
     let baseline = read_h5ad_expression_dense_f64(&cli.h5ad, &cli.layer)?;
@@ -190,8 +316,19 @@ fn main() -> anyhow::Result<()> {
         s.iter()
             .map(|t| t.parse::<f64>().unwrap_or(f64::NAN))
             .collect()
-    } else {
+    } else if let Some(ref csv) = cli.pseudotime_csv {
+        load_pseudotime_csv(csv, &obs_order)?
+    } else if cli.pseudotime_umap_x {
         umap.iter().map(|p| p[0]).collect()
+    } else {
+        let csv_out = cli
+            .branched_pseudotime_csv
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("spacetravlr_branched_pseudotime.csv"));
+        if !(cli.reuse_branched_pseudotime && csv_out.is_file()) {
+            run_notebook_branched_pseudotime(&cli, &csv_out)?;
+        }
+        load_pseudotime_csv(&csv_out, &obs_order)?
     };
     let pseudo_smoothed = smooth_on_umap(&pseudo_raw, &umap, cli.smooth_k);
 

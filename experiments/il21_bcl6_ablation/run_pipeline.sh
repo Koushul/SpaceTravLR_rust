@@ -67,7 +67,15 @@ for d in "$RUNS"/*; do
   done
 done
 
-echo "=== Alignment (Rust; no Python/velocyto) ==="
+echo "=== Branched pseudotime (notebook / Palantir) ==="
+PST_CSV="$EXP/analysis/branched_pseudotime_notebook.csv"
+if [[ ! -f "$PST_CSV" ]]; then
+  python3 "$REPO/scripts/compute_branched_pseudotime_notebook.py" \
+    --h5ad "$H5AD_SRC" \
+    --out-csv "$PST_CSV"
+fi
+
+echo "=== Alignment (Rust + notebook pseudotime CSV) ==="
 if [[ -x "$REPO/target/release/spacetravlr-alignment" ]] || [[ -x "$REPO/target/debug/spacetravlr-alignment" ]]; then
   ALIGN_BIN="$REPO/target/release/spacetravlr-alignment"
   [[ -x "$ALIGN_BIN" ]] || ALIGN_BIN="$REPO/target/debug/spacetravlr-alignment"
@@ -75,7 +83,8 @@ if [[ -x "$REPO/target/release/spacetravlr-alignment" ]] || [[ -x "$REPO/target/
     --h5ad "$H5AD_SRC" \
     --manifest "$MAN" \
     --out-csv "$EXP/analysis/alignment_rust_per_celltype.csv" \
-    --annot cell_type
+    --pseudotime-csv "$PST_CSV" \
+    --annot cell_type_2
   echo "Wrote $EXP/analysis/alignment_rust_per_celltype.csv"
 else
   echo "Build alignment binary: cargo build --bin spacetravlr-alignment" >&2

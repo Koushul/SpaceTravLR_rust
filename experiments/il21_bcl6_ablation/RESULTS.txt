@@ -21,9 +21,12 @@ Interpretation
   diagnosis (e.g. more targets, inspect Betabase.splash per gene, or assert non-zero delta from KO).
 
 Alignment metric (embeds2perturb / VirtualTissue.compute_vector_alignment)
-- Rust: `cargo build --bin spacetravlr-alignment` then `spacetravlr-alignment --h5ad ... --manifest ... --out-csv ...`
-  (uses `transition_umap` + KNN-smoothed pseudotime / UMAP0 + Wilcoxon normal approx; no Python/velocyto).
-- Optional Python duplicate: `scripts/ablation_il21_bcl6_alignment.py` if the SpaceTravLR Python stack is installed.
+- Rust: `cargo build --bin spacetravlr-alignment` then point it at the same **Palantir branched pseudotime** as the notebook:
+  1) `python3 scripts/compute_branched_pseudotime_notebook.py --h5ad ... --out-csv branched_pseudotime_notebook.csv`
+  2) `spacetravlr-alignment --h5ad ... --manifest ... --pseudotime-csv branched_pseudotime_notebook.csv --out-csv ...`
+  Default (no pseudotime flags) runs step (1) automatically via `python3` then loads the CSV; use `--reuse-branched-pseudotime`
+  with `--branched-pseudotime-csv` to skip recomputation. `--annot` defaults to `cell_type_2` like the notebook.
+- Optional full-Python duplicate: `scripts/ablation_il21_bcl6_alignment.py` (SpaceTravLR + cellrank + velocyto).
 
 Artifacts
 - runs/<config>/{IL21,BCL6}_betadata.feather, spacetravlr_run_repro.toml, perturb_feathers/*.feather
