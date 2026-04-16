@@ -1,0 +1,8 @@
+# Joint knockout IL21+BCL6 in one physics pass (matches notebook-style compound filenames).
+# spacetravlr-perturb --run-toml /path/to/spacetravlr_run_repro.toml --batch-toml examples/ablation_il21_bcl6_joint_ko.batch.toml
+
+parallelism = 4
+compound_genes = ["IL21", "BCL6"]
+desired_expr = [0.0, 0.0]
+n_propagation = 4
+out_dir = "perturb_joint_ko"

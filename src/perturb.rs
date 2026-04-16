@@ -12,7 +12,7 @@ use crate::ligand::{
     calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PerturbTarget {
     pub gene: String,
     pub desired_expr: f64,

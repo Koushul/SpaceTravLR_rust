@@ -25,7 +25,7 @@ Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag),
 
 Single-job batch: requires a repro TOML (--run-toml or run_toml in --config), --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --cells-csv + --cells-csv-column, --verbose.
 
-Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Do not combine with --gene, --export/--out, or --cells-*.
+Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Use `compound_genes` with scalar `out` (or `out_dir` defaulting to `<gene1>_<gene2>_perturb_expr.feather`) for one joint multi-gene perturbation. Do not combine with --gene, --export/--out, or --cells-*.
 
 Example:
   spacetravlr-perturb \
