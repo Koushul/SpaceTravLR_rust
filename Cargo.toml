@@ -182,6 +182,7 @@ colored = "2.2"
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
 statrs = "0.18"
+reflink = "0.1.3"
 
 [dev-dependencies]
 approx = "0.5"

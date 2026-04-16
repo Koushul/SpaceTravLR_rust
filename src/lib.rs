@@ -73,7 +73,7 @@ pub use cnn_gating::CnnGateGeneInputs;
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
-    cache_received_ligands_uns_for_processed_h5ad, materialize_canonical_training_adata,
+    materialize_canonical_training_adata,
     read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
     SpatialCellularProgramsEstimator,
 };

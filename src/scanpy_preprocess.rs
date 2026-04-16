@@ -39,9 +39,7 @@
 //! | MAGIC batch column resolution | [`resolve_magic_batch_obs_column`] | CLI / config wiring |
 //! | Training auto-prep | [`ensure_training_adata_ready`] (pass **`[data].condition`** as MAGIC batch when set) | updates path in place |
 //!
-//! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess`], then
-//! [`cache_received_ligands_uns_for_processed_h5ad`](crate::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad)
-//! when `[grn].use_lr_modulators` / `use_tfl_modulators` and the species GRN yield ligands.
+//! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess_maybe_log`] (or reuse when output is fresh).
 //! **`spacetravlr --impute --h5ad …`** → [`imputed_count_from_normalized`] (same imputation+CSR as the full pipeline).
 //! With **`--condition`**, the same obs column name is used as the MAGIC batch axis unless **`--magic-batch-obs`** overrides.
 //!
@@ -57,8 +55,7 @@
 //! **`contact_distance`**, and **[`cnn.spatial_feature_radius`](crate::config::CnnConfig::spatial_feature_radius)**
 //! in **µm** to match.
 
-use anndata::data::ArrayData;
-use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
+use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
 use crate::config::expand_user_path;
@@ -829,16 +826,18 @@ pub fn write_h5ad_csr_layers_uv(
 }
 
 /// True when **`X`** and every present **`layers[...]`** matrix is CSR/CSC (sparse), not dense.
+///
+/// Uses the HDF5 `encoding-type` attribute (metadata only) — does **not** read matrix data.
 pub fn adata_x_and_layers_are_csr(path: &Path) -> anyhow::Result<bool> {
+    use anndata::backend::DataType;
+    use anndata::ArrayElemOp;
+
+    fn dtype_is_sparse(dt: Option<DataType>) -> bool {
+        matches!(dt, Some(DataType::CsrMatrix(_) | DataType::CscMatrix(_)))
+    }
+
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let x_ok = match adata.x().get::<ArrayData>()? {
-        None => false,
-        Some(ArrayData::CsrMatrix(_))
-        | Some(ArrayData::CsrNonCanonical(_))
-        | Some(ArrayData::CscMatrix(_)) => true,
-        Some(ArrayData::Array(_)) | Some(ArrayData::DataFrame(_)) => false,
-    };
-    if !x_ok {
+    if !dtype_is_sparse(adata.x().dtype()) {
         adata.close()?;
         return Ok(false);
     }
@@ -846,14 +845,7 @@ pub fn adata_x_and_layers_are_csr(path: &Path) -> anyhow::Result<bool> {
         let Some(elem) = adata.layers().get(name.as_str()) else {
             continue;
         };
-        let ok = match elem.get::<ArrayData>()? {
-            None => false,
-            Some(ArrayData::CsrMatrix(_))
-            | Some(ArrayData::CsrNonCanonical(_))
-            | Some(ArrayData::CscMatrix(_)) => true,
-            Some(ArrayData::Array(_)) | Some(ArrayData::DataFrame(_)) => false,
-        };
-        if !ok {
+        if !dtype_is_sparse(elem.dtype()) {
             adata.close()?;
             return Ok(false);
         }

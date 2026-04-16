@@ -654,7 +654,7 @@ struct Cli {
         alias = "process_h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`). Afterward, writes `uns['spacetravlr_received_ligands']` when config + GRN allow (see spaceship_config `[grn]` / `[spatial]` / `[data].layer`)."
+        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`)."
     )]
     process_h5ad: bool,
 
@@ -1270,17 +1270,6 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     if !h5ad.is_file() {
         anyhow::bail!("AnnData not found at {}.", h5ad.display());
     }
-    let mut cfg = match &cli.config {
-        Some(p) => SpaceshipConfig::from_file(p)
-            .with_context(|| format!("load spaceship config {}", p.display()))?,
-        None => SpaceshipConfig::load(),
-    };
-    if let Some(v) = cli.weighted_ligand_scale_factor {
-        cfg.spatial.weighted_ligand_scale_factor = v;
-    }
-    if let Some(v) = cli.max_ligands {
-        cfg.grn.max_ligands = Some(v.max(1));
-    }
     let out_dir = match &cli.process_output_dir {
         Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
         None => std::env::current_dir().context("process-output-dir default (cwd)")?,
@@ -1324,20 +1313,9 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
             dest.display(),
             h5ad.display()
         );
-        match spacetravlr::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad(
-            dest.as_path(),
-            &cfg,
-        ) {
-            Ok(true) => eprintln!("Wrote uns['spacetravlr_received_ligands'] (+ _meta)."),
-            Ok(false) => {}
-            Err(e) => eprintln!(
-                "Warning: could not write uns['spacetravlr_received_ligands']: {}",
-                e
-            ),
-        }
         return Ok(());
     }
-    let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+    let (_out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
         &h5ad,
         &dest,
         true,
@@ -1346,17 +1324,6 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     )?;
     if let Some(l) = log {
         eprint!("{l}");
-    }
-    match spacetravlr::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad(
-        out.as_path(),
-        &cfg,
-    ) {
-        Ok(true) => eprintln!("Wrote uns['spacetravlr_received_ligands'] (+ _meta)."),
-        Ok(false) => {}
-        Err(e) => eprintln!(
-            "Warning: could not write uns['spacetravlr_received_ligands']: {}",
-            e
-        ),
     }
     Ok(())
 }
