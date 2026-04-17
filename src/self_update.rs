@@ -12,7 +12,8 @@ use std::path::Path;
 
 pub const GITHUB_REPO: &str = "Koushul/SpaceTravLR_rust";
 
-pub const DISTRIBUTION_BINARIES: [&str; 3] = ["spacetravlr", "spacetravlr-perturb", "spatial_viewer"];
+pub const DISTRIBUTION_BINARIES: [&str; 3] =
+    ["spacetravlr", "spacetravlr-perturb", "spatial_viewer"];
 
 pub const LINUX_GNU_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 
@@ -54,17 +55,13 @@ fn host_glibc_major_minor() -> Result<(u32, u32)> {
     let out = std::process::Command::new("ldd")
         .arg("--version")
         .output()
-        .context("run `ldd --version` to detect GNU libc (required for self-update on Linux x86_64)")?;
+        .context(
+            "run `ldd --version` to detect GNU libc (required for self-update on Linux x86_64)",
+        )?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let first = stdout
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim();
+    let first = stdout.lines().next().unwrap_or("").trim();
     glibc_version_from_ldd_first_line(first).ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not parse glibc version from `ldd --version` first line: {first:?}"
-        )
+        anyhow::anyhow!("could not parse glibc version from `ldd --version` first line: {first:?}")
     })
 }
 
@@ -73,9 +70,7 @@ fn linux_x86_64_prebuilt_tarball_target() -> Result<String> {
         return match v.as_str() {
             "standard" => Ok(LINUX_GNU_TRIPLE.to_string()),
             "compat" => Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT_SUFFIX}")),
-            _ => bail!(
-                "invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard or compat"
-            ),
+            _ => bail!("invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard or compat"),
         };
     }
     let (maj, min) = host_glibc_major_minor()?;
@@ -143,9 +138,9 @@ fn fetch_release(tag: Option<&str>) -> Result<GhRelease> {
         None => {
             let url = format!("{base}?per_page=1");
             let list: Vec<GhRelease> = gh_api_get_json(&url)?;
-            list.into_iter()
-                .next()
-                .context("no GitHub releases found (publish a release or pass a tag to --update-version)")
+            list.into_iter().next().context(
+                "no GitHub releases found (publish a release or pass a tag to --update-version)",
+            )
         }
     }
 }
@@ -236,8 +231,13 @@ fn extract_tar_gz(archive_path: &Path, out_dir: &Path) -> Result<()> {
 }
 
 pub fn run(update_version: Option<&str>) -> Result<()> {
-    let target = prebuilt_tarball_target()
-        .with_context(|| format!("unsupported OS/arch for prebuilt binaries: {} {}", std::env::consts::OS, std::env::consts::ARCH))?;
+    let target = prebuilt_tarball_target().with_context(|| {
+        format!(
+            "unsupported OS/arch for prebuilt binaries: {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
     let exe = std::env::current_exe().context("current_exe")?;
     let install_dir = exe
         .parent()
@@ -336,9 +336,7 @@ mod tests {
     #[test]
     fn glibc_from_ldd_ubuntu() {
         assert_eq!(
-            glibc_version_from_ldd_first_line(
-                "ldd (Ubuntu GLIBC 2.35-0ubuntu3.8) 2.35"
-            ),
+            glibc_version_from_ldd_first_line("ldd (Ubuntu GLIBC 2.35-0ubuntu3.8) 2.35"),
             Some((2, 35))
         );
     }

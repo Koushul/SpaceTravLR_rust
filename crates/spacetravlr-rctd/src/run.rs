@@ -11,9 +11,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array1, Array2};
 use rctd_core::io_npz::load_q_matrices_npz;
 use rctd_core::{
-    build_x_vals, compute_q_matrix, compute_spline_coefficients, device_cpu, sync_device,
-    BatchProgress, DeconvMode, DeconvolutionOutput, PreparedData, RctdConfig, RctdDevice,
-    run_deconvolution,
+    build_x_vals, compute_q_matrix, compute_spline_coefficients, device_cpu, run_deconvolution,
+    sync_device, BatchProgress, DeconvMode, DeconvolutionOutput, PreparedData, RctdConfig,
+    RctdDevice,
 };
 
 #[cfg(feature = "wgpu")]
@@ -158,7 +158,12 @@ fn load_q_matrix_tsv(path: &Path) -> Result<Array2<f64>> {
     let ncols = rows[0].len();
     for (i, r) in rows.iter().enumerate() {
         if r.len() != ncols {
-            bail!("Q matrix row {} has {} cols, expected {}", i, r.len(), ncols);
+            bail!(
+                "Q matrix row {} has {} cols, expected {}",
+                i,
+                r.len(),
+                ncols
+            );
         }
     }
     let nrows = rows.len();
@@ -176,12 +181,7 @@ fn load_x_vals_tsv(path: &Path) -> Result<Array1<f64>> {
         }
         let x = line
             .parse::<f64>()
-            .or_else(|_| {
-                line.split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .parse::<f64>()
-            })
+            .or_else(|_| line.split_whitespace().next().unwrap_or("").parse::<f64>())
             .with_context(|| format!("parse X_vals line {:?}", line.get(..40.min(line.len()))))?;
         v.push(x);
     }
@@ -193,7 +193,11 @@ fn load_x_vals_tsv(path: &Path) -> Result<Array1<f64>> {
 
 fn load_spatial_numi_tsv(path: &Path, obs_order: &[String]) -> Result<Array1<f64>> {
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let lines: Vec<&str> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if lines.is_empty() {
         bail!("empty spatial nUMI TSV");
     }
@@ -306,10 +310,7 @@ fn subset_genes_from_file(
 pub fn resolve_q_matrices_path(arg: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = arg {
         if !p.exists() {
-            bail!(
-                "q_matrices.npz not found at {}",
-                p.display()
-            );
+            bail!("q_matrices.npz not found at {}", p.display());
         }
         return Ok(p);
     }
@@ -380,11 +381,7 @@ fn heuristic_progress_len(n_pixels: usize, mode: DeconvMode, batch_size: usize) 
 }
 
 fn csv_header_field(name: &str) -> String {
-    if name.contains(',')
-        || name.contains('"')
-        || name.contains('\r')
-        || name.contains('\n')
-    {
+    if name.contains(',') || name.contains('"') || name.contains('\r') || name.contains('\n') {
         format!("\"{}\"", name.replace('"', "\"\""))
     } else {
         name.to_owned()
@@ -415,11 +412,7 @@ fn write_weights_csv(
     writeln!(f, "{}", header_fields.join(","))?;
     for (i, row) in w.rows().into_iter().enumerate() {
         let mut fields: Vec<String> = vec![csv_header_field(&row_names[i])];
-        fields.extend(
-            row.iter()
-                .map(|x| format!("{:.8e}", x))
-                .collect::<Vec<_>>(),
-        );
+        fields.extend(row.iter().map(|x| format!("{:.8e}", x)).collect::<Vec<_>>());
         writeln!(f, "{}", fields.join(","))?;
     }
     Ok(())
@@ -448,19 +441,17 @@ pub fn run_rctd(args: RctdCliArgs) -> Result<()> {
         (counts, spatial_genes, spatial_obs_names)
     };
 
-    let (counts, spatial_obs_names) =
-        if let Some(ref subset_path) = args.spatial_obs_subset_file {
-            apply_spatial_obs_subset(counts, spatial_obs_names, subset_path.as_path())
-                .context("spatial obs subset")?
-        } else {
-            (counts, spatial_obs_names)
-        };
+    let (counts, spatial_obs_names) = if let Some(ref subset_path) = args.spatial_obs_subset_file {
+        apply_spatial_obs_subset(counts, spatial_obs_names, subset_path.as_path())
+            .context("spatial obs subset")?
+    } else {
+        (counts, spatial_obs_names)
+    };
 
     let (profiles_kg, cell_type_names, ref_genes) = if input_is_rds(&args.reference) {
         if args.ref_rows_are_types {
-            ref_rds::load_reference_profiles_rds(args.reference.as_path()).context(
-                "reference .rds type profiles (matrix rows = types, cols = genes)",
-            )?
+            ref_rds::load_reference_profiles_rds(args.reference.as_path())
+                .context("reference .rds type profiles (matrix rows = types, cols = genes)")?
         } else {
             ref_rds::load_reference_sc_rds(
                 args.reference.as_path(),
@@ -508,20 +499,19 @@ pub fn run_rctd(args: RctdCliArgs) -> Result<()> {
         (pair.0, pair.1, ref_genes)
     };
 
-    let (counts, spatial_genes, profiles_kg) =
-        if let Some(ref gfp) = args.gene_subset_file {
-            let (c, sg, pk) = subset_genes_from_file(
-                gfp.as_path(),
-                &spatial_genes,
-                counts,
-                &ref_genes,
-                &profiles_kg,
-            )
-            .context("gene subset file")?;
-            (c, sg, pk)
-        } else {
-            (counts, spatial_genes, profiles_kg)
-        };
+    let (counts, spatial_genes, profiles_kg) = if let Some(ref gfp) = args.gene_subset_file {
+        let (c, sg, pk) = subset_genes_from_file(
+            gfp.as_path(),
+            &spatial_genes,
+            counts,
+            &ref_genes,
+            &profiles_kg,
+        )
+        .context("gene subset file")?;
+        (c, sg, pk)
+    } else {
+        (counts, spatial_genes, profiles_kg)
+    };
 
     let ref_genes = spatial_genes.clone();
     let (counts, profiles_gk_raw) =
@@ -618,14 +608,7 @@ pub fn run_rctd(args: RctdCliArgs) -> Result<()> {
         }
     }));
 
-    let out = run_deconvolution(
-        &data,
-        &config,
-        args.mode,
-        args.batch_size,
-        &dev,
-        progress,
-    );
+    let out = run_deconvolution(&data, &config, args.mode, args.batch_size, &dev, progress);
     sync_device(&dev);
     pb_arc.finish_with_message("RCTD finished");
 

@@ -549,7 +549,10 @@ pub fn perturb_with_targets(
                 }
             });
         if let Some(t) = timings.as_mut() {
-            t.record(format!("iter{}/pin_nonneg", iter + 1), t_pin_nonneg.elapsed());
+            t.record(
+                format!("iter{}/pin_nonneg", iter + 1),
+                t_pin_nonneg.elapsed(),
+            );
         }
         report_perturb_step(
             job_progress,
@@ -875,16 +878,14 @@ fn recompute_weighted_ligands(args: RecomputeWeightedLigandsArgs<'_>) -> Option<
             sub.column_mut(k).assign(&lig_data.column(j));
         }
         let weighted = match grid_factor {
-            Some(gf) if gf.is_finite() && gf > 0.0 => {
-                calculate_weighted_ligands_grid_with_cutoff(
-                    xy,
-                    &sub,
-                    radius,
-                    scale_factor,
-                    gf,
-                    contact_distance,
-                )
-            }
+            Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid_with_cutoff(
+                xy,
+                &sub,
+                radius,
+                scale_factor,
+                gf,
+                contact_distance,
+            ),
             _ => calculate_weighted_ligands_with_cutoff(
                 xy,
                 &sub,

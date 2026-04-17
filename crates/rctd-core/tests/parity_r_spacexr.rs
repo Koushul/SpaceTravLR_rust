@@ -136,7 +136,11 @@ fn pearson_r_rows(a: &Array2<f64>, b: &Array2<f64>) -> Vec<f64> {
             let rb = b.row(i);
             let ma = ra.mean().unwrap_or(0.0);
             let mb = rb.mean().unwrap_or(0.0);
-            let num: f64 = ra.iter().zip(rb.iter()).map(|(x, y)| (x - ma) * (y - mb)).sum();
+            let num: f64 = ra
+                .iter()
+                .zip(rb.iter())
+                .map(|(x, y)| (x - ma) * (y - mb))
+                .sum();
             let da: f64 = ra.iter().map(|x| (x - ma).powi(2)).sum::<f64>().sqrt();
             let db: f64 = rb.iter().map(|y| (y - mb).powi(2)).sum::<f64>().sqrt();
             if da * db < 1e-30 {
@@ -205,7 +209,10 @@ fn x_vals_matches_r() {
         .zip(rust_x_vals.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
-    eprintln!("X_vals: max |R-Rust| = {max_diff:.2e}  (len={})", r_x_vals.len());
+    eprintln!(
+        "X_vals: max |R-Rust| = {max_diff:.2e}  (len={})",
+        r_x_vals.len()
+    );
     assert_abs_diff_eq!(max_diff, 0.0, epsilon = 1e-10);
 }
 
@@ -292,9 +299,7 @@ fn full_mode_matches_r_spacexr() {
         let r_row: Vec<f64> = r_weights.row(i).to_vec();
         let rust_sum: f64 = rust_row.iter().sum();
         let r_sum: f64 = r_row.iter().sum();
-        eprintln!(
-            "  px{i}: Rust={rust_row:.5?} (Σ={rust_sum:.4})  R={r_row:.5?} (Σ={r_sum:.4})"
-        );
+        eprintln!("  px{i}: Rust={rust_row:.5?} (Σ={rust_sum:.4})  R={r_row:.5?} (Σ={r_sum:.4})");
     }
 
     // Absolute tolerance: the QP solver difference (quadprog vs coordinate descent)
@@ -327,8 +332,11 @@ fn doublet_mode_matches_r_spacexr() {
     let pf = load_prepared();
     let type_names = load_lines("type_names.txt");
 
-    let r_weights_full =
-        load_matrix("r_doublet_weights_full.bin", pf.meta.n_pixels, pf.meta.n_types);
+    let r_weights_full = load_matrix(
+        "r_doublet_weights_full.bin",
+        pf.meta.n_pixels,
+        pf.meta.n_types,
+    );
     let r_spot_class = load_lines("r_doublet_spot_class.txt");
     let r_first_type = load_lines("r_doublet_first_type.txt");
     let r_second_type = load_lines("r_doublet_second_type.txt");
@@ -385,7 +393,10 @@ fn doublet_mode_matches_r_spacexr() {
         }
     }
     let sc_pct = 100.0 * spot_class_matches as f64 / pf.meta.n_pixels as f64;
-    eprintln!("  spot_class agreement: {spot_class_matches}/{} ({sc_pct:.1}%)", pf.meta.n_pixels);
+    eprintln!(
+        "  spot_class agreement: {spot_class_matches}/{} ({sc_pct:.1}%)",
+        pf.meta.n_pixels
+    );
 
     // Type assignment comparison
     let mut type_matches = 0usize;
@@ -401,9 +412,7 @@ fn doublet_mode_matches_r_spacexr() {
         if rust_ft == *r_ft && rust_st == *r_st {
             type_matches += 1;
         } else {
-            eprintln!(
-                "  px{i}: types Rust=({rust_ft},{rust_st}) vs R=({r_ft},{r_st})"
-            );
+            eprintln!("  px{i}: types Rust=({rust_ft},{rust_st}) vs R=({r_ft},{r_st})");
         }
     }
     let tp_pct = 100.0 * type_matches as f64 / pf.meta.n_pixels as f64;
@@ -412,12 +421,12 @@ fn doublet_mode_matches_r_spacexr() {
         pf.meta.n_pixels
     );
 
-    assert!(max_w < 0.02, "doublet full weights max abs diff = {max_w:.4e} ≥ 0.02");
-    assert!(min_r > 0.999, "doublet min Pearson r = {min_r:.6} < 0.999");
     assert!(
-        sc_pct >= 80.0,
-        "spot class agreement {sc_pct:.1}% < 80%"
+        max_w < 0.02,
+        "doublet full weights max abs diff = {max_w:.4e} ≥ 0.02"
     );
+    assert!(min_r > 0.999, "doublet min Pearson r = {min_r:.6} < 0.999");
+    assert!(sc_pct >= 80.0, "spot class agreement {sc_pct:.1}% < 80%");
     assert!(
         tp_pct >= 70.0,
         "type assignment agreement {tp_pct:.1}% < 70%"
@@ -435,8 +444,11 @@ fn multi_mode_matches_r_spacexr() {
         panic!("{}", missing_fixture_msg());
     }
     let pf = load_prepared();
-    let r_weights_full =
-        load_matrix("r_multi_weights_full.bin", pf.meta.n_pixels, pf.meta.n_types);
+    let r_weights_full = load_matrix(
+        "r_multi_weights_full.bin",
+        pf.meta.n_pixels,
+        pf.meta.n_types,
+    );
 
     let cfg = RctdConfig::default();
     let device = device_cpu();
@@ -472,6 +484,9 @@ fn multi_mode_matches_r_spacexr() {
         eprintln!("  px{i} (n_types={nt}): Rust={rust_row:.4?}  R={r_row:.4?}");
     }
 
-    assert!(max_w < 0.02, "multi full weights max abs diff = {max_w:.4e} ≥ 0.02");
+    assert!(
+        max_w < 0.02,
+        "multi full weights max abs diff = {max_w:.4e} ≥ 0.02"
+    );
     assert!(min_r > 0.999, "multi min Pearson r = {min_r:.6} < 0.999");
 }

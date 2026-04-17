@@ -27,17 +27,17 @@ fn write_tiny_mouse_h5ad(path: &std::path::Path) -> anyhow::Result<()> {
     let a = AnnData::<H5>::new(path)?;
     a.set_obs_names(vec!["c0".into(), "c1".into(), "c2".into()].into())?;
     a.set_var_names(vec!["Reg1".into(), "Tgt1".into(), "Reg2".into()].into())?;
-    let obs = DataFrame::new(vec![Series::new(
-        "cell_type".into(),
-        vec!["t".to_string(), "t".to_string(), "t".to_string()],
-    )
-    .into()])?;
+    let obs = DataFrame::new(vec![
+        Series::new(
+            "cell_type".into(),
+            vec!["t".to_string(), "t".to_string(), "t".to_string()],
+        )
+        .into(),
+    ])?;
     a.set_obs(obs)?;
-    let var = DataFrame::new(vec![Series::new(
-        "gene_ids".into(),
-        vec!["Reg1", "Tgt1", "Reg2"],
-    )
-    .into()])?;
+    let var = DataFrame::new(vec![
+        Series::new("gene_ids".into(), vec!["Reg1", "Tgt1", "Reg2"]).into(),
+    ])?;
     a.set_var(var)?;
     let mut gem = Array2::<f64>::zeros((3, 3));
     for i in 0..3 {
@@ -63,7 +63,10 @@ fn help_lists_celloracle() {
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("--celloracle"), "expected --celloracle in help:\n{s}");
+    assert!(
+        s.contains("--celloracle"),
+        "expected --celloracle in help:\n{s}"
+    );
     assert!(
         s.contains("--celloracle-output"),
         "expected --celloracle-output in help:\n{s}"
@@ -72,10 +75,8 @@ fn help_lists_celloracle() {
 
 #[test]
 fn celloracle_writes_feather() {
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_celloracle_cli_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("spacetravlr_celloracle_cli_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     write_minimal_mouse_grn_parquet(&dir).unwrap();

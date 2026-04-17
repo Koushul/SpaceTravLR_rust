@@ -11,10 +11,10 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub use sklearn_bayesian_ridge::{bayesian_ridge_fit, BayesianRidgeFit};
+pub use sklearn_bayesian_ridge::{BayesianRidgeFit, bayesian_ridge_fit};
 
 #[derive(Clone, Debug)]
 pub struct LinkRow {
@@ -282,7 +282,8 @@ fn infer_one_target(ctx: &InferOneTargetCtx<'_>, target: &String) -> Vec<LinkRow
 
     let p_feat = reggenes.len();
     let x = nalgebra::DMatrix::from_fn(ctx.n_sub, p_feat, |i, j| ctx.gem_sc[[i, reggenes[j]]]);
-    let yv = nalgebra::DVector::from_iterator(ctx.n_sub, (0..ctx.n_sub).map(|i| ctx.gem_s[[i, ti]]));
+    let yv =
+        nalgebra::DVector::from_iterator(ctx.n_sub, (0..ctx.n_sub).map(|i| ctx.gem_s[[i, ti]]));
 
     let Some(fit) = sklearn_bayesian_ridge::bayesian_ridge_fit(&x, &yv) else {
         return Vec::new();
@@ -414,7 +415,10 @@ pub fn write_links_csv(path: &std::path::Path, rows: &[LinkRow]) -> anyhow::Resu
     Ok(())
 }
 
-pub fn write_links_as_tf_priors_feather(path: &std::path::Path, rows: &[LinkRow]) -> anyhow::Result<()> {
+pub fn write_links_as_tf_priors_feather(
+    path: &std::path::Path,
+    rows: &[LinkRow],
+) -> anyhow::Result<()> {
     use polars::prelude::*;
 
     let rows = sorted_link_rows(rows);

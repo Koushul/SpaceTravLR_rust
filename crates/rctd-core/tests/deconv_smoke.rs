@@ -2,13 +2,12 @@ mod common;
 
 use approx::assert_abs_diff_eq;
 use ndarray::{Array1, Array2, ArrayBase, Data, Dimension};
+use rctd_core::types::{
+    SPOT_CLASS_DOUBLET_CERTAIN, SPOT_CLASS_DOUBLET_UNCERTAIN, SPOT_CLASS_REJECT, SPOT_CLASS_SINGLET,
+};
 use rctd_core::{
     build_x_vals, compute_q_matrix, compute_spline_coefficients, device_cpu, run_doublet_mode,
     run_full_mode, run_multi_mode, RctdConfig,
-};
-use rctd_core::types::{
-    SPOT_CLASS_DOUBLET_CERTAIN, SPOT_CLASS_DOUBLET_UNCERTAIN, SPOT_CLASS_REJECT,
-    SPOT_CLASS_SINGLET,
 };
 
 use common::{k_names, synthetic_pixel_data};
@@ -28,36 +27,17 @@ fn assert_all_finite_f32<S: Data<Elem = f32>, D: Dimension>(a: &ArrayBase<S, D>)
     assert!(a.iter().all(|x| x.is_finite()));
 }
 
-#[cfg_attr(
-    feature = "wgpu",
-    ignore = "NdArray f64 parity; wgpu backend uses f32"
-)]
+#[cfg_attr(feature = "wgpu", ignore = "NdArray f64 parity; wgpu backend uses f32")]
 #[test]
 fn full_mode_batch_sizes_match() {
     let (counts, numi, profiles) = synthetic_pixel_data(42);
     let (q_mat, sq_mat, x_vals) = tables();
     let device = device_cpu();
     let a = run_full_mode(
-        &counts,
-        &numi,
-        &profiles,
-        &q_mat,
-        &sq_mat,
-        &x_vals,
-        16,
-        &device,
-        None,
+        &counts, &numi, &profiles, &q_mat, &sq_mat, &x_vals, 16, &device, None,
     );
     let b = run_full_mode(
-        &counts,
-        &numi,
-        &profiles,
-        &q_mat,
-        &sq_mat,
-        &x_vals,
-        64,
-        &device,
-        None,
+        &counts, &numi, &profiles, &q_mat, &sq_mat, &x_vals, 64, &device, None,
     );
     assert_eq!(a.weights.dim(), b.weights.dim());
     let max_abs = a

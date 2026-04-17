@@ -994,7 +994,7 @@ score_threshold = 0.1
 
 #[cfg(test)]
 mod train_modulators_config_tests {
-    use super::{parse_train_modulators_tokens, SpaceshipConfig};
+    use super::{SpaceshipConfig, parse_train_modulators_tokens};
     use std::fs;
 
     #[test]
@@ -1182,8 +1182,7 @@ n_propagation = 9
         let mut root: toml::Value = toml::from_str(base).unwrap();
         let ov: toml::Value = toml::from_str(overlay).unwrap();
         merge_spaceship_overlay_into_toml(&mut root, &ov);
-        let cfg: SpaceshipConfig =
-            toml::from_str(&toml::to_string_pretty(&root).unwrap()).unwrap();
+        let cfg: SpaceshipConfig = toml::from_str(&toml::to_string_pretty(&root).unwrap()).unwrap();
         assert_eq!(cfg.perturbation.n_propagation, 9);
         assert_eq!(cfg.perturbation.beta_scale_factor, 1.0);
         assert_eq!(cfg.data.layer, "imputed_count");

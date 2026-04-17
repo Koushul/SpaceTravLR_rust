@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
-fn uv_status_retry_no_cache(
-    mut build: impl FnMut(bool) -> Command,
-) -> std::io::Result<ExitStatus> {
+fn uv_status_retry_no_cache(mut build: impl FnMut(bool) -> Command) -> std::io::Result<ExitStatus> {
     let s = build(false).status()?;
     if s.success() {
         return Ok(s);
@@ -120,16 +118,22 @@ fn process_h5ad_end_to_end_writes_processed_sibling() {
 
     let toy_status = uv_status_retry_no_cache(|no_cache| {
         let mut c = Command::new(&uv);
-        c.env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1");
+        c.env_remove("PYTHONPATH").env("PYTHONNOUSERSITE", "1");
         if no_cache {
             c.arg("--no-cache");
         }
-        c.args(["run", "--isolated", "--with", "numpy<2", "--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        c.args([
+            "run",
+            "--isolated",
+            "--with",
+            "numpy<2",
+            "--with",
+            "anndata>=0.11",
+        ])
+        .arg("python")
+        .arg("-c")
+        .arg(
+            r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -146,8 +150,8 @@ a.obs_names = [f"c{i}" for i in range(n_obs)]
 a.var_names = [f"G{i}" for i in range(n_var)]
 a.write_h5ad(p)
 "#,
-            )
-            .arg(in_str);
+        )
+        .arg(in_str);
         c
     })
     .expect("uv toy h5ad");
@@ -179,11 +183,7 @@ a.write_h5ad(p)
         "{}_processed.h5ad",
         in_path.file_stem().unwrap().to_str().unwrap()
     ));
-    assert!(
-        expected.is_file(),
-        "missing {}",
-        expected.display()
-    );
+    assert!(expected.is_file(), "missing {}", expected.display());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -203,10 +203,7 @@ fn impute_writes_imputed_sibling_after_process_h5ad() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_cli_impute_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("spacetravlr_cli_impute_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let raw_path = dir.join("chain.h5ad");
@@ -214,16 +211,22 @@ fn impute_writes_imputed_sibling_after_process_h5ad() {
 
     let toy_status = uv_status_retry_no_cache(|no_cache| {
         let mut c = Command::new(&uv);
-        c.env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1");
+        c.env_remove("PYTHONPATH").env("PYTHONNOUSERSITE", "1");
         if no_cache {
             c.arg("--no-cache");
         }
-        c.args(["run", "--isolated", "--with", "numpy<2", "--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        c.args([
+            "run",
+            "--isolated",
+            "--with",
+            "numpy<2",
+            "--with",
+            "anndata>=0.11",
+        ])
+        .arg("python")
+        .arg("-c")
+        .arg(
+            r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -240,8 +243,8 @@ a.obs_names = [f"c{i}" for i in range(n_obs)]
 a.var_names = [f"G{i}" for i in range(n_var)]
 a.write_h5ad(p)
 "#,
-            )
-            .arg(raw_str);
+        )
+        .arg(raw_str);
         c
     })
     .expect("uv toy");

@@ -3,9 +3,9 @@
 //! Golden JSON was produced by Python sklearn; regenerate manually if needed.
 
 use approx::assert_relative_eq;
-use spacetravlr::celloracle::bayesian_ridge_fit;
 use nalgebra::{DMatrix, DVector};
 use serde::Deserialize;
+use spacetravlr::celloracle::bayesian_ridge_fit;
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::fs;
 use std::path::PathBuf;

@@ -1347,10 +1347,7 @@ fn meta_json(st: &AppState) -> MetaJson {
             .unwrap_or_default(),
         network_dir: ds.network_dir.as_ref().map(|p| p.display().to_string()),
         run_toml: ds.run_toml.as_ref().map(|p| p.display().to_string()),
-        perturb_overlay: ds
-            .perturb_overlay
-            .as_ref()
-            .map(|p| p.display().to_string()),
+        perturb_overlay: ds.perturb_overlay.as_ref().map(|p| p.display().to_string()),
         dataset_ready: true,
         spatial_model: ds
             .perturb_runtime
@@ -1455,16 +1452,12 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
         tracing::info!("UMAP layout available (obsm['{}'])", k);
     }
     let obs_df = adata.read_obs()?;
-    let clusters = Arc::new(
-        spacetravlr::adata_query::clusters_from_obs_dataframe(
-            &obs_df,
-            &inputs.cluster_annot,
-        )?,
-    );
-    let betadata_key_col = spacetravlr::betadata::resolve_betadata_cluster_key_column(
+    let clusters = Arc::new(spacetravlr::adata_query::clusters_from_obs_dataframe(
         &obs_df,
         &inputs.cluster_annot,
-    );
+    )?);
+    let betadata_key_col =
+        spacetravlr::betadata::resolve_betadata_cluster_key_column(&obs_df, &inputs.cluster_annot);
     if betadata_key_col != inputs.cluster_annot {
         tracing::info!(
             "betadata feather join uses obs column {:?} (cluster_annot is {:?})",
@@ -1767,8 +1760,7 @@ async fn api_perturb_batch(
     let verbose = body.verbose;
     let par_override = body.batch_parallelism;
     let batch_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let batch_file =
-            load_batch_file(batch_path.as_path()).map_err(|e| format!("{e:#}"))?;
+        let batch_file = load_batch_file(batch_path.as_path()).map_err(|e| format!("{e:#}"))?;
         let batch_parent = batch_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -1777,13 +1769,8 @@ async fn api_perturb_batch(
         let mut jobs = expand_prepared_jobs(&batch_file, batch_parent, default_n_prop)
             .map_err(|e| format!("{e:#}"))?;
         validate_jobs_genes(&jobs, &rt.gene_names).map_err(|e| format!("{e:#}"))?;
-        resolve_prepared_job_cell_indices(
-            &batch_file,
-            batch_parent,
-            &rt.obs_names,
-            &mut jobs,
-        )
-        .map_err(|e| format!("{e:#}"))?;
+        resolve_prepared_job_cell_indices(&batch_file, batch_parent, &rt.obs_names, &mut jobs)
+            .map_err(|e| format!("{e:#}"))?;
         let parallelism = effective_parallelism(batch_file.parallelism, par_override);
         run_batch_jobs(rt, jobs, parallelism, verbose).map_err(|e| format!("{e:#}"))
     })
@@ -5549,7 +5536,10 @@ fn build_app(
     let api = Router::new()
         .route("/meta", get(api_meta))
         .route("/cancel", post(api_cancel))
-        .route("/viewer_state", get(api_get_viewer_state).post(api_post_viewer_state))
+        .route(
+            "/viewer_state",
+            get(api_get_viewer_state).post(api_post_viewer_state),
+        )
         .route("/session/configure", post(api_session_configure))
         .route("/spatial", get(api_spatial))
         .route("/umap", get(api_umap))

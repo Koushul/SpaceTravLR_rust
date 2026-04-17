@@ -277,12 +277,8 @@ impl TrainingHudState {
         let mean_cnn = (n_cnn > 0).then_some(cnn_sum / n_cnn as f64);
         let n_modulators = n_betadata_beta_columns
             .unwrap_or_else(|| summaries.iter().map(|s| s.n_modulators).max().unwrap_or(0));
-        self.gene_r2_mean.push((
-            gene.to_string(),
-            mean_lasso,
-            mean_cnn,
-            n_modulators,
-        ));
+        self.gene_r2_mean
+            .push((gene.to_string(), mean_lasso, mean_cnn, n_modulators));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
     }
 

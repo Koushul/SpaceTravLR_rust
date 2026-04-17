@@ -1,4 +1,3 @@
-use anyhow::Context;
 use crate::betadata::{build_cluster_id_to_betadata_cluster_key_map, write_betadata_feather};
 use crate::cnn_gating::{
     CnnGateDecision, CnnGateGeneInputs, build_neighbors, decide_cnn_for_gene, load_gene_set_file,
@@ -9,7 +8,7 @@ use crate::config::{
     SpaceshipConfig, expand_user_path,
 };
 use crate::estimator::{
-    CachedSpatialData, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs, ClusteredGCNNWR,
+    CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs,
     finite_or_zero_f64,
 };
 use crate::lasso::GroupLassoParams;
@@ -24,14 +23,16 @@ use crate::training_hud::{
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
+use anyhow::Context;
 use burn::tensor::backend::AutodiffBackend;
+use fs4::fs_std::FileExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 use ndarray::{Array1, Array2, Array4};
 use ndarray_npy::NpzWriter;
 use polars::prelude::{DataFrame, NamedFrom, Series};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,10 @@ use std::time::{Duration, SystemTime};
 
 const LARGE_DATASET_GRID_AUTO_CELLS: usize = 15_000;
 const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
+
+/// Advisory lock for [`patch_adata_var_mean_lasso_r2_locked`]. Suffix is not `.lock` so
+/// [`remove_stale_lock_files_in_dir`] never deletes it while a patch is in progress.
+pub const VAR_SCORES_PATCH_FLOCK: &str = "spacetravlr_var_scores_patch.flock";
 
 /// `use_tf_modulators` is on and every fitted TF coefficient column is zero (column indices
 /// `1..=n_tf` in per-cell β; column 0 is intercept).
@@ -226,13 +231,13 @@ pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<St
     use polars::prelude::*;
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
     let obs = adata.read_obs().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let col = obs.column(key).map_err(|_| {
-        anyhow::anyhow!("obs column {:?} missing", key)
-    })?;
+    let col = obs
+        .column(key)
+        .map_err(|_| anyhow::anyhow!("obs column {:?} missing", key))?;
     let cast_col = col.cast(&DataType::String)?;
-    let s = cast_col.str().map_err(|_| {
-        anyhow::anyhow!("obs column {:?} could not be cast to string", key)
-    })?;
+    let s = cast_col
+        .str()
+        .map_err(|_| anyhow::anyhow!("obs column {:?} could not be cast to string", key))?;
     let mut out = Vec::with_capacity(s.len());
     for i in 0..s.len() {
         out.push(s.get(i).unwrap_or("").to_string());
@@ -378,10 +383,7 @@ fn clusters_array1_from_obs_column(
             let map: HashMap<String, usize> =
                 uniq.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
             ca.into_iter()
-                .map(|o| {
-                    o.and_then(|x| map.get(x).copied())
-                        .unwrap_or(0)
-                })
+                .map(|o| o.and_then(|x| map.get(x).copied()).unwrap_or(0))
                 .collect()
         }
         DataType::Categorical(_, _) | DataType::Enum(_, _) => {
@@ -393,9 +395,7 @@ fn clusters_array1_from_obs_column(
                 )
             })?;
             let ca = phys.u32().map_err(|e| anyhow::anyhow!("{}", e))?;
-            ca.into_iter()
-                .map(|o| o.unwrap_or(0) as usize)
-                .collect()
+            ca.into_iter().map(|o| o.unwrap_or(0) as usize).collect()
         }
         _ => {
             let f_series = s.cast(&DataType::Float64).map_err(|e| {
@@ -405,9 +405,7 @@ fn clusters_array1_from_obs_column(
                     e
                 )
             })?;
-            let f = f_series
-                .f64()
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let f = f_series.f64().map_err(|e| anyhow::anyhow!("{}", e))?;
             f.into_iter()
                 .map(|o| o.unwrap_or(0.0).round() as usize)
                 .collect()
@@ -1152,6 +1150,9 @@ fn copy_h5ad_reflink_or_full(from: &Path, to: &Path) -> anyhow::Result<()> {
 
 /// Parallel-safe per-gene mean Lasso R² and optional mean CNN R² (see [`patch_adata_var_mean_lasso_r2`]).
 ///
+/// Training merges finite entries into `adata.var` under a flock (`--join-output-dir`); non-finite
+/// slots leave prior on-disk values unchanged.
+///
 /// `mean_cnn_r2_scores` is used for [`CnnTrainingMode::Full`] runs and for hybrid top‑K phase 2
 /// (accumulator is upgraded before the second pass). Seed-only training omits it.
 #[derive(Clone)]
@@ -1194,15 +1195,61 @@ fn mean_lasso_accum_ensure_cnn_scores(accum: MeanLassoR2Accum, n_vars: usize) ->
     MeanLassoR2Accum {
         gene_to_idx: accum.gene_to_idx,
         scores: accum.scores,
-        mean_cnn_r2_scores: Some(Arc::new(
-            (0..n_vars).map(|_| AtomicU64::new(nan)).collect(),
-        )),
+        mean_cnn_r2_scores: Some(Arc::new((0..n_vars).map(|_| AtomicU64::new(nan)).collect())),
     }
 }
 
-pub fn patch_adata_var_mean_lasso_r2(
+fn f64_var_column_or_nan(df: &DataFrame, name: &str, n: usize) -> anyhow::Result<Vec<f64>> {
+    match df.column(name) {
+        Ok(c) => {
+            let ca = c.f64()?;
+            anyhow::ensure!(
+                ca.len() == n,
+                "column {name} length {} != n_vars {n}",
+                ca.len()
+            );
+            Ok((0..n).map(|i| ca.get(i).unwrap_or(f64::NAN)).collect())
+        }
+        Err(_) => Ok(vec![f64::NAN; n]),
+    }
+}
+
+fn apply_orphan_marker_zeros(
+    training_dir: &Path,
+    gene_to_idx: &HashMap<String, usize>,
+    lasso_out: &mut [f64],
+    cnn_vec: &mut Option<Vec<f64>>,
+) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(training_dir) else {
+        return Ok(());
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(ns) = name.to_str() else {
+            continue;
+        };
+        let Some(gene) = ns.strip_suffix(".orphan") else {
+            continue;
+        };
+        let Some(&idx) = gene_to_idx.get(gene) else {
+            continue;
+        };
+        if idx < lasso_out.len() {
+            lasso_out[idx] = 0.0;
+        }
+        if let Some(v) = cnn_vec {
+            if idx < v.len() {
+                v[idx] = 0.0;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn patch_adata_var_mean_lasso_r2_merged(
     path: &Path,
     accum: &MeanLassoR2Accum,
+    orphan_training_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
     let mut df = adata.read_var()?;
@@ -1213,29 +1260,42 @@ pub fn patch_adata_var_mean_lasso_r2(
         df.height(),
         n
     );
+    let prev_lasso = f64_var_column_or_nan(&df, "mean_lasso_r2", n)?;
     let mut col: Vec<f64> = Vec::with_capacity(n);
-    for i in 0..n {
-        let bits = accum.scores[i].load(Ordering::Acquire);
-        col.push(f64::from_bits(bits));
+    for (prev, slot) in prev_lasso.iter().zip(accum.scores.iter()) {
+        let acc = f64::from_bits(slot.load(Ordering::Acquire));
+        col.push(if acc.is_finite() { acc } else { *prev });
     }
-    let s = Series::new("mean_lasso_r2".into(), col);
-    if df.column("mean_lasso_r2").is_ok() {
-        df = df.drop("mean_lasso_r2")?;
-    }
-    df.with_column(s)?;
 
-    if let Some(ref cnn_scores) = accum.mean_cnn_r2_scores {
+    let mut col_cnn: Option<Vec<f64>> = if let Some(ref cnn_scores) = accum.mean_cnn_r2_scores {
         anyhow::ensure!(
             cnn_scores.len() == n,
             "mean_cnn_r2 len {} != training n_vars {}",
             cnn_scores.len(),
             n
         );
-        let mut col_cnn: Vec<f64> = Vec::with_capacity(n);
-        for i in 0..n {
-            let bits = cnn_scores[i].load(Ordering::Acquire);
-            col_cnn.push(f64::from_bits(bits));
+        let prev_cnn = f64_var_column_or_nan(&df, "mean_cnn_r2", n)?;
+        let mut v: Vec<f64> = Vec::with_capacity(n);
+        for (prev, slot) in prev_cnn.iter().zip(cnn_scores.iter()) {
+            let acc = f64::from_bits(slot.load(Ordering::Acquire));
+            v.push(if acc.is_finite() { acc } else { *prev });
         }
+        Some(v)
+    } else {
+        None
+    };
+
+    if let Some(dir) = orphan_training_dir {
+        apply_orphan_marker_zeros(dir, &accum.gene_to_idx, &mut col, &mut col_cnn)?;
+    }
+
+    let s = Series::new("mean_lasso_r2".into(), col);
+    if df.column("mean_lasso_r2").is_ok() {
+        df = df.drop("mean_lasso_r2")?;
+    }
+    df.with_column(s)?;
+
+    if let Some(col_cnn) = col_cnn {
         let s_cnn = Series::new("mean_cnn_r2".into(), col_cnn);
         if df.column("mean_cnn_r2").is_ok() {
             df = df.drop("mean_cnn_r2")?;
@@ -1246,6 +1306,56 @@ pub fn patch_adata_var_mean_lasso_r2(
     adata.set_var(df)?;
     adata.close()?;
     Ok(())
+}
+
+/// Writes `mean_lasso_r2` (and `mean_cnn_r2` when tracked) into `adata.var`. Finite values in
+/// `accum` replace per row; otherwise existing on-disk values are kept — suitable for join/resume.
+pub fn patch_adata_var_mean_lasso_r2(path: &Path, accum: &MeanLassoR2Accum) -> anyhow::Result<()> {
+    patch_adata_var_mean_lasso_r2_merged(path, accum, None)
+}
+
+/// Same merge as [`patch_adata_var_mean_lasso_r2`], under an advisory flock in `training_dir`
+/// (not HDF5 file locking; see [`crate::ensure_hdf5_no_file_locking`]).
+pub fn patch_adata_var_mean_lasso_r2_locked(
+    training_dir: &Path,
+    h5ad_path: &Path,
+    accum: &MeanLassoR2Accum,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(training_dir)?;
+    let lock_path = training_dir.join(VAR_SCORES_PATCH_FLOCK);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open flock {}", lock_path.display()))?;
+
+    const ATTEMPTS: usize = 3600;
+    const SLEEP_MS: u64 = 50;
+
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(SLEEP_MS));
+        }
+        match lock_file.try_lock_exclusive() {
+            Ok(true) => {
+                return patch_adata_var_mean_lasso_r2_merged(h5ad_path, accum, Some(training_dir))
+                    .with_context(|| {
+                    format!("patch var scores while holding {}", lock_path.display())
+                });
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("lock {}", lock_path.display()));
+            }
+        }
+    }
+    anyhow::bail!(
+        "timed out after {}s acquiring exclusive flock for var score patch ({})",
+        ATTEMPTS as u64 * SLEEP_MS / 1000,
+        lock_path.display()
+    );
 }
 
 /// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers
@@ -1287,21 +1397,16 @@ pub fn materialize_canonical_training_adata(
             *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         } else {
             let _ = std::fs::remove_file(&canonical);
-            if already_prepared
-                || crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)?
-            {
+            if already_prepared || crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
                 copy_h5ad_reflink_or_full(&current, &canonical)?;
             } else {
                 crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(
-                    &current,
-                    &canonical,
-                    false,
+                    &current, &canonical, false,
                 )?;
             }
             *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         }
-    } else if !already_prepared
-        && !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)?
+    } else if !already_prepared && !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)?
     {
         crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &current, false)?;
     }
@@ -1709,8 +1814,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 );
             }
             let all_var_names = setup_adata.var_names().into_vec();
-            let track_mean_cnn_r2 =
-                matches!(cnn_training_mode, CnnTrainingMode::Full);
+            let track_mean_cnn_r2 = matches!(cnn_training_mode, CnnTrainingMode::Full);
             let mean_r2_accum = match mean_r2_accum_parent {
                 Some(a) => a,
                 None => init_mean_lasso_r2_accum(&all_var_names, track_mean_cnn_r2),
@@ -1765,10 +1869,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
             let t_cl = pipeline_step_begin(&hud, "build cluster labels & cell-type map");
             let cell_type_counts = cell_type_label_counts_from_obs(&obs_df);
-            let clusters: Arc<Array1<usize>> = Arc::new(clusters_array1_from_obs_column(
-                &obs_df,
-                cluster_annot,
-            )?);
+            let clusters: Arc<Array1<usize>> =
+                Arc::new(clusters_array1_from_obs_column(&obs_df, cluster_annot)?);
             let num_clusters = clusters
                 .iter()
                 .copied()
@@ -1820,14 +1922,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 Some(Arc::new(loaded))
             } else if use_tf_modulators {
                 let co_path = Path::new(training_dir).join("celloracle_tf_priors.feather");
-                let co_path_str = co_path
-                    .to_str()
-                    .with_context(|| {
-                        format!(
-                            "celloracle TF priors path must be UTF-8: {}",
-                            co_path.display()
-                        )
-                    })?;
+                let co_path_str = co_path.to_str().with_context(|| {
+                    format!(
+                        "celloracle TF priors path must be UTF-8: {}",
+                        co_path.display()
+                    )
+                })?;
                 let t_co = pipeline_step_begin(&hud, "CellOracle GRN inference (auto TF priors)");
                 if !co_path.is_file() {
                     let gem = read_h5ad_expression_dense_f64(Path::new(adata_path), layer)?;
@@ -1897,8 +1997,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     };
                     let all_links = infer_res.inspect_err(|_| clear_celloracle_hud())?;
                     let p_max = spaceship_config.grn.celloracle_p_max;
-                    let links =
-                        crate::celloracle::filter_links_p_max(all_links, p_max);
+                    let links = crate::celloracle::filter_links_p_max(all_links, p_max);
                     crate::celloracle::write_links_as_tf_priors_feather(&co_path, &links)
                         .inspect_err(|_| clear_celloracle_hud())?;
                     clear_celloracle_hud();
@@ -1914,18 +2013,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 } else {
                     log_line(
                         &hud,
-                        format!(
-                            "Reusing cached CellOracle TF priors: {}",
-                            co_path.display()
-                        ),
+                        format!("Reusing cached CellOracle TF priors: {}", co_path.display()),
                     );
                 }
                 let loaded = crate::network::TfPriors::from_feather(co_path_str, &all_var_names)?;
                 pipeline_step_end(&hud, "CellOracle GRN inference (auto TF priors)", t_co);
-                log_line(
-                    &hud,
-                    format!("Loaded TF priors from {}", co_path.display()),
-                );
+                log_line(&hud, format!("Loaded TF priors from {}", co_path.display()));
                 Some(Arc::new(loaded))
             } else {
                 None
@@ -1958,7 +2051,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         "Minimal reproducibility export keeps only obs.cell_type; set [data].cluster_annot = \"cell_type\"."
                     );
                 }
-                let out = export_minimal_repro_adata_with_cache(setup_adata.as_ref(), training_dir, layer)?;
+                let out = export_minimal_repro_adata_with_cache(
+                    setup_adata.as_ref(),
+                    training_dir,
+                    layer,
+                )?;
                 verify_minimal_repro_adata_loadable(&out, layer, cluster_annot)?;
                 log_line(
                     &hud,
@@ -2437,8 +2534,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             let phase_str =
                                 if matches!(cnn_mode_w, CnnTrainingMode::Hybrid) && !hybrid_pass2 {
                                     format!("hybrid | {n_mods} m")
-                                } else if worker_run_full_cnn {
-                                    format!("{n_mods} mods")
                                 } else {
                                     format!("{n_mods} mods")
                                 };
@@ -3083,14 +3178,24 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 }
             }
 
-            if !join_training && obs_row_subset.is_none() {
-                match patch_adata_var_mean_lasso_r2(Path::new(adata_path), &mean_r2_accum) {
+            if obs_row_subset.is_none() {
+                match patch_adata_var_mean_lasso_r2_locked(
+                    Path::new(training_dir),
+                    Path::new(adata_path),
+                    &mean_r2_accum,
+                ) {
                     Ok(()) => {
-                        let msg = if mean_r2_accum.mean_cnn_r2_scores.is_some() {
-                            "Updated var['mean_lasso_r2', 'mean_cnn_r2'] on training AnnData."
-                                .to_string()
+                        let cols = if mean_r2_accum.mean_cnn_r2_scores.is_some() {
+                            "mean_lasso_r2', 'mean_cnn_r2"
                         } else {
-                            "Updated var['mean_lasso_r2'] on training AnnData.".to_string()
+                            "mean_lasso_r2"
+                        };
+                        let msg = if join_training {
+                            format!(
+                                "Join mode: merged var['{cols}'] into training AnnData (advisory flock)."
+                            )
+                        } else {
+                            format!("Updated var['{cols}'] on training AnnData.")
                         };
                         log_line(&hud, msg);
                     }
@@ -3107,20 +3212,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         ),
                     ),
                 }
-            } else if join_training {
-                log_line(
-                    &hud,
-                    "Join mode: skipped var training score columns (multi-writer); use a single-host run for those columns."
-                        .to_string(),
-                );
             }
 
             if join_training {
                 log_line(
-                &hud,
-                "Join mode: did not overwrite spacetravlr_run_repro.toml (canonical copy from leader run)"
-                    .to_string(),
-            );
+                    &hud,
+                    "Join mode: did not overwrite spacetravlr_run_repro.toml (canonical copy from leader run)"
+                        .to_string(),
+                );
             } else if obs_row_subset.is_none() {
                 match spaceship_config.write_run_repro_toml(Path::new(training_dir)) {
                     Ok(p) => log_line(&hud, format!("Wrote run repro {}", p.display())),
@@ -3519,9 +3618,7 @@ mod scale_columns_tests {
                 (n - i) as f64 * 0.01
             }
         });
-        let y = Array2::from_shape_fn((n, 1), |(i, _)| {
-            1.5 * x_orig[[i, 0]] + 2.0 * x_orig[[i, 1]]
-        });
+        let y = Array2::from_shape_fn((n, 1), |(i, _)| 1.5 * x_orig[[i, 0]] + 2.0 * x_orig[[i, 1]]);
         let mut x_scaled = x_orig.clone();
         let scales = scale_columns_no_center(&mut x_scaled);
         let params = GroupLassoParams {
@@ -3558,15 +3655,15 @@ mod scale_columns_tests {
 mod mean_lasso_r2_patch_tests {
     use super::{
         AnnData, AnnDataOp, ArrayData, Backend, MeanLassoR2Accum, dense_to_csr_f64,
-        patch_adata_var_mean_lasso_r2,
+        patch_adata_var_mean_lasso_r2, patch_adata_var_mean_lasso_r2_locked,
     };
     use anndata_hdf5::H5;
     use ndarray::Array2;
     use polars::prelude::{DataFrame, NamedFrom, Series};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Once;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -3609,14 +3706,14 @@ mod mean_lasso_r2_patch_tests {
                     let a = AnnData::<H5>::new(&p)?;
                     a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
                     a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
-                    let obs = DataFrame::new(vec![Series::new(
-                        "cell_type".into(),
-                        vec!["x".to_string(), "x".to_string()],
-                    )
-                    .into()])?;
+                    let obs = DataFrame::new(vec![
+                        Series::new("cell_type".into(), vec!["x".to_string(), "x".to_string()])
+                            .into(),
+                    ])?;
                     a.set_obs(obs)?;
-                    let var =
-                        DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+                    let var = DataFrame::new(vec![
+                        Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
+                    ])?;
                     a.set_var(var)?;
                     let dense = Array2::from_elem((2, 2), 0.5f64);
                     let csr = dense_to_csr_f64(&dense)?;
@@ -3668,10 +3765,8 @@ mod mean_lasso_r2_patch_tests {
 
     #[test]
     fn patch_var_mean_lasso_r2_and_mean_cnn_r2_columns() {
-        HDF5_TEST_LOCK_ENV.call_once(|| {
-            unsafe {
-                std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
-            }
+        HDF5_TEST_LOCK_ENV.call_once(|| unsafe {
+            std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
         });
 
         const MAX_ATTEMPTS: usize = 12;
@@ -3700,14 +3795,14 @@ mod mean_lasso_r2_patch_tests {
                     let a = AnnData::<H5>::new(&p)?;
                     a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
                     a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
-                    let obs = DataFrame::new(vec![Series::new(
-                        "cell_type".into(),
-                        vec!["x".to_string(), "x".to_string()],
-                    )
-                    .into()])?;
+                    let obs = DataFrame::new(vec![
+                        Series::new("cell_type".into(), vec!["x".to_string(), "x".to_string()])
+                            .into(),
+                    ])?;
                     a.set_obs(obs)?;
-                    let var =
-                        DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+                    let var = DataFrame::new(vec![
+                        Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
+                    ])?;
                     a.set_var(var)?;
                     let dense = Array2::from_elem((2, 2), 0.5f64);
                     let csr = dense_to_csr_f64(&dense)?;
@@ -3760,6 +3855,290 @@ mod mean_lasso_r2_patch_tests {
 
         panic!(
             "patch_var_mean_lasso_r2_and_mean_cnn_r2_columns failed after {MAX_ATTEMPTS} attempts: {:?}",
+            last_err
+        );
+    }
+
+    #[test]
+    fn patch_var_mean_lasso_r2_merge_keeps_disk_when_accum_nan() {
+        HDF5_TEST_LOCK_ENV.call_once(|| unsafe {
+            std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+        });
+
+        const MAX_ATTEMPTS: usize = 12;
+        const BACKOFF: Duration = Duration::from_millis(40);
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(BACKOFF);
+            }
+
+            let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "spacetravlr_var_merge_{}_{}",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                continue;
+            }
+            let p = dir.join("merge.h5ad");
+
+            let step = (|| -> anyhow::Result<()> {
+                {
+                    let a = AnnData::<H5>::new(&p)?;
+                    a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
+                    a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
+                    let obs = DataFrame::new(vec![
+                        Series::new("cell_type".into(), vec!["x".to_string(), "x".to_string()])
+                            .into(),
+                    ])?;
+                    a.set_obs(obs)?;
+                    let var = DataFrame::new(vec![
+                        Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
+                        Series::new("mean_lasso_r2".into(), vec![f64::NAN, 0.7f64]).into(),
+                    ])?;
+                    a.set_var(var)?;
+                    let dense = Array2::from_elem((2, 2), 0.5f64);
+                    let csr = dense_to_csr_f64(&dense)?;
+                    a.set_x(ArrayData::from(csr))?;
+                    a.close()?;
+                }
+                thread::sleep(Duration::from_millis(5));
+
+                let mut m: HashMap<String, usize> = HashMap::new();
+                m.insert("G0".into(), 0);
+                m.insert("G1".into(), 1);
+                let scores = Arc::new(vec![
+                    AtomicU64::new(0.25f64.to_bits()),
+                    AtomicU64::new(f64::NAN.to_bits()),
+                ]);
+                let accum = MeanLassoR2Accum {
+                    gene_to_idx: Arc::new(m),
+                    scores,
+                    mean_cnn_r2_scores: None,
+                };
+                patch_adata_var_mean_lasso_r2(&p, &accum)?;
+
+                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
+                let v = a2.read_var()?;
+                let r2 = v.column("mean_lasso_r2")?.f64()?;
+                anyhow::ensure!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
+                anyhow::ensure!((r2.get(1).unwrap() - 0.7).abs() < 1e-9);
+                a2.close()?;
+                Ok(())
+            })();
+
+            match step {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+            }
+        }
+
+        panic!(
+            "patch_var_mean_lasso_r2_merge_keeps_disk_when_accum_nan failed after {MAX_ATTEMPTS} attempts: {:?}",
+            last_err
+        );
+    }
+
+    #[test]
+    fn patch_var_locked_sequential_partial_merges() {
+        HDF5_TEST_LOCK_ENV.call_once(|| unsafe {
+            std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+        });
+
+        const MAX_ATTEMPTS: usize = 12;
+        const BACKOFF: Duration = Duration::from_millis(40);
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(BACKOFF);
+            }
+
+            let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "spacetravlr_var_flock_{}_{}",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                continue;
+            }
+            let p = dir.join("flock.h5ad");
+
+            let step = (|| -> anyhow::Result<()> {
+                {
+                    let a = AnnData::<H5>::new(&p)?;
+                    a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
+                    a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
+                    let obs = DataFrame::new(vec![
+                        Series::new("cell_type".into(), vec!["x".to_string(), "x".to_string()])
+                            .into(),
+                    ])?;
+                    a.set_obs(obs)?;
+                    let var = DataFrame::new(vec![
+                        Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
+                    ])?;
+                    a.set_var(var)?;
+                    let dense = Array2::from_elem((2, 2), 0.5f64);
+                    let csr = dense_to_csr_f64(&dense)?;
+                    a.set_x(ArrayData::from(csr))?;
+                    a.close()?;
+                }
+                thread::sleep(Duration::from_millis(5));
+
+                let mut m: HashMap<String, usize> = HashMap::new();
+                m.insert("G0".into(), 0);
+                m.insert("G1".into(), 1);
+
+                let accum1 = MeanLassoR2Accum {
+                    gene_to_idx: Arc::new(m.clone()),
+                    scores: Arc::new(vec![
+                        AtomicU64::new(0.1f64.to_bits()),
+                        AtomicU64::new(f64::NAN.to_bits()),
+                    ]),
+                    mean_cnn_r2_scores: None,
+                };
+                patch_adata_var_mean_lasso_r2_locked(&dir, &p, &accum1)?;
+
+                let accum2 = MeanLassoR2Accum {
+                    gene_to_idx: Arc::new(m),
+                    scores: Arc::new(vec![
+                        AtomicU64::new(f64::NAN.to_bits()),
+                        AtomicU64::new(0.2f64.to_bits()),
+                    ]),
+                    mean_cnn_r2_scores: None,
+                };
+                patch_adata_var_mean_lasso_r2_locked(&dir, &p, &accum2)?;
+
+                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
+                let v = a2.read_var()?;
+                let r2 = v.column("mean_lasso_r2")?.f64()?;
+                anyhow::ensure!((r2.get(0).unwrap() - 0.1).abs() < 1e-9);
+                anyhow::ensure!((r2.get(1).unwrap() - 0.2).abs() < 1e-9);
+                a2.close()?;
+                Ok(())
+            })();
+
+            match step {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+            }
+        }
+
+        panic!(
+            "patch_var_locked_sequential_partial_merges failed after {MAX_ATTEMPTS} attempts: {:?}",
+            last_err
+        );
+    }
+
+    #[test]
+    fn patch_var_orphan_markers_force_zero_under_flock() {
+        HDF5_TEST_LOCK_ENV.call_once(|| unsafe {
+            std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+        });
+
+        const MAX_ATTEMPTS: usize = 12;
+        const BACKOFF: Duration = Duration::from_millis(40);
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(BACKOFF);
+            }
+
+            let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "spacetravlr_var_orphan_{}_{}",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                continue;
+            }
+            let p = dir.join("orph.h5ad");
+
+            let step = (|| -> anyhow::Result<()> {
+                let _ = std::fs::File::create(dir.join("G0.orphan"))?;
+                {
+                    let a = AnnData::<H5>::new(&p)?;
+                    a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
+                    a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
+                    let obs = DataFrame::new(vec![
+                        Series::new("cell_type".into(), vec!["x".to_string(), "x".to_string()])
+                            .into(),
+                    ])?;
+                    a.set_obs(obs)?;
+                    let var = DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+                    a.set_var(var)?;
+                    let dense = Array2::from_elem((2, 2), 0.5f64);
+                    let csr = dense_to_csr_f64(&dense)?;
+                    a.set_x(ArrayData::from(csr))?;
+                    a.close()?;
+                }
+                thread::sleep(Duration::from_millis(5));
+
+                let mut m: HashMap<String, usize> = HashMap::new();
+                m.insert("G0".into(), 0);
+                m.insert("G1".into(), 1);
+                let scores = Arc::new(vec![
+                    AtomicU64::new(f64::NAN.to_bits()),
+                    AtomicU64::new(f64::NAN.to_bits()),
+                ]);
+                let cnn_scores = Arc::new(vec![
+                    AtomicU64::new(f64::NAN.to_bits()),
+                    AtomicU64::new(0.4f64.to_bits()),
+                ]);
+                let accum = MeanLassoR2Accum {
+                    gene_to_idx: Arc::new(m),
+                    scores,
+                    mean_cnn_r2_scores: Some(cnn_scores),
+                };
+                patch_adata_var_mean_lasso_r2_locked(&dir, &p, &accum)?;
+
+                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
+                let v = a2.read_var()?;
+                let r2 = v.column("mean_lasso_r2")?.f64()?;
+                anyhow::ensure!((r2.get(0).unwrap() - 0.0).abs() < 1e-12);
+                anyhow::ensure!(r2.get(1).unwrap().is_nan());
+                let cnn = v.column("mean_cnn_r2")?.f64()?;
+                anyhow::ensure!((cnn.get(0).unwrap() - 0.0).abs() < 1e-12);
+                anyhow::ensure!((cnn.get(1).unwrap() - 0.4).abs() < 1e-9);
+                a2.close()?;
+                Ok(())
+            })();
+
+            match step {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+            }
+        }
+
+        panic!(
+            "patch_var_orphan_markers_force_zero_under_flock failed after {MAX_ATTEMPTS} attempts: {:?}",
             last_err
         );
     }

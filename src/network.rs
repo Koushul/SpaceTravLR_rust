@@ -272,8 +272,8 @@ pub fn infer_species(var_names: &[String]) -> Option<&'static str> {
         }
 
         let all_caps = letters.iter().all(|c| c.is_ascii_uppercase());
-        let title_mouse = letters[0].is_ascii_uppercase()
-            && letters[1..].iter().all(|c| c.is_ascii_lowercase());
+        let title_mouse =
+            letters[0].is_ascii_uppercase() && letters[1..].iter().all(|c| c.is_ascii_lowercase());
 
         if all_caps {
             human += 1;
@@ -516,8 +516,7 @@ impl GeneNetwork {
             let mut tf_candidates: HashMap<String, Vec<(String, f64)>> = HashMap::new();
 
             for i in 0..nn_df.height() {
-                if let (Some(l), Some(tf), Some(w)) = (l_col.get(i), tf_col.get(i), w_col.get(i))
-                {
+                if let (Some(l), Some(tf), Some(w)) = (l_col.get(i), tf_col.get(i), w_col.get(i)) {
                     let l_string = l.to_string();
                     let tf_string = tf.to_string();
                     if ligands_set.contains(&l_string) && regs_set.contains(&tf_string) {
@@ -531,9 +530,8 @@ impl GeneNetwork {
 
             for reg in regulators.iter() {
                 if let Some(mut candidates) = tf_candidates.remove(reg) {
-                    candidates.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    candidates
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     for (l, _w) in candidates.into_iter().take(5) {
                         tfl_ligands.push(l.clone());
                         tfl_regulators.push(reg.clone());
@@ -816,49 +814,38 @@ mod tests {
 
     #[test]
     fn infer_species_ensembl_prefers_mouse() {
-        let genes = vec![
-            "ENSMUSG00000000001".to_string(),
-            "GAPDH".to_string(),
-        ];
+        let genes = vec!["ENSMUSG00000000001".to_string(), "GAPDH".to_string()];
         assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]
     fn infer_species_ensembl_prefers_human() {
-        let genes = vec![
-            "ENSG00000139618".to_string(),
-            "Gapdh".to_string(),
-        ];
+        let genes = vec!["ENSG00000139618".to_string(), "Gapdh".to_string()];
         assert_eq!(infer_species(&genes), Some("human"));
     }
 
     #[test]
     fn infer_species_riken_mouse() {
-        let genes: Vec<String> = vec![
-            "1700001C02Rik", "A230050P20Rik", "Gapdh", "BRCA1",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let genes: Vec<String> = vec!["1700001C02Rik", "A230050P20Rik", "Gapdh", "BRCA1"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]
     fn infer_species_mt_prefix_mouse() {
-        let genes: Vec<String> = vec![
-            "mt-Co1", "mt-Nd1", "mt-Cytb", "ACTB", "SOX2",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let genes: Vec<String> = vec!["mt-Co1", "mt-Nd1", "mt-Cytb", "ACTB", "SOX2"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]
     fn infer_species_human_with_mt_uppercase() {
         let genes: Vec<String> = vec![
-            "MT-CO1", "MT-ND1", "GAPDH", "ACTB", "SOX2", "TP53",
-            "BRCA1", "EGFR", "MYC", "KRAS",
+            "MT-CO1", "MT-ND1", "GAPDH", "ACTB", "SOX2", "TP53", "BRCA1", "EGFR", "MYC", "KRAS",
         ]
         .into_iter()
         .map(String::from)
@@ -869,11 +856,10 @@ mod tests {
     #[test]
     fn infer_species_mouse_large_set() {
         let genes: Vec<String> = vec![
-            "Gapdh", "Actb", "Sox2", "Pou5f1", "Nanog", "Klf4", "Myc",
-            "Bmp4", "Fgf2", "Wnt3a", "Shh", "Notch1", "Dll1", "Jag1",
-            "Hes1", "Hes5", "Hey1", "Hey2", "Neurog2", "Ascl1",
-            "Pax6", "Tbr1", "Tbr2", "Dcx", "Map2", "Tubb3", "Rbfox3",
-            "Gfap", "Aldh1l1", "Olig2", "Mbp", "Pdgfra", "Cspg4",
+            "Gapdh", "Actb", "Sox2", "Pou5f1", "Nanog", "Klf4", "Myc", "Bmp4", "Fgf2", "Wnt3a",
+            "Shh", "Notch1", "Dll1", "Jag1", "Hes1", "Hes5", "Hey1", "Hey2", "Neurog2", "Ascl1",
+            "Pax6", "Tbr1", "Tbr2", "Dcx", "Map2", "Tubb3", "Rbfox3", "Gfap", "Aldh1l1", "Olig2",
+            "Mbp", "Pdgfra", "Cspg4",
         ]
         .into_iter()
         .map(String::from)
@@ -884,11 +870,10 @@ mod tests {
     #[test]
     fn infer_species_human_large_set() {
         let genes: Vec<String> = vec![
-            "GAPDH", "ACTB", "SOX2", "POU5F1", "NANOG", "KLF4", "MYC",
-            "BMP4", "FGF2", "WNT3A", "SHH", "NOTCH1", "DLL1", "JAG1",
-            "HES1", "HES5", "HEY1", "HEY2", "NEUROG2", "ASCL1",
-            "PAX6", "TBR1", "EOMES", "DCX", "MAP2", "TUBB3", "RBFOX3",
-            "GFAP", "ALDH1L1", "OLIG2", "MBP", "PDGFRA", "CSPG4",
+            "GAPDH", "ACTB", "SOX2", "POU5F1", "NANOG", "KLF4", "MYC", "BMP4", "FGF2", "WNT3A",
+            "SHH", "NOTCH1", "DLL1", "JAG1", "HES1", "HES5", "HEY1", "HEY2", "NEUROG2", "ASCL1",
+            "PAX6", "TBR1", "EOMES", "DCX", "MAP2", "TUBB3", "RBFOX3", "GFAP", "ALDH1L1", "OLIG2",
+            "MBP", "PDGFRA", "CSPG4",
         ]
         .into_iter()
         .map(String::from)
@@ -899,7 +884,9 @@ mod tests {
     #[test]
     fn infer_species_all_ensembl_mouse() {
         let genes: Vec<String> = vec![
-            "ENSMUSG00000000001", "ENSMUSG00000000028", "ENSMUSG00000000031",
+            "ENSMUSG00000000001",
+            "ENSMUSG00000000028",
+            "ENSMUSG00000000031",
         ]
         .into_iter()
         .map(String::from)
@@ -909,34 +896,28 @@ mod tests {
 
     #[test]
     fn infer_species_all_ensembl_human() {
-        let genes: Vec<String> = vec![
-            "ENSG00000139618", "ENSG00000141510", "ENSG00000171862",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let genes: Vec<String> = vec!["ENSG00000139618", "ENSG00000141510", "ENSG00000171862"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(infer_species(&genes), Some("human"));
     }
 
     #[test]
     fn infer_species_mixed_ensembl_and_symbols() {
-        let genes: Vec<String> = vec![
-            "Gapdh", "Actb", "ENSMUSG00000000001", "BRCA1", "TP53",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let genes: Vec<String> = vec!["Gapdh", "Actb", "ENSMUSG00000000001", "BRCA1", "TP53"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
     #[test]
     fn infer_species_whitespace_and_edge_cases() {
-        let genes: Vec<String> = vec![
-            "  Gapdh  ", "", "  ", "Actb", "Sox2",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let genes: Vec<String> = vec!["  Gapdh  ", "", "  ", "Actb", "Sox2"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(infer_species(&genes), Some("mouse"));
     }
 
@@ -955,9 +936,26 @@ mod tests {
     #[test]
     fn infer_species_stereoseq_mouse_style() {
         let genes: Vec<String> = vec![
-            "Apoe", "Alb", "Serpina1a", "Hpx", "Fga", "Fgb", "Fgg",
-            "Hp", "Itih4", "Orm1", "Orm2", "Saa1", "Saa2", "Lcn2",
-            "Cyp2e1", "Cyp2f2", "Cyp3a11", "Cyp1a2", "Glul", "Oat",
+            "Apoe",
+            "Alb",
+            "Serpina1a",
+            "Hpx",
+            "Fga",
+            "Fgb",
+            "Fgg",
+            "Hp",
+            "Itih4",
+            "Orm1",
+            "Orm2",
+            "Saa1",
+            "Saa2",
+            "Lcn2",
+            "Cyp2e1",
+            "Cyp2f2",
+            "Cyp3a11",
+            "Cyp1a2",
+            "Glul",
+            "Oat",
         ]
         .into_iter()
         .map(String::from)

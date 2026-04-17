@@ -32,4 +32,4 @@ pub use likelihood_tables::{build_x_vals, compute_q_matrix, compute_spline_coeff
 pub use multi::run_multi_mode;
 pub use pipeline::{run_deconvolution, DeconvMode, DeconvolutionOutput, PreparedData};
 pub use sigma::{choose_sigma, SIGMA_ALL};
-pub use types::{BatchProgress, DoubletResult, MultiResult, RctdConfig, notify_batch};
+pub use types::{notify_batch, BatchProgress, DoubletResult, MultiResult, RctdConfig};

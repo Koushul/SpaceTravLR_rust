@@ -59,25 +59,20 @@
 //! **`contact_distance`**, and **[`cnn.spatial_feature_radius`](crate::config::CnnConfig::spatial_feature_radius)**
 //! in **µm** to match.
 
+use crate::config::expand_user_path;
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
-use crate::config::expand_user_path;
 use serde_json::json;
+use std::env;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::env;
 
 const UV_WITH_ANNDATA: &[&str] = &["numpy<2", "anndata>=0.11"];
 const UV_WITH_ATTACH: &[&str] = &["numpy<2", "anndata>=0.11", "scipy"];
-const UV_WITH_MAGIC_IMPUTE: &[&str] = &[
-    "numpy<2",
-    "anndata>=0.11",
-    "scipy",
-    "magic-impute>=3,<4",
-];
+const UV_WITH_MAGIC_IMPUTE: &[&str] = &["numpy<2", "anndata>=0.11", "scipy", "magic-impute>=3,<4"];
 const UV_WITH_SCANPY: &[&str] = &[
     "numpy<2",
     "anndata>=0.11",
@@ -90,7 +85,8 @@ const UV_WITH_SCANPY: &[&str] = &[
 ];
 
 // #region agent log
-const DEBUG_AGENT_LOG_PATH: &str = "/Users/koush/Projects/SpaceTravLR_rust/.cursor/debug-f9143e.log";
+const DEBUG_AGENT_LOG_PATH: &str =
+    "/Users/koush/Projects/SpaceTravLR_rust/.cursor/debug-f9143e.log";
 const DEBUG_AGENT_SESSION: &str = "f9143e";
 
 pub fn agent_debug_ndjson(
@@ -124,14 +120,12 @@ pub fn agent_debug_ndjson(
 // #endregion
 
 /// Options for heuristic **`obsm['spatial']` → microns** in the Scanpy embed ([`full_preprocess_maybe_log`]).
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SpatialMicronsOptions {
     pub skip: bool,
     pub species: String,
     pub target_median_nn_um: Option<f64>,
 }
-
 
 fn read_h5ad_var_names_for_infer(path: &Path) -> anyhow::Result<Vec<String>> {
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -165,7 +159,11 @@ fn uv_executable() -> OsString {
 }
 
 fn apply_blas_thread_caps_for_uv_child(cmd: &mut Command) {
-    if env::var("SPACETRAVLR_PRESERVE_BLAS_THREADS").ok().as_deref() == Some("1") {
+    if env::var("SPACETRAVLR_PRESERVE_BLAS_THREADS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
         return;
     }
     let n = env::var("SPACETRAVLR_UV_BLAS_THREADS")
@@ -301,7 +299,9 @@ fn uv_python_stdin_once(
         }
         Ok(combined)
     } else {
-        let status = child.wait().with_context(|| format!("wait for uv ({spawn_hint})"))?;
+        let status = child
+            .wait()
+            .with_context(|| format!("wait for uv ({spawn_hint})"))?;
         if !status.success() {
             bail!("uv run failed ({spawn_hint}): {status}");
         }
@@ -913,7 +913,10 @@ pub fn training_h5ad_is_fully_prepared(path: &Path) -> anyhow::Result<bool> {
 
 /// **`candidate`** can replace a full preprocess when it exists, is at least as new as **`source`**
 /// (mtime), and [`training_h5ad_is_fully_prepared`] is true for **`candidate`**.
-pub fn prepared_training_output_is_reusable(source: &Path, candidate: &Path) -> anyhow::Result<bool> {
+pub fn prepared_training_output_is_reusable(
+    source: &Path,
+    candidate: &Path,
+) -> anyhow::Result<bool> {
     if !candidate.is_file() {
         return Ok(false);
     }
@@ -1077,8 +1080,8 @@ pub fn write_h5ad_csr_layers_uv(
 ///
 /// Uses the HDF5 `encoding-type` attribute (metadata only) — does **not** read matrix data.
 pub fn adata_x_and_layers_are_csr(path: &Path) -> anyhow::Result<bool> {
-    use anndata::backend::DataType;
     use anndata::ArrayElemOp;
+    use anndata::backend::DataType;
 
     fn dtype_is_sparse(dt: Option<DataType>) -> bool {
         matches!(dt, Some(DataType::CsrMatrix(_) | DataType::CscMatrix(_)))
@@ -1115,13 +1118,8 @@ pub fn ensure_h5ad_csr_layers_on_path(
         let tmp = from_h5ad.with_extension("h5ad.csr_work");
         let _ = std::fs::remove_file(&tmp);
         write_h5ad_csr_layers_uv(from_h5ad, &tmp, capture_output)?;
-        std::fs::rename(&tmp, from_h5ad).with_context(|| {
-            format!(
-                "rename {} -> {}",
-                tmp.display(),
-                from_h5ad.display()
-            )
-        })?;
+        std::fs::rename(&tmp, from_h5ad)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), from_h5ad.display()))?;
         return Ok(());
     }
     let _ = std::fs::remove_file(to_h5ad);
@@ -1132,10 +1130,7 @@ pub fn ensure_h5ad_csr_layers_on_path(
     Ok(())
 }
 
-fn ensure_magic_batch_obs_column_exists(
-    source_h5ad: &Path,
-    batch_col: &str,
-) -> anyhow::Result<()> {
+fn ensure_magic_batch_obs_column_exists(source_h5ad: &Path, batch_col: &str) -> anyhow::Result<()> {
     let adata =
         AnnData::<H5>::open(H5::open(source_h5ad)?).map_err(|e| anyhow::anyhow!("{}", e))?;
     let obs = adata.read_obs().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -1388,13 +1383,8 @@ pub fn ensure_training_adata_ready(
                 "spacetravlr: running full Scanpy preprocess (UMAP, Leiden, cell_type, imputation) → {}",
                 out.display()
             );
-            let (written, _) = full_preprocess_maybe_log(
-                &p,
-                &out,
-                false,
-                magic_batch_obs,
-                spatial_microns,
-            )?;
+            let (written, _) =
+                full_preprocess_maybe_log(&p, &out, false, magic_batch_obs, spatial_microns)?;
             debug_assert_eq!(written, out);
             *adata_path = expand_user_path(written.to_string_lossy().as_ref());
         }
@@ -1613,15 +1603,11 @@ mod tests {
     fn uv_run_status_retry_no_cache(
         mut build: impl FnMut(bool) -> Command,
     ) -> anyhow::Result<std::process::ExitStatus> {
-        let s = build(false)
-            .status()
-            .context("spawn uv (first attempt)")?;
+        let s = build(false).status().context("spawn uv (first attempt)")?;
         if s.success() {
             return Ok(s);
         }
-        build(true)
-            .status()
-            .context("spawn uv (--no-cache retry)")
+        build(true).status().context("spawn uv (--no-cache retry)")
     }
 
     #[test]
@@ -1664,8 +1650,7 @@ mod tests {
         let path_str = path.to_str().context("toy path utf-8")?;
         let status = uv_run_status_retry_no_cache(|no_cache| {
             let mut c = Command::new(uv_executable());
-            c.env_remove("PYTHONPATH")
-                .env("PYTHONNOUSERSITE", "1");
+            c.env_remove("PYTHONPATH").env("PYTHONNOUSERSITE", "1");
             if no_cache {
                 c.arg("--no-cache");
             }
@@ -1706,8 +1691,7 @@ a.write_h5ad(p)
         let path_str = path.to_str().context("toy path utf-8")?;
         let status = uv_run_status_retry_no_cache(|no_cache| {
             let mut c = Command::new(uv_executable());
-            c.env_remove("PYTHONPATH")
-                .env("PYTHONNOUSERSITE", "1");
+            c.env_remove("PYTHONPATH").env("PYTHONNOUSERSITE", "1");
             if no_cache {
                 c.arg("--no-cache");
             }
@@ -1748,7 +1732,10 @@ a.write_h5ad(p)
             c
         })
         .context("uv to write spatial grid h5ad")?;
-        anyhow::ensure!(status.success(), "uv spatial grid h5ad write failed: {status}");
+        anyhow::ensure!(
+            status.success(),
+            "uv spatial grid h5ad write failed: {status}"
+        );
         Ok(())
     }
 
@@ -1758,25 +1745,22 @@ a.write_h5ad(p)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_scanpy_uv_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_scanpy_uv_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let in_path = dir.join("toy.h5ad");
         write_minimal_h5ad_via_uv(&in_path).expect("toy h5ad");
 
         let expected = processed_h5ad_path(&in_path).unwrap();
-        let (out, log) =
-            full_preprocess_maybe_log(
-                &in_path,
-                &expected,
-                true,
-                None,
-                SpatialMicronsOptions::default(),
-            )
-            .expect("preprocess");
+        let (out, log) = full_preprocess_maybe_log(
+            &in_path,
+            &expected,
+            true,
+            None,
+            SpatialMicronsOptions::default(),
+        )
+        .expect("preprocess");
         let log = log.expect("captured");
 
         assert_eq!(out, expected);
@@ -1809,9 +1793,7 @@ a.write_h5ad(p)
         assert!(
             matches!(
                 xdata,
-                ArrayData::CsrMatrix(_)
-                    | ArrayData::CsrNonCanonical(_)
-                    | ArrayData::CscMatrix(_)
+                ArrayData::CsrMatrix(_) | ArrayData::CsrNonCanonical(_) | ArrayData::CscMatrix(_)
             ),
             "final X should be sparse"
         );
@@ -1839,7 +1821,10 @@ a.write_h5ad(p)
             obs.column("cell_type").is_ok(),
             "processed h5ad should have obs cell_type (from Leiden)"
         );
-        assert!(obs.column("leiden").is_ok(), "processed h5ad should have leiden");
+        assert!(
+            obs.column("leiden").is_ok(),
+            "processed h5ad should have leiden"
+        );
 
         processed.close().expect("close");
 
@@ -1852,10 +1837,8 @@ a.write_h5ad(p)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_spatial_um_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_spatial_um_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let in_path = dir.join("grid.h5ad");
@@ -1919,8 +1902,7 @@ a.write_h5ad(p)
         let path_str = path.to_str().context("toy path utf-8")?;
         let status = uv_run_status_retry_no_cache(|no_cache| {
             let mut c = Command::new(uv_executable());
-            c.env_remove("PYTHONPATH")
-                .env("PYTHONNOUSERSITE", "1");
+            c.env_remove("PYTHONPATH").env("PYTHONNOUSERSITE", "1");
             if no_cache {
                 c.arg("--no-cache");
             }
@@ -1961,10 +1943,8 @@ a.write_h5ad(p)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_scanpy_log_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_scanpy_log_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let in_path = dir.join("logish.h5ad");
@@ -2021,10 +2001,7 @@ a.write_h5ad(p)
             resolve_magic_batch_obs_column(Some(""), Some("c")),
             Some("c".to_string())
         );
-        assert_eq!(
-            resolve_magic_batch_obs_column(Some("  "), None),
-            None
-        );
+        assert_eq!(resolve_magic_batch_obs_column(Some("  "), None), None);
         assert_eq!(resolve_magic_batch_obs_column(None, None), None);
         assert_eq!(
             resolve_magic_batch_obs_column(Some("x"), Some("y")),
@@ -2132,8 +2109,7 @@ a.write_h5ad(out)
         );
         let status = uv_run_status_retry_no_cache(|no_cache| {
             let mut c = Command::new(uv_executable());
-            c.env_remove("PYTHONPATH")
-                .env("PYTHONNOUSERSITE", "1");
+            c.env_remove("PYTHONPATH").env("PYTHONNOUSERSITE", "1");
             if no_cache {
                 c.arg("--no-cache");
             }
@@ -2159,10 +2135,8 @@ a.write_h5ad(out)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_probe_leiden_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_probe_leiden_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("x.h5ad");
@@ -2205,10 +2179,7 @@ a.obs["leiden"] = np.array([str(i % 3) for i in range(n_obs)], dtype=object)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_probe_ct_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("spacetravlr_probe_ct_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("y.h5ad");
@@ -2249,10 +2220,8 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_probe_noop_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_probe_noop_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("z.h5ad");
@@ -2289,10 +2258,8 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_magic_batch_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_magic_batch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("src.h5ad");
@@ -2336,10 +2303,8 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
             eprintln!("skip: uv not on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "spacetravlr_magic_badbatch_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_magic_badbatch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("src.h5ad");

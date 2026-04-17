@@ -47,11 +47,11 @@ pub fn ratatui_color_for_cell_type_index(i: usize) -> ratatui::style::Color {
 }
 
 #[cfg(feature = "tui")]
-pub fn ratatui_color_for_cell_type_label(label: &str, sorted_unique: &[String]) -> ratatui::style::Color {
-    let idx = sorted_unique
-        .iter()
-        .position(|s| s == label)
-        .unwrap_or(0);
+pub fn ratatui_color_for_cell_type_label(
+    label: &str,
+    sorted_unique: &[String],
+) -> ratatui::style::Color {
+    let idx = sorted_unique.iter().position(|s| s == label).unwrap_or(0);
     ratatui_color_for_cell_type_index(idx)
 }
 
@@ -81,7 +81,11 @@ pub fn detect_spatial_obsm_key<B: Backend>(adata: &AnnData<B>) -> anyhow::Result
         }
     }
     let keys = adata.obsm().keys();
-    anyhow::bail!("no usable 2D spatial in obsm (tried {:?}). Keys: {:?}", SPATIAL_OBSM_KEYS, keys)
+    anyhow::bail!(
+        "no usable 2D spatial in obsm (tried {:?}). Keys: {:?}",
+        SPATIAL_OBSM_KEYS,
+        keys
+    )
 }
 
 fn obs_index_dataset_name(obs: &Group) -> Option<String> {
@@ -142,7 +146,10 @@ fn h5ad_obs_labels_from_dataset(ds: &H5Dataset) -> anyhow::Result<Vec<String>> {
         return Ok(v.iter().map(|x| x.to_string()).collect());
     }
     if let Ok(v) = ds.read_1d::<bool>() {
-        return Ok(v.iter().map(|b| if *b { "true" } else { "false" }.to_string()).collect());
+        return Ok(v
+            .iter()
+            .map(|b| if *b { "true" } else { "false" }.to_string())
+            .collect());
     }
     bail!("unsupported obs column element type for plot-h5ad");
 }
@@ -165,7 +172,10 @@ fn h5ad_obs_labels_from_categorical_group(g: &Group) -> anyhow::Result<Vec<Strin
 
 fn h5ad_obs_labels(obs: &Group, col: &str) -> anyhow::Result<Vec<String>> {
     anyhow::ensure!(obs.link_exists(col), "obs column {col:?} not found");
-    match obs.loc_type_by_name(col).with_context(|| format!("obs[{col}]"))? {
+    match obs
+        .loc_type_by_name(col)
+        .with_context(|| format!("obs[{col}]"))?
+    {
         LocationType::Dataset => h5ad_obs_labels_from_dataset(&obs.dataset(col)?),
         LocationType::Group => h5ad_obs_labels_from_categorical_group(&obs.group(col)?),
         _ => bail!("obs[{col}] unsupported HDF5 type for plot-h5ad"),
@@ -198,7 +208,8 @@ fn h5ad_obsm_xy_two_cols(obsm: &Group, key: &str) -> anyhow::Result<Array2<f64>>
         LocationType::Dataset => h5ad_read_obsm_xy_two_cols(&obsm.dataset(key)?),
         LocationType::Group => {
             let g = obsm.group(key)?;
-            if g.link_exists("array") && matches!(g.loc_type_by_name("array")?, LocationType::Dataset)
+            if g.link_exists("array")
+                && matches!(g.loc_type_by_name("array")?, LocationType::Dataset)
             {
                 h5ad_read_obsm_xy_two_cols(&g.dataset("array")?)
             } else {
@@ -509,10 +520,7 @@ fn ansi_line_to_line(line: &str) -> ratatui::text::Line<'static> {
 }
 
 #[cfg(feature = "tui")]
-fn apply_ansi_seq(
-    _base: ratatui::style::Style,
-    seq: &str,
-) -> ratatui::style::Style {
+fn apply_ansi_seq(_base: ratatui::style::Style, seq: &str) -> ratatui::style::Style {
     use ratatui::style::{Color, Style};
     if seq == "0" || seq.is_empty() {
         return Style::default();
@@ -562,11 +570,7 @@ pub fn spatial_scatter_lines_for_tui(
 ) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
     let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
     let c = build_spatial_scatter_canvas_fixed_dims_from_root(
-        &h5,
-        color_by,
-        chart_w,
-        chart_h,
-        obsm_key,
+        &h5, color_by, chart_w, chart_h, obsm_key,
     )?;
     Ok(ansi_braille_to_lines(&c.canvas_no_border))
 }
@@ -657,16 +661,15 @@ pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
     let n_obs = xy.nrows();
     anyhow::ensure!(n_obs > 0, "obsm['{umap_key}'] is empty");
 
-    let color_col = resolve_plot_h5ad_color_column_opt(&h5)
-        .or_else(|| {
-            let obs = h5.group("obs").ok()?;
-            for fallback in ["cell_type", "leiden"] {
-                if obs.link_exists(fallback) {
-                    return Some(fallback.to_string());
-                }
+    let color_col = resolve_plot_h5ad_color_column_opt(&h5).or_else(|| {
+        let obs = h5.group("obs").ok()?;
+        for fallback in ["cell_type", "leiden"] {
+            if obs.link_exists(fallback) {
+                return Some(fallback.to_string());
             }
-            None
-        });
+        }
+        None
+    });
 
     let labels: Vec<String> = if let Some(ref col) = color_col {
         let obs = h5.group("obs").context("h5ad: missing obs group")?;
@@ -734,7 +737,10 @@ pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
             )
         })
         .collect();
-    print!("{}", zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines));
+    print!(
+        "{}",
+        zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines)
+    );
     Ok(())
 }
 
@@ -753,20 +759,18 @@ pub fn print_h5ad_scatter(path: &Path, cluster_annot_fallback: &str) -> anyhow::
         obsm.link_exists("spatial"),
         "obsm['spatial'] not found — --plot-h5ad requires spatial coordinates in obsm['spatial']"
     );
-    let xy = h5ad_obsm_xy_two_cols(&obsm, "spatial")
-        .context("failed to read obsm['spatial']")?;
+    let xy = h5ad_obsm_xy_two_cols(&obsm, "spatial").context("failed to read obsm['spatial']")?;
     let n_obs = xy.nrows();
     anyhow::ensure!(n_obs > 0, "obsm['spatial'] is empty");
 
-    let color_col = resolve_plot_h5ad_color_column_opt(&h5)
-        .or_else(|| {
-            let obs = h5.group("obs").ok()?;
-            if obs.link_exists(cluster_annot_fallback) {
-                Some(cluster_annot_fallback.to_string())
-            } else {
-                None
-            }
-        });
+    let color_col = resolve_plot_h5ad_color_column_opt(&h5).or_else(|| {
+        let obs = h5.group("obs").ok()?;
+        if obs.link_exists(cluster_annot_fallback) {
+            Some(cluster_annot_fallback.to_string())
+        } else {
+            None
+        }
+    });
 
     let labels: Vec<String> = if let Some(ref col) = color_col {
         let obs = h5.group("obs").context("h5ad: missing obs group")?;
@@ -834,6 +838,9 @@ pub fn print_h5ad_scatter(path: &Path, cluster_annot_fallback: &str) -> anyhow::
             )
         })
         .collect();
-    print!("{}", zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines));
+    print!(
+        "{}",
+        zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines)
+    );
     Ok(())
 }

@@ -5,8 +5,8 @@ use crate::backend::RctdDevice;
 use crate::full::run_full_mode;
 use crate::irwls_native::{calc_neg_loglik_row_sums, solve_irwls_batch_s_ndarray};
 use crate::types::{
-    BatchProgress, DoubletResult, RctdConfig, SPOT_CLASS_DOUBLET_CERTAIN,
-    SPOT_CLASS_DOUBLET_UNCERTAIN, SPOT_CLASS_REJECT, SPOT_CLASS_SINGLET, notify_batch,
+    notify_batch, BatchProgress, DoubletResult, RctdConfig, SPOT_CLASS_DOUBLET_CERTAIN,
+    SPOT_CLASS_DOUBLET_UNCERTAIN, SPOT_CLASS_REJECT, SPOT_CLASS_SINGLET,
 };
 
 fn s_pair_batch(

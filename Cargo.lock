@@ -7764,6 +7764,7 @@ dependencies = [
  "crossterm 0.29.0",
  "flate2",
  "foyer",
+ "fs4",
  "glob",
  "hdf5-metno",
  "indicatif",

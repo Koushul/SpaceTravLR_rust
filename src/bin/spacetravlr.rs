@@ -1,8 +1,8 @@
 mod compute_backend;
 
-use clap::builder::styling::AnsiColor;
-use clap::builder::Styles;
 use anyhow::Context;
+use clap::builder::Styles;
+use clap::builder::styling::AnsiColor;
 use clap::{ArgAction, ColorChoice, Parser, Subcommand};
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
@@ -18,11 +18,11 @@ use spacetravlr::config::{
 use spacetravlr::grn_extra;
 #[cfg(feature = "tui")]
 use spacetravlr::training_demo::{
-    prepare_demo_hud, run_demo_training, DEMO_KIDNEY_SLIDETAGS_H5AD, DEMO_OUTPUT_DIR_LABEL,
+    DEMO_KIDNEY_SLIDETAGS_H5AD, DEMO_OUTPUT_DIR_LABEL, prepare_demo_hud, run_demo_training,
 };
-use spacetravlr::training_hud::{RunConfigSummary, RunConfigSummaryBuildArgs};
 #[cfg(feature = "tui")]
 use spacetravlr::training_hud::TrainingHudState;
+use spacetravlr::training_hud::{RunConfigSummary, RunConfigSummaryBuildArgs};
 #[cfg(feature = "tui")]
 use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
@@ -65,6 +65,7 @@ const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
 Multi-host / shared storage
   Start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine.
+  Per-gene var['mean_lasso_r2'] (and mean_cnn_r2 when used) are merged into the training .h5ad under an advisory flock in the output directory (no single-host-only step).
 
 Condition splits
   With --condition, --join-output-dir points to the parent output directory; conditions/<group>/ subdirectories are auto-discovered from the repro TOML."#;
@@ -1279,8 +1280,7 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&out_dir)?;
     let stem = canonical_training_prep_stem(&h5ad);
-    let dest =
-        spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
+    let dest = spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
     let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
         cli.magic_batch_obs.as_deref(),
         cli.condition.as_deref(),
@@ -1332,11 +1332,14 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn run_impute(cli: &Cli) -> anyhow::Result<()> {
-    use spacetravlr::scanpy_preprocess::{magic_impute_and_attach_batch, training_imputed_h5ad_path};
+    use spacetravlr::scanpy_preprocess::{
+        magic_impute_and_attach_batch, training_imputed_h5ad_path,
+    };
 
-    let h5ad = cli.h5ad.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--impute requires `--h5ad PATH`")
-    })?;
+    let h5ad = cli
+        .h5ad
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--impute requires `--h5ad PATH`"))?;
     let h5ad = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
     if !h5ad.is_file() {
         anyhow::bail!("AnnData not found at {}.", h5ad.display());
@@ -1366,9 +1369,7 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
     let h5ad = match h5ad {
         Some(p) => p,
         None => {
-            anyhow::bail!(
-                "--plot-umap requires --h5ad PATH pointing to an existing .h5ad file."
-            );
+            anyhow::bail!("--plot-umap requires --h5ad PATH pointing to an existing .h5ad file.");
         }
     };
 
@@ -1403,8 +1404,7 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
         };
         std::fs::create_dir_all(&out_dir)?;
         let stem = canonical_training_prep_stem(&h5ad);
-        let dest =
-            spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
+        let dest = spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
         let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
             skip: cli.skip_spatial_microns,
             species: cli
@@ -1419,28 +1419,29 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
             cli.magic_batch_obs.as_deref(),
             cli.condition.as_deref(),
         );
-        let out = if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)?
-            && h5ad_obsm_has_umap(&dest)?
-        {
-            eprintln!(
-                "spacetravlr: reusing existing {} (>= mtime of {})",
-                dest.display(),
-                h5ad.display()
-            );
-            dest
-        } else {
-            let (written, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
-                &h5ad,
-                &dest,
-                true,
-                batch_owned.as_deref(),
-                spatial_microns,
-            )?;
-            if let Some(l) = log {
-                eprint!("{l}");
-            }
-            written
-        };
+        let out =
+            if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)?
+                && h5ad_obsm_has_umap(&dest)?
+            {
+                eprintln!(
+                    "spacetravlr: reusing existing {} (>= mtime of {})",
+                    dest.display(),
+                    h5ad.display()
+                );
+                dest
+            } else {
+                let (written, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+                    &h5ad,
+                    &dest,
+                    true,
+                    batch_owned.as_deref(),
+                    spatial_microns,
+                )?;
+                if let Some(l) = log {
+                    eprint!("{l}");
+                }
+                written
+            };
         let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&out);
         out
     };
@@ -1466,7 +1467,6 @@ fn resolve_celloracle_network_data_dir(cli: &Cli) -> anyhow::Result<Option<Strin
 }
 
 fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
-    use std::path::Path;
     use spacetravlr::celloracle::{
         filter_links_p_max, infer_grn_per_cluster, infer_grn_whole, scale_gem_no_center,
         write_links_as_tf_priors_feather,
@@ -1478,6 +1478,7 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
     use spacetravlr::{
         read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
     };
+    use std::path::Path;
 
     let h5ad_arg = cli
         .celloracle_h5ad
@@ -1549,11 +1550,7 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
     };
 
     let network_data_dir = resolve_celloracle_network_data_dir(cli)?;
-    let network = GeneNetwork::new(
-        species.trim(),
-        &var_names,
-        network_data_dir.as_deref(),
-    )?;
+    let network = GeneNetwork::new(species.trim(), &var_names, network_data_dir.as_deref())?;
     let tf_by_target = network.grn_celloracle_tf_regulators_by_target()?;
 
     let gem_scaled = scale_gem_no_center(&gem);
@@ -1608,8 +1605,7 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
         }
     };
     if let Some(parent) = feather_out.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("mkdir {:?}", parent))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {:?}", parent))?;
     }
     write_links_as_tf_priors_feather(&feather_out, &links)
         .with_context(|| format!("write {:?}", feather_out))?;
@@ -1624,7 +1620,9 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
 #[cfg(feature = "rctd")]
 fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
     let h5ad = cli.h5ad.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--rctd requires `--h5ad PATH` (spatial AnnData .h5ad or .rds via same path)")
+        anyhow::anyhow!(
+            "--rctd requires `--h5ad PATH` (spatial AnnData .h5ad or .rds via same path)"
+        )
     })?;
     let spatial = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
     if !spatial.is_file() {
@@ -1657,26 +1655,31 @@ fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
     run_rctd(RctdCliArgs {
         spatial,
         reference,
-        spatial_obs_subset_file: cli.rctd_obs_subset_file.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
-        gene_subset_file: cli.rctd_genes_file.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
-        spatial_numi_tsv: cli.rctd_spatial_numi_tsv.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
+        spatial_obs_subset_file: cli
+            .rctd_obs_subset_file
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
+        gene_subset_file: cli
+            .rctd_genes_file
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
+        spatial_numi_tsv: cli
+            .rctd_spatial_numi_tsv
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
         sigma_float: if cli.rctd_q_tsv.is_some() {
             None
         } else {
             sigma_float
         },
-        q_matrix_tsv: cli.rctd_q_tsv.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
-        x_vals_tsv: cli.rctd_x_vals_tsv.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
+        q_matrix_tsv: cli
+            .rctd_q_tsv
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
+        x_vals_tsv: cli
+            .rctd_x_vals_tsv
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
         k_val: cli.rctd_k_val,
         skip_profile_column_normalize: cli.rctd_skip_profile_normalize,
         cell_type_col: cli.rctd_cell_type_col.clone(),
@@ -1684,15 +1687,17 @@ fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
         ref_cell_min: cli.rctd_ref_cell_min,
         ref_min_umi: cli.rctd_ref_min_umi,
         ref_max_cells_per_type: cli.rctd_ref_max_cells_per_type,
-        q_matrices: cli.rctd_q_matrices.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
+        q_matrices: cli
+            .rctd_q_matrices
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
         sigma: cli.rctd_sigma,
         mode: cli.rctd_mode.into(),
         batch_size: cli.rctd_batch_size,
-        output_prefix: cli.rctd_output.as_ref().map(|p| {
-            PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))
-        }),
+        output_prefix: cli
+            .rctd_output
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref()))),
         gpu: cli.rctd_gpu,
     })
 }
@@ -1734,7 +1739,9 @@ fn main() -> anyhow::Result<()> {
         let h5ad = match h5ad {
             Some(p) => p,
             None => {
-                anyhow::bail!("--infer-species requires --h5ad PATH pointing to an existing .h5ad file.");
+                anyhow::bail!(
+                    "--infer-species requires --h5ad PATH pointing to an existing .h5ad file."
+                );
             }
         };
         let var_names = spacetravlr::read_h5ad_var_names(&h5ad)
@@ -1743,7 +1750,10 @@ fn main() -> anyhow::Result<()> {
         match spacetravlr::network::infer_species(&var_names) {
             Some(species) => {
                 println!("{species}");
-                eprintln!("inferred species={species} from {n} var_names in {}", h5ad.display());
+                eprintln!(
+                    "inferred species={species} from {n} var_names in {}",
+                    h5ad.display()
+                );
             }
             None => {
                 eprintln!(
@@ -1782,7 +1792,9 @@ fn main() -> anyhow::Result<()> {
         let h5ad = match h5ad {
             Some(p) => p,
             None => {
-                anyhow::bail!("--plot-h5ad requires --h5ad PATH pointing to an existing .h5ad file.");
+                anyhow::bail!(
+                    "--plot-h5ad requires --h5ad PATH pointing to an existing .h5ad file."
+                );
             }
         };
         return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(&h5ad, "cell_type");
@@ -1937,11 +1949,7 @@ fn main() -> anyhow::Result<()> {
             skip: false,
             species: {
                 let s = cfg.data.spatial_species.trim().to_lowercase();
-                if s.is_empty() {
-                    String::new()
-                } else {
-                    s
-                }
+                if s.is_empty() { String::new() } else { s }
             },
             target_median_nn_um: cfg.data.spatial_median_nn_target_um,
         };

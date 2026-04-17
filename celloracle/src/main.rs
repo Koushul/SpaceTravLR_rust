@@ -3,17 +3,15 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 
 use spacetravlr::celloracle::{
-    build_coef_matrix, filter_links_p_max, infer_grn_per_cluster, infer_grn_whole, scale_gem_no_center,
-    write_coef_matrix_exports, write_links_csv, write_links_parquet,
+    build_coef_matrix, filter_links_p_max, infer_grn_per_cluster, infer_grn_whole,
+    scale_gem_no_center, write_coef_matrix_exports, write_links_csv, write_links_parquet,
 };
 use spacetravlr::config::{canonical_adata_stem, expand_user_path};
 use spacetravlr::network::{GeneNetwork, infer_species};
 use spacetravlr::scanpy_preprocess::{
     SpatialMicronsOptions, ensure_training_adata_ready, resolve_magic_batch_obs_column,
 };
-use spacetravlr::{
-    read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
-};
+use spacetravlr::{read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names};
 
 #[derive(Parser, Debug)]
 #[command(name = "spacetravlr-celloracle")]
@@ -22,7 +20,10 @@ struct Cli {
     #[arg(long)]
     h5ad: PathBuf,
 
-    #[arg(long, help = "GRN species (human|mouse); omit to infer from var gene symbols")]
+    #[arg(
+        long,
+        help = "GRN species (human|mouse); omit to infer from var gene symbols"
+    )]
     species: Option<String>,
 
     #[arg(long)]
@@ -93,7 +94,12 @@ fn main() -> anyhow::Result<()> {
     }
     let var_names_infer = read_h5ad_var_names(&h5ad_for_read).context("read var_names")?;
 
-    let grn_species: String = match cli.species.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let grn_species: String = match cli
+        .species
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => s.to_lowercase(),
         None => infer_species(&var_names_infer)
             .ok_or_else(|| {
@@ -154,7 +160,15 @@ fn main() -> anyhow::Result<()> {
             let key = cli.obs_key.as_deref().unwrap_or("cell_type");
             let obs = read_h5ad_obs_column_str(&adata_in, key)
                 .with_context(|| format!("read obs[{key}]"))?;
-            infer_grn_per_cluster(&gem, &gem_scaled, &var_names, &tf_by_target, &obs, true, None)
+            infer_grn_per_cluster(
+                &gem,
+                &gem_scaled,
+                &var_names,
+                &tf_by_target,
+                &obs,
+                true,
+                None,
+            )
         } else {
             infer_grn_whole(&gem, &gem_scaled, &var_names, &tf_by_target, true, None)
         }

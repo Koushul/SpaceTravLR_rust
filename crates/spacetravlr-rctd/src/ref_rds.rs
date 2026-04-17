@@ -20,8 +20,7 @@ struct RdsMeta {
 const BRIDGE_R: &str = include_str!("../resources/export_rds_bridge.R");
 
 fn read_lines(path: &Path) -> Result<Vec<String>> {
-    let s = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let s = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     Ok(s.lines().map(|l| l.to_string()).collect())
 }
 
@@ -36,9 +35,7 @@ fn read_matrix_bin(path: &Path, nrows: usize, ncols: usize) -> Result<Array2<f64
         .with_context(|| format!("read {} bytes from {}", byte_len, path.display()))?;
     let mut v = Vec::with_capacity(nrows * ncols);
     for chunk in buf.chunks_exact(8) {
-        v.push(f64::from_le_bytes(
-            chunk.try_into().expect("8-byte chunk"),
-        ));
+        v.push(f64::from_le_bytes(chunk.try_into().expect("8-byte chunk")));
     }
     Array2::from_shape_vec((nrows, ncols), v).map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -91,11 +88,7 @@ pub fn load_spatial_rds(path: &Path) -> Result<(Array2<f64>, Vec<String>, Vec<St
         );
     }
     if obs.len() != meta.nrows {
-        bail!(
-            "obs.txt length {} != meta.nrows {}",
-            obs.len(),
-            meta.nrows
-        );
+        bail!("obs.txt length {} != meta.nrows {}", obs.len(), meta.nrows);
     }
     let m = read_matrix_bin(&work.path().join("matrix.bin"), meta.nrows, meta.ncols)?;
     Ok((m, genes, obs))

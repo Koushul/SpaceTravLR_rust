@@ -265,10 +265,7 @@ pub(crate) fn decide_cnn_for_gene_with_rng(
         );
     }
 
-    let all_conv = inputs
-        .summaries
-        .iter()
-        .all(|s| s.lasso_converged);
+    let all_conv = inputs.summaries.iter().all(|s| s.lasso_converged);
     if cfg.require_all_clusters_lasso_converged && !all_conv {
         let reason = "lasso_not_converged_all_clusters".to_string();
         return finish_decision(

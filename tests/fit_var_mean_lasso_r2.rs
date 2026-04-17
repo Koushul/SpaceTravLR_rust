@@ -4,8 +4,8 @@
 use anndata::data::ArrayData;
 use anndata::{AnnData, AnnDataOp, Backend};
 use anndata_hdf5::H5;
-use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::NdArray;
+use burn::backend::ndarray::NdArrayDevice;
 use burn_autodiff::Autodiff;
 use ndarray::Array2;
 use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Series};
@@ -15,21 +15,9 @@ use std::path::Path;
 
 fn write_minimal_mouse_grn_parquet(dir: &Path) -> anyhow::Result<()> {
     let mut df = DataFrame::new(vec![
-        Series::new(
-            "source".into(),
-            vec!["Reg1", "Tgt1", "Tgt1", "Reg2"],
-        )
-        .into(),
-        Series::new(
-            "target".into(),
-            vec!["Tgt1", "Reg1", "Reg2", "Tgt1"],
-        )
-        .into(),
-        Series::new(
-            "edge_type".into(),
-            vec!["grn", "grn", "grn", "grn"],
-        )
-        .into(),
+        Series::new("source".into(), vec!["Reg1", "Tgt1", "Tgt1", "Reg2"]).into(),
+        Series::new("target".into(), vec!["Tgt1", "Reg1", "Reg2", "Tgt1"]).into(),
+        Series::new("edge_type".into(), vec!["grn", "grn", "grn", "grn"]).into(),
         Series::new("weight".into(), vec![1.0_f64, 1.0, 1.0, 1.0]).into(),
     ])?;
     let path = dir.join("mouse_network.parquet");
@@ -51,7 +39,9 @@ fn write_mock_training_h5ad(path: &Path) -> anyhow::Result<()> {
     let obs = DataFrame::new(vec![Series::new("cell_type".into(), cell_types).into()])?;
     a.set_obs(obs)?;
 
-    let var = DataFrame::new(vec![Series::new("gene_ids".into(), vec!["r1", "t1", "r2"]).into()])?;
+    let var = DataFrame::new(vec![
+        Series::new("gene_ids".into(), vec!["r1", "t1", "r2"]).into(),
+    ])?;
     a.set_var(var)?;
 
     let mut mat = Array2::<f64>::zeros((n_obs, 3));
@@ -78,10 +68,7 @@ fn write_mock_training_h5ad(path: &Path) -> anyhow::Result<()> {
 
 #[test]
 fn fit_all_genes_writes_finite_mean_lasso_r2_to_var() {
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_fit_var_r2_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("spacetravlr_fit_var_r2_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     write_minimal_mouse_grn_parquet(&dir).unwrap();

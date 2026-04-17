@@ -174,7 +174,6 @@ fn test_perturb_knockout_propagates() {
         lr_radii: &lr_radii,
     });
 
-
     // A should be 0
     for i in 0..n_cells {
         assert_eq!(result.simulated[[i, 0]], 0.0, "A should be knocked out");
@@ -218,7 +217,6 @@ fn test_perturb_knockout_negative_control_unwired_gene_unchanged() {
         config: &config,
         lr_radii: &lr_radii,
     });
-
 
     let max_abs_z = (0..n_cells)
         .map(|i| result.delta[[i, z_idx]].abs())
@@ -273,7 +271,6 @@ fn test_perturb_knockout_isolated_gene_only_self_changes() {
         lr_radii: &lr_radii,
     });
 
-
     for (g, name) in gene_names.iter().enumerate() {
         if g == z_idx {
             continue;
@@ -319,7 +316,6 @@ fn test_perturb_no_change_when_target_at_original() {
         lr_radii: &lr_radii,
     });
 
-
     let max_delta = result.delta.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
     assert!(
         max_delta < 1e-10,
@@ -349,7 +345,6 @@ fn test_perturb_result_clipped_nonnegative() {
         config: &config,
         lr_radii: &lr_radii,
     });
-
 
     for &v in result.simulated.iter() {
         assert!(
@@ -403,7 +398,6 @@ fn test_perturb_grid_vs_exact_consistency() {
         lr_radii: &lr_radii,
     });
 
-
     let max_diff = exact
         .simulated
         .iter()
@@ -450,7 +444,6 @@ fn test_perturb_overexpression() {
         lr_radii: &lr_radii,
     });
 
-
     for i in 0..n_cells {
         assert!((result.simulated[[i, 0]] - 5.0).abs() < 1e-10);
     }
@@ -482,7 +475,6 @@ fn test_perturb_shape_preserved() {
         config: &config,
         lr_radii: &lr_radii,
     });
-
 
     assert_eq!(result.simulated.shape(), gene_mtx.shape());
     assert_eq!(result.delta.shape(), gene_mtx.shape());
@@ -1454,7 +1446,6 @@ fn bench_perturb() {
             lr_radii: &lr_radii,
         });
 
-
         // Exact
         let t0 = Instant::now();
         let result_exact = perturb(PerturbInputs {
@@ -1685,10 +1676,7 @@ fn two_cell_tf_lr_perturb_bundle() -> (
         tfs_set: ["TF1".to_string()].into_iter().collect(),
     };
 
-    let gene_mtx = array![
-        [1.0, 10.0, 1.0, 1.0],
-        [1.0, 0.0, 1.0, 1.0],
-    ];
+    let gene_mtx = array![[1.0, 10.0, 1.0, 1.0], [1.0, 0.0, 1.0, 1.0],];
     let xy = array![[0.0, 0.0], [1.0, 0.0],];
     let rw_tfligands = GeneMatrix::new(Array2::<f32>::zeros((2, 0)), vec![]);
     let targets = vec![
@@ -1703,14 +1691,7 @@ fn two_cell_tf_lr_perturb_bundle() -> (
             cell_indices: Some(vec![0]),
         },
     ];
-    (
-        bb,
-        gene_mtx,
-        gene_names,
-        xy,
-        rw_tfligands,
-        targets,
-    )
+    (bb, gene_mtx, gene_names, xy, rw_tfligands, targets)
 }
 
 #[test]

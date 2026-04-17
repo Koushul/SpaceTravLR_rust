@@ -29,10 +29,7 @@ fn materialize_reuse_canonical_skips_full_copy_second_pass() {
         return;
     }
 
-    let tmp = std::env::temp_dir().join(format!(
-        "st_materialize_slidetags_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("st_materialize_slidetags_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("mkdir tmp");
     let out_dir = tmp.join("out");

@@ -5,15 +5,14 @@ use std::thread;
 
 use serde::Deserialize;
 
-use crate::config::{SPACESHIP_MERGE_SECTIONS, expand_user_path};
 use crate::betadata::{GeneMatrix, write_betadata_feather};
+use crate::config::{SPACESHIP_MERGE_SECTIONS, expand_user_path};
 use crate::perturb::{
     PerturbConfig, PerturbTarget, PerturbTimings, PerturbWithTargetsInputs, perturb_with_targets,
 };
 use crate::perturb_mode::{
     ComputeInitialWeightedLigandsArgs, PerturbRuntime, compute_initial_weighted_ligands,
-    parse_obs_columns_csv,
-    perturb_obs_indices_from_file, validate_perturb_simulated_matrix,
+    parse_obs_columns_csv, perturb_obs_indices_from_file, validate_perturb_simulated_matrix,
 };
 use std::collections::HashMap;
 
@@ -206,9 +205,7 @@ pub fn resolve_effective_run_toml(
     let hint = config_path
         .map(|p| format!("{}", p.display()))
         .unwrap_or_else(|| "config".into());
-    anyhow::bail!(
-        "need a run repro TOML: pass --run-toml, or set run_toml in {hint}"
-    )
+    anyhow::bail!("need a run repro TOML: pass --run-toml, or set run_toml in {hint}")
 }
 
 pub fn resolve_relative_to(batch_parent: &Path, rel: impl AsRef<Path>) -> PathBuf {
@@ -479,7 +476,11 @@ pub fn validate_jobs_genes(
     Ok(())
 }
 
-fn run_one_job(runtime: &PerturbRuntime, job: PreparedPerturbJob, verbose: bool) -> anyhow::Result<()> {
+fn run_one_job(
+    runtime: &PerturbRuntime,
+    job: PreparedPerturbJob,
+    verbose: bool,
+) -> anyhow::Result<()> {
     let cell_indices = job.cell_indices.clone();
     let targets = vec![PerturbTarget {
         gene: job.gene.clone(),
@@ -497,58 +498,60 @@ fn run_one_job(runtime: &PerturbRuntime, job: PreparedPerturbJob, verbose: bool)
     cfg.ligand_grid_factor = ligand_grid;
     cfg.contact_distance = contact;
 
-    let spatial_override = job.radius.is_some()
-        || job.ligand_grid_factor.is_some()
-        || job.contact_distance.is_some();
+    let spatial_override =
+        job.radius.is_some() || job.ligand_grid_factor.is_some() || job.contact_distance.is_some();
 
     let rw_lr_store;
     let rw_tfl_store;
     let lr_store;
-    let (rw_ligands_ref, rw_tfl_ref, lr_radii_ref): (&GeneMatrix, &GeneMatrix, &HashMap<String, f64>) =
-        if spatial_override {
-            let radius = job.radius.unwrap_or(runtime.cfg.spatial.radius);
-            let mut lr_radii = HashMap::new();
-            for lig in runtime
-                .bb
-                .ligands_set
-                .iter()
-                .chain(runtime.bb.tfl_ligands_set.iter())
-            {
-                lr_radii.insert(lig.clone(), radius);
-            }
-            lr_store = lr_radii;
-            let lr_ligands: Vec<String> = runtime.bb.ligands_set.iter().cloned().collect();
-            let tfl_ligands: Vec<String> = runtime.bb.tfl_ligands_set.iter().cloned().collect();
-            rw_lr_store = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
-                gene_mtx: &runtime.gene_mtx,
-                gene_names: &runtime.gene_names,
-                ligand_names: &lr_ligands,
-                xy: &runtime.xy,
-                lr_radii: &lr_store,
-                weighted_ligand_scale: runtime.perturb_cfg.scale_factor,
-                min_expression: runtime.perturb_cfg.min_expression,
-                grid_factor: ligand_grid,
-                contact_distance: contact,
-            });
-            rw_tfl_store = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
-                gene_mtx: &runtime.gene_mtx,
-                gene_names: &runtime.gene_names,
-                ligand_names: &tfl_ligands,
-                xy: &runtime.xy,
-                lr_radii: &lr_store,
-                weighted_ligand_scale: runtime.perturb_cfg.scale_factor,
-                min_expression: runtime.perturb_cfg.min_expression,
-                grid_factor: ligand_grid,
-                contact_distance: contact,
-            });
-            (&rw_lr_store, &rw_tfl_store, &lr_store)
-        } else {
-            (
-                &runtime.rw_ligands_init,
-                &runtime.rw_tfligands_init,
-                &runtime.lr_radii,
-            )
-        };
+    let (rw_ligands_ref, rw_tfl_ref, lr_radii_ref): (
+        &GeneMatrix,
+        &GeneMatrix,
+        &HashMap<String, f64>,
+    ) = if spatial_override {
+        let radius = job.radius.unwrap_or(runtime.cfg.spatial.radius);
+        let mut lr_radii = HashMap::new();
+        for lig in runtime
+            .bb
+            .ligands_set
+            .iter()
+            .chain(runtime.bb.tfl_ligands_set.iter())
+        {
+            lr_radii.insert(lig.clone(), radius);
+        }
+        lr_store = lr_radii;
+        let lr_ligands: Vec<String> = runtime.bb.ligands_set.iter().cloned().collect();
+        let tfl_ligands: Vec<String> = runtime.bb.tfl_ligands_set.iter().cloned().collect();
+        rw_lr_store = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+            gene_mtx: &runtime.gene_mtx,
+            gene_names: &runtime.gene_names,
+            ligand_names: &lr_ligands,
+            xy: &runtime.xy,
+            lr_radii: &lr_store,
+            weighted_ligand_scale: runtime.perturb_cfg.scale_factor,
+            min_expression: runtime.perturb_cfg.min_expression,
+            grid_factor: ligand_grid,
+            contact_distance: contact,
+        });
+        rw_tfl_store = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+            gene_mtx: &runtime.gene_mtx,
+            gene_names: &runtime.gene_names,
+            ligand_names: &tfl_ligands,
+            xy: &runtime.xy,
+            lr_radii: &lr_store,
+            weighted_ligand_scale: runtime.perturb_cfg.scale_factor,
+            min_expression: runtime.perturb_cfg.min_expression,
+            grid_factor: ligand_grid,
+            contact_distance: contact,
+        });
+        (&rw_lr_store, &rw_tfl_store, &lr_store)
+    } else {
+        (
+            &runtime.rw_ligands_init,
+            &runtime.rw_tfligands_init,
+            &runtime.lr_radii,
+        )
+    };
 
     let mut timings: Option<PerturbTimings> = if verbose {
         Some(PerturbTimings::default())
@@ -841,12 +844,13 @@ parallelism = 2
             std::env::temp_dir().join(format!("spacetravlr_batch_cells_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let csv_path = dir.join("lists.csv");
-        std::fs::write(
-            &csv_path,
-            "col_a,col_b,col_c\nalpha,beta,gamma\n,,delta\n",
-        )
-        .unwrap();
-        let obs = vec!["alpha".into(), "beta".into(), "gamma".into(), "delta".into()];
+        std::fs::write(&csv_path, "col_a,col_b,col_c\nalpha,beta,gamma\n,,delta\n").unwrap();
+        let obs = vec![
+            "alpha".into(),
+            "beta".into(),
+            "gamma".into(),
+            "delta".into(),
+        ];
         let batch_toml = format!(
             r#"
 genes = ["G1", "G2", "G3"]
@@ -887,10 +891,7 @@ cells_csv_columns = ["only"]
         let parent = dir.as_path();
         let mut jobs = expand_prepared_jobs(&f, parent, 4).unwrap();
         resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
-        assert_eq!(
-            jobs[0].cell_indices,
-            jobs[1].cell_indices
-        );
+        assert_eq!(jobs[0].cell_indices, jobs[1].cell_indices);
         assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[1usize]);
     }
 

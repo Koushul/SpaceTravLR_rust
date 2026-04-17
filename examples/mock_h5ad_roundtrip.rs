@@ -14,18 +14,18 @@ use anndata::{AnnData, AnnDataOp, Backend};
 use anndata_hdf5::H5;
 use ndarray::Array2;
 use polars::prelude::{DataFrame, NamedFrom, Series};
-use spacetravlr::spatial_estimator::{MeanLassoR2Accum, dense_to_csr_f64, patch_adata_var_mean_lasso_r2};
+use spacetravlr::spatial_estimator::{
+    MeanLassoR2Accum, dense_to_csr_f64, patch_adata_var_mean_lasso_r2,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 fn main() -> anyhow::Result<()> {
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_mock_roundtrip_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("spacetravlr_mock_roundtrip_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
     let p = dir.join("mock.h5ad");
@@ -34,13 +34,13 @@ fn main() -> anyhow::Result<()> {
     let a = AnnData::<H5>::new(&p)?;
     a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
     a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
-    let obs = DataFrame::new(vec![Series::new(
-        "cell_type".into(),
-        vec!["t".to_string(), "t".to_string()],
-    )
-    .into()])?;
+    let obs = DataFrame::new(vec![
+        Series::new("cell_type".into(), vec!["t".to_string(), "t".to_string()]).into(),
+    ])?;
     a.set_obs(obs)?;
-    let var = DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+    let var = DataFrame::new(vec![
+        Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
+    ])?;
     a.set_var(var)?;
     let dense = Array2::from_elem((2, 2), 0.5f64);
     let csr = dense_to_csr_f64(&dense)?;
@@ -105,9 +105,7 @@ for k in names:
 f.close()
 "#
     );
-    let out = Command::new("python3")
-        .args(["-c", &script])
-        .output();
+    let out = Command::new("python3").args(["-c", &script]).output();
     match out {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout);

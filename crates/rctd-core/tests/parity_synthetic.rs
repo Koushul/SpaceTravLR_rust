@@ -8,9 +8,7 @@ use std::path::Path;
 use approx::assert_abs_diff_eq;
 use ndarray::{Array1, Array2};
 use ndarray_npy::NpzReader;
-use rctd_core::{
-    device_cpu, run_doublet_mode, run_full_mode, run_multi_mode, RctdConfig,
-};
+use rctd_core::{device_cpu, run_doublet_mode, run_full_mode, run_multi_mode, RctdConfig};
 
 type ParityInputs = (
     Array2<f64>,
@@ -50,10 +48,7 @@ fn k_names(k: usize) -> Vec<String> {
     (0..k).map(|i| format!("t{i}")).collect()
 }
 
-#[cfg_attr(
-    feature = "wgpu",
-    ignore = "f64 NdArray parity; wgpu uses f32"
-)]
+#[cfg_attr(feature = "wgpu", ignore = "f64 NdArray parity; wgpu uses f32")]
 #[test]
 fn full_mode_matches_python_fixture() {
     let (counts, numi, profiles, q_mat, sq_mat, x_vals) = load_parity();
@@ -61,15 +56,7 @@ fn full_mode_matches_python_fixture() {
     let py_w: Array2<f64> = npz.by_name("py_full_weights").expect("py_full_weights");
     let device = device_cpu();
     let res = run_full_mode(
-        &counts,
-        &numi,
-        &profiles,
-        &q_mat,
-        &sq_mat,
-        &x_vals,
-        64,
-        &device,
-        None,
+        &counts, &numi, &profiles, &q_mat, &sq_mat, &x_vals, 64, &device, None,
     );
     assert_eq!(res.weights.dim(), py_w.dim());
     let max_abs = res
@@ -243,26 +230,10 @@ fn full_mode_batch_sizes_agree_on_fixture() {
     let (counts, numi, profiles, q_mat, sq_mat, x_vals) = load_parity();
     let device = device_cpu();
     let a = run_full_mode(
-        &counts,
-        &numi,
-        &profiles,
-        &q_mat,
-        &sq_mat,
-        &x_vals,
-        16,
-        &device,
-        None,
+        &counts, &numi, &profiles, &q_mat, &sq_mat, &x_vals, 16, &device, None,
     );
     let b = run_full_mode(
-        &counts,
-        &numi,
-        &profiles,
-        &q_mat,
-        &sq_mat,
-        &x_vals,
-        64,
-        &device,
-        None,
+        &counts, &numi, &profiles, &q_mat, &sq_mat, &x_vals, 64, &device, None,
     );
     let max_abs = a
         .weights

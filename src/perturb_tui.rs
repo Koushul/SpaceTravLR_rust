@@ -20,7 +20,6 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
 use crate::betadata::BetadataUiProgress;
 use crate::config::expand_user_path;
-use std::path::Path;
 use crate::perturb::{
     PerturbConfig, PerturbResult, PerturbTarget, PerturbTimings, PerturbWithTargetsInputs,
     perturb_with_targets,
@@ -31,6 +30,7 @@ use crate::perturb_mode::{
     parse_obs_columns_csv, single_perturb_target,
 };
 use crate::tui_theme::TuiColors;
+use std::path::Path;
 
 const SYS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -240,7 +240,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                 overlay.as_ref(),
             )
             .map_err(|e| e.to_string())
-                .map(Box::new);
+            .map(Box::new);
             let _ = tx.send(BgMsg::Loaded {
                 generation: load_gen,
                 result,
@@ -504,8 +504,8 @@ impl App {
                             Some(result) => {
                                 let genes = spec.genes.clone();
                                 let joint_csv = spec.joint_csv_summary;
-                                let (export_dir, export_err) = match export_joint_perturb_result(
-                                    ExportJointPerturbArgs {
+                                let (export_dir, export_err) =
+                                    match export_joint_perturb_result(ExportJointPerturbArgs {
                                         runtime: rt_t.as_ref(),
                                         simulated: &result.simulated,
                                         selected_genes: &genes,
@@ -514,11 +514,10 @@ impl App {
                                         selected_cell_types_per_gene: &spec.scopes,
                                         cells_csv_summary: joint_csv,
                                         job_id: Some(id),
-                                    },
-                                ) {
-                                    Ok(p) => (Some(p), None),
-                                    Err(e) => (None, Some(e.to_string())),
-                                };
+                                    }) {
+                                        Ok(p) => (Some(p), None),
+                                        Err(e) => (None, Some(e.to_string())),
+                                    };
                                 Ok(PerturbOutcome {
                                     job_id: id,
                                     genes,
@@ -720,7 +719,10 @@ impl App {
             return (
                 Line::from(vec![
                     Span::styled(" Mean expr ", Style::default().fg(p.label)),
-                    Span::styled(format!("· {} · ", title_layer), Style::default().fg(p.muted)),
+                    Span::styled(
+                        format!("· {} · ", title_layer),
+                        Style::default().fg(p.muted),
+                    ),
                 ]),
                 vec![Line::from(Span::styled(
                     "Select a gene (↑/↓) for cluster means (input layer).",
@@ -794,10 +796,7 @@ impl App {
             let bar: String = "█".repeat(nf) + &"░".repeat(bar_w.saturating_sub(nf));
             let num = format!("{:>7.3}", mean);
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{lab:<label_w$}"),
-                    Style::default().fg(p.title),
-                ),
+                Span::styled(format!("{lab:<label_w$}"), Style::default().fg(p.title)),
                 Span::raw(" "),
                 Span::styled(bar, Style::default().fg(p.sky)),
                 Span::raw(" "),
@@ -812,11 +811,11 @@ impl App {
         }
         let block_title = Line::from(vec![
             Span::styled(" Mean ", Style::default().fg(p.label)),
-            Span::styled(gene.clone(), Style::default().fg(p.value).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!(" · {} ", title_layer),
-                Style::default().fg(p.muted),
+                gene.clone(),
+                Style::default().fg(p.value).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(format!(" · {} ", title_layer), Style::default().fg(p.muted)),
         ]);
         (block_title, lines)
     }
@@ -1183,7 +1182,10 @@ impl App {
                 let list = List::new(items)
                     .block(block_panel(
                         pal,
-                        Line::from(Span::styled(" CSV columns ", Style::default().fg(pal.label))),
+                        Line::from(Span::styled(
+                            " CSV columns ",
+                            Style::default().fg(pal.label),
+                        )),
                         pal.rocket_bord,
                     ))
                     .highlight_style(
@@ -1584,7 +1586,10 @@ impl App {
                     Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" halt q  ", Style::default().fg(pal.muted)),
-                Span::styled("Esc", Style::default().fg(pal.sky).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" clr  ", Style::default().fg(pal.muted)),
                 Span::styled(
                     "Ctrl+Q",

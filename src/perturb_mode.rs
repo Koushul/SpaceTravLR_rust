@@ -400,17 +400,18 @@ impl PerturbRuntime {
         });
         set_msg("Weighted ligand precomputation (TFL)…");
         set_p(910);
-        let rw_tfligands_init = compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
-            gene_mtx: &gene_mtx,
-            gene_names: &gene_names,
-            ligand_names: &tfl_ligands,
-            xy: &xy,
-            lr_radii: &lr_radii,
-            weighted_ligand_scale: wl_scale,
-            min_expression,
-            grid_factor: grid,
-            contact_distance: None,
-        });
+        let rw_tfligands_init =
+            compute_initial_weighted_ligands(ComputeInitialWeightedLigandsArgs {
+                gene_mtx: &gene_mtx,
+                gene_names: &gene_names,
+                ligand_names: &tfl_ligands,
+                xy: &xy,
+                lr_radii: &lr_radii,
+                weighted_ligand_scale: wl_scale,
+                min_expression,
+                grid_factor: grid,
+                contact_distance: None,
+            });
 
         let perturb_cfg = PerturbConfig {
             n_propagation: cfg.perturbation.n_propagation,

@@ -1,13 +1,17 @@
 use clap::Parser;
 use spacetravlr::betadata::write_betadata_feather;
-use spacetravlr::perturb::{PerturbTarget, PerturbTimings, PerturbWithTargetsInputs, perturb_with_targets};
+use spacetravlr::config::expand_user_path;
+use spacetravlr::perturb::{
+    PerturbTarget, PerturbTimings, PerturbWithTargetsInputs, perturb_with_targets,
+};
 use spacetravlr::perturb_batch::{
     PerturbBatchFile, batch_from_perturb_table, effective_parallelism, expand_prepared_jobs,
     load_batch_file, load_perturb_cli_toml, resolve_effective_run_toml,
     resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
 };
-use spacetravlr::config::expand_user_path;
-use spacetravlr::perturb_mode::{PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix};
+use spacetravlr::perturb_mode::{
+    PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix,
+};
 #[cfg(not(feature = "tui"))]
 use spacetravlr::perturb_mode::{interactive_run_toml_prompt, run_interactive};
 use std::path::{Path, PathBuf};
@@ -49,11 +53,7 @@ struct Cli {
     )]
     config: Option<PathBuf>,
 
-    #[arg(
-        index = 1,
-        value_name = "CONFIG",
-        help = "Same as --config."
-    )]
+    #[arg(index = 1, value_name = "CONFIG", help = "Same as --config.")]
     config_positional: Option<PathBuf>,
 
     #[arg(
@@ -193,7 +193,9 @@ fn main() -> anyhow::Result<()> {
             .and_then(|p| p.batch_table.as_ref())
             .is_some()
         {
-            anyhow::bail!("do not combine --batch-toml with batch/job keys (gene, out, …) inside --config");
+            anyhow::bail!(
+                "do not combine --batch-toml with batch/job keys (gene, out, …) inside --config"
+            );
         }
         let run_toml_eff = resolve_effective_run_toml(
             cli.run_toml.clone(),
@@ -241,9 +243,7 @@ fn main() -> anyhow::Result<()> {
                     .map(|p| p.display().to_string()),
                 cells_csv: cli.cells_csv.clone(),
                 cells_csv_column: cli.cells_csv_column.clone(),
-                config_merge_overlay: parsed_opt
-                    .as_ref()
-                    .map(|p| p.overlay_source.clone()),
+                config_merge_overlay: parsed_opt.as_ref().map(|p| p.overlay_source.clone()),
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -256,10 +256,8 @@ fn main() -> anyhow::Result<()> {
                 Some(p) => p,
                 None => interactive_run_toml_prompt()?,
             };
-            let mut runtime = PerturbRuntime::from_run_toml_with_config_overlay(
-                run_toml.as_path(),
-                overlay_ref,
-            )?;
+            let mut runtime =
+                PerturbRuntime::from_run_toml_with_config_overlay(run_toml.as_path(), overlay_ref)?;
             if let Some(n) = cli.n_propagation {
                 runtime.perturb_cfg.n_propagation = n;
             }
@@ -279,7 +277,8 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--gene is required with --export / --out"))?;
     let t_load = Instant::now();
-    let mut runtime = PerturbRuntime::from_run_toml_with_config_overlay(run_toml.as_path(), overlay_ref)?;
+    let mut runtime =
+        PerturbRuntime::from_run_toml_with_config_overlay(run_toml.as_path(), overlay_ref)?;
     let load_elapsed = t_load.elapsed();
     if let Some(n) = cli.n_propagation {
         runtime.perturb_cfg.n_propagation = n;

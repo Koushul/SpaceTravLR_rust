@@ -5,7 +5,7 @@ use ndarray::{Array1, Array2};
 use crate::backend::RctdDevice;
 use crate::full::run_full_mode;
 use crate::irwls_native::{calc_neg_loglik_row_sums, solve_irwls_batch_s_ndarray};
-use crate::types::{BatchProgress, MultiResult, RctdConfig, notify_batch};
+use crate::types::{notify_batch, BatchProgress, MultiResult, RctdConfig};
 
 type ConfTask = (usize, Vec<usize>, usize, usize);
 

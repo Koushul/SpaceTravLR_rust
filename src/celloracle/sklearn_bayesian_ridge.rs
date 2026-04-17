@@ -93,7 +93,10 @@ fn posterior_sigma_diag(
 }
 
 #[allow(unused_assignments)]
-pub fn bayesian_ridge_fit(x_celloracle: &DMatrix<f64>, y: &DVector<f64>) -> Option<BayesianRidgeFit> {
+pub fn bayesian_ridge_fit(
+    x_celloracle: &DMatrix<f64>,
+    y: &DVector<f64>,
+) -> Option<BayesianRidgeFit> {
     let n_samples = x_celloracle.nrows();
     let n_features = x_celloracle.ncols();
     if n_samples <= n_features {

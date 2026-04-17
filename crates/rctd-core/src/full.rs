@@ -1,7 +1,7 @@
 use ndarray::{Array1, Array2};
 
 use crate::backend::RctdDevice;
-use crate::types::{BatchProgress, notify_batch};
+use crate::types::{notify_batch, BatchProgress};
 
 pub struct FullResult {
     pub weights: Array2<f64>,

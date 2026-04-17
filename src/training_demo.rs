@@ -38,13 +38,19 @@ pub type DemoKidneyObsmCache = (Vec<DemoKidneySpatialPoint>, Vec<String>);
 
 pub fn parse_demo_kidney_obsm_cache() -> anyhow::Result<DemoKidneyObsmCache> {
     let data: &[u8] = include_bytes!("demo_kidney_obsm_cache.bin");
-    anyhow::ensure!(data.len() >= 12, "demo kidney spatial cache: truncated header");
+    anyhow::ensure!(
+        data.len() >= 12,
+        "demo kidney spatial cache: truncated header"
+    );
     anyhow::ensure!(
         data.get(..4) == Some(DEMO_KIDNEY_OBSM_MAGIC.as_slice()),
         "demo kidney spatial cache: bad magic"
     );
     let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    anyhow::ensure!(version == 1, "demo kidney spatial cache: unsupported version {version}");
+    anyhow::ensure!(
+        version == 1,
+        "demo kidney spatial cache: unsupported version {version}"
+    );
     let n = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
     anyhow::ensure!(
         n == DEMO_KIDNEY_N_CELLS,
@@ -84,10 +90,7 @@ pub fn demo_kidney_spatial_scatter_lines_for_tui(
 ) -> anyhow::Result<Vec<ratatui::text::Line<'static>>> {
     let (points, labels) = parse_demo_kidney_obsm_cache()?;
     crate::adata_terminal_scatter::spatial_scatter_lines_from_xy_labels(
-        &points,
-        &labels,
-        chart_w,
-        chart_h,
+        &points, &labels, chart_w, chart_h,
     )
 }
 
@@ -248,7 +251,11 @@ fn demo_worker(
         let n_mods = 12 + (gene_hash(&gene) % 140) as usize;
         let lasso_base_ms = 180 + (gene_hash(&gene) % 160) as u64;
         let n_ct = hud.lock().map(|g| g.n_clusters.max(1)).unwrap_or(8);
-        let ep = if run_full_cnn { epochs_per_gene.clamp(1, 32) } else { 0 };
+        let ep = if run_full_cnn {
+            epochs_per_gene.clamp(1, 32)
+        } else {
+            0
+        };
         let total_steps = n_ct + ep;
 
         {
@@ -392,12 +399,8 @@ pub fn run_demo_training(
         let g = hud
             .lock()
             .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
-        let ep = g.epochs_per_gene.max(1).min(12);
-        (
-            g.n_parallel.clamp(1, 32),
-            g.full_cnn,
-            ep,
-        )
+        let ep = g.epochs_per_gene.clamp(1, 12);
+        (g.n_parallel.clamp(1, 32), g.full_cnn, ep)
     };
 
     {

@@ -3,9 +3,9 @@ use anyhow::{bail, Context, Result};
 use nalgebra_sparse::csr::CsrMatrix;
 use ndarray::{Array2, Axis};
 use polars::prelude::*;
+use rand::rngs::StdRng;
 use rand::seq::index::sample;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 
 pub fn x_to_dense_f64<B: Backend>(ad: &AnnData<B>) -> Result<Array2<f64>> {
     let elem = ad.x();
@@ -62,9 +62,7 @@ fn series_to_labels(series: &Series) -> Result<Vec<String>> {
     let s = series
         .cast(&DataType::String)
         .with_context(|| "cast obs column to string")?;
-    let ca = s
-        .str()
-        .with_context(|| "obs column as Utf8")?;
+    let ca = s.str().with_context(|| "obs column as Utf8")?;
     Ok((0..ca.len())
         .map(|i| ca.get(i).unwrap_or("").to_string())
         .collect())
@@ -120,9 +118,7 @@ pub fn single_cell_reference_profiles_from_arrays(
     let mut rng = StdRng::seed_from_u64(42);
     let mut pick: Vec<usize> = Vec::new();
     for ct in &unique_types {
-        let mut idx: Vec<usize> = (0..n)
-            .filter(|&i| keep[i] && labels[i] == *ct)
-            .collect();
+        let mut idx: Vec<usize> = (0..n).filter(|&i| keep[i] && labels[i] == *ct).collect();
         if idx.len() > n_max_cells {
             let smp = sample(&mut rng, idx.len(), n_max_cells);
             idx = smp.iter().map(|j| idx[j]).collect();
@@ -137,11 +133,7 @@ pub fn single_cell_reference_profiles_from_arrays(
     let k = unique_types.len();
     let mut profiles = Array2::<f64>::zeros((k, g));
     for (ti, ct) in unique_types.iter().enumerate() {
-        let cells: Vec<usize> = pick
-            .iter()
-            .copied()
-            .filter(|&i| labels[i] == *ct)
-            .collect();
+        let cells: Vec<usize> = pick.iter().copied().filter(|&i| labels[i] == *ct).collect();
         if cells.is_empty() {
             bail!("no cells for type {ct:?} after subsampling");
         }
