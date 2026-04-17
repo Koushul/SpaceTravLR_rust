@@ -2595,17 +2595,27 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
                             let mut wrote = false;
                             let mut orphan_zero_mod_betas = false;
-                            let mut bad_r2_clusters: HashSet<usize> = HashSet::new();
+                            let mut bad_lasso_r2_clusters: HashSet<usize> = HashSet::new();
+                            let mut bad_betadata_clusters: HashSet<usize> = HashSet::new();
                             let mut n_betadata_beta_columns: Option<usize> = None;
                             if fit_ok {
                                 if let Some(est_inner) = estimator.estimator.as_mut() {
                                     for s in &mut est_inner.cluster_training_summaries {
                                         if !s.lasso_r2.is_finite() || s.lasso_r2 < score_threshold {
-                                            bad_r2_clusters.insert(s.cluster_id);
+                                            bad_lasso_r2_clusters.insert(s.cluster_id);
+                                            bad_betadata_clusters.insert(s.cluster_id);
                                             s.lasso_r2 = 0.0;
                                         }
+                                        if export_per_cell
+                                            && est_inner.models.contains_key(&s.cluster_id)
+                                            && (!s.cnn_r2.is_finite()
+                                                || s.cnn_r2 < score_threshold)
+                                        {
+                                            bad_betadata_clusters.insert(s.cluster_id);
+                                            s.cnn_r2 = 0.0;
+                                        }
                                     }
-                                    for &cid in &bad_r2_clusters {
+                                    for &cid in &bad_lasso_r2_clusters {
                                         est_inner.r2_scores.insert(cid, 0.0);
                                         est_inner.lasso_intercepts.insert(cid, 0.0);
                                         if let Some(coef) =
@@ -2642,9 +2652,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             &device,
                                             Some(cached_spatial.as_ref()),
                                         );
-                                        if !bad_r2_clusters.is_empty() {
+                                        if !bad_betadata_clusters.is_empty() {
                                             for i in 0..all_betas.nrows() {
-                                                if bad_r2_clusters.contains(&clusters[i]) {
+                                                if bad_betadata_clusters.contains(&clusters[i]) {
                                                     all_betas.row_mut(i).fill(0.0);
                                                 }
                                             }
@@ -2731,7 +2741,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         let rows: Vec<Vec<f64>> = cluster_ids
                                             .iter()
                                             .map(|&c_id| {
-                                                if bad_r2_clusters.contains(&c_id) {
+                                                if bad_betadata_clusters.contains(&c_id) {
                                                     return vec![0.0; 1 + n_mods];
                                                 }
                                                 let intercept = finite_or_zero_f64(
@@ -2862,7 +2872,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             &gene,
                                             &training_dir,
                                             &model_export_w,
-                                            Some(&bad_r2_clusters),
+                                            Some(&bad_betadata_clusters),
                                         ) {
                                             Ok(Some(path)) => {
                                                 log_line(
