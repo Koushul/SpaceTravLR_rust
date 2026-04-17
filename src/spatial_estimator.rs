@@ -2915,12 +2915,25 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     }
                                     if wrote && !est.cluster_training_summaries.is_empty() {
                                         if let Some(&idx) = mean_r2_accum_w.gene_to_idx.get(&gene) {
-                                            let mean_r2: f64 = est
-                                                .cluster_training_summaries
-                                                .iter()
-                                                .map(|s| s.lasso_r2)
-                                                .sum::<f64>()
-                                                / est.cluster_training_summaries.len() as f64;
+                                            let mean_r2: f64 = {
+                                                let mut sum = 0.0_f64;
+                                                let mut n_fin = 0usize;
+                                                for v in est
+                                                    .cluster_training_summaries
+                                                    .iter()
+                                                    .map(|s| s.lasso_r2)
+                                                {
+                                                    if v.is_finite() {
+                                                        sum += v;
+                                                        n_fin += 1;
+                                                    }
+                                                }
+                                                if n_fin == 0 {
+                                                    f64::NAN
+                                                } else {
+                                                    sum / n_fin as f64
+                                                }
+                                            };
                                             mean_r2_accum_w.scores[idx].store(
                                                 mean_r2.to_bits(),
                                                 Ordering::Release,

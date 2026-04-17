@@ -41,6 +41,23 @@ fn finite_or_zero_f32(x: f32) -> f32 {
     if x.is_finite() { x } else { 0.0 }
 }
 
+/// In-sample R² with a finite denominator guard: when `SS_tot` is positive but tiny relative
+/// to `SS_res`, `1 − SS_res/SS_tot` can take absurd magnitudes. Clamp so per-cluster metrics and
+/// their means stay interpretable.
+fn r2_in_sample_from_residuals(n: usize, ss_tot: f64, ss_res: f64) -> f64 {
+    if ss_tot <= 0.0 {
+        return 0.0;
+    }
+    if ss_tot < f64::EPSILON * ss_res.max(1.0) * (n as f64).max(1.0) {
+        return f64::NAN;
+    }
+    let raw = 1.0 - ss_res / ss_tot;
+    if !raw.is_finite() {
+        return f64::NAN;
+    }
+    raw.clamp(-1_000_000.0, 1.0)
+}
+
 fn r2_score_from_pred_slice(y_true: ArrayView1<f64>, y_pred: &[f32]) -> f64 {
     let n = y_true.len();
     if n == 0 || y_pred.len() != n {
@@ -53,11 +70,7 @@ fn r2_score_from_pred_slice(y_true: ArrayView1<f64>, y_pred: &[f32]) -> f64 {
         .zip(y_pred.iter())
         .map(|(y, p)| (y - *p as f64).powi(2))
         .sum();
-    finite_or_zero_f64(if ss_tot > 0.0 {
-        1.0 - ss_res / ss_tot
-    } else {
-        0.0
-    })
+    r2_in_sample_from_residuals(n, ss_tot, ss_res)
 }
 
 fn cnn_r2_from_forward<B: AutodiffBackend>(
@@ -272,11 +285,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     let lasso_train_mse = ss_res / cluster_n.max(1) as f64;
                     let y_mean = y_c_flat.mean().unwrap_or(0.0);
                     let ss_tot: f64 = y_c_flat.iter().map(|yi| (yi - y_mean).powi(2)).sum();
-                    let r2 = finite_or_zero_f64(if ss_tot > 0.0 {
-                        1.0 - (ss_res / ss_tot)
-                    } else {
-                        0.0
-                    });
+                    let r2 = finite_or_zero_f64(r2_in_sample_from_residuals(
+                        cluster_n,
+                        ss_tot,
+                        ss_res,
+                    ));
 
                     let mut anchors_vec = vec![finite_or_zero_f32(intercept as f32)];
                     anchors_vec.extend(
@@ -831,6 +844,21 @@ mod tests {
         let y = array![1.0_f64, 2.0];
         let pred = [1.0f32];
         assert!(r2_score_from_pred_slice(y.view(), &pred).is_nan());
+    }
+
+    #[test]
+    fn r2_in_sample_clamps_extreme_negative() {
+        let r = r2_in_sample_from_residuals(10, 1e-12, 2.0);
+        assert!(r.is_finite());
+        assert!(r >= -1_000_000.0 && r <= 1.0);
+    }
+
+    #[test]
+    fn r2_score_from_pred_near_constant_target_avoids_absurd_r2() {
+        let y = array![1.0_f64, 1.0 + 1e-30];
+        let pred = [0.0f32, 5.0f32];
+        let r = r2_score_from_pred_slice(y.view(), &pred);
+        assert!(r.is_nan() || (r.is_finite() && r.abs() <= 1_000_000.0));
     }
 
     #[test]
