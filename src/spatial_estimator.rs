@@ -1273,15 +1273,23 @@ pub fn materialize_canonical_training_adata(
     }
     let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
     let canonical = crate::scanpy_preprocess::training_processed_h5ad_path(output_dir, &stem);
+
+    let already_prepared =
+        crate::scanpy_preprocess::training_h5ad_is_fully_prepared(&current).unwrap_or(false);
+
     if current != canonical {
         let reuse_canonical = canonical.is_file()
-            && crate::scanpy_preprocess::adata_x_and_layers_are_csr(&canonical)?
-            && canonical.metadata()?.modified()? >= current.metadata()?.modified()?;
+            && canonical.metadata()?.modified()? >= current.metadata()?.modified()?
+            && (already_prepared
+                || crate::scanpy_preprocess::adata_x_and_layers_are_csr(&canonical)
+                    .unwrap_or(false));
         if reuse_canonical {
             *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         } else {
             let _ = std::fs::remove_file(&canonical);
-            if crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
+            if already_prepared
+                || crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)?
+            {
                 copy_h5ad_reflink_or_full(&current, &canonical)?;
             } else {
                 crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(
@@ -1292,7 +1300,9 @@ pub fn materialize_canonical_training_adata(
             }
             *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         }
-    } else if !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
+    } else if !already_prepared
+        && !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)?
+    {
         crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &current, false)?;
     }
 
