@@ -7,6 +7,7 @@
 //! do not leak into the isolated env.
 //! **`--no-cache-dir`** is passed to **`uv run`** unless **`cfg(test)`** is enabled or **`SPACETRAVLR_UV_ALLOW_CACHE`**
 //! is set to **`1`**, **`true`**, or **`yes`** (trimmed, ASCII case-insensitive). Unit tests and opt-in callers can reuse wheels.
+//! On failure, the same invocation is retried once with global **`uv --no-cache`** (disables uv’s cache entirely) to recover from bad cache state.
 //! **`uv`** children also cap **`OPENBLAS_NUM_THREADS`**, **`OMP_NUM_THREADS`**, **`MKL_NUM_THREADS`**,
 //! **`NUMEXPR_NUM_THREADS`**, and **`VECLIB_MAXIMUM_THREADS`** (default **`1`**) so inherited huge
 //! thread counts do not trigger OpenBLAS “NUM_THREADS exceeded” / bad unallocation; override with
@@ -25,6 +26,10 @@
 //! (cluster × batch) groups). The same **`uv`** step **CSR-sparsifies `X` and every `layers` matrix**
 //! and writes the final file.
 //!
+//! Before writing, embedded Python and [`strip_heavy_training_artifacts_from_h5ad`] drop any
+//! **`obsm` / `layers` / `obsp` / `uns`** entries that look like precomputed received or weighted
+//! ligand tensors (and other heavy training caches), so processed outputs stay lean.
+//!
 //! Output is `<stem>_processed.h5ad` beside the input (pathlib `stem` rule, same as [`processed_h5ad_path`]).
 //!
 //! **Library entry points**
@@ -38,9 +43,7 @@
 //! | MAGIC batch column resolution | [`resolve_magic_batch_obs_column`] | CLI / config wiring |
 //! | Training auto-prep | [`ensure_training_adata_ready`] (pass **`[data].condition`** as MAGIC batch when set) | updates path in place |
 //!
-//! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess`], then
-//! [`cache_received_ligands_uns_for_processed_h5ad`](crate::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad)
-//! when `[grn].use_lr_modulators` / `use_tfl_modulators` and the species GRN yield ligands.
+//! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess_maybe_log`] (or reuse when output is fresh).
 //! **`spacetravlr --impute --h5ad …`** → [`imputed_count_from_normalized`] (same imputation+CSR as the full pipeline).
 //! With **`--condition`**, the same obs column name is used as the MAGIC batch axis unless **`--magic-batch-obs`** overrides.
 //!
@@ -56,8 +59,7 @@
 //! **`contact_distance`**, and **[`cnn.spatial_feature_radius`](crate::config::CnnConfig::spatial_feature_radius)**
 //! in **µm** to match.
 
-use anndata::data::ArrayData;
-use anndata::{AnnData, AnnDataOp, ArrayElemOp, AxisArraysOp, Backend};
+use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
 use crate::config::expand_user_path;
@@ -84,6 +86,7 @@ const UV_WITH_SCANPY: &[&str] = &[
     "h5py",
     "leidenalg",
     "igraph",
+    "magic-impute>=3,<4",
 ];
 
 // #region agent log
@@ -210,6 +213,39 @@ fn uv_python_stdin(
     capture_output: bool,
     spawn_hint: &str,
 ) -> anyhow::Result<String> {
+    match uv_python_stdin_once(
+        false,
+        with_packages,
+        stdin_script,
+        argv_after_dash,
+        capture_output,
+        spawn_hint,
+    ) {
+        Ok(s) => Ok(s),
+        Err(first) => uv_python_stdin_once(
+            true,
+            with_packages,
+            stdin_script,
+            argv_after_dash,
+            capture_output,
+            spawn_hint,
+        )
+        .map_err(|second| {
+            anyhow::anyhow!(
+                "uv run failed ({spawn_hint}); retry with `uv --no-cache` also failed.\n--- first attempt ---\n{first}\n--- retry ---\n{second}"
+            )
+        }),
+    }
+}
+
+fn uv_python_stdin_once(
+    global_no_cache: bool,
+    with_packages: &[&str],
+    stdin_script: &str,
+    argv_after_dash: &[&str],
+    capture_output: bool,
+    spawn_hint: &str,
+) -> anyhow::Result<String> {
     let (stdout, stderr) = if capture_output {
         (Stdio::piped(), Stdio::piped())
     } else {
@@ -219,6 +255,9 @@ fn uv_python_stdin(
     let mut cmd = uv_command_base();
     #[cfg(test)]
     cmd.env("SPACETRAVLR_TEST_FAST_UV", "1");
+    if global_no_cache {
+        cmd.arg("--no-cache");
+    }
     cmd.arg("run").arg("--isolated");
     if !uv_allow_wheel_cache() {
         cmd.arg("--no-cache-dir");
@@ -379,6 +418,26 @@ def _as_csr(m):
     return sp.csr_matrix(np.asarray(m, dtype=np.float64))
 
 
+def _spacetravlr_strip_heavy_training_artifacts(a):
+    def _lig_key(k):
+        lk = str(k).lower()
+        return "weighted_ligand" in lk or "received_ligand" in lk
+
+    for k in list(a.obsm.keys()):
+        if k in ("spacetravlr_spatial_features", "spacetravlr_spatial_maps_flat") or _lig_key(k):
+            del a.obsm[k]
+    for k in list(a.layers.keys()):
+        if _lig_key(k):
+            del a.layers[k]
+    for k in list(a.obsp.keys()):
+        if _lig_key(k):
+            del a.obsp[k]
+    for k in list(a.uns.keys()):
+        if str(k).startswith("spacetravlr_cache_") or _lig_key(k):
+            del a.uns[k]
+
+
+_spacetravlr_strip_heavy_training_artifacts(a)
 a.X = _as_csr(a.X)
 for k in list(a.layers.keys()):
     a.layers[k] = _as_csr(a.layers[k])
@@ -394,6 +453,28 @@ import scipy.sparse as sp
 
 src, dst = sys.argv[1], sys.argv[2]
 a = ad.read_h5ad(src)
+
+
+def _spacetravlr_strip_heavy_training_artifacts(adata):
+    def _lig_key(k):
+        lk = str(k).lower()
+        return "weighted_ligand" in lk or "received_ligand" in lk
+
+    for k in list(adata.obsm.keys()):
+        if k in ("spacetravlr_spatial_features", "spacetravlr_spatial_maps_flat") or _lig_key(k):
+            del adata.obsm[k]
+    for k in list(adata.layers.keys()):
+        if _lig_key(k):
+            del adata.layers[k]
+    for k in list(adata.obsp.keys()):
+        if _lig_key(k):
+            del adata.obsp[k]
+    for k in list(adata.uns.keys()):
+        if str(k).startswith("spacetravlr_cache_") or _lig_key(k):
+            del adata.uns[k]
+
+
+_spacetravlr_strip_heavy_training_artifacts(a)
 
 
 def _as_csr(m):
@@ -419,6 +500,7 @@ import os, shutil, sys, tempfile
 from pathlib import Path
 
 import h5py
+import magic
 import numpy as np
 import scanpy as sc
 import scipy.sparse as sp
@@ -477,12 +559,18 @@ def _infer_x_is_log1p(adata) -> bool:
 
 
 src = Path(sys.argv[1])
-out_partial = Path(sys.argv[2])
+dest_final = Path(sys.argv[2])
 if src.suffix.lower() != ".h5ad":
     sys.exit("expected path ending in .h5ad")
 _skip_microns = len(sys.argv) > 3 and sys.argv[3] == "1"
 _species_m = (sys.argv[4] if len(sys.argv) > 4 else "human").lower().strip()
 _target_um_s = sys.argv[5] if len(sys.argv) > 5 else ""
+_batch_magic_arg = sys.argv[6] if len(sys.argv) > 6 else "-"
+batch_col = (
+    None
+    if _batch_magic_arg.strip() in ("", "-")
+    else _batch_magic_arg.strip()
+)
 adata = _read_h5ad(str(src))
 _fast_uv = os.environ.get("SPACETRAVLR_TEST_FAST_UV") == "1"
 sc.pp.filter_cells(adata, min_genes=100)
@@ -628,8 +716,128 @@ except ImportError:
     sc.tl.leiden(adata)
 if "cell_type" not in adata.obs.columns:
     adata.obs["cell_type"] = adata.obs["leiden"].astype(str)
-adata.write_h5ad(out_partial)
-print("wrote_partial", out_partial)
+
+a = adata
+if "normalized_count" not in a.layers:
+    sys.exit("expected layers['normalized_count']")
+if "cell_type" in a.obs.columns:
+    annot = "cell_type"
+elif "leiden" in a.obs.columns:
+    annot = "leiden"
+else:
+    sys.exit("clusterwise MAGIC needs obs column 'cell_type' or 'leiden'")
+if batch_col is not None and batch_col not in a.obs.columns:
+    sys.exit("magic batch obs column not found: %r" % (batch_col,))
+
+nc = a.layers["normalized_count"]
+if sp.issparse(nc):
+    col_sum = np.asarray(nc.sum(axis=0)).ravel()
+else:
+    col_sum = np.sum(np.asarray(nc, dtype=np.float64), axis=0)
+expressed = col_sum > 0.0
+if not np.any(expressed):
+    sys.exit("normalized_count has no genes with positive total expression")
+if not np.all(expressed):
+    a = a[:, np.flatnonzero(expressed)].copy()
+    nc = a.layers["normalized_count"]
+if sp.issparse(nc):
+    X = nc.toarray().astype(np.float64)
+else:
+    X = np.asarray(nc, dtype=np.float64)
+
+labels = np.array([str(x) for x in a.obs[annot].to_numpy()], dtype=object)
+out = X.copy()
+_fast_uv = os.environ.get("SPACETRAVLR_TEST_FAST_UV") == "1"
+knn_def, knn_max_cap, t_magic, n_pca_cap = (
+    (3, 6, 2, 12) if _fast_uv else (5, 10, 3, 100)
+)
+
+
+def magic_op_for_subset(n_sub, n_genes):
+    knn = min(knn_def, max(1, n_sub - 1))
+    knn_max = max(knn, min(knn_max_cap, n_sub - 1))
+    pca_bound = min(int(n_sub), int(n_genes))
+    n_pca_eff = min(n_pca_cap, max(1, pca_bound - 1))
+    return magic.MAGIC(
+        knn=knn,
+        knn_max=knn_max,
+        decay=1,
+        t=t_magic,
+        n_pca=n_pca_eff,
+        verbose=0,
+    )
+
+
+def magic_impute_rows(sub, n_sub):
+    gene_active = sub.sum(axis=0) > 0.0
+    n_g = int(gene_active.sum())
+    if n_g == 0:
+        return np.asarray(sub, dtype=np.float64)
+    op = magic_op_for_subset(n_sub, n_g)
+    if n_g == sub.shape[1]:
+        return np.asarray(op.fit_transform(sub, genes="all_genes"), dtype=np.float64)
+    imp = np.asarray(sub, dtype=np.float64)
+    sub_f = sub[:, gene_active]
+    imp_f = np.asarray(op.fit_transform(sub_f, genes="all_genes"), dtype=np.float64)
+    imp[:, gene_active] = imp_f
+    return imp
+
+
+if batch_col is None:
+    for lab in np.unique(labels):
+        m = labels == lab
+        idx = np.flatnonzero(m)
+        if idx.size < 2:
+            continue
+        sub = X[m]
+        out[m] = magic_impute_rows(sub, int(idx.size))
+else:
+    batch_vals = np.array([str(x) for x in a.obs[batch_col].to_numpy()], dtype=object)
+    keys = list({(labels[i], batch_vals[i]) for i in range(labels.size)})
+    for ct, bt in keys:
+        m = (labels == ct) & (batch_vals == bt)
+        if not np.any(m):
+            continue
+        idx = np.flatnonzero(m)
+        if idx.size < 2:
+            continue
+        sub = X[m]
+        out[m] = magic_impute_rows(sub, int(idx.size))
+
+a.layers["imputed_count"] = out
+
+
+def _spacetravlr_strip_heavy_training_artifacts(adata):
+    def _lig_key(k):
+        lk = str(k).lower()
+        return "weighted_ligand" in lk or "received_ligand" in lk
+
+    for k in list(adata.obsm.keys()):
+        if k in ("spacetravlr_spatial_features", "spacetravlr_spatial_maps_flat") or _lig_key(k):
+            del adata.obsm[k]
+    for k in list(adata.layers.keys()):
+        if _lig_key(k):
+            del adata.layers[k]
+    for k in list(adata.obsp.keys()):
+        if _lig_key(k):
+            del adata.obsp[k]
+    for k in list(adata.uns.keys()):
+        if str(k).startswith("spacetravlr_cache_") or _lig_key(k):
+            del adata.uns[k]
+
+
+def _as_csr_magic(m):
+    if sp.issparse(m):
+        return m.tocsr()
+    return sp.csr_matrix(np.asarray(m, dtype=np.float64))
+
+
+_spacetravlr_strip_heavy_training_artifacts(a)
+a.X = _as_csr_magic(a.X)
+for k in list(a.layers.keys()):
+    a.layers[k] = _as_csr_magic(a.layers[k])
+a.write_h5ad(dest_final)
+print("wrote_processed", dest_final)
 "#;
 
 const ADD_CELL_TYPE_FROM_LEIDEN_PY: &str = r#"
@@ -644,6 +852,28 @@ elif "leiden" in a.obs.columns:
     a.obs["cell_type"] = a.obs["leiden"].astype(str)
 else:
     sys.exit("cannot set cell_type: obs has no leiden column")
+
+
+def _spacetravlr_strip_heavy_training_artifacts(adata):
+    def _lig_key(k):
+        lk = str(k).lower()
+        return "weighted_ligand" in lk or "received_ligand" in lk
+
+    for k in list(adata.obsm.keys()):
+        if k in ("spacetravlr_spatial_features", "spacetravlr_spatial_maps_flat") or _lig_key(k):
+            del adata.obsm[k]
+    for k in list(adata.layers.keys()):
+        if _lig_key(k):
+            del adata.layers[k]
+    for k in list(adata.obsp.keys()):
+        if _lig_key(k):
+            del adata.obsp[k]
+    for k in list(adata.uns.keys()):
+        if str(k).startswith("spacetravlr_cache_") or _lig_key(k):
+            del adata.uns[k]
+
+
+_spacetravlr_strip_heavy_training_artifacts(a)
 a.write_h5ad(outp)
 print("wrote", outp)
 "#;
@@ -672,6 +902,27 @@ pub fn probe_adata_training_readiness(path: &Path) -> anyhow::Result<AdataTraini
         has_normalized_count,
         has_imputed_count,
     })
+}
+
+/// Training auto-prep is unnecessary when **`cell_type`**, **`layers["imputed_count"]`**, and
+/// **`layers["normalized_count"]`** are all present.
+pub fn training_h5ad_is_fully_prepared(path: &Path) -> anyhow::Result<bool> {
+    let r = probe_adata_training_readiness(path)?;
+    Ok(r.has_cell_type && r.has_imputed_count && r.has_normalized_count)
+}
+
+/// **`candidate`** can replace a full preprocess when it exists, is at least as new as **`source`**
+/// (mtime), and [`training_h5ad_is_fully_prepared`] is true for **`candidate`**.
+pub fn prepared_training_output_is_reusable(source: &Path, candidate: &Path) -> anyhow::Result<bool> {
+    if !candidate.is_file() {
+        return Ok(false);
+    }
+    let src_mtime = source.metadata()?.modified()?;
+    let out_mtime = candidate.metadata()?.modified()?;
+    if out_mtime < src_mtime {
+        return Ok(false);
+    }
+    training_h5ad_is_fully_prepared(candidate)
 }
 
 fn sibling_h5ad_with_suffix(adata: &Path, suffix_before_ext: &str) -> anyhow::Result<PathBuf> {
@@ -733,9 +984,61 @@ pub fn write_cell_type_from_leiden_echo_uv_to_stderr(
     Ok(())
 }
 
-/// `{stem}_processed.h5ad` under **`output_dir`** (stem from [`crate::config::canonical_adata_stem`]).
+/// `{stem}_processed.h5ad` under **`output_dir`** (stem from [`crate::config::canonical_training_prep_stem`]).
 pub fn training_processed_h5ad_path(output_dir: &Path, stem: &str) -> PathBuf {
     output_dir.join(format!("{stem}_processed.h5ad"))
+}
+
+/// Removes precomputed CNN spatial tensors, received-/weighted-ligand matrices, and `spacetravlr_cache_*` `uns`
+/// keys from an on-disk `.h5ad`. Keeps coordinate `obsm` (`spatial`, `X_spatial`, `spatial_loc`, `unscaled_spatial`)
+/// and standard expression layers. No-op if the path is missing or not `.h5ad`.
+pub fn strip_heavy_training_artifacts_from_h5ad(path: &Path) -> anyhow::Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let is_h5ad = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("h5ad"))
+        .unwrap_or(false);
+    if !is_h5ad {
+        return Ok(());
+    }
+
+    let adata = AnnData::<H5>::open(H5::open_rw(path)?)
+        .with_context(|| format!("open .h5ad rw for artifact strip: {}", path.display()))?;
+
+    fn ligand_artifact_key(k: &str) -> bool {
+        let kl = k.to_ascii_lowercase();
+        kl.contains("weighted_ligand") || kl.contains("received_ligand")
+    }
+
+    for key in adata.obsm().keys() {
+        if key == "spacetravlr_spatial_features"
+            || key == "spacetravlr_spatial_maps_flat"
+            || ligand_artifact_key(&key)
+        {
+            adata.obsm().remove(&key)?;
+        }
+    }
+    for key in adata.layers().keys() {
+        if ligand_artifact_key(&key) {
+            adata.layers().remove(&key)?;
+        }
+    }
+    for key in adata.obsp().keys() {
+        if ligand_artifact_key(&key) {
+            adata.obsp().remove(&key)?;
+        }
+    }
+    for key in adata.uns().keys() {
+        if key.starts_with("spacetravlr_cache_") || ligand_artifact_key(&key) {
+            adata.uns().remove(&key)?;
+        }
+    }
+
+    adata.close()?;
+    Ok(())
 }
 
 /// `{stem}_imputed.h5ad` under **`output_dir`**.
@@ -771,16 +1074,18 @@ pub fn write_h5ad_csr_layers_uv(
 }
 
 /// True when **`X`** and every present **`layers[...]`** matrix is CSR/CSC (sparse), not dense.
+///
+/// Uses the HDF5 `encoding-type` attribute (metadata only) — does **not** read matrix data.
 pub fn adata_x_and_layers_are_csr(path: &Path) -> anyhow::Result<bool> {
+    use anndata::backend::DataType;
+    use anndata::ArrayElemOp;
+
+    fn dtype_is_sparse(dt: Option<DataType>) -> bool {
+        matches!(dt, Some(DataType::CsrMatrix(_) | DataType::CscMatrix(_)))
+    }
+
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let x_ok = match adata.x().get::<ArrayData>()? {
-        None => false,
-        Some(ArrayData::CsrMatrix(_))
-        | Some(ArrayData::CsrNonCanonical(_))
-        | Some(ArrayData::CscMatrix(_)) => true,
-        Some(ArrayData::Array(_)) | Some(ArrayData::DataFrame(_)) => false,
-    };
-    if !x_ok {
+    if !dtype_is_sparse(adata.x().dtype()) {
         adata.close()?;
         return Ok(false);
     }
@@ -788,14 +1093,7 @@ pub fn adata_x_and_layers_are_csr(path: &Path) -> anyhow::Result<bool> {
         let Some(elem) = adata.layers().get(name.as_str()) else {
             continue;
         };
-        let ok = match elem.get::<ArrayData>()? {
-            None => false,
-            Some(ArrayData::CsrMatrix(_))
-            | Some(ArrayData::CsrNonCanonical(_))
-            | Some(ArrayData::CscMatrix(_)) => true,
-            Some(ArrayData::Array(_)) | Some(ArrayData::DataFrame(_)) => false,
-        };
-        if !ok {
+        if !dtype_is_sparse(elem.dtype()) {
             adata.close()?;
             return Ok(false);
         }
@@ -896,6 +1194,8 @@ pub fn magic_impute_and_attach_batch(
         );
     }
 
+    strip_heavy_training_artifacts_from_h5ad(dest_h5ad)?;
+
     Ok(log)
 }
 
@@ -986,7 +1286,7 @@ pub fn plan_training_prep(
 /// ([`TrainingPrepPlan::FullPreprocess`]); empty **`species`** is resolved via
 /// [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
 ///
-/// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_adata_stem`] on
+/// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_training_prep_stem`] on
 /// the pre-prep path for **`original_input_for_stem`** so filenames match the user's dataset stem.
 pub fn ensure_training_adata_ready(
     adata_path: &mut String,
@@ -1010,7 +1310,7 @@ pub fn ensure_training_adata_ready(
         return Ok(());
     }
 
-    let stem = crate::config::canonical_adata_stem(original_input_for_stem);
+    let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
     let r = probe_adata_training_readiness(&p)?;
     let plan = plan_training_prep(&r, output_dir, &stem)?;
     // #region agent log
@@ -1032,6 +1332,25 @@ pub fn ensure_training_adata_ready(
         }),
     );
     // #endregion
+    let reuse_out: Option<PathBuf> = match &plan {
+        TrainingPrepPlan::Noop => None,
+        TrainingPrepPlan::PatchCellType { out } => Some(out.clone()),
+        TrainingPrepPlan::ImputeOnly { out } => Some(out.clone()),
+        TrainingPrepPlan::PatchThenImpute { out, .. } => Some(out.clone()),
+        TrainingPrepPlan::FullPreprocess { out } => Some(out.clone()),
+    };
+    if let Some(out) = reuse_out {
+        if prepared_training_output_is_reusable(&p, &out)? {
+            eprintln!(
+                "spacetravlr: reusing existing training-prep output {} (>= mtime of {})",
+                out.display(),
+                p.display()
+            );
+            strip_heavy_training_artifacts_from_h5ad(&out)?;
+            *adata_path = expand_user_path(out.to_string_lossy().as_ref());
+            return Ok(());
+        }
+    }
     match plan {
         TrainingPrepPlan::Noop => {
             *adata_path = expanded;
@@ -1098,18 +1417,19 @@ pub fn processed_h5ad_path(adata_in: &Path) -> anyhow::Result<PathBuf> {
     Ok(out)
 }
 
-fn run_uv_scanpy_to_scratch(
-    scratch_out: &Path,
+fn run_uv_full_preprocess_one_write(
+    work_out: &Path,
     adata_in: &Path,
     capture_output: bool,
     spatial_microns: &SpatialMicronsOptions,
+    magic_batch_obs: Option<&str>,
 ) -> anyhow::Result<String> {
     let adata_str = adata_in
         .to_str()
         .with_context(|| format!("AnnData path must be UTF-8: {}", adata_in.display()))?;
-    let scratch_str = scratch_out
+    let work_str = work_out
         .to_str()
-        .with_context(|| format!("scratch path must be UTF-8: {}", scratch_out.display()))?;
+        .with_context(|| format!("work .h5ad path must be UTF-8: {}", work_out.display()))?;
     let skip = if spatial_microns.skip { "1" } else { "0" };
     let species_trim = spatial_microns.species.trim();
     let species_arg = if spatial_microns.skip {
@@ -1130,18 +1450,23 @@ fn run_uv_scanpy_to_scratch(
         .target_median_nn_um
         .map(|x| x.to_string())
         .unwrap_or_default();
+    let batch_token = magic_batch_obs
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("-");
     // #region agent log
     agent_debug_ndjson(
         "B",
-        "scanpy_preprocess.rs:run_uv_scanpy_to_scratch",
-        "embedded scanpy argv: skip_microns species target_um",
+        "scanpy_preprocess.rs:run_uv_full_preprocess_one_write",
+        "embedded scanpy+magic argv: skip_microns species target_um batch",
         "preprocess",
         json!({
             "adata_in": adata_in.to_string_lossy(),
-            "scratch_out": scratch_out.to_string_lossy(),
+            "work_out": work_out.to_string_lossy(),
             "skip_microns": skip,
             "species_arg": species_arg,
             "target_um_arg": target_um,
+            "batch_token": batch_token,
         }),
     );
     // #endregion
@@ -1150,17 +1475,18 @@ fn run_uv_scanpy_to_scratch(
         SCANPY_BASIC_PREPROCESS_PY,
         &[
             adata_str,
-            scratch_str,
+            work_str,
             skip,
             species_arg,
             target_um.as_str(),
+            batch_token,
         ],
         capture_output,
-        "scanpy preprocess",
+        "scanpy preprocess + magic impute + csr",
     )
 }
 
-/// Scanpy QC → UMAP/Leiden (scratch `.h5ad`) → **magic-impute** → **`<stem>_processed.h5ad`** beside the input.
+/// Scanpy QC → UMAP/Leiden → **magic-impute** (one embedded uv run) → **`<stem>_processed.h5ad`** beside the input.
 pub fn full_preprocess(adata_in: &Path) -> anyhow::Result<PathBuf> {
     let dest = processed_h5ad_path(adata_in)?;
     let (path, _) = full_preprocess_maybe_log(
@@ -1205,32 +1531,52 @@ pub fn full_preprocess_maybe_log(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    let scratch = parent.join(format!(
-        ".spacetravlr_scanpy_scratch_{}.h5ad",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&scratch);
-
-    let mut log_scanpy =
-        run_uv_scanpy_to_scratch(&scratch, adata_in, capture_output, &spatial_microns)?;
-    if !scratch.is_file() {
-        bail!("Scanpy scratch output missing: {}", scratch.display());
+    if let Some(b) = magic_batch_obs.map(str::trim).filter(|s| !s.is_empty()) {
+        ensure_magic_batch_obs_column_exists(adata_in, b)?;
     }
 
-    let log_attach = match magic_impute_and_attach_batch(
-        &scratch,
-        dest_processed,
-        magic_batch_obs,
-        capture_output,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = std::fs::remove_file(&scratch);
-            return Err(e);
-        }
-    };
+    let work_path = parent.join(format!(
+        ".spacetravlr_preprocess_work_{}.h5ad",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&work_path);
 
-    let _ = std::fs::remove_file(&scratch);
+    let log_scanpy = run_uv_full_preprocess_one_write(
+        &work_path,
+        adata_in,
+        capture_output,
+        &spatial_microns,
+        magic_batch_obs,
+    )?;
+    if !work_path.is_file() {
+        bail!(
+            "preprocess+magic work output missing: {}",
+            work_path.display()
+        );
+    }
+
+    let same_in_out = match (
+        std::fs::canonicalize(adata_in),
+        std::fs::canonicalize(dest_processed),
+    ) {
+        (Ok(a), Ok(d)) => a == d,
+        _ => false,
+    };
+    if dest_processed.exists() && !same_in_out {
+        std::fs::remove_file(dest_processed).with_context(|| {
+            format!(
+                "remove existing output before replace: {}",
+                dest_processed.display()
+            )
+        })?;
+    }
+    std::fs::rename(&work_path, dest_processed).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            work_path.display(),
+            dest_processed.display()
+        )
+    })?;
 
     if !dest_processed.is_file() {
         bail!(
@@ -1239,8 +1585,9 @@ pub fn full_preprocess_maybe_log(
         );
     }
 
+    strip_heavy_training_artifacts_from_h5ad(dest_processed)?;
+
     let log = if capture_output {
-        log_scanpy.push_str(&log_attach);
         Some(log_scanpy)
     } else {
         None
@@ -1262,6 +1609,20 @@ mod tests {
     use ndarray::Array2;
     use std::path::Path;
     use std::process::{Command, Stdio};
+
+    fn uv_run_status_retry_no_cache(
+        mut build: impl FnMut(bool) -> Command,
+    ) -> anyhow::Result<std::process::ExitStatus> {
+        let s = build(false)
+            .status()
+            .context("spawn uv (first attempt)")?;
+        if s.success() {
+            return Ok(s);
+        }
+        build(true)
+            .status()
+            .context("spawn uv (--no-cache retry)")
+    }
 
     #[test]
     fn processed_h5ad_path_stem() {
@@ -1301,17 +1662,21 @@ mod tests {
 
     fn write_minimal_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .arg("python")
+                .arg("-c")
+                .arg(
+                    r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -1328,27 +1693,32 @@ a.obs_names = [f"c{i}" for i in range(n_obs)]
 a.var_names = [f"GEN{i}" for i in range(n_var)]
 a.write_h5ad(p)
 "#,
-            )
-            .arg(path_str)
-            .status()
-            .context("spawn uv to write toy h5ad")?;
+                )
+                .arg(path_str);
+            c
+        })
+        .context("uv to write toy h5ad")?;
         anyhow::ensure!(status.success(), "uv toy h5ad write failed: {status}");
         Ok(())
     }
 
     fn write_spatial_grid_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .arg("python")
+                .arg("-c")
+                .arg(
+                    r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -1373,10 +1743,11 @@ a.var_names = [f"GEN{i}" for i in range(n_var)]
 a.obsm["spatial"] = spatial
 a.write_h5ad(p)
 "#,
-            )
-            .arg(path_str)
-            .status()
-            .context("spawn uv to write spatial grid h5ad")?;
+                )
+                .arg(path_str);
+            c
+        })
+        .context("uv to write spatial grid h5ad")?;
         anyhow::ensure!(status.success(), "uv spatial grid h5ad write failed: {status}");
         Ok(())
     }
@@ -1546,17 +1917,21 @@ a.write_h5ad(p)
 
     fn write_log1p_like_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .arg("python")
-            .arg("-c")
-            .arg(
-                r#"
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .arg("python")
+                .arg("-c")
+                .arg(
+                    r#"
 import sys
 from pathlib import Path
 import numpy as np
@@ -1571,10 +1946,11 @@ a.obs_names = [f"c{i}" for i in range(60)]
 a.var_names = [f"G{i}" for i in range(300)]
 a.write_h5ad(p)
 "#,
-            )
-            .arg(path_str)
-            .status()
-            .context("spawn uv to write log1p-like h5ad")?;
+                )
+                .arg(path_str);
+            c
+        })
+        .context("uv to write log1p-like h5ad")?;
         anyhow::ensure!(status.success(), "uv log1p toy write failed: {status}");
         Ok(())
     }
@@ -1754,20 +2130,25 @@ a.write_h5ad(out)
 "#,
             py_body = py_body
         );
-        let status = Command::new(uv_executable())
-            .env_remove("PYTHONPATH")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg("run")
-            .arg("--isolated")
-            .args(["--with", "numpy<2"])
-            .args(["--with", "anndata>=0.11"])
-            .args(["--with", "scipy"])
-            .arg("python")
-            .arg("-c")
-            .arg(&script)
-            .arg(path_str)
-            .status()
-            .context("spawn uv fixture h5ad")?;
+        let status = uv_run_status_retry_no_cache(|no_cache| {
+            let mut c = Command::new(uv_executable());
+            c.env_remove("PYTHONPATH")
+                .env("PYTHONNOUSERSITE", "1");
+            if no_cache {
+                c.arg("--no-cache");
+            }
+            c.arg("run")
+                .arg("--isolated")
+                .args(["--with", "numpy<2"])
+                .args(["--with", "anndata>=0.11"])
+                .args(["--with", "scipy"])
+                .arg("python")
+                .arg("-c")
+                .arg(&script)
+                .arg(path_str);
+            c
+        })
+        .context("uv fixture h5ad")?;
         anyhow::ensure!(status.success(), "uv fixture h5ad failed: {status}");
         Ok(())
     }

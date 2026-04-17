@@ -1,4 +1,5 @@
-//! CellOracle-style GRN inference: TF-only priors from SpaceTravLR `*_network.parquet`,
+//! CellOracle-style GRN inference: TF-only priors from SpaceTravLR `*_network.parquet`
+//! ([`crate::network::GeneNetwork::grn_celloracle_tf_regulators_by_target`]: TF→TF edges only),
 //! sklearn-compatible Bayesian ridge for coefficients and edge statistics.
 
 mod sklearn_bayesian_ridge;

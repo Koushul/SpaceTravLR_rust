@@ -300,10 +300,37 @@ fn brighten(c: Color, amt: u8) -> Color {
     }
 }
 
-// ── Workers: multi-column (display-width–fixed cells so │ stays aligned) ─────
+// ── Workers: one gene per row (status + optional · done/total from HUD) ───────────
 const GENE_DISP: usize = 16;
-const STAT_DISP: usize = 38;
 const GENE_STAT_SEP: &str = " · ";
+
+fn status_is_cnn_only_line(status: &str) -> bool {
+    let t = status.trim_start();
+    if t.starts_with("CNN ") {
+        return true;
+    }
+    let lower = status.to_lowercase();
+    lower.contains("cnn") && !lower.contains("lasso")
+}
+
+fn worker_status_line(
+    gene: &str,
+    status: &str,
+    lasso_ct: &std::collections::HashMap<String, (usize, usize)>,
+) -> String {
+    if status_is_cnn_only_line(status) {
+        return status.to_string();
+    }
+    if let Some(&(done, total)) = lasso_ct.get(gene) {
+        if total > 0 {
+            format!("{status} · {done}/{total}")
+        } else {
+            status.to_string()
+        }
+    } else {
+        status.to_string()
+    }
+}
 
 fn pad_or_trunc_display(s: &str, width: usize) -> String {
     if width == 0 {
@@ -335,37 +362,7 @@ fn pad_or_trunc_display(s: &str, width: usize) -> String {
     out
 }
 
-fn pad_left_trunc_display(s: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let w = s.width();
-    if w <= width {
-        let pad = width - w;
-        return format!("{}{}", " ".repeat(pad), s);
-    }
-    let mut out = String::new();
-    let mut used = 0usize;
-    let el = '…';
-    let el_w = el.width().unwrap_or(1);
-    let budget = width.saturating_sub(el_w);
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if used + cw > budget {
-            break;
-        }
-        out.push(ch);
-        used += cw;
-    }
-    out.push(el);
-    let rem = width.saturating_sub(out.width());
-    if rem > 0 {
-        out.push_str(&" ".repeat(rem));
-    }
-    out
-}
-
-fn workers_in_columns(
+fn workers_single_column(
     active: &[(&String, &String)],
     content_w: usize,
     lasso_ct: &std::collections::HashMap<String, (usize, usize)>,
@@ -379,50 +376,43 @@ fn workers_in_columns(
     }
     let prefix_w = "✿ ".width();
     let mid_w = GENE_STAT_SEP.width();
-    let sep_w = " │ ".width();
-    let entry_w = prefix_w + GENE_DISP + mid_w + STAT_DISP;
-    let n_cols = ((content_w + sep_w) / (entry_w + sep_w)).max(1);
+    let gene_col = (content_w.saturating_sub(prefix_w + mid_w) * 2 / 9)
+        .clamp(6, GENE_DISP)
+        .max(1);
+    let stat_w = content_w
+        .saturating_sub(prefix_w + gene_col + mid_w)
+        .max(12);
+
     active
-        .chunks(n_cols)
-        .map(|chunk| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (i, (gene, status)) in chunk.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled(" │ ", Style::default().fg(pal.muted)));
-                }
-                let pc = if status.contains("export") {
-                    pal.c_wrote
-                } else if status.contains("lasso") || status.contains("cnn") {
-                    pal.grape
-                } else if status.contains("fail") {
-                    pal.c_fail
-                } else if status.contains("skip") {
-                    pal.c_skip
-                } else {
-                    pal.lilac
-                };
-                let status_line: String = if let Some(&(done, total)) = lasso_ct.get(gene.as_str())
-                {
-                    if total > 0 {
-                        format!("{} · {}/{}", status, done, total)
-                    } else {
-                        (*status).clone()
-                    }
-                } else {
-                    (*status).clone()
-                };
-                spans.push(Span::styled("✿ ", Style::default().fg(pal.label)));
-                spans.push(Span::styled(
-                    pad_left_trunc_display(gene.as_str(), GENE_DISP),
+        .iter()
+        .map(|(gene, status)| {
+            let status_line = worker_status_line(gene.as_str(), status, lasso_ct);
+            let pc = if status.contains("export") || status.contains("write") {
+                pal.c_wrote
+            } else if status.contains("lasso")
+                || status.contains("hybrid")
+                || status.to_lowercase().contains("cnn")
+            {
+                pal.grape
+            } else if status.contains("fail") {
+                pal.c_fail
+            } else if status.contains("skip") {
+                pal.c_skip
+            } else {
+                pal.lilac
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled("✿ ", Style::default().fg(pal.label)),
+                Span::styled(
+                    pad_or_trunc_display(gene.as_str(), gene_col),
                     Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(GENE_STAT_SEP, Style::default().fg(pal.muted)));
-                spans.push(Span::styled(
-                    pad_or_trunc_display(&status_line, STAT_DISP),
+                ),
+                Span::styled(GENE_STAT_SEP, Style::default().fg(pal.muted)),
+                Span::styled(
+                    pad_or_trunc_display(&status_line, stat_w),
                     Style::default().fg(pc),
-                ));
-            }
-            ListItem::new(Line::from(spans))
+                ),
+            ]))
         })
         .collect()
 }
@@ -619,7 +609,10 @@ fn scan_output_metrics(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.ends_with(".feather") || name.ends_with(".orphan") {
+        if name.ends_with(".feather")
+            || name.ends_with(".orphan")
+            || name.ends_with(".tf_ablated")
+        {
             disk_done += 1;
         } else if name.ends_with(".lock") {
             let stem = name.strip_suffix(".lock").unwrap_or(name);
@@ -728,6 +721,51 @@ fn fmt_r2_fixed(r: f64) -> String {
     }
 }
 
+fn perf_sort_key(entry: &(String, f64, Option<f64>, usize)) -> f64 {
+    let (_, lasso, cnn, _) = entry;
+    match cnn {
+        Some(c) if c.is_finite() => *c,
+        _ => *lasso,
+    }
+}
+
+fn perf_panel_has_cnn(st: &TrainingHudState) -> bool {
+    (st.full_cnn || st.run_config.cnn_training_mode == "hybrid")
+        && st
+            .gene_r2_mean
+            .iter()
+            .any(|(_, _, cnn, _)| matches!(cnn, Some(c) if c.is_finite()))
+}
+
+fn spans_r2_value(
+    lasso: f64,
+    cnn: Option<f64>,
+    pal: &TuiColors,
+    has_cnn: bool,
+    highlight: Style,
+) -> Vec<Span<'static>> {
+    if has_cnn {
+        if let Some(cv) = cnn.filter(|c| c.is_finite()) {
+            let (arrow, arrow_style) = if cv > lasso {
+                ("▲", Style::default().fg(pal.c_wrote))
+            } else if cv < lasso {
+                ("▼", Style::default().fg(pal.c_fail))
+            } else {
+                ("─", Style::default().fg(pal.muted))
+            };
+            return vec![
+                Span::styled(fmt_r2_fixed(cv), highlight),
+                Span::styled(arrow, arrow_style),
+            ];
+        }
+        return vec![
+            Span::styled(fmt_r2_fixed(lasso), Style::default().fg(pal.title)),
+            Span::styled(" ", Style::default().fg(pal.muted)),
+        ];
+    }
+    vec![Span::styled(fmt_r2_fixed(lasso), highlight)]
+}
+
 fn fmt_lasso_float(x: f64) -> String {
     if x.is_finite() {
         format!("{:.3e}", x)
@@ -736,13 +774,15 @@ fn fmt_lasso_float(x: f64) -> String {
     }
 }
 
-fn perf_r2_columns(inner_w: usize) -> (usize, usize) {
+fn perf_r2_columns(inner_w: usize, has_cnn: bool) -> (usize, usize) {
     const MID: usize = 2;
     const R2_COL: usize = 7;
+    const R2_COL_CNN: usize = 8;
     const MOD_COL: usize = 5;
+    let r2w = if has_cnn { R2_COL_CNN } else { R2_COL };
     let w = inner_w.max(MID + 2);
     let half = (w - MID) / 2;
-    let gene_w = half.saturating_sub(R2_COL + MOD_COL);
+    let gene_w = half.saturating_sub(r2w + MOD_COL);
     (half, gene_w)
 }
 
@@ -764,54 +804,65 @@ fn build_perf_panel_lines(st: &TrainingHudState, inner_w: usize, pal: TuiColors)
         ))];
     }
 
-    let (half, gene_w) = perf_r2_columns(inner_w);
+    let has_cnn = perf_panel_has_cnn(st);
+    let (half, gene_w) = perf_r2_columns(inner_w, has_cnn);
 
     let mut v = st.gene_r2_mean.clone();
-    v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let top_n: Vec<(String, f64, usize)> =
+    v.sort_by(|a, b| {
+        perf_sort_key(b)
+            .partial_cmp(&perf_sort_key(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top_n: Vec<(String, f64, Option<f64>, usize)> =
         v.iter().take(PERF_R2_LEADERBOARD_LEN).cloned().collect();
-    v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    let bot_n: Vec<(String, f64, usize)> =
+    v.sort_by(|a, b| {
+        perf_sort_key(a)
+            .partial_cmp(&perf_sort_key(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let bot_n: Vec<(String, f64, Option<f64>, usize)> =
         v.iter().take(PERF_R2_LEADERBOARD_LEN).cloned().collect();
 
     let mut lines: Vec<Line<'static>> =
         Vec::with_capacity(2 + PERF_R2_LEADERBOARD_LEN.min(n_genes));
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<hw$}", "▲ best R²", hw = half),
+            format!("{:<hw$}", "▲ best", hw = half),
             Style::default().fg(pal.c_topr2).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().fg(pal.muted)),
         Span::styled(
-            format!("{:<hw$}", "▼ worst R²", hw = half),
+            format!("{:<hw$}", "▼ worst", hw = half),
             Style::default().fg(pal.c_botr2).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(rule_line(inner_w, pal));
-    for ((g_hi, r_hi, m_hi), (g_lo, r_lo, m_lo)) in top_n.into_iter().zip(bot_n.into_iter()) {
+    let hi_style = Style::default()
+        .fg(pal.c_topr2)
+        .add_modifier(Modifier::BOLD);
+    let lo_style = Style::default()
+        .fg(pal.c_botr2)
+        .add_modifier(Modifier::BOLD);
+    for ((g_hi, r_hi, c_hi, m_hi), (g_lo, r_lo, c_lo, m_lo)) in top_n.into_iter().zip(bot_n.into_iter())
+    {
         let g_hi_s = truncate_label(&g_hi, gene_w);
         let g_lo_s = truncate_label(&g_lo, gene_w);
-        lines.push(Line::from(vec![
+        let mut spans_hi = vec![
             Span::styled(
                 format!("{:<gw$}", g_hi_s, gw = gene_w),
                 Style::default().fg(pal.title),
             ),
             Span::styled(fmt_n_mod(m_hi), Style::default().fg(pal.muted)),
-            Span::styled(
-                fmt_r2_fixed(r_hi),
-                Style::default().fg(pal.c_topr2).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default().fg(pal.muted)),
-            Span::styled(
-                format!("{:<gw$}", g_lo_s, gw = gene_w),
-                Style::default().fg(pal.title),
-            ),
-            Span::styled(fmt_n_mod(m_lo), Style::default().fg(pal.muted)),
-            Span::styled(
-                fmt_r2_fixed(r_lo),
-                Style::default().fg(pal.c_botr2).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        ];
+        spans_hi.extend(spans_r2_value(r_hi, c_hi, &pal, has_cnn, hi_style));
+        spans_hi.push(Span::styled("  ", Style::default().fg(pal.muted)));
+        spans_hi.push(Span::styled(
+            format!("{:<gw$}", g_lo_s, gw = gene_w),
+            Style::default().fg(pal.title),
+        ));
+        spans_hi.push(Span::styled(fmt_n_mod(m_lo), Style::default().fg(pal.muted)));
+        spans_hi.extend(spans_r2_value(r_lo, c_lo, &pal, has_cnn, lo_style));
+        lines.push(Line::from(spans_hi));
     }
 
     lines
@@ -1106,12 +1157,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
     let mut dir_bytes: u64 = 0;
     let mut dir_files: usize = 0;
-    let mut disk_genes_done: usize = 0;
     let mut external_workers: usize = 0;
 
     if let Ok(st) = hud.lock() {
         let active: HashSet<String> = st.active_genes.keys().cloned().collect();
-        (dir_bytes, dir_files, disk_genes_done, external_workers) =
+        (dir_bytes, dir_files, _, external_workers) =
             scan_output_metrics(&st.output_dir, &active);
     }
 
@@ -1157,7 +1207,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         if last_dir_scan.elapsed() > Duration::from_secs(2) {
             if let Ok(st) = hud.lock() {
                 let active: HashSet<String> = st.active_genes.keys().cloned().collect();
-                (dir_bytes, dir_files, disk_genes_done, external_workers) =
+                (dir_bytes, dir_files, _, external_workers) =
                     scan_output_metrics(&st.output_dir, &active);
             }
             last_dir_scan = Instant::now();
@@ -1803,7 +1853,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let rest_style = Style::default().fg(pal.grape).add_modifier(Modifier::BOLD);
 
             f.render_widget(
-                List::new(workers_in_columns(
+                List::new(workers_single_column(
                     &active,
                     cw,
                     &st.gene_lasso_cluster_progress,
@@ -1855,7 +1905,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             .border_style(Style::default().fg(pal.perf_bord))
                             .title(Span::styled(
                                 format!(
-                                    " ✦ LASSO R²  · n = β cols in feather  · {} best / {} worst ",
+                                    " ✦ R²  · top {} / bottom {} ",
                                     PERF_R2_LEADERBOARD_LEN, PERF_R2_LEADERBOARD_LEN
                                 ),
                                 Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
@@ -1941,11 +1991,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     (t, d, r, true)
                 } else {
                     let t = st.total_genes.max(1) as u64;
-                    let p = if !st.is_demo && Path::new(&st.output_dir).is_dir() {
-                        disk_genes_done.min(st.total_genes)
-                    } else {
-                        st.genes_rounds.min(st.total_genes)
-                    } as u64;
+                    let p = st.genes_rounds.min(st.total_genes) as u64;
                     let r = (p as f64 / t as f64).clamp(0.0, 1.0);
                     (t, p, r, false)
                 };
@@ -2002,6 +2048,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Span::styled(format!("{}", st.genes_failed), title_bold),
                     Span::styled("  orphan ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_orphan), title_bold),
+                    Span::styled("  tf_ablated ", Style::default().fg(pal.muted)),
+                    Span::styled(format!("{}", st.genes_tf_ablated), title_bold),
                 ])
             };
             let prog_block = Block::default()

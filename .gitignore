@@ -16,9 +16,7 @@ results/
 .cursor/
 
 retro_synthesis/
-data/h5ad/
 
-# Ignore build artifacts and auto-generated files/directories from ReadTheDocs and Sphinx
 docs/_build/
 docs/.doctrees/
 docs/.buildinfo
@@ -38,3 +36,5 @@ docs/api/
 docs/_jupyter_cache/
 # If using ReadTheDocs config lock
 .readthedocs.lock
+
+ablation_training_configs/

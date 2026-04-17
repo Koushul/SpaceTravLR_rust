@@ -128,6 +128,9 @@ pub struct TrainingHudState {
     pub genes_skipped: usize,
     pub genes_failed: usize,
     pub genes_orphan: usize,
+    /// TF modulators disabled (`[grn].use_tf_modulators = false`) but target had TF-only GRN/prior
+    /// support — written as `GENE.tf_ablated`, not counted as GRN orphan.
+    pub genes_tf_ablated: usize,
     pub genes_rounds: usize,
     pub active_genes: HashMap<String, String>,
     /// Per-gene LASSO progress: clusters (cell types) completed / total, for TUI only.
@@ -138,10 +141,11 @@ pub struct TrainingHudState {
     pub started: Instant,
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
-    /// Mean LASSO R² per completed gene (for TUI best / worst list only).
-    /// Third field: count of `beta_*` columns in written betadata (non-zero across rows/cells);
+    /// Per completed gene for the TUI best / worst list: `(gene, mean_lasso_r2, mean_cnn_r2, n_modulators)`.
+    /// `mean_cnn_r2` is `Some` when the spatial CNN ran for that gene (mean over clusters with finite `cnn_r2`).
+    /// Fourth field: count of `beta_*` columns in written betadata (non-zero across rows/cells);
     /// falls back to design-matrix width when not supplied (e.g. training demo).
-    pub gene_r2_mean: Vec<(String, f64, usize)>,
+    pub gene_r2_mean: Vec<(String, f64, Option<f64>, usize)>,
     pub perf_stats_generation: u64,
     pub gene_train_times: VecDeque<(String, f64)>,
     /// Human-readable obs value for the subset currently training (`--condition` mode).
@@ -180,6 +184,7 @@ impl TrainingHudState {
             genes_skipped: 0,
             genes_failed: 0,
             genes_orphan: 0,
+            genes_tf_ablated: 0,
             genes_rounds: 0,
             active_genes: HashMap::new(),
             gene_lasso_cluster_progress: HashMap::new(),
@@ -225,6 +230,7 @@ impl TrainingHudState {
         self.genes_skipped = 0;
         self.genes_failed = 0;
         self.genes_orphan = 0;
+        self.genes_tf_ablated = 0;
         self.genes_rounds = 0;
         self.active_genes.clear();
         self.gene_lasso_cluster_progress.clear();
@@ -258,11 +264,25 @@ impl TrainingHudState {
         if summaries.is_empty() {
             return;
         }
-        let mean: f64 = summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
+        let mean_lasso: f64 =
+            summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
+        let mut cnn_sum = 0.0_f64;
+        let mut n_cnn = 0usize;
+        for s in summaries {
+            if s.cnn_r2.is_finite() {
+                cnn_sum += s.cnn_r2;
+                n_cnn += 1;
+            }
+        }
+        let mean_cnn = (n_cnn > 0).then_some(cnn_sum / n_cnn as f64);
         let n_modulators = n_betadata_beta_columns
             .unwrap_or_else(|| summaries.iter().map(|s| s.n_modulators).max().unwrap_or(0));
-        self.gene_r2_mean
-            .push((gene.to_string(), mean, n_modulators));
+        self.gene_r2_mean.push((
+            gene.to_string(),
+            mean_lasso,
+            mean_cnn,
+            n_modulators,
+        ));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
     }
 
@@ -387,7 +407,11 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
     if g.genes_rounds < g.total_genes {
         return;
     }
-    if g.genes_failed == 0 && g.genes_orphan == 0 && g.genes_skipped >= g.total_genes {
+    if g.genes_failed == 0
+        && g.genes_orphan == 0
+        && g.genes_tf_ablated == 0
+        && g.genes_skipped >= g.total_genes
+    {
         eprintln!(
             "\nNote: no new *_betadata.feather files were written — every gene was skipped (outputs already exist or another process holds a .lock)."
         );
@@ -403,6 +427,10 @@ pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
     eprintln!(
         "  orphan (no modulators in GRN for that target): {}",
         g.genes_orphan
+    );
+    eprintln!(
+        "  tf_ablated (TF modulators off; TF-only target per GRN/priors): {}",
+        g.genes_tf_ablated
     );
     eprintln!(
         "Typical fixes: set [data].layer and [data].cluster_annot to match the .h5ad; ensure obsm has spatial / X_spatial / spatial_loc (≥2 cols); verify species/GRN covers your gene symbols; relax --genes filter."

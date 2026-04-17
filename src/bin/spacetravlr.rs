@@ -12,7 +12,8 @@ use serde_json::Value;
 use spacetravlr::condition_split::{prepare_condition_splits, scan_condition_status};
 use spacetravlr::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
-    canonical_adata_stem, default_output_dir_for_adata_path, expand_user_path,
+    canonical_adata_stem, canonical_training_prep_stem, default_output_dir_for_adata_path,
+    expand_user_path,
 };
 use spacetravlr::grn_extra;
 #[cfg(feature = "tui")]
@@ -260,6 +261,7 @@ struct Cli {
 
     #[arg(
         long = "max-ligands",
+        visible_alias = "max-lr",
         value_name = "N",
         help_heading = "Gene list & GRN extras",
         help = "Keep only DB L–R pairs whose ligand ranks in the top N by mean expression ([data].layer)"
@@ -281,6 +283,14 @@ struct Cli {
         help = "Extra ligand→receptor pairs, merged with [grn].extra_lr / *_file. Forms: L1$R1,L2$R2  or  L1,R1;L2,R2  or  single L1,R1"
     )]
     extra_lr: Option<String>,
+
+    #[arg(
+        long = "train-modulators",
+        value_name = "LIST",
+        help_heading = "Gene list & GRN extras",
+        help = "Ablation / subset: which GRN modulator groups to train (comma-separated). Tokens: tf (TF→target), lr (ligand–receptor), tfl or ltf (TF–ligand / NicheNet-style). Overrides [grn].use_*_modulators when set (same as [grn].train_modulators in TOML)"
+    )]
+    train_modulators: Option<String>,
 
     #[arg(
         long,
@@ -644,7 +654,7 @@ struct Cli {
         alias = "process_h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`). Afterward, writes `uns['spacetravlr_received_ligands']` when config + GRN allow (see spaceship_config `[grn]` / `[spatial]` / `[data].layer`)."
+        help = "Full pipeline: uv Scanpy (QC → UMAP/Leiden) + clusterwise magic-impute → `<stem>_processed.h5ad` (requires `--h5ad`)."
     )]
     process_h5ad: bool,
 
@@ -890,7 +900,84 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     if let Some(n) = cli.max_genes {
         cfg.training.max_genes = Some(n);
     }
+    if let Some(raw) = cli.train_modulators.as_deref() {
+        cfg.grn.train_modulators = Some(raw.trim().to_string());
+    }
+    cfg.grn.apply_train_modulators_shorthand()?;
     Ok(())
+}
+
+fn validate_join_cli_against_repro(
+    cli: &Cli,
+    cfg: &SpaceshipConfig,
+    repro: &Path,
+    err_prefix: &str,
+) -> anyhow::Result<()> {
+    if let Some(cli_k) = cli.max_ligands {
+        let expected = cli_k.max(1);
+        if cfg.grn.max_ligands != Some(expected) {
+            anyhow::bail!(
+                "{err_prefix} --max-ligands / --max-lr {} does not match [grn].max_ligands ({:?}) in {}.\n\
+                 Join-style training uses the repro TOML as the single source of truth; omit those flags, or set [grn].max_ligands the same on the leader run.",
+                expected,
+                cfg.grn.max_ligands,
+                repro.display()
+            );
+        }
+    }
+    let repro_file_condition = cfg.data.condition.clone();
+    if let Some(cli_raw) = cli.condition.as_deref() {
+        let cli_c = cli_raw.trim();
+        if !cli_c.is_empty() {
+            if let Some(ref file_c) = repro_file_condition {
+                if !cli_c.eq_ignore_ascii_case(file_c.trim()) {
+                    anyhow::bail!(
+                        "{err_prefix} --condition {:?} does not match [data].condition = {:?} in {}; omit --condition to use the file, or fix the mismatch.",
+                        cli_c,
+                        file_c,
+                        repro.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eprint_join_style_resume_cli_notes(cli: &Cli, repro: &Path, explicit_join_flag: bool) {
+    let via = if explicit_join_flag {
+        "--join-output-dir"
+    } else {
+        "existing output directory"
+    };
+    if cli.config.is_some() {
+        eprintln!(
+            "Note: {via}: training uses {} (--config ignored for training settings).",
+            repro.display()
+        );
+    }
+    if cli.max_genes.is_some() || cli.genes.is_some() {
+        eprintln!(
+            "Note: {via}: [training] genes / max_genes come from {}; --genes and --max-genes are ignored.",
+            repro.display()
+        );
+    }
+    if cli.epochs.is_some()
+        || cli.lr.is_some()
+        || cli.l1_reg.is_some()
+        || cli.group_reg.is_some()
+        || cli.n_iter.is_some()
+        || cli.tol.is_some()
+        || cli.training_mode.is_some()
+        || cli.output_dir.is_some()
+        || cli.cnn_output_activation.is_some()
+        || cli.weighted_ligand_scale_factor.is_some()
+        || cli.train_modulators.is_some()
+    {
+        eprintln!(
+            "Note: {via}: hyperparameter / output CLI flags are ignored except --parallel (using repro TOML)."
+        );
+    }
 }
 
 fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
@@ -904,62 +991,10 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
             );
         }
         let mut cfg = SpaceshipConfig::from_file(&repro)?;
-        if let Some(cli_k) = cli.max_ligands {
-            let expected = cli_k.max(1);
-            if cfg.grn.max_ligands != Some(expected) {
-                anyhow::bail!(
-                    "--join-output-dir: --max-ligands {} does not match [grn].max_ligands ({:?}) in {}.\n\
-                     Join training uses the repro TOML as the single source of truth; omit --max-ligands, or set [grn].max_ligands the same on the leader run.",
-                    expected,
-                    cfg.grn.max_ligands,
-                    repro.display()
-                );
-            }
-        }
-        let repro_file_condition = cfg.data.condition.clone();
-        if let Some(cli_raw) = cli.condition.as_deref() {
-            let cli_c = cli_raw.trim();
-            if !cli_c.is_empty() {
-                if let Some(ref file_c) = repro_file_condition {
-                    if !cli_c.eq_ignore_ascii_case(file_c.trim()) {
-                        anyhow::bail!(
-                            "--condition {:?} does not match [data].condition = {:?} in {}; omit --condition to use the file, or fix the mismatch.",
-                            cli_c,
-                            file_c,
-                            repro.display()
-                        );
-                    }
-                }
-            }
-        }
+        validate_join_cli_against_repro(cli, &cfg, &repro, "--join-output-dir:")?;
         cfg.execution.output_dir = jexp;
         apply_cli_join_overrides(cli, &mut cfg)?;
-        if cli.config.is_some() {
-            eprintln!(
-                "Note: --join-output-dir ignores --config for training settings (using repro TOML)."
-            );
-        }
-        if cli.max_genes.is_some() || cli.genes.is_some() {
-            eprintln!(
-                "Note: --join-output-dir uses [training] genes / max_genes from {}; --genes and --max-genes on this command are ignored.",
-                repro.display()
-            );
-        }
-        if cli.epochs.is_some()
-            || cli.lr.is_some()
-            || cli.l1_reg.is_some()
-            || cli.group_reg.is_some()
-            || cli.n_iter.is_some()
-            || cli.tol.is_some()
-            || cli.training_mode.is_some()
-            || cli.output_dir.is_some()
-            || cli.cnn_output_activation.is_some()
-            || cli.weighted_ligand_scale_factor.is_some()
-        {
-            eprintln!(
-                "Note: --join-output-dir ignores hyperparameter/output CLI flags except --parallel (using repro TOML)."
-            );
-        }
+        eprint_join_style_resume_cli_notes(cli, &repro, true);
         Ok((cfg, true))
     } else {
         let mut cfg = match &cli.config {
@@ -1169,9 +1204,12 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         None => SpaceshipConfig::load(),
     };
     apply_cli_to_config(cli, &mut cfg)?;
+    if matches!(cfg.resolved_cnn_mode(), CnnTrainingMode::Seed) {
+        cfg.training.mode = Some(CnnTrainingMode::Full);
+    }
 
     let gene_filter = cfg.training.genes.clone();
-    let demo_total = cfg.training.max_genes.unwrap_or(24).clamp(1, 512);
+    let demo_total = cfg.training.max_genes.unwrap_or(16).clamp(1, 512);
 
     let config_path_ref = cli.config.as_deref();
     let run_summary = RunConfigSummary::build(RunConfigSummaryBuildArgs {
@@ -1235,23 +1273,12 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     if !h5ad.is_file() {
         anyhow::bail!("AnnData not found at {}.", h5ad.display());
     }
-    let mut cfg = match &cli.config {
-        Some(p) => SpaceshipConfig::from_file(p)
-            .with_context(|| format!("load spaceship config {}", p.display()))?,
-        None => SpaceshipConfig::load(),
-    };
-    if let Some(v) = cli.weighted_ligand_scale_factor {
-        cfg.spatial.weighted_ligand_scale_factor = v;
-    }
-    if let Some(v) = cli.max_ligands {
-        cfg.grn.max_ligands = Some(v.max(1));
-    }
     let out_dir = match &cli.process_output_dir {
         Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
         None => std::env::current_dir().context("process-output-dir default (cwd)")?,
     };
     std::fs::create_dir_all(&out_dir)?;
-    let stem = canonical_adata_stem(&h5ad);
+    let stem = canonical_training_prep_stem(&h5ad);
     let dest =
         spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
     let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
@@ -1283,7 +1310,15 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
         }),
     );
     // #endregion
-    let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+    if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)? {
+        eprintln!(
+            "spacetravlr: reusing existing {} (>= mtime of {})",
+            dest.display(),
+            h5ad.display()
+        );
+        return Ok(());
+    }
+    let (_out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
         &h5ad,
         &dest,
         true,
@@ -1292,17 +1327,6 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     )?;
     if let Some(l) = log {
         eprint!("{l}");
-    }
-    match spacetravlr::spatial_estimator::cache_received_ligands_uns_for_processed_h5ad(
-        out.as_path(),
-        &cfg,
-    ) {
-        Ok(true) => eprintln!("Wrote uns['spacetravlr_received_ligands'] (+ _meta)."),
-        Ok(false) => {}
-        Err(e) => eprintln!(
-            "Warning: could not write uns['spacetravlr_received_ligands']: {}",
-            e
-        ),
     }
     Ok(())
 }
@@ -1329,7 +1353,7 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
         cli.condition.as_deref(),
     );
     let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
-       eprint!("{log}");
+    eprint!("{log}");
     Ok(())
 }
 
@@ -1348,14 +1372,19 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
         }
     };
 
-    let has_umap = {
+    fn h5ad_obsm_has_umap(path: &Path) -> anyhow::Result<bool> {
+        if !path.is_file() {
+            return Ok(false);
+        }
         use anndata::{AnnDataOp, AxisArraysOp, Backend};
-        let a = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(&h5ad)?)
+        let a = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(path)?)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let found = a.obsm().keys().iter().any(|k| k == "X_umap" || k == "umap");
         a.close()?;
-        found
-    };
+        Ok(found)
+    }
+
+    let has_umap = h5ad_obsm_has_umap(&h5ad)?;
 
     let plot_path = if has_umap {
         eprintln!(
@@ -1373,7 +1402,7 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
             None => std::env::temp_dir(),
         };
         std::fs::create_dir_all(&out_dir)?;
-        let stem = canonical_adata_stem(&h5ad);
+        let stem = canonical_training_prep_stem(&h5ad);
         let dest =
             spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
         let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
@@ -1390,16 +1419,29 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
             cli.magic_batch_obs.as_deref(),
             cli.condition.as_deref(),
         );
-        let (out, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
-            &h5ad,
-            &dest,
-            true,
-            batch_owned.as_deref(),
-            spatial_microns,
-        )?;
-        if let Some(l) = log {
-            eprint!("{l}");
-        }
+        let out = if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)?
+            && h5ad_obsm_has_umap(&dest)?
+        {
+            eprintln!(
+                "spacetravlr: reusing existing {} (>= mtime of {})",
+                dest.display(),
+                h5ad.display()
+            );
+            dest
+        } else {
+            let (written, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+                &h5ad,
+                &dest,
+                true,
+                batch_owned.as_deref(),
+                spatial_microns,
+            )?;
+            if let Some(l) = log {
+                eprint!("{l}");
+            }
+            written
+        };
+        let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&out);
         out
     };
 
@@ -1512,7 +1554,7 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
         &var_names,
         network_data_dir.as_deref(),
     )?;
-    let tf_by_target = network.grn_regulators_by_target()?;
+    let tf_by_target = network.grn_celloracle_tf_regulators_by_target()?;
 
     let gem_scaled = scale_gem_no_center(&gem);
 
@@ -1546,8 +1588,16 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
         run_infer()?
     };
 
-    if let Some(pm) = cli.celloracle_p_max {
-        links = filter_links_p_max(links, pm);
+    let p_max = cli.celloracle_p_max.unwrap_or(0.05);
+    let n_before = links.len();
+    links = filter_links_p_max(links, p_max);
+    if links.len() < n_before {
+        eprintln!(
+            "CellOracle p-filter: {} → {} edges (p ≤ {})",
+            n_before,
+            links.len(),
+            p_max
+        );
     }
 
     let feather_out = match &cli.celloracle_output {
@@ -1648,6 +1698,7 @@ fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    spacetravlr::ensure_hdf5_no_file_locking();
     let cli = Cli::parse();
 
     if cli.update {
@@ -1741,39 +1792,7 @@ fn main() -> anyhow::Result<()> {
         return run_plot_umap(&cli);
     }
 
-    let (mut cfg, join_training) = load_config_for_main(&cli)?;
-
-    let config_source_path: Option<PathBuf> = if join_training {
-        Some(
-            PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()))
-                .join(RUN_REPRO_TOML_FILENAME),
-        )
-    } else {
-        cli.config
-            .as_ref()
-            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
-            .or_else(SpaceshipConfig::discover_default_path)
-    };
-
-    let max_genes = cfg.training.max_genes;
-    let gene_filter = cfg.training.genes.clone();
-    let condition_column = cli
-        .condition
-        .clone()
-        .or_else(|| cfg.data.condition.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    if join_training
-        && condition_column.is_none()
-        && Path::new(&cfg.execution.output_dir)
-            .join(spacetravlr::condition_split::CONDITION_RUNS_SUBDIR)
-            .is_dir()
-    {
-        eprintln!(
-            "Warning: --join-output-dir points at a run with a `conditions/` subtree, but neither --condition nor [data].condition in the repro TOML is set; training will use a single output directory (not per-condition). Pass --condition <obs_column> if you meant to resume condition splits."
-        );
-    }
+    let (mut cfg, mut join_training) = load_config_for_main(&cli)?;
 
     let use_dashboard = cfg!(feature = "tui") && !cli.plain;
     let compute = select_compute_backend();
@@ -1810,13 +1829,13 @@ fn main() -> anyhow::Result<()> {
     let mut path = expand_user_path(&cfg.data.adata_path);
     cfg.data.adata_path = path.clone();
 
-    let network_data_dir: Option<String> = cfg
+    let mut network_data_dir: Option<String> = cfg
         .grn
         .network_data_dir
         .as_ref()
         .map(|s| expand_user_path(s.trim()))
         .filter(|s| !s.is_empty());
-    let tf_priors_feather: Option<String> = cfg
+    let mut tf_priors_feather: Option<String> = cfg
         .grn
         .tf_priors_feather
         .as_ref()
@@ -1828,7 +1847,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("Dataset not found at {}.", path);
     }
 
-    let adata_path_for_stem = path.clone();
+    let mut adata_path_for_stem = path.clone();
 
     if cfg.execution.output_dir.trim().is_empty() {
         cfg.execution.output_dir =
@@ -1837,6 +1856,71 @@ fn main() -> anyhow::Result<()> {
     let output_dir_pb = PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()));
     std::fs::create_dir_all(&output_dir_pb)?;
     cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
+
+    if !join_training {
+        let repro_pb = output_dir_pb.join(RUN_REPRO_TOML_FILENAME);
+        if repro_pb.is_file() {
+            eprintln!(
+                "Note: {} already exists under {} — loading it (same training contract as --join-output-dir).",
+                RUN_REPRO_TOML_FILENAME,
+                output_dir_pb.display()
+            );
+            join_training = true;
+            cfg = SpaceshipConfig::from_file(&repro_pb)?;
+            cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
+            validate_join_cli_against_repro(&cli, &cfg, &repro_pb, "Resume:")?;
+            apply_cli_join_overrides(&cli, &mut cfg)?;
+            eprint_join_style_resume_cli_notes(&cli, &repro_pb, false);
+            path = expand_user_path(cfg.data.adata_path.trim());
+            cfg.data.adata_path = path.clone();
+            if !Path::new(&path).exists() {
+                anyhow::bail!("Dataset not found at {}.", path);
+            }
+            adata_path_for_stem = path.clone();
+            network_data_dir = cfg
+                .grn
+                .network_data_dir
+                .as_ref()
+                .map(|s| expand_user_path(s.trim()))
+                .filter(|s| !s.is_empty());
+            tf_priors_feather = cfg
+                .grn
+                .tf_priors_feather
+                .as_ref()
+                .map(|s| expand_user_path(s.trim()))
+                .filter(|s| !s.is_empty());
+            cfg.grn.tf_priors_feather = tf_priors_feather.clone();
+        }
+    }
+
+    let max_genes = cfg.training.max_genes;
+    let gene_filter = cfg.training.genes.clone();
+    let condition_column = cli
+        .condition
+        .clone()
+        .or_else(|| cfg.data.condition.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let config_source_path: Option<PathBuf> = if join_training {
+        Some(output_dir_pb.join(RUN_REPRO_TOML_FILENAME))
+    } else {
+        cli.config
+            .as_ref()
+            .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
+            .or_else(SpaceshipConfig::discover_default_path)
+    };
+
+    if join_training
+        && condition_column.is_none()
+        && Path::new(&cfg.execution.output_dir)
+            .join(spacetravlr::condition_split::CONDITION_RUNS_SUBDIR)
+            .is_dir()
+    {
+        eprintln!(
+            "Warning: --join-output-dir points at a run with a `conditions/` subtree, but neither --condition nor [data].condition in the repro TOML is set; training will use a single output directory (not per-condition). Pass --condition <obs_column> if you meant to resume condition splits."
+        );
+    }
 
     if !cli.skip_auto_adata_prep
         && Path::new(&path)
@@ -1980,11 +2064,12 @@ fn main() -> anyhow::Result<()> {
                             "not started"
                         };
                         println!(
-                            "  {}: {} done ({} feather + {} orphan), {} active locks [{}]",
+                            "  {}: {} done ({} feather + {} orphan + {} tf_ablated), {} active locks [{}]",
                             cs.label,
                             cs.n_done(),
                             cs.n_feathers,
                             cs.n_orphans,
+                            cs.n_tf_ablated,
                             cs.n_locks,
                             status,
                         );

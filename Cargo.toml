@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "spacetravlr"
-version = "1.6.7"
+version = "1.7.0"
 edition = "2024"
 description = "Spatial gene regulatory network inference and in-silico perturbation (Rust port of SpaceTravLR)"
 readme = "README.md"
@@ -182,6 +182,7 @@ colored = "2.2"
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
 statrs = "0.18"
+reflink = "0.1.3"
 
 [dev-dependencies]
 approx = "0.5"

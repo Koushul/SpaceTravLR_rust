@@ -1,3 +1,18 @@
+/// Ensure HDF5 file locking is disabled so `.h5ad` opens succeed on network
+/// filesystems (NFS, Lustre, GPFS) that do not support POSIX advisory locks.
+/// Safe to call more than once; only the first call sets the variable.
+pub fn ensure_hdf5_no_file_locking() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("HDF5_USE_FILE_LOCKING").is_none() {
+            unsafe {
+                std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+            }
+        }
+    });
+}
+
 #[cfg(feature = "spatial-viewer")]
 pub mod adata_query;
 pub mod adata_terminal_scatter;
@@ -46,7 +61,8 @@ pub use cnn_gating::CnnGateDecision;
 pub use config::{
     CnnConfig, CnnOutputActivation, CnnTrainingMode, HybridCnnGatingConfig,
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem,
-    default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
+    canonical_training_prep_stem, default_output_dir_for_adata_path, expand_user_path,
+    filter_training_var_names,
     normalize_ui_path, resolve_training_target_genes,
 };
 pub use estimator::{
@@ -57,7 +73,7 @@ pub use cnn_gating::CnnGateGeneInputs;
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
-    cache_received_ligands_uns_for_processed_h5ad, materialize_canonical_training_adata,
+    materialize_canonical_training_adata,
     read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
     SpatialCellularProgramsEstimator,
 };

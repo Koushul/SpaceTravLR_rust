@@ -91,7 +91,7 @@ pub fn demo_kidney_spatial_scatter_lines_for_tui(
     )
 }
 
-const DEMO_LATENCY_SCALE: u64 = 25;
+const DEMO_LATENCY_SCALE: u64 = 10;
 
 fn demo_delay_ms(base_plus_jitter: u64) -> Duration {
     Duration::from_millis(base_plus_jitter.saturating_mul(DEMO_LATENCY_SCALE))
@@ -156,6 +156,12 @@ fn fake_summaries(gene: &str, n_clusters: usize, full_cnn: bool) -> Vec<ClusterT
         } else {
             Vec::new()
         };
+        let cnn_r2 = if full_cnn {
+            let uplift = if h % 2 == 0 { 0.03 } else { -0.025 };
+            (r2 + uplift).clamp(0.05, 0.995)
+        } else {
+            f64::NAN
+        };
         v.push(ClusterTrainingSummary {
             cluster_id: i,
             n_cells: 320 + (h as usize % 200) + i * 41,
@@ -165,6 +171,7 @@ fn fake_summaries(gene: &str, n_clusters: usize, full_cnn: bool) -> Vec<ClusterT
             lasso_fista_iters: 30 + (h as usize % 40) + i * 3,
             lasso_converged: true,
             cnn_train_mse_epochs,
+            cnn_r2,
         });
     }
     v
@@ -241,12 +248,15 @@ fn demo_worker(
         let n_mods = 12 + (gene_hash(&gene) % 140) as usize;
         let lasso_base_ms = 180 + (gene_hash(&gene) % 160) as u64;
         let n_ct = hud.lock().map(|g| g.n_clusters.max(1)).unwrap_or(8);
+        let ep = if run_full_cnn { epochs_per_gene.clamp(1, 32) } else { 0 };
+        let total_steps = n_ct + ep;
+
         {
             let mut g = hud.lock().unwrap_or_else(|e| e.into_inner());
-            g.set_gene_status(&gene, format!("lasso | {n_mods} mods"));
-            g.set_gene_lasso_cluster_progress(&gene, 0, n_ct);
+            g.set_gene_status(&gene, format!("{n_mods} mods"));
+            g.set_gene_lasso_cluster_progress(&gene, 0, total_steps);
         }
-        let per_step_ms = (lasso_base_ms / n_ct as u64).max(5);
+        let per_step_ms = (lasso_base_ms / n_ct as u64).max(2);
         for d in 1..=n_ct {
             thread::sleep(demo_delay_ms(per_step_ms));
             if hud.lock().map(|g| g.should_cancel()).unwrap_or(true) {
@@ -254,7 +264,7 @@ fn demo_worker(
                 return;
             }
             if let Ok(mut g) = hud.lock() {
-                g.set_gene_lasso_cluster_progress(&gene, d, n_ct);
+                g.set_gene_lasso_cluster_progress(&gene, d, total_steps);
             }
         }
 
@@ -280,18 +290,14 @@ fn demo_worker(
         }
 
         if run_full_cnn {
-            {
-                let mut g = hud.lock().unwrap_or_else(|e| e.into_inner());
-                g.set_gene_status(&gene, format!("lasso+cnn | {n_mods} mods"));
-            }
-            let ep = epochs_per_gene.clamp(1, 32);
             for e in 1..=ep {
                 if hud.lock().map(|g| g.should_cancel()).unwrap_or(true) {
                     let _ = hud.lock().map(|mut g| g.remove_gene(&gene));
                     return;
                 }
                 if let Ok(mut g) = hud.lock() {
-                    g.set_gene_status(&gene, format!("CNN epoch {e}/{ep} | {n_mods} mods"));
+                    g.set_gene_status(&gene, format!("CNN {e}/{ep} | {n_mods} m"));
+                    g.set_gene_lasso_cluster_progress(&gene, n_ct + e, total_steps);
                 }
                 thread::sleep(demo_delay_ms(
                     55 + (gene_hash(&gene).wrapping_add(e as u32) % 65) as u64,
@@ -361,6 +367,7 @@ fn apply_demo_hud_baseline(g: &mut TrainingHudState, total_genes: usize) {
     g.genes_skipped = 0;
     g.genes_failed = 0;
     g.genes_orphan = 0;
+    g.genes_tf_ablated = 0;
     g.genes_rounds = 0;
     g.genes_exported_seed_only = 0;
     g.genes_exported_cnn = 0;
@@ -385,10 +392,11 @@ pub fn run_demo_training(
         let g = hud
             .lock()
             .map_err(|e| anyhow::anyhow!("HUD lock poisoned: {}", e))?;
+        let ep = g.epochs_per_gene.max(1).min(12);
         (
             g.n_parallel.clamp(1, 32),
             g.full_cnn,
-            g.epochs_per_gene.max(1),
+            ep,
         )
     };
 

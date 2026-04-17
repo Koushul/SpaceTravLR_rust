@@ -1,5 +1,5 @@
 use anyhow::Context;
-use crate::betadata::write_betadata_feather;
+use crate::betadata::{build_cluster_id_to_betadata_cluster_key_map, write_betadata_feather};
 use crate::cnn_gating::{
     CnnGateDecision, CnnGateGeneInputs, build_neighbors, decide_cnn_for_gene, load_gene_set_file,
     predict_lasso_y,
@@ -22,9 +22,7 @@ use crate::training_hud::{
     TrainingHud, log_line, pipeline_step_begin, pipeline_step_end, print_training_outcome_banner,
 };
 use anndata::data::{ArrayConvert, SelectInfoElem};
-use anndata::{
-    AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend, ElemCollectionOp,
-};
+use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use burn::tensor::backend::AutodiffBackend;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -41,6 +39,29 @@ use std::time::{Duration, SystemTime};
 
 const LARGE_DATASET_GRID_AUTO_CELLS: usize = 15_000;
 const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
+
+/// `use_tf_modulators` is on and every fitted TF coefficient column is zero (column indices
+/// `1..=n_tf` in per-cell β; column 0 is intercept).
+fn per_cell_all_tf_beta_columns_zero(all_betas: &Array2<f64>, n_tf: usize) -> bool {
+    if n_tf == 0 {
+        return false;
+    }
+    (1..=n_tf).all(|j| {
+        j < all_betas.ncols()
+            && !all_betas
+                .column(j)
+                .iter()
+                .any(|&v| finite_or_zero_f64(v) != 0.0)
+    })
+}
+
+/// Same as [`per_cell_all_tf_beta_columns_zero`] for cluster-rows export (`[intercept, β…]` per row).
+fn cluster_rows_all_tf_coef_columns_zero(rows: &[Vec<f64>], n_tf: usize) -> bool {
+    if n_tf == 0 {
+        return false;
+    }
+    (1..=n_tf).all(|j| !rows.iter().any(|r| j < r.len() && r[j] != 0.0))
+}
 
 /// Remove `*.lock` files in `dir` whose modification time is at least `stale_secs` old.
 /// Returns how many files were deleted. No-op if `stale_secs == 0` or `dir` is not a directory.
@@ -519,53 +540,10 @@ fn ensure_sparse_array_data(data: ArrayData) -> anyhow::Result<ArrayData> {
     }
 }
 
-fn build_spatial_maps_flat_csr(
-    spatial_maps: &Array4<f32>,
-    clusters: &Array1<usize>,
-    num_clusters: usize,
-    spatial_dim: usize,
-) -> anyhow::Result<CsrMatrix<f64>> {
-    let n_cells = spatial_maps.shape()[0];
-    let hw = spatial_dim * spatial_dim;
-    let total_cols = num_clusters * hw;
-    let mut indptr = Vec::with_capacity(n_cells + 1);
-    let mut indices = Vec::new();
-    let mut data = Vec::new();
-    indptr.push(0);
-
-    for cell in 0..n_cells {
-        let c = clusters[cell];
-        if c >= num_clusters {
-            indptr.push(indices.len());
-            continue;
-        }
-        let base = c * hw;
-        for i in 0..spatial_dim {
-            for j in 0..spatial_dim {
-                let v = spatial_maps[[cell, c, i, j]] as f64;
-                if v != 0.0 {
-                    indices.push(base + i * spatial_dim + j);
-                    data.push(v);
-                }
-            }
-        }
-        indptr.push(indices.len());
-    }
-    CsrMatrix::try_from_csr_data(n_cells, total_cols, indptr, indices, data)
-        .map_err(|e| anyhow::anyhow!("build CSR for spatial maps failed: {}", e))
-}
-
-#[allow(clippy::too_many_arguments)]
 fn export_minimal_repro_adata_with_cache(
     src: &AnnData<H5>,
     output_dir: &str,
     layer: &str,
-    cluster_annot: &str,
-    xy: &Array2<f64>,
-    clusters: &Array1<usize>,
-    num_clusters: usize,
-    spatial_dim: usize,
-    spatial_feature_radius: f64,
 ) -> anyhow::Result<String> {
     let out_path = format!("{}/spacetravlr_minimal_repro.h5ad", output_dir);
     let dst = AnnData::<H5>::new(&out_path)?;
@@ -623,33 +601,6 @@ fn export_minimal_repro_adata_with_cache(
             layer
         );
     }
-
-    let spatial_features = crate::estimator::create_spatial_features(
-        xy,
-        clusters,
-        num_clusters,
-        spatial_feature_radius,
-    );
-    let spatial_maps =
-        crate::estimator::xyc2spatial_fast(xy, clusters, num_clusters, spatial_dim, spatial_dim);
-    let spatial_features_csr = dense_to_csr_f64(&spatial_features)?;
-    let spatial_maps_flat_csr =
-        build_spatial_maps_flat_csr(&spatial_maps, clusters, num_clusters, spatial_dim)?;
-
-    dst.obsm()
-        .add("spacetravlr_spatial_features", spatial_features_csr)?;
-    dst.obsm()
-        .add("spacetravlr_spatial_maps_flat", spatial_maps_flat_csr)?;
-    dst.uns()
-        .add("spacetravlr_cache_cluster_annot", cluster_annot.to_string())?;
-    dst.uns()
-        .add("spacetravlr_cache_spatial_dim", spatial_dim as i64)?;
-    dst.uns()
-        .add("spacetravlr_cache_num_clusters", num_clusters as i64)?;
-    dst.uns().add(
-        "spacetravlr_cache_spatial_feature_radius",
-        spatial_feature_radius,
-    )?;
 
     dst.close()?;
     Ok(out_path)
@@ -1188,200 +1139,29 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
     Ok(Some(out_str.to_string()))
 }
 
-const RECEIVED_LIGANDS_UNS_DF: &str = "spacetravlr_received_ligands";
-const RECEIVED_LIGANDS_UNS_META: &str = "spacetravlr_received_ligands_meta";
-const RECEIVED_LIGANDS_LEGACY_OBSM: &str = "spacetravlr_received_ligands";
-
-fn strip_spacetravlr_received_ligand_keys(path: &Path) -> anyhow::Result<()> {
-    let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
-    let _ = adata.obsm().remove(RECEIVED_LIGANDS_LEGACY_OBSM);
-    let _ = adata.uns().remove(RECEIVED_LIGANDS_UNS_DF);
-    let _ = adata.uns().remove(RECEIVED_LIGANDS_UNS_META);
-    adata.close()?;
-    Ok(())
-}
-
-fn compute_received_ligands_uns_payload(
-    adata: &AnnData<H5>,
-    xy: &Array2<f64>,
-    layer: &str,
-    union_ligands_sorted: &[String],
-    radius: f64,
-    weighted_ligand_scale: f64,
-    ligand_grid_factor: Option<f64>,
-) -> anyhow::Result<(DataFrame, String)> {
-    anyhow::ensure!(
-        xy.nrows() == adata.n_obs(),
-        "xy rows {} != adata n_obs {}",
-        xy.nrows(),
-        adata.n_obs()
-    );
-    let mut lig_unique: Vec<String> = union_ligands_sorted.to_vec();
-    lig_unique.sort_unstable();
-    lig_unique.dedup();
-
-    let var_names = adata.var_names().into_vec();
-    let gene_to_idx: HashMap<String, usize> = var_names
-        .iter()
-        .enumerate()
-        .map(|(i, g)| (g.clone(), i))
-        .collect();
-    let lig_present: Vec<String> = lig_unique
-        .into_iter()
-        .filter(|g| gene_to_idx.contains_key(g.as_str()))
-        .filter(|g| g.as_str() != "_index")
-        .collect();
-    if lig_present.is_empty() {
-        return Ok((DataFrame::new(vec![])?, String::new()));
-    }
-    let slice = [SelectInfoElem::full(), SelectInfoElem::full()];
-    let full = read_expression_matrix_dense_f64(adata, layer, &slice)?;
-    let n = xy.nrows();
-    let mut lig_expr = Array2::<f64>::zeros((n, lig_present.len()));
-    for (k, lig) in lig_present.iter().enumerate() {
-        let idx = gene_to_idx[lig];
-        lig_expr.column_mut(k).assign(&full.column(idx));
-    }
-    let received = match ligand_grid_factor {
-        Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid(
-            xy,
-            &lig_expr,
-            radius,
-            weighted_ligand_scale,
-            gf,
-        ),
-        _ => calculate_weighted_ligands(xy, &lig_expr, radius, weighted_ligand_scale),
-    };
-    let obs_names: Vec<String> = adata.obs_names().into_iter().collect();
-    anyhow::ensure!(
-        obs_names.len() == n,
-        "obs_names len {} != expression rows {}",
-        obs_names.len(),
-        n
-    );
-    let mut cols: Vec<_> = vec![Series::new("_index".into(), obs_names).into()];
-    cols.extend(lig_present.iter().enumerate().map(|(k, name)| {
-        Series::new(
-            name.as_str().into(),
-            received.column(k).to_vec(),
-        )
-        .into()
-    }));
-    let df = DataFrame::new(cols)?;
-    let meta = serde_json::json!({
-        "schema": "spacetravlr_received_ligands/v1",
-        "radius": radius,
-        "weighted_ligand_scale_factor": weighted_ligand_scale,
-        "ligand_grid_factor": ligand_grid_factor,
-        "layer": layer,
-        "n_obs": n,
-        "n_ligands": lig_present.len(),
-        "ligands": lig_present,
-    });
-    let meta_str = serde_json::to_string(&meta)?;
-    Ok((df, meta_str))
-}
-
-fn write_received_ligands_uns_payload(
-    h5ad_path: &Path,
-    df: DataFrame,
-    meta_json: &str,
-) -> anyhow::Result<()> {
-    let adata_rw = AnnData::<H5>::open(H5::open_rw(h5ad_path)?)?;
-    let _ = adata_rw.obsm().remove(RECEIVED_LIGANDS_LEGACY_OBSM);
-    let _ = adata_rw.uns().remove(RECEIVED_LIGANDS_UNS_DF);
-    let _ = adata_rw.uns().remove(RECEIVED_LIGANDS_UNS_META);
-    adata_rw.uns().add(RECEIVED_LIGANDS_UNS_DF, df)?;
-    adata_rw.uns().add(RECEIVED_LIGANDS_UNS_META, meta_json.to_string())?;
-    adata_rw.close()?;
-    Ok(())
-}
-
-/// Writes `uns['spacetravlr_received_ligands']` (+ `_meta`) on a processed `.h5ad` using
-/// `[grn]`, `[spatial]`, `[data].layer`, and `[perturbation].ligand_grid_factor` from `cfg`
-/// (same rules as training: [`GeneNetwork::dataset_union_lr_ligands`], Gaussian / grid aggregation).
-///
-/// Returns `Ok(true)` if a non-empty dataframe was written. `Ok(false)` when LR and TFL modulators
-/// are both off, the expression layer name is empty, the GRN yields no union ligands, or the
-/// filtered ligand set is empty after matching `var`.
-pub fn cache_received_ligands_uns_for_processed_h5ad(
-    processed_h5ad: &Path,
-    cfg: &SpaceshipConfig,
-) -> anyhow::Result<bool> {
-    if !cfg.grn.use_lr_modulators && !cfg.grn.use_tfl_modulators {
-        return Ok(false);
-    }
-    let layer = cfg.data.layer.trim();
-    if layer.is_empty() {
-        return Ok(false);
-    }
-    let network_dd = cfg
-        .grn
-        .network_data_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(expand_user_path);
-
-    let adata = AnnData::<H5>::open(H5::open(processed_h5ad)?)?;
-    let all_var_names = adata.var_names().into_vec();
-    let species = crate::network::infer_species(&all_var_names).with_context(|| {
+fn copy_h5ad_reflink_or_full(from: &Path, to: &Path) -> anyhow::Result<()> {
+    reflink::reflink_or_copy(from, to).with_context(|| {
         format!(
-            "could not infer human vs mouse from var_names in {}; set [data].spatial_species or use explicit GRN paths",
-            processed_h5ad.display()
+            "copy (reflink or full) {} -> {}",
+            from.display(),
+            to.display()
         )
     })?;
-    let grn = crate::network::GeneNetwork::new(
-        species,
-        &all_var_names,
-        network_dd.as_deref(),
-    )?;
-    let max_lig = cfg.grn.max_ligands;
-    let gene_mean = if max_lig.is_some_and(|k| k > 0) {
-        Some(compute_gene_mean_expression(&adata, layer, None)?)
-    } else {
-        None
-    };
-    let mut union_ligs =
-        grn.dataset_union_lr_ligands(&all_var_names, max_lig, gene_mean.as_ref())?;
-    if union_ligs.is_empty() {
-        adata.close()?;
-        return Ok(false);
-    }
-    union_ligs.sort();
-    let xy = load_spatial_coords_f64(&adata)?;
-    let grid_eff = cfg.perturbation.ligand_grid_factor.or_else(|| {
-        if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
-            Some(DEFAULT_LIGAND_GRID_FACTOR)
-        } else {
-            None
-        }
-    });
-    let (df, meta) = compute_received_ligands_uns_payload(
-        &adata,
-        &xy,
-        layer,
-        &union_ligs,
-        cfg.spatial.radius,
-        cfg.spatial.weighted_ligand_scale_factor,
-        grid_eff,
-    )?;
-    adata.close()?;
-    if df.width() == 0 {
-        return Ok(false);
-    }
-    write_received_ligands_uns_payload(processed_h5ad, df, &meta)?;
-    Ok(true)
+    Ok(())
 }
 
-/// Parallel-safe per-gene mean Lasso R² (see [`patch_adata_var_mean_lasso_r2`]).
+/// Parallel-safe per-gene mean Lasso R² and optional mean CNN R² (see [`patch_adata_var_mean_lasso_r2`]).
+///
+/// `mean_cnn_r2_scores` is used for [`CnnTrainingMode::Full`] runs and for hybrid top‑K phase 2
+/// (accumulator is upgraded before the second pass). Seed-only training omits it.
 #[derive(Clone)]
 pub struct MeanLassoR2Accum {
     pub gene_to_idx: Arc<HashMap<String, usize>>,
     pub scores: Arc<Vec<AtomicU64>>,
+    pub mean_cnn_r2_scores: Option<Arc<Vec<AtomicU64>>>,
 }
 
-fn init_mean_lasso_r2_accum(all_var_names: &[String]) -> MeanLassoR2Accum {
+fn init_mean_lasso_r2_accum(all_var_names: &[String], with_mean_cnn_r2: bool) -> MeanLassoR2Accum {
     let mut gene_to_idx = HashMap::new();
     for (i, s) in all_var_names.iter().enumerate() {
         gene_to_idx.entry(s.clone()).or_insert(i);
@@ -1392,9 +1172,31 @@ fn init_mean_lasso_r2_accum(all_var_names: &[String]) -> MeanLassoR2Accum {
             .map(|_| AtomicU64::new(nan))
             .collect::<Vec<_>>(),
     );
+    let mean_cnn_r2_scores = with_mean_cnn_r2.then(|| {
+        Arc::new(
+            (0..all_var_names.len())
+                .map(|_| AtomicU64::new(nan))
+                .collect::<Vec<_>>(),
+        )
+    });
     MeanLassoR2Accum {
         gene_to_idx: Arc::new(gene_to_idx),
         scores,
+        mean_cnn_r2_scores,
+    }
+}
+
+fn mean_lasso_accum_ensure_cnn_scores(accum: MeanLassoR2Accum, n_vars: usize) -> MeanLassoR2Accum {
+    if accum.mean_cnn_r2_scores.is_some() {
+        return accum;
+    }
+    let nan = f64::NAN.to_bits();
+    MeanLassoR2Accum {
+        gene_to_idx: accum.gene_to_idx,
+        scores: accum.scores,
+        mean_cnn_r2_scores: Some(Arc::new(
+            (0..n_vars).map(|_| AtomicU64::new(nan)).collect(),
+        )),
     }
 }
 
@@ -1421,14 +1223,33 @@ pub fn patch_adata_var_mean_lasso_r2(
         df = df.drop("mean_lasso_r2")?;
     }
     df.with_column(s)?;
+
+    if let Some(ref cnn_scores) = accum.mean_cnn_r2_scores {
+        anyhow::ensure!(
+            cnn_scores.len() == n,
+            "mean_cnn_r2 len {} != training n_vars {}",
+            cnn_scores.len(),
+            n
+        );
+        let mut col_cnn: Vec<f64> = Vec::with_capacity(n);
+        for i in 0..n {
+            let bits = cnn_scores[i].load(Ordering::Acquire);
+            col_cnn.push(f64::from_bits(bits));
+        }
+        let s_cnn = Series::new("mean_cnn_r2".into(), col_cnn);
+        if df.column("mean_cnn_r2").is_ok() {
+            df = df.drop("mean_cnn_r2")?;
+        }
+        df.with_column(s_cnn)?;
+    }
+
     adata.set_var(df)?;
     adata.close()?;
     Ok(())
 }
 
-/// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers.
-/// Drops any persisted `spacetravlr_received_ligands` / `_meta` keys so a stale on-disk cache is not reused;
-/// [`SpatialCellularProgramsEstimator::fit_all_genes`] recomputes and writes them to `adata.uns` when training starts (full-obs runs only).
+/// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers
+/// (`stem` from [`crate::config::canonical_training_prep_stem`]).
 pub fn materialize_canonical_training_adata(
     adata_path: &mut String,
     output_dir: &Path,
@@ -1450,21 +1271,37 @@ pub fn materialize_canonical_training_adata(
         *adata_path = expanded;
         return Ok(());
     }
-    let stem = crate::config::canonical_adata_stem(original_input_for_stem);
+    let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
     let canonical = crate::scanpy_preprocess::training_processed_h5ad_path(output_dir, &stem);
     if current != canonical {
-        let _ = std::fs::remove_file(&canonical);
-        if crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
-            std::fs::copy(&current, &canonical)?;
+        let reuse_canonical = canonical.is_file()
+            && crate::scanpy_preprocess::adata_x_and_layers_are_csr(&canonical)?
+            && canonical.metadata()?.modified()? >= current.metadata()?.modified()?;
+        if reuse_canonical {
+            *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         } else {
-            crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &canonical, false)?;
+            let _ = std::fs::remove_file(&canonical);
+            if crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
+                copy_h5ad_reflink_or_full(&current, &canonical)?;
+            } else {
+                crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(
+                    &current,
+                    &canonical,
+                    false,
+                )?;
+            }
+            *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
         }
-        *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
     } else if !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
         crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &current, false)?;
     }
-    let path = PathBuf::from(expand_user_path(adata_path.trim()));
-    strip_spacetravlr_received_ligand_keys(&path)?;
+
+    let training_on_disk = if current != canonical {
+        canonical
+    } else {
+        current
+    };
+    crate::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&training_on_disk)?;
     Ok(())
 }
 
@@ -1498,6 +1335,10 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// When set, only these obs rows are read from the backing AnnData (read-only; no disk writes).
     pub obs_row_subset: Option<Arc<[usize]>>,
     pub modulator_scales: Option<Array1<f64>>,
+    /// Only when `[grn].use_tf_modulators` is **false**: target had TF-only GRN/prior support but
+    /// no LR/TFL/extra columns — written as `.tf_ablated`, not `.orphan`. When TF modulators are
+    /// on, missing or all-zero TF support uses `.orphan` like any other orphan.
+    pub gene_excluded_tf_modulators_ablation: bool,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -1529,14 +1370,17 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         let var_set: HashSet<String> = adata.var_names().into_vec().into_iter().collect();
 
-        let modulators = grn
-            .get_modulators(
-                &target_gene_str,
-                tf_ligand_cutoff,
-                max_ligands,
-                gene_mean_expression.as_deref(),
-            )?
-            .apply_modulator_mask(use_tf_modulators, use_lr_modulators, use_tfl_modulators);
+        let full = grn.get_modulators(
+            &target_gene_str,
+            tf_ligand_cutoff,
+            max_ligands,
+            gene_mean_expression.as_deref(),
+        )?;
+        let modulators = full.clone().apply_modulator_mask(
+            use_tf_modulators,
+            use_lr_modulators,
+            use_tfl_modulators,
+        );
 
         let mut ligands = modulators.ligands.clone();
         let mut receptors = modulators.receptors.clone();
@@ -1607,6 +1451,31 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             }
         }
 
+        if use_tfl_modulators && tfl_pairs.is_empty() && !full.ligands.is_empty() {
+            let regs_for_nn: Vec<String> = if !full.regulators.is_empty() {
+                full.regulators.clone()
+            } else if let Some(priors) = tf_priors.as_ref() {
+                priors
+                    .tfs_for_target_any(&target_gene_str)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !regs_for_nn.is_empty() {
+                let (nl, nr, np) = grn.nichenet_tfl_pairs_for_regulators(
+                    &regs_for_nn,
+                    tf_ligand_cutoff,
+                    &full.ligands,
+                )?;
+                if !np.is_empty() {
+                    tfl_ligands = nl;
+                    tfl_regulators = nr;
+                    tfl_pairs = np;
+                }
+            }
+        }
+
         let mut occupied: HashSet<String> = HashSet::new();
         occupied.insert(target_gene_str.clone());
         for g in regulators
@@ -1636,6 +1505,14 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         modulators_genes_ordered.extend(tfl_pairs.iter().cloned());
         modulators_genes_ordered.extend(extra_modulators_accepted.iter().cloned());
 
+        let gene_excluded_tf_modulators_ablation = !use_tf_modulators
+            && modulators_genes_ordered.is_empty()
+            && (!full.regulators.is_empty()
+                || tf_priors
+                    .as_ref()
+                    .and_then(|p| p.tfs_for_target_any(&target_gene_str))
+                    .is_some_and(|v| !v.is_empty()));
+
         Ok(Self {
             adata,
             target_gene,
@@ -1664,6 +1541,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             weighted_ligand_scale_factor,
             obs_row_subset,
             modulator_scales: None,
+            gene_excluded_tf_modulators_ablation,
         })
     }
 
@@ -1821,9 +1699,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 );
             }
             let all_var_names = setup_adata.var_names().into_vec();
+            let track_mean_cnn_r2 =
+                matches!(cnn_training_mode, CnnTrainingMode::Full);
             let mean_r2_accum = match mean_r2_accum_parent {
                 Some(a) => a,
-                None => init_mean_lasso_r2_accum(&all_var_names),
+                None => init_mean_lasso_r2_accum(&all_var_names, track_mean_cnn_r2),
             };
 
             let mut target_genes =
@@ -1887,6 +1767,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 .unwrap_or(1);
             let cluster_to_cell_type =
                 Arc::new(build_cluster_to_cell_type_map(&obs_df, cluster_annot)?);
+            let cluster_betadata_row_keys = Arc::new(build_cluster_id_to_betadata_cluster_key_map(
+                &obs_df,
+                cluster_annot,
+                clusters.as_ref(),
+            )?);
             pipeline_step_end(&hud, "build cluster labels & cell-type map", t_cl);
             if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
                 log_line(
@@ -1937,7 +1822,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 if !co_path.is_file() {
                     let gem = read_h5ad_expression_dense_f64(Path::new(adata_path), layer)?;
                     let gem_scaled = crate::celloracle::scale_gem_no_center(&gem);
-                    let tf_by_target = global_grn.grn_regulators_by_target()?;
+                    let tf_by_target = global_grn.grn_celloracle_tf_regulators_by_target()?;
                     let celloracle_terminal_progress = hud.is_none();
                     let clear_celloracle_hud = || {
                         if let Some(h) = hud.as_ref() {
@@ -2000,15 +1885,19 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             hud_done,
                         )
                     };
-                    let links = infer_res.inspect_err(|_| clear_celloracle_hud())?;
+                    let all_links = infer_res.inspect_err(|_| clear_celloracle_hud())?;
+                    let p_max = spaceship_config.grn.celloracle_p_max;
+                    let links =
+                        crate::celloracle::filter_links_p_max(all_links, p_max);
                     crate::celloracle::write_links_as_tf_priors_feather(&co_path, &links)
                         .inspect_err(|_| clear_celloracle_hud())?;
                     clear_celloracle_hud();
                     log_line(
                         &hud,
                         format!(
-                            "Wrote CellOracle TF priors ({} edges) to {}",
+                            "Wrote CellOracle TF priors ({} edges, p ≤ {}) to {}",
                             links.len(),
+                            p_max,
                             co_path.display()
                         ),
                     );
@@ -2059,22 +1948,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         "Minimal reproducibility export keeps only obs.cell_type; set [data].cluster_annot = \"cell_type\"."
                     );
                 }
-                let out = export_minimal_repro_adata_with_cache(
-                    setup_adata.as_ref(),
-                    training_dir,
-                    layer,
-                    cluster_annot,
-                    xy.as_ref(),
-                    clusters.as_ref(),
-                    num_clusters,
-                    spatial_dim,
-                    cnn.spatial_feature_radius,
-                )?;
+                let out = export_minimal_repro_adata_with_cache(setup_adata.as_ref(), training_dir, layer)?;
                 verify_minimal_repro_adata_loadable(&out, layer, cluster_annot)?;
                 log_line(
                     &hud,
                     format!(
-                        "Wrote minimal reproducibility AnnData with sparse X/layers and cached spatial tensors: {}",
+                        "Wrote minimal reproducibility AnnData (sparse X/layers, obsm coordinates; no precomputed spatial maps or ligand tensors): {}",
                         out
                     ),
                 );
@@ -2196,79 +2075,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let weighted_ligand_scale_factor =
                 spaceship_config.spatial.weighted_ligand_scale_factor;
 
-            if obs_row_subset.is_none() && (use_lr_modulators || use_tfl_modulators) {
-                let t_rl = pipeline_step_begin(&hud, "cache received ligands → adata.uns");
-                let grid_eff = ligand_grid_factor.or_else(|| {
-                    if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
-                        Some(DEFAULT_LIGAND_GRID_FACTOR)
-                    } else {
-                        None
-                    }
-                });
-                let received_payload: anyhow::Result<Option<(DataFrame, String)>> = (|| {
-                    let mut union_ligs = global_grn.dataset_union_lr_ligands(
-                        &all_var_names,
-                        max_ligands,
-                        gene_mean_arc.as_deref(),
-                    )?;
-                    if union_ligs.is_empty() {
-                        return Ok(None);
-                    }
-                    union_ligs.sort();
-                    let (df, meta) = compute_received_ligands_uns_payload(
-                        setup_adata.as_ref(),
-                        xy.as_ref(),
-                        layer,
-                        &union_ligs,
-                        radius,
-                        weighted_ligand_scale_factor,
-                        grid_eff,
-                    )?;
-                    if df.width() == 0 {
-                        return Ok(None);
-                    }
-                    Ok(Some((df, meta)))
-                })();
-                drop(setup_adata);
-                match received_payload {
-                    Ok(Some((df, meta))) => {
-                        let rw_path = PathBuf::from(&worker_adata_path);
-                        let n_l = df.width();
-                        let n_c = df.height();
-                        match write_received_ligands_uns_payload(&rw_path, df, &meta) {
-                            Ok(()) => log_line(
-                                &hud,
-                                format!(
-                                    "Wrote uns['{}'] ({} ligands × {} cells) → {}",
-                                    RECEIVED_LIGANDS_UNS_DF,
-                                    n_l,
-                                    n_c,
-                                    rw_path.display()
-                                ),
-                            ),
-                            Err(e) => log_line(
-                                &hud,
-                                format!("Could not write {}: {}", RECEIVED_LIGANDS_UNS_DF, e),
-                            ),
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => log_line(
-                        &hud,
-                        format!("Could not build {}: {}", RECEIVED_LIGANDS_UNS_DF, e),
-                    ),
-                }
-                pipeline_step_end(&hud, "cache received ligands → adata.uns", t_rl);
-            } else {
-                if obs_row_subset.is_some() && (use_lr_modulators || use_tfl_modulators) {
-                    log_line(
-                        &hud,
-                        "Skipping spacetravlr_received_ligands cache (condition split: obs subset vs full .h5ad)."
-                            .to_string(),
-                    );
-                }
-                drop(setup_adata);
-            }
+            drop(setup_adata);
 
             let pb_opt: Option<ProgressBar> = if hud.is_none() {
                 let pb = ProgressBar::new(total_genes as u64);
@@ -2347,6 +2154,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let global_grn = global_grn.clone();
                 let tf_priors = tf_priors.clone();
                 let cluster_to_cell_type = cluster_to_cell_type.clone();
+                let cluster_betadata_row_keys = cluster_betadata_row_keys.clone();
                 let cluster_annot_w = cluster_annot_for_workers.clone();
                 let hud = hud.clone();
                 let pb = pb_opt.clone();
@@ -2414,11 +2222,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             let feather_path =
                                 format!("{}/{}_betadata.feather", training_dir, gene);
                             let orphan_path = format!("{}/{}.orphan", training_dir, gene);
+                            let tf_ablated_path =
+                                format!("{}/{}.tf_ablated", training_dir, gene);
                             let lock_path = format!("{}/{}.lock", training_dir, gene);
 
                             // Skip already-done
                             if std::path::Path::new(&feather_path).exists()
                                 || std::path::Path::new(&orphan_path).exists()
+                                || std::path::Path::new(&tf_ablated_path).exists()
                             {
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
@@ -2497,7 +2308,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             // Register as active
                             if let Some(ref h) = hud {
                                 if let Ok(mut g) = h.lock() {
-                                    g.set_gene_status(&gene, "estimator | ? mods");
+                                    g.set_gene_status(&gene, "? mods");
                                     if n_lasso_total > 0 {
                                         g.set_gene_lasso_cluster_progress(&gene, 0, n_lasso_total);
                                     }
@@ -2556,24 +2367,51 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             let n_mods = estimator.modulators_genes.len();
                             if let Some(ref h) = hud {
                                 if let Ok(mut g) = h.lock() {
-                                    g.set_gene_status(
-                                        &gene,
-                                        format!("estimator | {} mods", n_mods),
-                                    );
+                                    g.set_gene_status(&gene, format!("{n_mods} mods"));
                                 }
                             }
 
-                            if n_mods == 0 {
-                                let _ =
-                                    fs::File::create(format!("{}/{}.orphan", training_dir, gene));
-                                if let Some(ref h) = hud {
-                                    if let Ok(mut g) = h.lock() {
-                                        g.genes_orphan += 1;
-                                        g.remove_gene(&gene);
-                                        g.genes_rounds += 1;
+                            let absent_tf_when_required =
+                                use_tf_modulators && estimator.regulators.is_empty();
+
+                            if n_mods == 0 || absent_tf_when_required {
+                                if n_mods == 0
+                                    && estimator.gene_excluded_tf_modulators_ablation
+                                {
+                                    let _ = fs::File::create(&tf_ablated_path);
+                                    if let Some(ref h) = hud {
+                                        if let Ok(mut g) = h.lock() {
+                                            g.genes_tf_ablated += 1;
+                                            g.remove_gene(&gene);
+                                            g.genes_rounds += 1;
+                                        }
                                     }
+                                    log_line(
+                                        &hud,
+                                        format!(
+                                            ">> tf_ablated (TF modulators off; had TF-only GRN/prior support) {}",
+                                            gene
+                                        ),
+                                    );
+                                } else {
+                                    let _ = fs::File::create(&orphan_path);
+                                    if let Some(ref h) = hud {
+                                        if let Ok(mut g) = h.lock() {
+                                            g.genes_orphan += 1;
+                                            g.remove_gene(&gene);
+                                            g.genes_rounds += 1;
+                                        }
+                                    }
+                                    let msg = if absent_tf_when_required {
+                                        format!(
+                                            ">> orphan (use_tf_modulators on but no TF regulators for target) {}",
+                                            gene
+                                        )
+                                    } else {
+                                        format!(">> orphan (no modulators) {}", gene)
+                                    };
+                                    log_line(&hud, msg);
                                 }
-                                log_line(&hud, format!(">> orphan (no modulators) {}", gene));
                                 if let Some(ref p) = pb {
                                     p.inc(1);
                                 }
@@ -2588,11 +2426,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             }
                             let phase_str =
                                 if matches!(cnn_mode_w, CnnTrainingMode::Hybrid) && !hybrid_pass2 {
-                                    format!("hybrid gate | {} mods", n_mods)
+                                    format!("hybrid | {n_mods} m")
                                 } else if worker_run_full_cnn {
-                                    format!("lasso+cnn | {} mods", n_mods)
+                                    format!("{n_mods} mods")
                                 } else {
-                                    format!("lasso | {} mods", n_mods)
+                                    format!("{n_mods} mods")
                                 };
                             if let Some(ref h) = hud {
                                 if let Ok(mut g) = h.lock() {
@@ -2769,10 +2607,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     if let Some(ref h) = hud {
                                         if let Ok(mut g) = h.lock() {
                                             g.clear_gene_lasso_cluster_progress(&gene);
-                                            g.set_gene_status(
-                                                &gene,
-                                                format!("export | {} mods", n_mods),
-                                            );
+                                            g.set_gene_status(&gene, format!("write | {n_mods} m"));
                                         }
                                     }
                                     let betadata_path =
@@ -2824,7 +2659,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         n_betadata_beta_columns =
                                             Some(keep.iter().filter(|&&j| j >= 1).count());
 
-                                        if !keep.iter().any(|&j| j >= 1) {
+                                        let n_tf = estimator.regulators.len();
+                                        let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
+                                        let all_tf_betas_zero =
+                                            per_cell_all_tf_beta_columns_zero(&all_betas, n_tf);
+
+                                        if !has_any_mod_beta || all_tf_betas_zero {
                                             let _ = fs::File::create(format!(
                                                 "{}/{}.orphan",
                                                 training_dir, gene
@@ -2835,13 +2675,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     g.genes_orphan += 1;
                                                 }
                                             }
-                                            log_line(
-                                                &hud,
+                                            let orphan_msg = if !has_any_mod_beta {
                                                 format!(
                                                     ">> orphan (no non-zero modulator betas) {}",
                                                     gene
-                                                ),
-                                            );
+                                                )
+                                            } else {
+                                                format!(
+                                                    ">> orphan (all TF modulator betas are zero) {}",
+                                                    gene
+                                                )
+                                            };
+                                            log_line(&hud, orphan_msg);
                                         } else {
                                             let n_rows = obs_names.len();
                                             let n_keep = keep.len();
@@ -2917,7 +2762,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         n_betadata_beta_columns =
                                             Some(keep.iter().filter(|&&j| j >= 1).count());
 
-                                        if !keep.iter().any(|&j| j >= 1) {
+                                        let n_tf = estimator.regulators.len();
+                                        let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
+                                        let all_tf_betas_zero =
+                                            cluster_rows_all_tf_coef_columns_zero(&rows, n_tf);
+
+                                        if !has_any_mod_beta || all_tf_betas_zero {
                                             let _ = fs::File::create(format!(
                                                 "{}/{}.orphan",
                                                 training_dir, gene
@@ -2928,13 +2778,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     g.genes_orphan += 1;
                                                 }
                                             }
-                                            log_line(
-                                                &hud,
+                                            let orphan_msg = if !has_any_mod_beta {
                                                 format!(
                                                     ">> orphan (no non-zero modulator betas) {}",
                                                     gene
-                                                ),
-                                            );
+                                                )
+                                            } else {
+                                                format!(
+                                                    ">> orphan (all TF modulator betas are zero) {}",
+                                                    gene
+                                                )
+                                            };
+                                            log_line(&hud, orphan_msg);
                                         } else {
                                             let n_rows = rows.len();
                                             let n_keep = keep.len();
@@ -2944,8 +2799,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     mat[[i, new_j]] = row_vals[j];
                                                 }
                                             }
-                                            let ids: Vec<String> =
-                                                cluster_ids.iter().map(|c| c.to_string()).collect();
+                                            let ids: Vec<String> = cluster_ids
+                                                .iter()
+                                                .map(|&c| {
+                                                    cluster_betadata_row_keys
+                                                        .get(&c)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| c.to_string())
+                                                })
+                                                .collect();
                                             let data_cols: Vec<String> = keep
                                                 .iter()
                                                 .map(|&j| col_names[j].clone())
@@ -3053,6 +2915,27 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 mean_r2.to_bits(),
                                                 Ordering::Release,
                                             );
+                                            if let Some(ref cnn_scores) =
+                                                mean_r2_accum_w.mean_cnn_r2_scores
+                                            {
+                                                let mut sum_cnn = 0.0_f64;
+                                                let mut n_cnn = 0usize;
+                                                for s in &est.cluster_training_summaries {
+                                                    if s.cnn_r2.is_finite() {
+                                                        sum_cnn += s.cnn_r2;
+                                                        n_cnn += 1;
+                                                    }
+                                                }
+                                                let mean_cnn = if n_cnn > 0 {
+                                                    sum_cnn / n_cnn as f64
+                                                } else {
+                                                    f64::NAN
+                                                };
+                                                cnn_scores[idx].store(
+                                                    mean_cnn.to_bits(),
+                                                    Ordering::Release,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -3157,7 +3040,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             spaceship_config,
                             config_source_path.clone(),
                             join_training,
-                            Some(mean_r2_accum.clone()),
+                            Some(mean_lasso_accum_ensure_cnn_scores(
+                                mean_r2_accum.clone(),
+                                all_var_names.len(),
+                            )),
                             device,
                         );
                     }
@@ -3166,19 +3052,32 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
             if !join_training && obs_row_subset.is_none() {
                 match patch_adata_var_mean_lasso_r2(Path::new(adata_path), &mean_r2_accum) {
-                    Ok(()) => log_line(
-                        &hud,
-                        "Updated var['mean_lasso_r2'] on training AnnData.".to_string(),
-                    ),
+                    Ok(()) => {
+                        let msg = if mean_r2_accum.mean_cnn_r2_scores.is_some() {
+                            "Updated var['mean_lasso_r2', 'mean_cnn_r2'] on training AnnData."
+                                .to_string()
+                        } else {
+                            "Updated var['mean_lasso_r2'] on training AnnData.".to_string()
+                        };
+                        log_line(&hud, msg);
+                    }
                     Err(e) => log_line(
                         &hud,
-                        format!("Could not write var['mean_lasso_r2']: {}", e),
+                        format!(
+                            "Could not write var training score columns (mean_lasso_r2{}): {}",
+                            if mean_r2_accum.mean_cnn_r2_scores.is_some() {
+                                ", mean_cnn_r2"
+                            } else {
+                                ""
+                            },
+                            e
+                        ),
                     ),
                 }
             } else if join_training {
                 log_line(
                     &hud,
-                    "Join mode: skipped var['mean_lasso_r2'] (multi-writer); use a single-host run for that column."
+                    "Join mode: skipped var training score columns (multi-writer); use a single-host run for those columns."
                         .to_string(),
                 );
             }
@@ -3703,6 +3602,7 @@ mod mean_lasso_r2_patch_tests {
                 let accum = MeanLassoR2Accum {
                     gene_to_idx: Arc::new(m),
                     scores,
+                    mean_cnn_r2_scores: None,
                 };
                 patch_adata_var_mean_lasso_r2(&p, &accum)?;
 
@@ -3729,6 +3629,104 @@ mod mean_lasso_r2_patch_tests {
 
         panic!(
             "patch_var_mean_lasso_r2_column failed after {MAX_ATTEMPTS} attempts: {:?}",
+            last_err
+        );
+    }
+
+    #[test]
+    fn patch_var_mean_lasso_r2_and_mean_cnn_r2_columns() {
+        HDF5_TEST_LOCK_ENV.call_once(|| {
+            unsafe {
+                std::env::set_var("HDF5_USE_FILE_LOCKING", "FALSE");
+            }
+        });
+
+        const MAX_ATTEMPTS: usize = 12;
+        const BACKOFF: Duration = Duration::from_millis(40);
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(BACKOFF);
+            }
+
+            let seq = PATCH_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "spacetravlr_var_patch_cnn_{}_{}",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                continue;
+            }
+            let p = dir.join("mini_cnn.h5ad");
+
+            let step = (|| -> anyhow::Result<()> {
+                {
+                    let a = AnnData::<H5>::new(&p)?;
+                    a.set_obs_names(vec!["c0".into(), "c1".into()].into())?;
+                    a.set_var_names(vec!["G0".into(), "G1".into()].into())?;
+                    let obs = DataFrame::new(vec![Series::new(
+                        "cell_type".into(),
+                        vec!["x".to_string(), "x".to_string()],
+                    )
+                    .into()])?;
+                    a.set_obs(obs)?;
+                    let var =
+                        DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+                    a.set_var(var)?;
+                    let dense = Array2::from_elem((2, 2), 0.5f64);
+                    let csr = dense_to_csr_f64(&dense)?;
+                    a.set_x(ArrayData::from(csr))?;
+                    a.close()?;
+                }
+                thread::sleep(Duration::from_millis(5));
+
+                let mut m: HashMap<String, usize> = HashMap::new();
+                m.insert("G0".into(), 0);
+                m.insert("G1".into(), 1);
+                let scores = Arc::new(vec![
+                    AtomicU64::new(0.25f64.to_bits()),
+                    AtomicU64::new(f64::NAN.to_bits()),
+                ]);
+                let cnn_scores = Arc::new(vec![
+                    AtomicU64::new(0.5f64.to_bits()),
+                    AtomicU64::new(f64::NAN.to_bits()),
+                ]);
+                let accum = MeanLassoR2Accum {
+                    gene_to_idx: Arc::new(m),
+                    scores,
+                    mean_cnn_r2_scores: Some(cnn_scores),
+                };
+                patch_adata_var_mean_lasso_r2(&p, &accum)?;
+
+                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
+                let v = a2.read_var()?;
+                let r2 = v.column("mean_lasso_r2")?.f64()?;
+                anyhow::ensure!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
+                anyhow::ensure!(r2.get(1).unwrap().is_nan());
+                let cnn = v.column("mean_cnn_r2")?.f64()?;
+                anyhow::ensure!((cnn.get(0).unwrap() - 0.5).abs() < 1e-9);
+                anyhow::ensure!(cnn.get(1).unwrap().is_nan());
+                a2.close()?;
+                Ok(())
+            })();
+
+            match step {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+            }
+        }
+
+        panic!(
+            "patch_var_mean_lasso_r2_and_mean_cnn_r2_columns failed after {MAX_ATTEMPTS} attempts: {:?}",
             last_err
         );
     }
