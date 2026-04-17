@@ -481,6 +481,7 @@ mod tests {
             lasso_fista_iters: 10,
             lasso_converged: true,
             cnn_train_mse_epochs: vec![],
+            cnn_r2: f64::NAN,
         }
     }
 

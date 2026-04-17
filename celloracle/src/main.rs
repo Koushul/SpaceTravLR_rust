@@ -145,7 +145,7 @@ fn main() -> anyhow::Result<()> {
         &var_names,
         cli.network_data_dir.as_deref(),
     )?;
-    let tf_by_target = network.grn_regulators_by_target()?;
+    let tf_by_target = network.grn_celloracle_tf_regulators_by_target()?;
 
     let gem_scaled = scale_gem_no_center(&gem);
 
@@ -170,8 +170,16 @@ fn main() -> anyhow::Result<()> {
         run_infer()?
     };
 
-    if let Some(pm) = cli.p_max {
-        links = filter_links_p_max(links, pm);
+    let p_max = cli.p_max.unwrap_or(0.05);
+    let n_before = links.len();
+    links = filter_links_p_max(links, p_max);
+    if links.len() < n_before {
+        eprintln!(
+            "CellOracle p-filter: {} → {} edges (p ≤ {})",
+            n_before,
+            links.len(),
+            p_max
+        );
     }
 
     if let Some(ref p) = cli.links_out {

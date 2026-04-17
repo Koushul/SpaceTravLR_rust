@@ -141,10 +141,11 @@ pub struct TrainingHudState {
     pub started: Instant,
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
-    /// Mean LASSO R² per completed gene (for TUI best / worst list only).
-    /// Third field: count of `beta_*` columns in written betadata (non-zero across rows/cells);
+    /// Per completed gene for the TUI best / worst list: `(gene, mean_lasso_r2, mean_cnn_r2, n_modulators)`.
+    /// `mean_cnn_r2` is `Some` when the spatial CNN ran for that gene (mean over clusters with finite `cnn_r2`).
+    /// Fourth field: count of `beta_*` columns in written betadata (non-zero across rows/cells);
     /// falls back to design-matrix width when not supplied (e.g. training demo).
-    pub gene_r2_mean: Vec<(String, f64, usize)>,
+    pub gene_r2_mean: Vec<(String, f64, Option<f64>, usize)>,
     pub perf_stats_generation: u64,
     pub gene_train_times: VecDeque<(String, f64)>,
     /// Human-readable obs value for the subset currently training (`--condition` mode).
@@ -263,11 +264,25 @@ impl TrainingHudState {
         if summaries.is_empty() {
             return;
         }
-        let mean: f64 = summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
+        let mean_lasso: f64 =
+            summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
+        let mut cnn_sum = 0.0_f64;
+        let mut n_cnn = 0usize;
+        for s in summaries {
+            if s.cnn_r2.is_finite() {
+                cnn_sum += s.cnn_r2;
+                n_cnn += 1;
+            }
+        }
+        let mean_cnn = (n_cnn > 0).then_some(cnn_sum / n_cnn as f64);
         let n_modulators = n_betadata_beta_columns
             .unwrap_or_else(|| summaries.iter().map(|s| s.n_modulators).max().unwrap_or(0));
-        self.gene_r2_mean
-            .push((gene.to_string(), mean, n_modulators));
+        self.gene_r2_mean.push((
+            gene.to_string(),
+            mean_lasso,
+            mean_cnn,
+            n_modulators,
+        ));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
     }
 

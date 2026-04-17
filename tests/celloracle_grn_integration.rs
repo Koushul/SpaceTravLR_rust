@@ -51,7 +51,9 @@ fn infer_grn_whole_runs_on_synthetic_gem() {
         Some(dir.to_str().unwrap()),
     )
     .expect("GeneNetwork");
-    let tf_by_target = net.grn_regulators_by_target().expect("grn map");
+    let tf_by_target = net
+        .grn_celloracle_tf_regulators_by_target()
+        .expect("grn map");
     assert!(
         tf_by_target.contains_key("Tgt1"),
         "expected Tgt1 in GRN priors"

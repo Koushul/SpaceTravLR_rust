@@ -7,7 +7,7 @@ use burn::optim::{AdamConfig, Optimizer};
 use burn::prelude::*;
 use burn::tensor::ElementConversion;
 use burn::tensor::backend::AutodiffBackend;
-use ndarray::{Array1, Array2, Array4, Axis, s};
+use ndarray::{Array1, Array2, Array4, ArrayView1, Axis, s};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -41,6 +41,41 @@ fn finite_or_zero_f32(x: f32) -> f32 {
     if x.is_finite() { x } else { 0.0 }
 }
 
+fn r2_score_from_pred_slice(y_true: ArrayView1<f64>, y_pred: &[f32]) -> f64 {
+    let n = y_true.len();
+    if n == 0 || y_pred.len() != n {
+        return f64::NAN;
+    }
+    let y_mean: f64 = y_true.iter().copied().sum::<f64>() / n as f64;
+    let ss_tot: f64 = y_true.iter().map(|y| (y - y_mean).powi(2)).sum();
+    let ss_res: f64 = y_true
+        .iter()
+        .zip(y_pred.iter())
+        .map(|(y, p)| (y - *p as f64).powi(2))
+        .sum();
+    finite_or_zero_f64(if ss_tot > 0.0 {
+        1.0 - ss_res / ss_tot
+    } else {
+        0.0
+    })
+}
+
+fn cnn_r2_from_forward<B: AutodiffBackend>(
+    model: &CellularNicheNetwork<B>,
+    sm_tensor: Tensor<B, 4>,
+    x_tensor: Tensor<B, 2>,
+    sf_tensor: Tensor<B, 2>,
+    y_true: ArrayView1<f64>,
+) -> f64 {
+    let y_pred = model.forward(sm_tensor, x_tensor, sf_tensor);
+    let pred_data = y_pred.into_data();
+    let pred: &[f32] = match pred_data.as_slice::<f32>() {
+        Ok(s) => s,
+        Err(_) => return f64::NAN,
+    };
+    r2_score_from_pred_slice(y_true, pred)
+}
+
 fn min_max_finite_col(col: ndarray::ArrayView1<f64>) -> (f32, f32) {
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
@@ -67,6 +102,7 @@ pub struct ClusterTrainingSummary {
     pub lasso_fista_iters: usize,
     pub lasso_converged: bool,
     pub cnn_train_mse_epochs: Vec<f32>,
+    pub cnn_r2: f64,
 }
 
 pub struct FittedClusterResult<B: AutodiffBackend> {
@@ -274,6 +310,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                             lasso_fista_iters,
                             lasso_converged,
                             cnn_train_mse_epochs: Vec::new(),
+                            cnn_r2: f64::NAN,
                         });
                         return Some(FittedClusterResult {
                             cluster_id: c_id,
@@ -343,6 +380,14 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         model = optim.step(learning_rate, model, grads);
                     }
 
+                    let cnn_r2 = cnn_r2_from_forward(
+                        &model,
+                        sm_tensor.clone(),
+                        x_tensor.clone(),
+                        sf_tensor.clone(),
+                        y_c.column(0),
+                    );
+
                     training_summaries.push(ClusterTrainingSummary {
                         cluster_id: c_id,
                         n_cells: cluster_n,
@@ -352,6 +397,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         lasso_fista_iters,
                         lasso_converged,
                         cnn_train_mse_epochs,
+                        cnn_r2,
                     });
 
                     Some(FittedClusterResult {
@@ -509,10 +555,19 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 model = optim.step(learning_rate, model, grads);
             }
 
+            let cnn_r2 = cnn_r2_from_forward(
+                &model,
+                sm_tensor.clone(),
+                x_tensor.clone(),
+                sf_tensor.clone(),
+                y_c.view(),
+            );
+
             self.models.insert(c_id, model);
 
             if let Some(s) = summaries_by_cluster.get_mut(&c_id) {
                 s.cnn_train_mse_epochs = cnn_train_mse_epochs;
+                s.cnn_r2 = cnn_r2;
             }
         }
 
@@ -748,6 +803,34 @@ mod tests {
         assert_eq!(finite_or_zero_f32(f32::NAN), 0.0);
         assert_eq!(finite_or_zero_f32(f32::INFINITY), 0.0);
         assert_eq!(finite_or_zero_f32(1.5), 1.5);
+    }
+
+    #[test]
+    fn r2_score_from_pred_perfect_match() {
+        let y = array![1.0_f64, 2.0, 3.0];
+        let pred = [1.0f32, 2.0, 3.0];
+        assert_abs_diff_eq!(r2_score_from_pred_slice(y.view(), &pred), 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn r2_score_from_pred_partial_fit() {
+        let y = array![0.0_f64, 2.0, 4.0];
+        let pred = [0.0f32, 1.0, 3.0];
+        assert_abs_diff_eq!(r2_score_from_pred_slice(y.view(), &pred), 0.75, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn r2_score_from_pred_zero_variance_y() {
+        let y = array![2.0_f64, 2.0, 2.0];
+        let pred = [1.0f32, 3.0, 2.0];
+        assert_abs_diff_eq!(r2_score_from_pred_slice(y.view(), &pred), 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn r2_score_from_pred_len_mismatch_is_nan() {
+        let y = array![1.0_f64, 2.0];
+        let pred = [1.0f32];
+        assert!(r2_score_from_pred_slice(y.view(), &pred).is_nan());
     }
 
     #[test]

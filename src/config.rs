@@ -120,6 +120,10 @@ pub struct GrnConfig {
     /// `{output_dir}/celloracle_tf_priors.feather` (reused on subsequent runs if present).
     pub tf_priors_feather: Option<String>,
     pub tf_ligand_cutoff: f64,
+    /// Max p-value for CellOracle Bayesian ridge edges to enter the TF priors feather.
+    /// Edges with `p > celloracle_p_max` are dropped before writing `celloracle_tf_priors.feather`.
+    /// Default **0.05**. Only used during auto inference (not when loading a user-supplied feather).
+    pub celloracle_p_max: f64,
     /// Keep only DB L–R pairs whose **ligand** is among the top `max_ligands` by mean expression
     /// (uses `[data].layer`, e.g. `imputed_count`). Requires per-gene mean map when training.
     /// Deserialize accepts TOML keys `max_lr` (matches CLI `--max-lr`) and legacy `max_lr_pairs`.
@@ -384,6 +388,7 @@ impl Default for GrnConfig {
             network_data_dir: None,
             tf_priors_feather: None,
             tf_ligand_cutoff: 0.2,
+            celloracle_p_max: 0.05,
             max_ligands: None,
             use_tf_modulators: true,
             use_lr_modulators: true,

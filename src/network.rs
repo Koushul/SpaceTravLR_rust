@@ -587,6 +587,59 @@ impl GeneNetwork {
         Ok(by_target)
     }
 
+    /// GRN edges for **CellOracle / TF-prior** inference: only **TF→TF** links derived from the
+    /// species `*_network.parquet`.
+    ///
+    /// A gene is treated as a TF if it appears at least once as **`source`** on an `edge_type ==
+    /// "grn"` row (same convention as curated GRN files). Targets of the Bayesian ridge step are
+    /// restricted to that TF set, and each target’s regulators are restricted to TFs as well, so
+    /// ligand–receptor / NicheNet rows never enter this map.
+    pub fn grn_celloracle_tf_regulators_by_target(&self) -> Result<HashMap<String, Vec<String>>> {
+        let lf = self
+            .network_df
+            .clone()
+            .lazy()
+            .filter(col("edge_type").cast(DataType::String).eq(lit("grn")))
+            .select([col("source"), col("target")]);
+        let df = lf.collect()?;
+
+        let src_series = df.column("source")?.cast(&DataType::String)?;
+        let tgt_series = df.column("target")?.cast(&DataType::String)?;
+        let (Ok(s_col), Ok(t_col)) = (src_series.str(), tgt_series.str()) else {
+            return Ok(HashMap::new());
+        };
+
+        let mut tf_set: HashSet<String> = HashSet::new();
+        for i in 0..df.height() {
+            if let Some(src) = s_col.get(i).map(str::trim).filter(|s| !s.is_empty()) {
+                tf_set.insert(src.to_string());
+            }
+        }
+
+        let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+        for i in 0..df.height() {
+            let Some(src) = s_col.get(i).map(str::trim) else {
+                continue;
+            };
+            let Some(tgt) = t_col.get(i).map(str::trim) else {
+                continue;
+            };
+            if src.is_empty() || tgt.is_empty() || src == tgt {
+                continue;
+            }
+            if !tf_set.contains(tgt) {
+                continue;
+            }
+            debug_assert!(tf_set.contains(src));
+            let entry = by_target.entry(tgt.to_string()).or_default();
+            if !entry.iter().any(|s| s == src) {
+                entry.push(src.to_string());
+            }
+        }
+
+        Ok(by_target)
+    }
+
     /// Union of LR ligands on edges whose endpoints are both in `var_names`, for dataset-wide caches.
     /// Applies [`apply_max_ligands_filter`] when `max_ligands` is `Some(k)` with `k > 0`.
     pub fn dataset_union_lr_ligands(
@@ -672,6 +725,43 @@ impl GeneNetwork {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn grn_celloracle_tf_map_omits_non_tf_targets_and_keeps_tf_tf_edges() {
+        use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Series};
+
+        let dir = std::env::temp_dir().join(format!("st_net_co_tf_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut df = DataFrame::new(vec![
+            Series::new("source".into(), vec!["TFa", "TFa", "TFb"]).into(),
+            Series::new("target".into(), vec!["TFb", "PassiveGene", "TFa"]).into(),
+            Series::new("edge_type".into(), vec!["grn", "grn", "grn"]).into(),
+            Series::new("weight".into(), vec![1.0_f64, 1.0, 1.0]).into(),
+        ])
+        .unwrap();
+        let path = dir.join("mouse_network.parquet");
+        let f = std::fs::File::create(&path).unwrap();
+        ParquetWriter::new(f).finish(&mut df).unwrap();
+
+        let var_names = vec!["TFa".into(), "TFb".into(), "PassiveGene".into()];
+        let net = GeneNetwork::new("mouse", &var_names, Some(dir.to_str().unwrap())).unwrap();
+        let all = net.grn_regulators_by_target().unwrap();
+        assert!(
+            all.contains_key("PassiveGene"),
+            "full GRN includes targets that are never GRN sources"
+        );
+
+        let co = net.grn_celloracle_tf_regulators_by_target().unwrap();
+        assert!(
+            !co.contains_key("PassiveGene"),
+            "CellOracle map should skip targets not in TF (source) set"
+        );
+        assert_eq!(co.get("TFb").unwrap(), &vec!["TFa".to_string()]);
+        assert_eq!(co.get("TFa").unwrap(), &vec!["TFb".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn infer_species_mouse_genes() {

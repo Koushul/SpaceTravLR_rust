@@ -58,6 +58,7 @@ fn main() -> anyhow::Result<()> {
     let accum = MeanLassoR2Accum {
         gene_to_idx: Arc::new(m),
         scores,
+        mean_cnn_r2_scores: None,
     };
     patch_adata_var_mean_lasso_r2(&p, &accum)?;
 

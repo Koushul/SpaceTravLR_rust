@@ -1204,9 +1204,12 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         None => SpaceshipConfig::load(),
     };
     apply_cli_to_config(cli, &mut cfg)?;
+    if matches!(cfg.resolved_cnn_mode(), CnnTrainingMode::Seed) {
+        cfg.training.mode = Some(CnnTrainingMode::Full);
+    }
 
     let gene_filter = cfg.training.genes.clone();
-    let demo_total = cfg.training.max_genes.unwrap_or(24).clamp(1, 512);
+    let demo_total = cfg.training.max_genes.unwrap_or(16).clamp(1, 512);
 
     let config_path_ref = cli.config.as_deref();
     let run_summary = RunConfigSummary::build(RunConfigSummaryBuildArgs {
@@ -1438,6 +1441,7 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
             }
             written
         };
+        let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&out);
         out
     };
 
@@ -1550,7 +1554,7 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
         &var_names,
         network_data_dir.as_deref(),
     )?;
-    let tf_by_target = network.grn_regulators_by_target()?;
+    let tf_by_target = network.grn_celloracle_tf_regulators_by_target()?;
 
     let gem_scaled = scale_gem_no_center(&gem);
 
@@ -1584,8 +1588,16 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
         run_infer()?
     };
 
-    if let Some(pm) = cli.celloracle_p_max {
-        links = filter_links_p_max(links, pm);
+    let p_max = cli.celloracle_p_max.unwrap_or(0.05);
+    let n_before = links.len();
+    links = filter_links_p_max(links, p_max);
+    if links.len() < n_before {
+        eprintln!(
+            "CellOracle p-filter: {} → {} edges (p ≤ {})",
+            n_before,
+            links.len(),
+            p_max
+        );
     }
 
     let feather_out = match &cli.celloracle_output {

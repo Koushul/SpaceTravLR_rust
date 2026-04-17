@@ -36,3 +36,5 @@ docs/api/
 docs/_jupyter_cache/
 # If using ReadTheDocs config lock
 .readthedocs.lock
+
+ablation_training_configs/

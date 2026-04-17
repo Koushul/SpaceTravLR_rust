@@ -18,11 +18,11 @@ cluster_annot   = "cell_type"
 
 [spatial]
 # Radius for spatial neighbor detection
-radius           = 200
+radius           = 300
 # Grid resolution for spatial convolution kernel
 spatial_dim      = 32
 # Distance threshold for contact-based signaling
-contact_distance = 50
+contact_distance = 30
 # Linear scale on Gaussian weights in received-ligand aggregation
 weighted_ligand_scale_factor = 1.0
 
@@ -34,6 +34,8 @@ weighted_ligand_scale_factor = 1.0
 # tf_priors_feather = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/SlideTagsKidney/xenium_skin_links.feather"
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.1
+# Max p-value for CellOracle Bayesian ridge edges to enter the TF priors feather (default 0.05).
+celloracle_p_max = 0.05
 max_lr = 200
 use_tf_modulators = true
 use_lr_modulators = true
@@ -57,11 +59,11 @@ output_activation = "sigmoidx2"
 
 [lasso]
 # Element-wise L1 penalty
-l1_reg    = 1e-9
+l1_reg    = 1e-5
 # Group-L2 penalty
 group_reg = 1e-9
 # Max FISTA iterations
-n_iter    = 100
+n_iter    = 500
 # Relative convergence tolerance
 tol       = 1e-4
 # Column-wise scaling of modulator features (divide by std, no mean subtraction).
