@@ -2,5 +2,7 @@
 __pycache__/
 *.pyc
 results/*.h5ad
+results/*.npy
+results/*.log
 mlruns/
 nichecompass_artifacts/
