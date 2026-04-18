@@ -1,0 +1,73 @@
+{
+  "name": "banksy",
+  "n_cells": 5646,
+  "n_labels": 20,
+  "runtime_sec": 26.604831095784903,
+  "method": "BANKSY",
+  "chosen_param": "scaled_gaussian_pc20_nc0.50_r2.00",
+  "n_clusters": 20,
+  "lambdas": [
+    0.2,
+    0.5,
+    0.8
+  ],
+  "resolutions": [
+    0.5,
+    1.0,
+    1.5,
+    2.0
+  ],
+  "k_nbrs": 15,
+  "pca_dims": 20,
+  "n_hvg": 2000,
+  "all_runs": [
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.50_r2.00",
+      "n_clusters": 20
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.80_r2.00",
+      "n_clusters": 20
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.20_r2.00",
+      "n_clusters": 21
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.50_r1.50",
+      "n_clusters": 16
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.80_r1.50",
+      "n_clusters": 16
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.20_r1.50",
+      "n_clusters": 15
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.50_r1.00",
+      "n_clusters": 14
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.20_r1.00",
+      "n_clusters": 12
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.80_r1.00",
+      "n_clusters": 12
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.20_r0.50",
+      "n_clusters": 8
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.50_r0.50",
+      "n_clusters": 7
+    },
+    {
+      "param_id": "scaled_gaussian_pc20_nc0.80_r0.50",
+      "n_clusters": 7
+    }
+  ]
+}
