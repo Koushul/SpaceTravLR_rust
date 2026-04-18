@@ -32,6 +32,7 @@ pub mod ligand;
 pub mod model;
 mod modulator_scale;
 pub mod network;
+pub mod niche;
 pub mod perturb;
 pub use perturb::{ComputeSplashAllProgressArgs, PerturbWithTargetsInputs};
 pub mod perturb_batch;

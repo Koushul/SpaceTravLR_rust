@@ -83,6 +83,10 @@ name = "spacetravlr-perturb"
 path = "src/bin/spacetravlr_perturb.rs"
 
 [[bin]]
+name = "spacetravlr-niche"
+path = "src/bin/spacetravlr_niche.rs"
+
+[[bin]]
 name = "spacetravlr-dev"
 path = "src/main.rs"
 required-features = ["dev-main"]
@@ -194,6 +198,7 @@ polars = { version = "0.51", default-features = false, features = ["ipc", "parqu
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 statrs = "0.18"
+tempfile = "3"
 
 # Use vendored anndata default WriteConfig: gzip (deflate) instead of Zstd→Blosc so Python
 # h5py/Scanpy on arm64 can read our .h5ad without a Blosc HDF5 plugin.
