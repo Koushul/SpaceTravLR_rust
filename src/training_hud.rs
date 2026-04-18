@@ -57,7 +57,9 @@ impl RunConfigSummary {
         } = args;
         let config_source = config_path
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "spaceship_config.toml (search path)".to_string());
+            .unwrap_or_else(|| {
+                "spaceship_config.toml (repo/cwd base + optional --config overlay)".to_string()
+            });
 
         let max_ligands = cfg
             .grn

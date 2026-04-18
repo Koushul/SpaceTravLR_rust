@@ -1,5 +1,11 @@
 [workspace]
-members = [".", "celloracle", "crates/rctd-core", "crates/spacetravlr-rctd"]
+members = [
+    ".",
+    "celloracle",
+    "crates/enrichr",
+    "crates/rctd-core",
+    "crates/spacetravlr-rctd",
+]
 resolver = "2"
 
 [package]

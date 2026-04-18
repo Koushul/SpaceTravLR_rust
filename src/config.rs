@@ -31,6 +31,46 @@ fn merge_toml_table_maps(
     }
 }
 
+fn merge_toml_table_underlay_maps(
+    base: &mut toml::map::Map<String, toml::Value>,
+    fill: &toml::map::Map<String, toml::Value>,
+) {
+    for (k, v) in fill {
+        match base.get_mut(k) {
+            None => {
+                base.insert(k.clone(), v.clone());
+            }
+            Some(base_val) => {
+                if let (Some(bt), Some(ft)) = (base_val.as_table_mut(), v.as_table()) {
+                    merge_toml_table_underlay_maps(bt, ft);
+                }
+            }
+        }
+    }
+}
+
+/// Fills missing keys in `into` from `underlay_root` for `[data]`, `[spatial]`, … only where
+/// `into` has no value yet (including nested tables). Existing values in `into` are never replaced.
+pub fn merge_spaceship_underlay_into_toml(into: &mut toml::Value, underlay_root: &toml::Value) {
+    let Some(into_t) = into.as_table_mut() else {
+        return;
+    };
+    let Some(ul_t) = underlay_root.as_table() else {
+        return;
+    };
+    for &sec in SPACESHIP_MERGE_SECTIONS {
+        let Some(ul_sec) = ul_t.get(sec).and_then(|x| x.as_table()) else {
+            continue;
+        };
+        let entry = into_t
+            .entry(sec.to_string())
+            .or_insert(toml::Value::Table(Default::default()));
+        if let Some(bt) = entry.as_table_mut() {
+            merge_toml_table_underlay_maps(bt, ul_sec);
+        }
+    }
+}
+
 /// Merges `[data]`, `[spatial]`, … from `overlay_root` into a TOML document that will deserialize
 /// as [`SpaceshipConfig`]. Unknown top-level keys in `overlay_root` are ignored.
 pub fn merge_spaceship_overlay_into_toml(into: &mut toml::Value, overlay_root: &toml::Value) {
@@ -811,6 +851,53 @@ impl SpaceshipConfig {
         Ok(cfg)
     }
 
+    /// Load `spacetravlr_run_repro.toml`-style document, fill missing keys from repo
+    /// [`repo_spaceship_config_path`] when present, then merge `--config` overlay (overlay wins on conflict).
+    pub fn from_run_repro_merged(
+        repro_path: impl AsRef<Path>,
+        config_overlay: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let path = repro_path.as_ref();
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let mut root: toml::Value = toml::from_str(&text)
+            .with_context(|| format!("parse run repro {}", path.display()))?;
+
+        let repo = Self::repo_spaceship_config_path();
+        if repo.is_file() {
+            match std::fs::read_to_string(&repo) {
+                Ok(repo_text) => match toml::from_str::<toml::Value>(&repo_text) {
+                    Ok(repo_root) => {
+                        merge_spaceship_underlay_into_toml(&mut root, &repo_root);
+                    }
+                    Err(e) => eprintln!(
+                        "Warning: failed to parse repo spaceship {}: {}",
+                        repo.display(),
+                        e
+                    ),
+                },
+                Err(e) => eprintln!("Warning: failed to read {}: {}", repo.display(), e),
+            }
+        }
+
+        if let Some(p) = config_overlay {
+            let overlay_text =
+                std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+            let overlay_root: toml::Value = toml::from_str(&overlay_text)
+                .with_context(|| format!("parse {}", p.display()))?;
+            merge_spaceship_overlay_into_toml(&mut root, &overlay_root);
+        }
+
+        let mut cfg = <SpaceshipConfig as Deserialize>::deserialize(root).with_context(|| {
+            format!(
+                "deserialize SpaceshipConfig from {} (after repro merge)",
+                path.display()
+            )
+        })?;
+        cfg.grn.apply_train_modulators_shorthand()?;
+        Ok(cfg)
+    }
+
     pub fn to_toml_pretty(&self) -> anyhow::Result<String> {
         toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("serialize config to TOML: {e}"))
     }
@@ -840,7 +927,18 @@ impl SpaceshipConfig {
         Ok(Some(path))
     }
 
+    /// `spaceship_config.toml` next to the workspace `Cargo.toml` for this crate (the repo root when building `spacetravlr` from this tree).
+    ///
+    /// At runtime after `cargo install` from another machine, this path may not exist; callers fall back to cwd discovery or [`SpaceshipConfig::default`].
+    pub fn repo_spaceship_config_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("spaceship_config.toml")
+    }
+
     pub fn discover_default_path() -> Option<PathBuf> {
+        let repo = Self::repo_spaceship_config_path();
+        if repo.is_file() {
+            return Some(repo);
+        }
         for name in &["spaceship_config.toml", "SpaceshipConfig.toml"] {
             let p = Path::new(name);
             if p.is_file() {
@@ -850,22 +948,69 @@ impl SpaceshipConfig {
         None
     }
 
-    pub fn load() -> Self {
-        let candidates = ["spaceship_config.toml", "SpaceshipConfig.toml"];
-        for name in &candidates {
-            if Path::new(name).exists() {
-                match Self::from_file(name) {
-                    Ok(cfg) => {
-                        eprintln!("Loaded config from {}", name);
-                        return cfg;
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: failed to parse {}: {}", name, e);
-                    }
+    fn read_config_base_document() -> anyhow::Result<(toml::Value, Option<PathBuf>)> {
+        let repo = Self::repo_spaceship_config_path();
+        if repo.is_file() {
+            let text = std::fs::read_to_string(&repo)
+                .with_context(|| format!("read {}", repo.display()))?;
+            match toml::from_str::<toml::Value>(&text) {
+                Ok(v) => return Ok((v, Some(repo))),
+                Err(e) => eprintln!("Warning: failed to parse {}: {}", repo.display(), e),
+            }
+        }
+        for name in &["spaceship_config.toml", "SpaceshipConfig.toml"] {
+            let p = Path::new(name);
+            if p.is_file() {
+                let text =
+                    std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+                match toml::from_str::<toml::Value>(&text) {
+                    Ok(v) => return Ok((v, Some(p.to_path_buf()))),
+                    Err(e) => eprintln!("Warning: failed to parse {}: {}", p.display(), e),
                 }
             }
         }
-        Self::default()
+        Ok((toml::Value::Table(Default::default()), None))
+    }
+
+    /// Load base TOML (repo [`repo_spaceship_config_path`], else cwd `spaceship_config.toml`, else empty + serde defaults),
+    /// then merge `overlay` on top for keys in [`SPACESHIP_MERGE_SECTIONS`].
+    pub fn try_load_merged(overlay: Option<&Path>) -> anyhow::Result<Self> {
+        let (mut doc, base_path) = Self::read_config_base_document()?;
+        if let Some(p) = overlay {
+            let overlay_text =
+                std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+            let overlay_root: toml::Value = toml::from_str(&overlay_text)
+                .with_context(|| format!("parse {}", p.display()))?;
+            merge_spaceship_overlay_into_toml(&mut doc, &overlay_root);
+            if let Some(ref bp) = base_path {
+                eprintln!(
+                    "Merged --config {} over defaults from {}.",
+                    p.display(),
+                    bp.display()
+                );
+            } else {
+                eprintln!(
+                    "Loaded --config {} (no repo/cwd spaceship TOML; serde defaults for omitted keys).",
+                    p.display()
+                );
+            }
+        } else if let Some(bp) = base_path {
+            eprintln!("Loaded config from {}", bp.display());
+        }
+        let mut cfg = <SpaceshipConfig as Deserialize>::deserialize(doc)
+            .context("deserialize SpaceshipConfig after TOML merge")?;
+        cfg.grn.apply_train_modulators_shorthand()?;
+        Ok(cfg)
+    }
+
+    pub fn load() -> Self {
+        match Self::try_load_merged(None) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: config load failed: {e:#}; using built-in defaults");
+                Self::default()
+            }
+        }
     }
 
     pub fn resolved_cnn_mode(&self) -> CnnTrainingMode {
@@ -1240,6 +1385,53 @@ output_dir = "out_a"
         let cfg = SpaceshipConfig::from_file_merged(&repro, Some(&overlay)).unwrap();
         let dir = cfg.resolve_training_output_dir(repro.as_path());
         assert_eq!(dir, tmp.join("out_b"));
+    }
+
+    #[test]
+    fn underlay_fills_missing_keys_only() {
+        use super::merge_spaceship_underlay_into_toml;
+        let mut base: toml::Value = toml::from_str(
+            r#"
+[data]
+adata_path = "/repro.h5ad"
+layer = "L0"
+"#,
+        )
+        .unwrap();
+        let fill: toml::Value = toml::from_str(
+            r#"
+[data]
+cluster_annot = "c_repo"
+layer = "L99"
+"#,
+        )
+        .unwrap();
+        merge_spaceship_underlay_into_toml(&mut base, &fill);
+        let cfg: SpaceshipConfig = toml::from_str(&toml::to_string_pretty(&base).unwrap()).unwrap();
+        assert_eq!(cfg.data.layer, "L0");
+        assert_eq!(cfg.data.cluster_annot, "c_repo");
+        assert_eq!(cfg.data.adata_path, "/repro.h5ad");
+    }
+
+    #[test]
+    fn repro_underlay_repo_then_overlay_cli_order() {
+        use super::{merge_spaceship_overlay_into_toml, merge_spaceship_underlay_into_toml};
+        let mut root: toml::Value = toml::from_str(
+            r#"
+[data]
+adata_path = "/repro.h5ad"
+layer = "L0"
+"#,
+        )
+        .unwrap();
+        let repo_like: toml::Value = toml::from_str("[data]\ncluster_annot = \"c1\"\n").unwrap();
+        merge_spaceship_underlay_into_toml(&mut root, &repo_like);
+        let cli: toml::Value = toml::from_str("[data]\nlayer = \"LX\"\n").unwrap();
+        merge_spaceship_overlay_into_toml(&mut root, &cli);
+        let cfg: SpaceshipConfig = toml::from_str(&toml::to_string_pretty(&root).unwrap()).unwrap();
+        assert_eq!(cfg.data.adata_path, "/repro.h5ad");
+        assert_eq!(cfg.data.layer, "LX");
+        assert_eq!(cfg.data.cluster_annot, "c1");
     }
 }
 

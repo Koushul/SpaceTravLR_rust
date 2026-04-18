@@ -152,7 +152,7 @@ struct RunSummaryCli {
         short = 'c',
         long,
         value_name = "PATH",
-        help = "spaceship_config.toml (defaults to cwd discovery if omitted)"
+        help = "spaceship_config.toml overlay (merged on top of repo/cwd base; omitted keys keep base values)"
     )]
     config: Option<PathBuf>,
     #[arg(
@@ -216,7 +216,7 @@ struct Cli {
         long,
         value_name = "PATH",
         help_heading = "Input",
-        help = "spaceship_config.toml (searched nearby if omitted)"
+        help = "spaceship_config.toml overlay (merged on top of repo/cwd base; omitted keys keep base values)"
     )]
     config: Option<PathBuf>,
 
@@ -953,7 +953,7 @@ fn eprint_join_style_resume_cli_notes(cli: &Cli, repro: &Path, explicit_join_fla
     };
     if cli.config.is_some() {
         eprintln!(
-            "Note: {via}: training uses {} (--config ignored for training settings).",
+            "Note: {via}: primary training contract is {}; --config overlays it; repo spaceship_config.toml fills keys missing from the repro.",
             repro.display()
         );
     }
@@ -991,17 +991,14 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
                 repro.display()
             );
         }
-        let mut cfg = SpaceshipConfig::from_file(&repro)?;
+        let mut cfg = SpaceshipConfig::from_run_repro_merged(&repro, cli.config.as_deref())?;
         validate_join_cli_against_repro(cli, &cfg, &repro, "--join-output-dir:")?;
         cfg.execution.output_dir = jexp;
         apply_cli_join_overrides(cli, &mut cfg)?;
         eprint_join_style_resume_cli_notes(cli, &repro, true);
         Ok((cfg, true))
     } else {
-        let mut cfg = match &cli.config {
-            Some(path) => SpaceshipConfig::from_file(path)?,
-            None => SpaceshipConfig::load(),
-        };
+        let mut cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
         apply_cli_to_config(cli, &mut cfg)?;
         Ok((cfg, false))
     }
@@ -1123,10 +1120,9 @@ fn print_plain_preamble(
 }
 
 fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
-    let cfg = match rs.config.as_ref().or(cli.config.as_ref()) {
-        Some(p) => SpaceshipConfig::from_file(p)?,
-        None => SpaceshipConfig::load(),
-    };
+    let cfg = SpaceshipConfig::try_load_merged(
+        rs.config.as_ref().or(cli.config.as_ref()).map(|p| p.as_path()),
+    )?;
 
     let adata_path = rs
         .h5ad
@@ -1200,10 +1196,7 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
         anyhow::bail!("--demo is for the full-screen dashboard; omit --plain.");
     }
 
-    let mut cfg = match &cli.config {
-        Some(path) => SpaceshipConfig::from_file(path)?,
-        None => SpaceshipConfig::load(),
-    };
+    let mut cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
     apply_cli_to_config(cli, &mut cfg)?;
     if matches!(cfg.resolved_cnn_mode(), CnnTrainingMode::Seed) {
         cfg.training.mode = Some(CnnTrainingMode::Full);
@@ -1454,14 +1447,12 @@ fn resolve_celloracle_network_data_dir(cli: &Cli) -> anyhow::Result<Option<Strin
         return Ok(Some(expand_user_path(p.to_string_lossy().as_ref())));
     }
     if let Some(p) = cli.config.as_ref() {
-        let cfg = SpaceshipConfig::from_file(p)
-            .with_context(|| format!("load spaceship config {}", p.display()))?;
+        let cfg = SpaceshipConfig::try_load_merged(Some(p.as_path()))
+            .with_context(|| format!("load merged spaceship config {}", p.display()))?;
         return Ok(cfg.grn.network_data_dir);
     }
-    if let Some(p) = SpaceshipConfig::discover_default_path() {
-        if let Ok(cfg) = SpaceshipConfig::from_file(&p) {
-            return Ok(cfg.grn.network_data_dir);
-        }
+    if let Ok(cfg) = SpaceshipConfig::try_load_merged(None) {
+        return Ok(cfg.grn.network_data_dir);
     }
     Ok(None)
 }
@@ -1878,7 +1869,7 @@ fn main() -> anyhow::Result<()> {
                 output_dir_pb.display()
             );
             join_training = true;
-            cfg = SpaceshipConfig::from_file(&repro_pb)?;
+            cfg = SpaceshipConfig::from_run_repro_merged(&repro_pb, cli.config.as_deref())?;
             cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
             validate_join_cli_against_repro(&cli, &cfg, &repro_pb, "Resume:")?;
             apply_cli_join_overrides(&cli, &mut cfg)?;
