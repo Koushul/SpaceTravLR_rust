@@ -13,6 +13,20 @@ use polars::prelude::*;
 use rayon::prelude::*;
 use serde::Serialize;
 
+/// One human-readable label from an `obs` column row (`cell_type`, `--condition`, etc.).
+/// Uses [`Series::str_value`] so categoricals resolve to category names, not `AnyValue::to_string()` / `Debug` quoting.
+pub fn obs_series_row_str(series: &Series, i: usize) -> anyhow::Result<String> {
+    let v = series
+        .str_value(i)
+        .map_err(|e| anyhow::anyhow!("obs row {i}: {e}"))?;
+    let t = v.as_ref();
+    Ok(if t == "null" {
+        String::new()
+    } else {
+        t.to_string()
+    })
+}
+
 /// Named matrix for gene expression or weighted ligand data.
 /// Wraps a dense 2D array with gene-name → column-index lookup.
 pub struct GeneMatrix {

@@ -126,6 +126,7 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_var() {
         &cfg,
         None,
         false,
+        false,
         None,
         &device,
     )

@@ -9,11 +9,14 @@ Layout (per cluster id C, prefix c0000_, c0001_, ...):
   cluster_ids, meta_spatial_dim, meta_n_clusters, meta_n_modulators
   cNNNN_conv[123]_weight / _bias, cNNNN_bn[123]_{gamma,beta,running_mean,running_var}
   cNNNN_spatial_l{123}_{weight,bias}, cNNNN_head_l{12}_{weight,bias}, cNNNN_anchors
+  cNNNN_{conv1,conv2,conv3,spatial_l1,spatial_l2,head_l1}_prelu_alpha  (length-1 f32, learnable)
 
-Forward matches Rust `CellularNicheNetwork` (src/model.rs): 3x3 same-pad convs, BN, PReLU(0.1),
+Forward matches Rust `CellularNicheNetwork` (src/model.rs): 3x3 same-pad convs, BN, PReLU,
 maxpool 2x2, adaptive avg pool 1x1, spatial MLP on neighbor-count features, residual add, head MLP,
 then output activation (identity / sigmoid / tanh / sigmoid×2; see meta_cnn_output_activation in .npz) * anchors.
-PReLU slope is fixed at 0.1 in Rust (not stored in .npz).
+Each PReLU is a learnable, single-parameter (`num_parameters=1`) module initialised at 0.1, matching
+Python `nn.PReLU(init=0.1)`. Older Rust binaries did not store the slopes; if the `*_prelu_alpha`
+keys are missing the loader falls back to the 0.1 init value.
 
 meta_cnn_output_activation: uint32 0 = identity, 1 = sigmoid (default if key missing), 2 = tanh, 3 = 2·sigmoid → (0,2).
 
@@ -32,16 +35,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_PRELU = 0.1
+_PRELU_INIT = 0.1
 _BN_EPS = 1e-5
 _ACT_IDENTITY = 0
 _ACT_SIGMOID = 1
 _ACT_TANH = 2
 _ACT_SIGMOID_X2 = 3
+_CNN_SPP_FLAT = 64 * (1 + 4 + 16)
 
 
-def _prelu(x: torch.Tensor) -> torch.Tensor:
-    return F.prelu(x, torch.tensor(_PRELU, device=x.device, dtype=x.dtype))
+def _prelu(x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    return F.prelu(x, alpha.to(device=x.device, dtype=x.dtype))
 
 
 def cluster_prefixes(npz: np.lib.npyio.NpzFile) -> list[int]:
@@ -75,23 +79,32 @@ class RustCellularNicheCNN(nn.Module):
         n_modulators: int,
         spatial_dim: int,
         output_activation: int = _ACT_SIGMOID,
+        input_channels: int = 1,
     ) -> None:
         super().__init__()
         self.spatial_dim = spatial_dim
         self.n_clusters = n_clusters
         self.n_modulators = n_modulators
         self.output_activation = int(output_activation)
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1, bias=True)
+        ic = int(input_channels)
+        self.conv1 = nn.Conv2d(ic, 16, kernel_size=3, padding=1, bias=True)
         self.bn1 = nn.BatchNorm2d(16, eps=_BN_EPS)
+        self.prelu_conv1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1, bias=True)
         self.bn2 = nn.BatchNorm2d(32, eps=_BN_EPS)
+        self.prelu_conv2 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=True)
         self.bn3 = nn.BatchNorm2d(64, eps=_BN_EPS)
+        self.prelu_conv3 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.spatial_l1 = nn.Linear(n_clusters, 16)
+        self.prelu_spatial_l1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.spatial_l2 = nn.Linear(16, 32)
+        self.prelu_spatial_l2 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.spatial_l3 = nn.Linear(32, 64)
         self.head_l1 = nn.Linear(64, 64)
+        self.prelu_head_l1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.head_l2 = nn.Linear(64, n_modulators + 1)
+        self.spp_proj = nn.Linear(_CNN_SPP_FLAT, 64)
         self.register_buffer("anchors", torch.zeros(n_modulators + 1))
 
     def load_from_npz(self, d: np.lib.npyio.NpzFile, prefix: str) -> None:
@@ -131,35 +144,55 @@ class RustCellularNicheCNN(nn.Module):
         self.head_l2.weight.data.copy_(t32(f"{prefix}head_l2_weight"))
         self.head_l2.bias.data.copy_(t32(f"{prefix}head_l2_bias"))
 
+        if f"{prefix}spp_proj_weight" in d.files:
+            w = np.asarray(d[f"{prefix}spp_proj_weight"], dtype=np.float32)
+            self.spp_proj.weight.data.copy_(torch.from_numpy(np.ascontiguousarray(w.T)))
+            self.spp_proj.bias.data.copy_(t32(f"{prefix}spp_proj_bias"))
+
         self.anchors.copy_(t32(f"{prefix}anchors"))
+
+        for module, key in (
+            (self.prelu_conv1, "conv1_prelu_alpha"),
+            (self.prelu_conv2, "conv2_prelu_alpha"),
+            (self.prelu_conv3, "conv3_prelu_alpha"),
+            (self.prelu_spatial_l1, "spatial_l1_prelu_alpha"),
+            (self.prelu_spatial_l2, "spatial_l2_prelu_alpha"),
+            (self.prelu_head_l1, "head_l1_prelu_alpha"),
+        ):
+            full = f"{prefix}{key}"
+            if full in d.files:
+                module.weight.data.copy_(t32(full))
 
     def get_betas(self, spatial_maps: torch.Tensor, spatial_features: torch.Tensor) -> torch.Tensor:
         x = spatial_maps
         x = self.conv1(x)
         x = self.bn1(x)
-        x = _prelu(x)
+        x = _prelu(x, self.prelu_conv1.weight)
         x = F.max_pool2d(x, 2, stride=2)
         x = self.conv2(x)
         x = self.bn2(x)
-        x = _prelu(x)
+        x = _prelu(x, self.prelu_conv2.weight)
         x = F.max_pool2d(x, 2, stride=2)
         x = self.conv3(x)
         x = self.bn3(x)
-        x = _prelu(x)
+        x = _prelu(x, self.prelu_conv3.weight)
         x = F.max_pool2d(x, 2, stride=2)
-        x = F.adaptive_avg_pool2d(x, (1, 1))
+        p1 = F.adaptive_avg_pool2d(x, (1, 1))
+        p2 = F.adaptive_avg_pool2d(x, (2, 2))
+        p3 = F.adaptive_avg_pool2d(x, (4, 4))
         b = x.shape[0]
-        x = x.reshape(b, 64)
+        spp = torch.cat([p1.reshape(b, -1), p2.reshape(b, -1), p3.reshape(b, -1)], dim=1)
+        x = self.spp_proj(spp)
 
         s = self.spatial_l1(spatial_features)
-        s = _prelu(s)
+        s = _prelu(s, self.prelu_spatial_l1.weight)
         s = self.spatial_l2(s)
-        s = _prelu(s)
+        s = _prelu(s, self.prelu_spatial_l2.weight)
         s = self.spatial_l3(s)
 
         out = x + s
         out = self.head_l1(out)
-        out = _prelu(out)
+        out = _prelu(out, self.prelu_head_l1.weight)
         out = self.head_l2(out)
         if self.output_activation == _ACT_IDENTITY:
             pass
@@ -210,10 +243,16 @@ def load_gene_npz(path: str, device: str | torch.device | None = None) -> Loaded
 
         spatial_dim, n_clusters, n_modulators, out_act = _meta(data)
 
+        pfx0 = f"c{ids[0]:04d}_"
+        _cw = np.asarray(data[f"{pfx0}conv1_weight"])
+        inch = int(_cw.shape[1]) if _cw.ndim == 4 else 1
+
         models: Dict[int, RustCellularNicheCNN] = {}
         for cid in ids:
             prefix = f"c{cid:04d}_"
-            m = RustCellularNicheCNN(n_clusters, n_modulators, spatial_dim, out_act)
+            m = RustCellularNicheCNN(
+                n_clusters, n_modulators, spatial_dim, out_act, input_channels=inch
+            )
             m.load_from_npz(data, prefix)
             m.to(device)
             m.eval()
@@ -241,7 +280,8 @@ def main() -> None:
     m = bundle.models[cid]
     b = args.batch
     h = m.spatial_dim
-    sm = torch.randn(b, 1, h, h, device=args.device, dtype=torch.float32)
+    ic = m.conv1.in_channels
+    sm = torch.randn(b, ic, h, h, device=args.device, dtype=torch.float32)
     sf = torch.randn(b, m.n_clusters, device=args.device, dtype=torch.float32)
     x = torch.randn(b, m.n_modulators, device=args.device, dtype=torch.float32)
 

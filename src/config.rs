@@ -49,6 +49,15 @@ fn merge_toml_table_underlay_maps(
     }
 }
 
+/// `GrnConfig` deserializes `max_lr` as an alias of `max_ligands`. After underlay merge, both keys
+/// can appear in `[grn]` (repro has `max_ligands`, repo spaceship has `max_lr`), which serde
+/// rejects as a duplicate field. Prefer the repro value (`max_ligands`).
+fn dedupe_grn_max_ligand_toml_keys(grn: &mut toml::map::Map<String, toml::Value>) {
+    if grn.contains_key("max_ligands") && grn.contains_key("max_lr") {
+        grn.remove("max_lr");
+    }
+}
+
 /// Fills missing keys in `into` from `underlay_root` for `[data]`, `[spatial]`, … only where
 /// `into` has no value yet (including nested tables). Existing values in `into` are never replaced.
 pub fn merge_spaceship_underlay_into_toml(into: &mut toml::Value, underlay_root: &toml::Value) {
@@ -68,6 +77,9 @@ pub fn merge_spaceship_underlay_into_toml(into: &mut toml::Value, underlay_root:
         if let Some(bt) = entry.as_table_mut() {
             merge_toml_table_underlay_maps(bt, ul_sec);
         }
+    }
+    if let Some(grn) = into_t.get_mut("grn").and_then(|v| v.as_table_mut()) {
+        dedupe_grn_max_ligand_toml_keys(grn);
     }
 }
 
@@ -338,6 +350,49 @@ pub enum CnnOutputActivation {
     SigmoidX2,
 }
 
+/// Learning-rate schedule for full-batch Adam CNN steps (per epoch).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CnnLrSchedule {
+    /// Fixed `[training].learning_rate` every epoch (after warmup, if any).
+    #[default]
+    Constant,
+    /// Cosine decay from `learning_rate` down to `learning_rate * cosine_lr_min_ratio` over post-warmup epochs.
+    Cosine,
+}
+
+fn default_mean_beta_lasso_prior_weight() -> f64 {
+    0.005
+}
+
+fn default_grad_clip_norm() -> Option<f64> {
+    Some(3.0)
+}
+
+fn default_cosine_lr_min_ratio() -> f64 {
+    0.01
+}
+
+fn default_early_stop_patience() -> usize {
+    8
+}
+
+fn default_early_stop_min_epochs() -> usize {
+    12
+}
+
+fn default_drop_cnn_if_insample_worse_than_lasso() -> bool {
+    true
+}
+
+fn default_cnn_minibatch_size() -> usize {
+    512
+}
+
+fn default_false() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CnnConfig {
@@ -345,10 +400,46 @@ pub struct CnnConfig {
     pub adam_beta_2: f64,
     pub adam_epsilon: f64,
     pub weight_decay: Option<f64>,
+    #[serde(default = "default_grad_clip_norm")]
     pub grad_clip_norm: Option<f64>,
     pub spatial_feature_radius: f64,
     /// Applied after the final head linear (`mlp.l2`), before multiplying by lasso anchors.
     pub output_activation: CnnOutputActivation,
+    /// When > 0, add this × MSE(`mean_batch(get_betas)`, lasso anchors) to the CNN loss (weak prior on mean effective coefficients).
+    #[serde(default = "default_mean_beta_lasso_prior_weight")]
+    pub mean_beta_lasso_prior_weight: f64,
+    #[serde(default)]
+    pub lr_schedule: CnnLrSchedule,
+    #[serde(default = "default_cosine_lr_min_ratio")]
+    /// Cosine floor: effective minimum LR is `learning_rate * cosine_lr_min_ratio` (only used with `lr_schedule = "cosine"`).
+    pub cosine_lr_min_ratio: f64,
+    /// Linear LR warmup: ramp from 0 to `learning_rate` over this many epochs (0 = off).
+    pub lr_warmup_epochs: usize,
+    #[serde(default = "default_early_stop_patience")]
+    /// Stop early if train MSE does not improve for this many epochs (0 = disabled).
+    pub cnn_early_stop_patience: usize,
+    #[serde(default = "default_early_stop_min_epochs")]
+    /// Minimum epochs before early stopping can trigger.
+    pub cnn_early_stop_min_epochs: usize,
+    /// Optional MSE(`y_pred`, `y_lasso`) weight; use with `lasso_pred_align_linear_decay` to avoid washing out spatial signal.
+    pub lasso_pred_align_weight: f64,
+    #[serde(default)]
+    pub lasso_pred_align_linear_decay: bool,
+    #[serde(default = "default_drop_cnn_if_insample_worse_than_lasso")]
+    /// After training, remove CNN if in-sample `cnn_r2 + margin < lasso_r2` so exports fall back to Lasso.
+    pub drop_cnn_if_insample_worse_than_lasso: bool,
+    /// Margin added to `cnn_r2` when comparing to `lasso_r2` for [`Self::drop_cnn_if_insample_worse_than_lasso`].
+    pub cnn_vs_lasso_arbitration_margin: f64,
+    /// Per-optimizer-step batch size over cells within a cluster. `0` = full batch (one step per epoch).
+    #[serde(default = "default_cnn_minibatch_size")]
+    pub cnn_minibatch_size: usize,
+    /// When true, feed all cluster channels `[batch, n_clusters, H, W]` into conv1 (cross-cell-type layout).
+    /// When false (default), only the focal cluster channel `[batch, 1, H, W]` (matches legacy behavior).
+    #[serde(default = "default_false")]
+    pub multi_channel_spatial_maps: bool,
+    /// When true, each cell's inverse-distance grid is centered on that cell (translation-invariant local niche).
+    #[serde(default = "default_false")]
+    pub ego_center_spatial_maps: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +478,13 @@ pub struct PerturbationConfig {
 pub struct ModelExportConfig {
     /// When true, export trained CNN weights for genes that run per-cell CNN refinement (default off).
     pub save_cnn_weights: bool,
+    /// When true, write `{gene}_cnn_train_data.npz` plus `{gene}_cnn_train_meta.json` under
+    /// [`Self::output_subdir`] for the Python reference trainer (`scripts/python_train_cnn.py`): same
+    /// scaled `x`, `y`, spatial maps, and Lasso anchor init Rust used—no
+    /// `SPACETRAVLR_DUMP_CNN_TRAIN_DATA` env var required.
+    /// Still requires at least one trained CNN cluster (`est.models` non-empty).
+    #[serde(default)]
+    pub write_cnn_train_data_npz: bool,
     /// Write .npz with deflate compression (recommended).
     pub compressed_npz: bool,
     /// Subdirectory under [execution].output_dir for CNN `.npz` exports (default `CNN_weights`).
@@ -562,9 +660,22 @@ impl Default for CnnConfig {
             adam_beta_2: 0.999,
             adam_epsilon: 1e-5,
             weight_decay: None,
-            grad_clip_norm: None,
+            grad_clip_norm: Some(3.0),
             spatial_feature_radius: 100.0,
             output_activation: CnnOutputActivation::default(),
+            mean_beta_lasso_prior_weight: 0.005,
+            lr_schedule: CnnLrSchedule::Cosine,
+            cosine_lr_min_ratio: 0.01,
+            lr_warmup_epochs: 0,
+            cnn_early_stop_patience: 8,
+            cnn_early_stop_min_epochs: 12,
+            lasso_pred_align_weight: 0.0,
+            lasso_pred_align_linear_decay: false,
+            drop_cnn_if_insample_worse_than_lasso: true,
+            cnn_vs_lasso_arbitration_margin: 0.0,
+            cnn_minibatch_size: 512,
+            multi_channel_spatial_maps: false,
+            ego_center_spatial_maps: false,
         }
     }
 }
@@ -652,6 +763,7 @@ impl Default for ModelExportConfig {
     fn default() -> Self {
         Self {
             save_cnn_weights: false,
+            write_cnn_train_data_npz: false,
             compressed_npz: true,
             output_subdir: "CNN_weights".into(),
         }
@@ -860,8 +972,8 @@ impl SpaceshipConfig {
         let path = repro_path.as_ref();
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let mut root: toml::Value = toml::from_str(&text)
-            .with_context(|| format!("parse run repro {}", path.display()))?;
+        let mut root: toml::Value =
+            toml::from_str(&text).with_context(|| format!("parse run repro {}", path.display()))?;
 
         let repo = Self::repo_spaceship_config_path();
         if repo.is_file() {
@@ -883,8 +995,8 @@ impl SpaceshipConfig {
         if let Some(p) = config_overlay {
             let overlay_text =
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
-            let overlay_root: toml::Value = toml::from_str(&overlay_text)
-                .with_context(|| format!("parse {}", p.display()))?;
+            let overlay_root: toml::Value =
+                toml::from_str(&overlay_text).with_context(|| format!("parse {}", p.display()))?;
             merge_spaceship_overlay_into_toml(&mut root, &overlay_root);
         }
 
@@ -979,8 +1091,8 @@ impl SpaceshipConfig {
         if let Some(p) = overlay {
             let overlay_text =
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
-            let overlay_root: toml::Value = toml::from_str(&overlay_text)
-                .with_context(|| format!("parse {}", p.display()))?;
+            let overlay_root: toml::Value =
+                toml::from_str(&overlay_text).with_context(|| format!("parse {}", p.display()))?;
             merge_spaceship_overlay_into_toml(&mut doc, &overlay_root);
             if let Some(ref bp) = base_path {
                 eprintln!(

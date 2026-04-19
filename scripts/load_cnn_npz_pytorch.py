@@ -22,50 +22,70 @@ _ACT_IDENTITY = 0
 _ACT_SIGMOID = 1
 _ACT_TANH = 2
 _ACT_SIGMOID_X2 = 3
+_PRELU_INIT = 0.1
+_CNN_SPP_FLAT = 64 * (1 + 4 + 16)
 
 
 class CellularNicheNetworkTorch(nn.Module):
     def __init__(
-        self, n_modulators: int, n_clusters: int, output_activation: int = _ACT_SIGMOID
+        self,
+        n_modulators: int,
+        n_clusters: int,
+        output_activation: int = _ACT_SIGMOID,
+        input_channels: int = 1,
     ) -> None:
         super().__init__()
         dim = n_modulators + 1
         self.output_activation = int(output_activation)
+        ic = int(input_channels)
 
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1, bias=True)
+        self.conv1 = nn.Conv2d(ic, 16, kernel_size=3, padding=1, bias=True)
         self.bn1 = nn.BatchNorm2d(16, eps=1e-5, momentum=0.1)
+        self.prelu_conv1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1, bias=True)
         self.bn2 = nn.BatchNorm2d(32, eps=1e-5, momentum=0.1)
+        self.prelu_conv2 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=True)
         self.bn3 = nn.BatchNorm2d(64, eps=1e-5, momentum=0.1)
+        self.prelu_conv3 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
 
         self.spatial_l1 = nn.Linear(n_clusters, 16)
+        self.prelu_spatial_l1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.spatial_l2 = nn.Linear(16, 32)
+        self.prelu_spatial_l2 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.spatial_l3 = nn.Linear(32, 64)
 
         self.head_l1 = nn.Linear(64, 64)
+        self.prelu_head_l1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.head_l2 = nn.Linear(64, dim)
+
+        self.spp_proj = nn.Linear(_CNN_SPP_FLAT, 64)
 
         self.register_buffer("anchors", torch.ones(dim, dtype=torch.float32))
 
     def get_betas(self, spatial_maps: torch.Tensor, spatial_features: torch.Tensor) -> torch.Tensor:
-        x = F.prelu(self.bn1(self.conv1(spatial_maps)), torch.tensor(0.1, device=spatial_maps.device))
+        x = F.prelu(self.bn1(self.conv1(spatial_maps)), self.prelu_conv1.weight)
         x = F.max_pool2d(x, kernel_size=2, stride=2)
 
-        x = F.prelu(self.bn2(self.conv2(x)), torch.tensor(0.1, device=spatial_maps.device))
+        x = F.prelu(self.bn2(self.conv2(x)), self.prelu_conv2.weight)
         x = F.max_pool2d(x, kernel_size=2, stride=2)
 
-        x = F.prelu(self.bn3(self.conv3(x)), torch.tensor(0.1, device=spatial_maps.device))
+        x = F.prelu(self.bn3(self.conv3(x)), self.prelu_conv3.weight)
         x = F.max_pool2d(x, kernel_size=2, stride=2)
 
-        x = F.adaptive_avg_pool2d(x, output_size=(1, 1)).reshape(spatial_maps.shape[0], 64)
+        b = spatial_maps.shape[0]
+        p1 = F.adaptive_avg_pool2d(x, output_size=(1, 1))
+        p2 = F.adaptive_avg_pool2d(x, output_size=(2, 2))
+        p3 = F.adaptive_avg_pool2d(x, output_size=(4, 4))
+        spp = torch.cat([p1.reshape(b, -1), p2.reshape(b, -1), p3.reshape(b, -1)], dim=1)
+        x = self.spp_proj(spp)
 
-        s = F.prelu(self.spatial_l1(spatial_features), torch.tensor(0.1, device=spatial_maps.device))
-        s = F.prelu(self.spatial_l2(s), torch.tensor(0.1, device=spatial_maps.device))
+        s = F.prelu(self.spatial_l1(spatial_features), self.prelu_spatial_l1.weight)
+        s = F.prelu(self.spatial_l2(s), self.prelu_spatial_l2.weight)
         s = self.spatial_l3(s)
 
         out = x + s
-        out = F.prelu(self.head_l1(out), torch.tensor(0.1, device=spatial_maps.device))
+        out = F.prelu(self.head_l1(out), self.prelu_head_l1.weight)
         out = self.head_l2(out)
         if self.output_activation == _ACT_IDENTITY:
             betas = out
@@ -107,10 +127,13 @@ def load_cluster_model(npz_path: str, cluster_id: int) -> CellularNicheNetworkTo
     spatial_l1_w = _t(data, p + "spatial_l1_weight")
     n_clusters = int(spatial_l1_w.shape[0])
 
-    model = CellularNicheNetworkTorch(n_modulators, n_clusters, out_act)
+    cw = _t(data, p + "conv1_weight")
+    inch = int(cw.shape[1]) if cw.dim() == 4 else 1
+
+    model = CellularNicheNetworkTorch(n_modulators, n_clusters, out_act, input_channels=inch)
 
     with torch.no_grad():
-        model.conv1.weight.copy_(_t(data, p + "conv1_weight"))
+        model.conv1.weight.copy_(cw)
         model.conv1.bias.copy_(_t(data, p + "conv1_bias"))
         model.conv2.weight.copy_(_t(data, p + "conv2_weight"))
         model.conv2.bias.copy_(_t(data, p + "conv2_bias"))
@@ -145,7 +168,23 @@ def load_cluster_model(npz_path: str, cluster_id: int) -> CellularNicheNetworkTo
         model.head_l2.weight.copy_(_t(data, p + "head_l2_weight").T)
         model.head_l2.bias.copy_(_t(data, p + "head_l2_bias"))
 
+        if p + "spp_proj_weight" in data.files:
+            model.spp_proj.weight.copy_(_t(data, p + "spp_proj_weight").T)
+            model.spp_proj.bias.copy_(_t(data, p + "spp_proj_bias"))
+
         model.anchors.copy_(anchors)
+
+        for module, key in (
+            (model.prelu_conv1, "conv1_prelu_alpha"),
+            (model.prelu_conv2, "conv2_prelu_alpha"),
+            (model.prelu_conv3, "conv3_prelu_alpha"),
+            (model.prelu_spatial_l1, "spatial_l1_prelu_alpha"),
+            (model.prelu_spatial_l2, "spatial_l2_prelu_alpha"),
+            (model.prelu_head_l1, "head_l1_prelu_alpha"),
+        ):
+            full = p + key
+            if full in data.files:
+                module.weight.copy_(_t(data, full))
 
     model.eval()
     return model

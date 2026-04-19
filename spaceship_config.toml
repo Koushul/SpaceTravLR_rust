@@ -52,14 +52,35 @@ use_tfl_modulators = true
 adam_beta_1 = 0.9
 adam_beta_2 = 0.999
 adam_epsilon = 1e-5
+# Optional L2 on CNN parameters (omit = off)
+# weight_decay = 1e-5
+# Clip gradient L2 norm each step (default in code: 3.0; set null to disable)
+# grad_clip_norm = 3.0
 # Radius passed to create_spatial_features for CNN inputs (coordinate units)
 spatial_feature_radius = 300.0
 # After final head linear, before lasso-anchor scaling: identity | sigmoid | tanh | sigmoidx2 (2·sigmoid, (0,2))
 output_activation = "sigmoidx2"
+# Per-optimizer-step batch size over cells within a cluster (0 = full batch per epoch)
+cnn_minibatch_size = 512
+# Weak prior: MSE between batch-mean effective betas and Lasso anchors (default in code ~1e-3–1e-2 range; keeps mean near Lasso while allowing per-cell spatial variation)
+# mean_beta_lasso_prior_weight = 0.005
+# LR schedule: constant | cosine (cosine decays to learning_rate * cosine_lr_min_ratio after optional warmup)
+# lr_schedule = "cosine"
+# cosine_lr_min_ratio = 0.01
+# lr_warmup_epochs = 0
+# Early stop on train MSE if no improvement for cnn_early_stop_patience epochs (after cnn_early_stop_min_epochs)
+# cnn_early_stop_patience = 8
+# cnn_early_stop_min_epochs = 12
+# Optional Lasso prediction alignment: MSE(y_pred, y_lasso); use small weight; linear_decay ramps weight down over epochs
+lasso_pred_align_weight = 0.05
+lasso_pred_align_linear_decay = true
+# If CNN in-sample R² is worse than Lasso, drop CNN for that cluster (export uses Lasso); margin relaxes the comparison
+drop_cnn_if_insample_worse_than_lasso = true
+# cnn_vs_lasso_arbitration_margin = 0.0
 
 [lasso]
 # Element-wise L1 penalty
-l1_reg    = 1e-5
+l1_reg    = 1e-9
 # Group-L2 penalty
 group_reg = 1e-9
 # Max FISTA iterations
@@ -117,6 +138,8 @@ n_propagation     = 4
 [model_export]
 # Export CNN weights (.npz) for genes that run per-cell CNN refinement (omit or false = off).
 save_cnn_weights = false
+# Write {gene}_cnn_train_data.npz + {gene}_cnn_train_meta.json for scripts/python_train_cnn.py (same tensors as Rust; no SPACETRAVLR_DUMP_CNN_TRAIN_DATA). CLI: --write-cnn-train-data-npz
+# write_cnn_train_data_npz = false
 # Use compressed .npz (numpy savez_compressed format).
 compressed_npz = true
 # Subdirectory under [execution].output_dir for CNN .npz exports

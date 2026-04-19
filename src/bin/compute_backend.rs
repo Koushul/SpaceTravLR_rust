@@ -124,6 +124,7 @@ pub(crate) struct FitAllGenesParams<'a> {
     pub config_source_path: Option<std::path::PathBuf>,
     /// Loaded from shared `spacetravlr_run_repro.toml` (`--join-output-dir`); skips overwriting that file at end.
     pub join_training: bool,
+    pub verbose: bool,
 }
 
 macro_rules! dispatch_fit_all_genes {
@@ -165,6 +166,7 @@ macro_rules! dispatch_fit_all_genes {
             $p.spaceship_config,
             $p.config_source_path.clone(),
             $p.join_training,
+            $p.verbose,
             None,
             $device,
         )

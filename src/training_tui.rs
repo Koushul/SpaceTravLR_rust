@@ -1,6 +1,7 @@
 use crate::adata_terminal_scatter::{
     self as adata_scatter, ratatui_color_for_cell_type_label, sorted_unique_labels_from_counts,
 };
+use crate::estimator::CnnEpochHudSlot;
 use crate::training_hud::{TrainingHud, TrainingHudState};
 use crate::tui_theme::TuiColors;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -15,9 +16,10 @@ use ratatui::symbols;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, LineGauge, List, ListItem, Paragraph, Wrap};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write, stdout};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -311,12 +313,12 @@ fn status_is_cnn_only_line(status: &str) -> bool {
 fn worker_status_line(
     gene: &str,
     status: &str,
-    lasso_ct: &std::collections::HashMap<String, (usize, usize)>,
+    lasso_ct: &HashMap<String, (usize, usize)>,
+    cnn_epoch_slot: Option<&Arc<CnnEpochHudSlot>>,
 ) -> String {
-    if status_is_cnn_only_line(status) {
-        return status.to_string();
-    }
-    if let Some(&(done, total)) = lasso_ct.get(gene) {
+    let base = if status_is_cnn_only_line(status) {
+        status.to_string()
+    } else if let Some(&(done, total)) = lasso_ct.get(gene) {
         if total > 0 {
             format!("{status} · {done}/{total}")
         } else {
@@ -324,6 +326,18 @@ fn worker_status_line(
         }
     } else {
         status.to_string()
+    };
+    let epoch_note = cnn_epoch_slot.and_then(|slot| {
+        let tot = slot.total();
+        let cur = slot.current();
+        (tot > 0 && cur > 0).then(|| {
+            let c = cur.min(tot);
+            format!(" · {c}/{tot}")
+        })
+    });
+    match epoch_note {
+        Some(s) => format!("{base}{s}"),
+        None => base,
     }
 }
 
@@ -360,7 +374,8 @@ fn pad_or_trunc_display(s: &str, width: usize) -> String {
 fn workers_single_column(
     active: &[(&String, &String)],
     content_w: usize,
-    lasso_ct: &std::collections::HashMap<String, (usize, usize)>,
+    lasso_ct: &HashMap<String, (usize, usize)>,
+    cnn_epoch_slots: &HashMap<String, Arc<CnnEpochHudSlot>>,
     pal: TuiColors,
 ) -> Vec<ListItem<'static>> {
     if active.is_empty() {
@@ -381,7 +396,12 @@ fn workers_single_column(
     active
         .iter()
         .map(|(gene, status)| {
-            let status_line = worker_status_line(gene.as_str(), status, lasso_ct);
+            let status_line = worker_status_line(
+                gene.as_str(),
+                status,
+                lasso_ct,
+                cnn_epoch_slots.get(gene.as_str()),
+            );
             let pc = if status.contains("export") || status.contains("write") {
                 pal.c_wrote
             } else if status.contains("lasso")
@@ -1857,6 +1877,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     &active,
                     cw,
                     &st.gene_lasso_cluster_progress,
+                    &st.gene_cnn_epoch_slots,
                     pal,
                 ))
                 .block(

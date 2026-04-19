@@ -352,6 +352,14 @@ struct Cli {
     cnn_output_activation: Option<CnnOutputActivationArg>,
 
     #[arg(
+        long = "mean-beta-lasso-prior-weight",
+        value_name = "F",
+        help_heading = "Training",
+        help = "CNN auxiliary loss: weight on MSE(mean batch betas, lasso anchors) — overrides [cnn].mean_beta_lasso_prior_weight"
+    )]
+    mean_beta_lasso_prior_weight: Option<f64>,
+
+    #[arg(
         long,
         value_name = "N",
         help_heading = "Training",
@@ -400,6 +408,14 @@ struct Cli {
     join_output_dir: Option<PathBuf>,
 
     #[arg(
+        long = "clean-output-dir",
+        action = ArgAction::SetTrue,
+        help_heading = "Output",
+        help = "Remove the training output directory if it exists, then start a new run (cannot be used with --join-output-dir)"
+    )]
+    clean_output_dir: bool,
+
+    #[arg(
         long,
         action = ArgAction::SetTrue,
         help_heading = "Output",
@@ -416,11 +432,28 @@ struct Cli {
     save_cnn_weights: bool,
 
     #[arg(
+        long = "write-cnn-train-data-npz",
+        action = ArgAction::SetTrue,
+        help_heading = "Output",
+        help = "Write {gene}_cnn_train_data.npz + _cnn_train_meta.json under CNN_weights/ for scripts/python_train_cnn.py (no SPACETRAVLR_DUMP_CNN_TRAIN_DATA env var)"
+    )]
+    write_cnn_train_data_npz: bool,
+
+    #[arg(
         long,
         help_heading = "Interface",
         help = "Print line-oriented logs instead of the full-screen dashboard (when built with `tui`)"
     )]
     plain: bool,
+
+    #[arg(
+        short = 'v',
+        long,
+        action = ArgAction::SetTrue,
+        help_heading = "Interface",
+        help = "Per gene, print each cluster's Lasso R² and CNN R² (before zeroing failed Lasso rows), plus pass / CNN weight-export skip flags vs [training].score_threshold"
+    )]
+    verbose: bool,
 
     #[arg(
         long,
@@ -710,10 +743,12 @@ struct Cli {
     #[arg(
         long = "celloracle",
         value_name = "PATH",
+        num_args = 0..=1,
+        default_missing_value = "",
         help_heading = "Utility",
-        help = "CellOracle-style TF prior inference: read AnnData .h5ad, run Bayesian ridge GRN (SpaceTravLR priors), write TF-prior Feather (source, target, cell_type) and exit"
+        help = "CellOracle-style TF prior inference only: run Bayesian ridge GRN (SpaceTravLR priors), write TF-prior Feather (source, target, cell_type), and exit. Pass optional .h5ad path, or omit PATH and use `--h5ad` for the same file"
     )]
-    celloracle_h5ad: Option<PathBuf>,
+    celloracle: Option<String>,
 
     #[arg(
         long = "celloracle-output",
@@ -805,6 +840,9 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Res
     if cli.save_cnn_weights {
         cfg.model_export.save_cnn_weights = true;
     }
+    if cli.write_cnn_train_data_npz {
+        cfg.model_export.write_cnn_train_data_npz = true;
+    }
     if cli.write_minimal_repro_h5ad {
         cfg.execution.write_minimal_repro_h5ad = true;
     }
@@ -856,6 +894,9 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     if let Some(a) = cli.cnn_output_activation {
         cfg.cnn.output_activation = a.into();
     }
+    if let Some(v) = cli.mean_beta_lasso_prior_weight {
+        cfg.cnn.mean_beta_lasso_prior_weight = v;
+    }
     if let Some(v) = cli.n_iter {
         cfg.lasso.n_iter = v;
     }
@@ -880,6 +921,9 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     }
     if cli.save_cnn_weights {
         cfg.model_export.save_cnn_weights = true;
+    }
+    if cli.write_cnn_train_data_npz {
+        cfg.model_export.write_cnn_train_data_npz = true;
     }
     if let Some(ref c) = cli.condition {
         let t = c.trim();
@@ -982,6 +1026,9 @@ fn eprint_join_style_resume_cli_notes(cli: &Cli, repro: &Path, explicit_join_fla
 }
 
 fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
+    if cli.clean_output_dir && cli.join_output_dir.is_some() {
+        anyhow::bail!("--clean-output-dir cannot be used with --join-output-dir.");
+    }
     if let Some(j) = cli.join_output_dir.as_ref() {
         let jexp = expand_user_path(j.to_string_lossy().as_ref());
         let repro = Path::new(&jexp).join(RUN_REPRO_TOML_FILENAME);
@@ -1121,7 +1168,10 @@ fn print_plain_preamble(
 
 fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
     let cfg = SpaceshipConfig::try_load_merged(
-        rs.config.as_ref().or(cli.config.as_ref()).map(|p| p.as_path()),
+        rs.config
+            .as_ref()
+            .or(cli.config.as_ref())
+            .map(|p| p.as_path()),
     )?;
 
     let adata_path = rs
@@ -1457,7 +1507,7 @@ fn resolve_celloracle_network_data_dir(cli: &Cli) -> anyhow::Result<Option<Strin
     Ok(None)
 }
 
-fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
+fn run_celloracle(cli: &Cli, h5ad_input: &std::path::Path) -> anyhow::Result<()> {
     use spacetravlr::celloracle::{
         filter_links_p_max, infer_grn_per_cluster, infer_grn_whole, scale_gem_no_center,
         write_links_as_tf_priors_feather,
@@ -1471,12 +1521,7 @@ fn run_celloracle(cli: &Cli) -> anyhow::Result<()> {
     };
     use std::path::Path;
 
-    let h5ad_arg = cli
-        .celloracle_h5ad
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("--celloracle requires a path argument"))?;
-
-    let h5ad_expanded = expand_user_path(h5ad_arg.to_string_lossy().as_ref());
+    let h5ad_expanded = expand_user_path(h5ad_input.to_string_lossy().as_ref());
 
     let out_base = if let Some(p) = cli
         .celloracle_output_dir
@@ -1765,8 +1810,17 @@ fn main() -> anyhow::Result<()> {
         return run_impute(&cli);
     }
 
-    if cli.celloracle_h5ad.is_some() {
-        return run_celloracle(&cli);
+    if let Some(raw) = cli.celloracle.as_deref() {
+        let h5ad_path = if raw.trim().is_empty() {
+            cli.h5ad.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`--celloracle` without PATH requires `--h5ad PATH` to the AnnData .h5ad"
+                )
+            })?
+        } else {
+            std::path::PathBuf::from(expand_user_path(raw.trim()))
+        };
+        return run_celloracle(&cli, h5ad_path.as_path());
     }
 
     #[cfg(feature = "rctd")]
@@ -1857,6 +1911,14 @@ fn main() -> anyhow::Result<()> {
             default_output_dir_for_adata_path(Path::new(&adata_path_for_stem))?;
     }
     let output_dir_pb = PathBuf::from(expand_user_path(cfg.execution.output_dir.trim()));
+    if cli.clean_output_dir && output_dir_pb.exists() {
+        std::fs::remove_dir_all(&output_dir_pb).with_context(|| {
+            format!(
+                "--clean-output-dir: could not remove {}",
+                output_dir_pb.display()
+            )
+        })?;
+    }
     std::fs::create_dir_all(&output_dir_pb)?;
     cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
 
@@ -2015,6 +2077,8 @@ fn main() -> anyhow::Result<()> {
         condition_split: condition_column.as_deref(),
     });
 
+    let verbose = cli.verbose;
+
     if !use_dashboard {
         print_compute_notice(&compute);
         print_plain_preamble(
@@ -2119,6 +2183,7 @@ fn main() -> anyhow::Result<()> {
                     spaceship_config: &cfg,
                     config_source_path: config_source_path.clone(),
                     join_training,
+                    verbose,
                 };
                 fit_all_genes_dispatch(&params, &compute)?;
             }
@@ -2160,6 +2225,7 @@ fn main() -> anyhow::Result<()> {
                 spaceship_config: &cfg,
                 config_source_path: config_source_path.clone(),
                 join_training,
+                verbose,
             };
             fit_all_genes_dispatch(&params, &compute)?;
         }
@@ -2243,6 +2309,7 @@ fn main() -> anyhow::Result<()> {
                         spaceship_config: &cfg,
                         config_source_path: config_source_for_training.clone(),
                         join_training,
+                        verbose,
                     };
                     fit_all_genes_dispatch(&params, &compute_thread)?;
                 }
@@ -2285,6 +2352,7 @@ fn main() -> anyhow::Result<()> {
                     spaceship_config: &cfg,
                     config_source_path: config_source_for_training,
                     join_training,
+                    verbose,
                 };
                 fit_all_genes_dispatch(&params, &compute_thread)
             }

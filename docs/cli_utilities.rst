@@ -49,8 +49,8 @@ Metadata and priors
 ``--infer-species``
    Prints inferred **human vs. mouse** from gene symbols in ``var`` and exits (requires ``--h5ad``).
 
-``--celloracle PATH``
-   **CellOracle-style TF prior** inference: reads AnnData, runs the Bayesian ridge GRN with SpaceTravLR priors, writes a Feather with ``(source, target, cell_type)``, then exits.
+``--celloracle [PATH]``
+   **CellOracle-style TF prior** inference only: reads AnnData, runs the Bayesian ridge GRN with SpaceTravLR priors, writes a Feather with ``(source, target, cell_type)``, then exits. Pass ``PATH`` to the ``.h5ad``, or omit it and use the same ``--h5ad`` you would use for training.
 
 Related flags:
 

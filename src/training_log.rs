@@ -18,6 +18,8 @@ pub struct ClusterTrainingLogRow {
     pub cnn_epochs_ran: usize,
     pub cnn_mse_first: Option<f64>,
     pub cnn_mse_last: Option<f64>,
+    /// In-sample CNN R² when CNN ran; `None` if column absent (older logs) or not applicable.
+    pub cnn_r2: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +52,14 @@ fn parse_cluster_summary_row(cols: &[&str]) -> Option<ClusterTrainingLogRow> {
     if cols.len() < 10 {
         return None;
     }
+    let cnn_r2 = if cols.len() > 10 {
+        match cols[10] {
+            "NA" | "" => None,
+            s => s.parse::<f64>().ok().filter(|x| x.is_finite()),
+        }
+    } else {
+        None
+    };
     Some(ClusterTrainingLogRow {
         cluster_id: cols[0].parse().ok()?,
         n_cells: cols[1].parse().ok()?,
@@ -61,6 +71,7 @@ fn parse_cluster_summary_row(cols: &[&str]) -> Option<ClusterTrainingLogRow> {
         cnn_epochs_ran: cols[7].parse().ok()?,
         cnn_mse_first: parse_f64_cell(cols[8]),
         cnn_mse_last: parse_f64_cell(cols[9]),
+        cnn_r2,
     })
 }
 
@@ -301,11 +312,11 @@ pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::R
 
     writeln!(
         w,
-        "# summary: cluster_id, n_cells, n_modulators, lasso_r2, lasso_train_mse, lasso_fista_iters, lasso_converged, cnn_epochs_ran, cnn_mse_first, cnn_mse_last"
+        "# summary: cluster_id, n_cells, n_modulators, lasso_r2, lasso_train_mse, lasso_fista_iters, lasso_converged, cnn_epochs_ran, cnn_mse_first, cnn_mse_last, cnn_r2"
     )?;
     writeln!(
         w,
-        "cluster_id\tn_cells\tn_modulators\tlasso_r2\tlasso_train_mse\tlasso_fista_iters\tlasso_converged\tcnn_epochs_ran\tcnn_mse_first\tcnn_mse_last"
+        "cluster_id\tn_cells\tn_modulators\tlasso_r2\tlasso_train_mse\tlasso_fista_iters\tlasso_converged\tcnn_epochs_ran\tcnn_mse_first\tcnn_mse_last\tcnn_r2"
     )?;
 
     for s in summaries {
@@ -319,9 +330,14 @@ pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::R
                 format!("{:.6}", v.last().expect("nonempty")),
             )
         };
+        let cnn_r2_s = if s.cnn_r2.is_finite() {
+            format!("{:.6}", s.cnn_r2)
+        } else {
+            "nan".to_string()
+        };
         writeln!(
             w,
-            "{}\t{}\t{}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}",
             s.cluster_id,
             s.n_cells,
             s.n_modulators,
@@ -332,6 +348,7 @@ pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::R
             ran,
             first_s,
             last_s,
+            cnn_r2_s,
         )?;
     }
 
@@ -362,10 +379,10 @@ learning_rate\t0.0002
 lasso_n_iter_max\t100
 lasso_tol\t0.0001
 
-# summary: cluster_id, n_cells, n_modulators, lasso_r2, lasso_train_mse, lasso_fista_iters, lasso_converged, cnn_epochs_ran, cnn_mse_first, cnn_mse_last
-cluster_id\tn_cells\tn_modulators\tlasso_r2\tlasso_train_mse\tlasso_fista_iters\tlasso_converged\tcnn_epochs_ran\tcnn_mse_first\tcnn_mse_last
-0\t1107\t376\t0.284636\t0.000007\t100\tfalse\t0\tNA\tNA
-1\t841\t376\t0.011789\t0.000004\t100\tfalse\t0\tNA\tNA
+# summary: cluster_id, n_cells, n_modulators, lasso_r2, lasso_train_mse, lasso_fista_iters, lasso_converged, cnn_epochs_ran, cnn_mse_first, cnn_mse_last, cnn_r2
+cluster_id\tn_cells\tn_modulators\tlasso_r2\tlasso_train_mse\tlasso_fista_iters\tlasso_converged\tcnn_epochs_ran\tcnn_mse_first\tcnn_mse_last\tcnn_r2
+0\t1107\t376\t0.284636\t0.000007\t100\tfalse\t0\tNA\tNA\tnan
+1\t841\t376\t0.011789\t0.000004\t100\tfalse\t0\tNA\tNA\tnan
 ";
         let lines: Vec<String> = raw.lines().map(|s| s.to_string()).collect();
         let r = parse_gene_training_log_lines(&lines)

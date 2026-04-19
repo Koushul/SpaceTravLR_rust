@@ -1,4 +1,6 @@
-use crate::betadata::{build_cluster_id_to_betadata_cluster_key_map, write_betadata_feather};
+use crate::betadata::{
+    build_cluster_id_to_betadata_cluster_key_map, obs_series_row_str, write_betadata_feather,
+};
 use crate::cnn_gating::{
     CnnGateDecision, CnnGateGeneInputs, build_neighbors, decide_cnn_for_gene, load_gene_set_file,
     predict_lasso_y,
@@ -9,7 +11,7 @@ use crate::config::{
 };
 use crate::estimator::{
     CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs,
-    finite_or_zero_f64,
+    CnnEpochHudSlot, finite_or_zero_f64,
 };
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -228,19 +230,18 @@ pub fn read_h5ad_var_names(path: &Path) -> anyhow::Result<Vec<String>> {
 
 /// String values for one `adata.obs` column (e.g. `cell_type`, `leiden`).
 pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<String>> {
-    use polars::prelude::*;
     let adata = AnnData::<H5>::open(H5::open(path)?).map_err(|e| anyhow::anyhow!("{}", e))?;
     let obs = adata.read_obs().map_err(|e| anyhow::anyhow!("{}", e))?;
     let col = obs
         .column(key)
         .map_err(|_| anyhow::anyhow!("obs column {:?} missing", key))?;
-    let cast_col = col.cast(&DataType::String)?;
-    let s = cast_col
-        .str()
-        .map_err(|_| anyhow::anyhow!("obs column {:?} could not be cast to string", key))?;
-    let mut out = Vec::with_capacity(s.len());
-    for i in 0..s.len() {
-        out.push(s.get(i).unwrap_or("").to_string());
+    let series = col.as_materialized_series();
+    let mut out = Vec::with_capacity(series.len());
+    for i in 0..series.len() {
+        out.push(
+            obs_series_row_str(series, i)
+                .map_err(|e| anyhow::anyhow!("obs column {:?} row {}: {}", key, i, e))?,
+        );
     }
     adata.close()?;
     Ok(out)
@@ -447,9 +448,9 @@ fn cell_type_label_counts_from_obs(obs_df: &DataFrame) -> Vec<(String, usize)> {
     };
     let series = cell_col.as_materialized_series();
     let mut map: HashMap<String, usize> = HashMap::new();
-    for v in series.iter() {
-        let key = v.to_string();
-        if key != "null" && !key.trim().is_empty() {
+    for i in 0..series.len() {
+        let key = obs_series_row_str(series, i).unwrap_or_default();
+        if !key.trim().is_empty() {
             *map.entry(key).or_insert(0) += 1;
         }
     }
@@ -473,13 +474,10 @@ fn build_cluster_to_cell_type_map(
     let cell_ser = cell_col.as_materialized_series();
 
     let mut counts: HashMap<usize, HashMap<String, usize>> = HashMap::new();
-    for (i, ct) in cell_ser.iter().enumerate() {
-        if i >= cluster_ids.len() {
-            break;
-        }
+    for i in 0..cluster_ids.len().min(cell_ser.len()) {
         let cid = cluster_ids[i];
-        let cell_t = ct.to_string();
-        if cell_t != "null" && !cell_t.trim().is_empty() {
+        let cell_t = obs_series_row_str(cell_ser, i)?;
+        if !cell_t.trim().is_empty() {
             *counts.entry(cid).or_default().entry(cell_t).or_insert(0) += 1;
         }
     }
@@ -715,9 +713,9 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
         .get(&first_c)
         .ok_or_else(|| anyhow::anyhow!("missing model for cluster {}", first_c))?;
     let sc1 = m0.spatial_features_mlp.l1.weight.shape().dims::<2>();
-    let n_clusters_meta = sc1[1] as u32;
+    let n_clusters_meta = sc1[0] as u32;
     let hl2 = m0.mlp.l2.weight.shape().dims::<2>();
-    let n_mods_meta = hl2[0].saturating_sub(1) as u32;
+    let n_mods_meta = hl2[1].saturating_sub(1) as u32;
     npz.add_array(
         "meta_spatial_dim",
         &Array1::from_vec(vec![est.spatial_dim as u32]),
@@ -969,6 +967,37 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
         )?;
 
         npz.add_array(
+            format!("{}spp_proj_weight", p),
+            &Array2::from_shape_vec(
+                (
+                    m.conv_layers.spp_proj.weight.shape().dims::<2>()[0],
+                    m.conv_layers.spp_proj.weight.shape().dims::<2>()[1],
+                ),
+                m.conv_layers
+                    .spp_proj
+                    .weight
+                    .to_data()
+                    .as_slice::<f32>()
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))?
+                    .to_vec(),
+            )?,
+        )?;
+        npz.add_array(
+            format!("{}spp_proj_bias", p),
+            &Array1::from_vec(
+                m.conv_layers
+                    .spp_proj
+                    .bias
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing spp_proj bias"))?
+                    .to_data()
+                    .as_slice::<f32>()
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))?
+                    .to_vec(),
+            ),
+        )?;
+
+        npz.add_array(
             format!("{}spatial_l1_weight", p),
             &Array2::from_shape_vec(
                 (
@@ -1131,9 +1160,586 @@ fn export_cnn_models_npz<AB: AutodiffBackend>(
                     .to_vec(),
             ),
         )?;
+
+        for (suffix, alpha_param) in [
+            ("conv1_prelu_alpha", &m.conv_layers.prelu1.alpha),
+            ("conv2_prelu_alpha", &m.conv_layers.prelu2.alpha),
+            ("conv3_prelu_alpha", &m.conv_layers.prelu3.alpha),
+            (
+                "spatial_l1_prelu_alpha",
+                &m.spatial_features_mlp.prelu1.alpha,
+            ),
+            (
+                "spatial_l2_prelu_alpha",
+                &m.spatial_features_mlp.prelu2.alpha,
+            ),
+            ("head_l1_prelu_alpha", &m.mlp.prelu.alpha),
+        ] {
+            npz.add_array(
+                format!("{}{}", p, suffix),
+                &Array1::from_vec(
+                    alpha_param
+                        .val()
+                        .into_data()
+                        .as_slice::<f32>()
+                        .map_err(|e| anyhow::anyhow!("{:?}", e))?
+                        .to_vec(),
+                ),
+            )?;
+        }
     }
 
     npz.finish()?;
+    Ok(Some(out_str.to_string()))
+}
+
+/// Environment variable controlling the optional CNN parity dump
+/// (see [`export_cnn_parity_npz`]). Set to `1`, `true`, or `on` to enable.
+pub const SPACETRAVLR_DUMP_CNN_PARITY_ENV: &str = "SPACETRAVLR_DUMP_CNN_PARITY";
+
+fn parity_dump_enabled() -> bool {
+    matches!(
+        std::env::var(SPACETRAVLR_DUMP_CNN_PARITY_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
+
+/// When enabled, snapshot the per-cell CNN forward inputs **and** the matching
+/// `model.get_betas` outputs for the first `K = min(N, 256)` cells whose cluster
+/// owns a trained CNN. The dump lives at
+/// `{model_export.output_subdir}/{gene}_cnn_parity.npz` next to the weights and
+/// is consumed by `scripts/python_reference_cnn.py` for numeric parity checks
+/// against the reference Python implementation.
+#[allow(clippy::too_many_arguments)]
+fn export_cnn_parity_npz<AB: AutodiffBackend>(
+    est: &ClusteredGCNNWR<AB>,
+    gene: &str,
+    training_dir: &str,
+    model_export: &ModelExportConfig,
+    excluded_clusters: Option<&HashSet<usize>>,
+    xy: &Array2<f64>,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    cached_spatial: Option<&CachedSpatialData>,
+    device: &<AB as burn::tensor::backend::Backend>::Device,
+) -> anyhow::Result<Option<String>> {
+    use crate::estimator::{create_spatial_features, finite_or_zero_f32, xyc2spatial_fast};
+    use burn::tensor::Tensor;
+    use ndarray::Axis;
+
+    if est.models.is_empty() || !model_export.save_cnn_weights || !parity_dump_enabled() {
+        return Ok(None);
+    }
+    let sub = model_export.output_subdir.trim().trim_matches('/');
+    if sub.is_empty() {
+        anyhow::bail!("model_export.output_subdir is empty");
+    }
+    let model_dir = Path::new(training_dir).join(sub);
+
+    let n_cells = xy.nrows();
+    if n_cells == 0 {
+        return Ok(None);
+    }
+
+    let mut sample_indices: Vec<usize> = Vec::with_capacity(256);
+    for i in 0..n_cells {
+        if sample_indices.len() >= 256 {
+            break;
+        }
+        let c = clusters[i];
+        if !est.models.contains_key(&c) {
+            continue;
+        }
+        if excluded_clusters
+            .map(|excluded| excluded.contains(&c))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        sample_indices.push(i);
+    }
+    if sample_indices.is_empty() {
+        return Ok(None);
+    }
+
+    let owned_sf;
+    let owned_sm;
+    let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
+        (&c.spatial_features, &c.spatial_maps)
+    } else {
+        owned_sf = create_spatial_features(xy, clusters, num_clusters, est.spatial_feature_radius);
+        owned_sm = xyc2spatial_fast(
+            xy,
+            clusters,
+            num_clusters,
+            est.spatial_dim,
+            est.spatial_dim,
+            est.ego_center_spatial_maps,
+        );
+        (&owned_sf, &owned_sm)
+    };
+
+    let h = est.spatial_dim;
+    let k = sample_indices.len();
+    let sm_ch = if est.multi_channel_spatial_maps {
+        num_clusters
+    } else {
+        1
+    };
+    let mut sf_out = Array2::<f32>::zeros((k, num_clusters));
+    let mut sm_out = Array4::<f32>::zeros((k, sm_ch, h, h));
+    let mut betas_out: Option<Array2<f32>> = None;
+    let mut cluster_ids_out: Vec<i32> = Vec::with_capacity(k);
+    let mut cell_indices_out: Vec<i32> = Vec::with_capacity(k);
+
+    let mut by_cluster: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (out_pos, &cell_idx) in sample_indices.iter().enumerate() {
+        let c = clusters[cell_idx];
+        by_cluster.entry(c).or_default().push(out_pos);
+
+        for j in 0..num_clusters {
+            sf_out[[out_pos, j]] = finite_or_zero_f32(spatial_features[[cell_idx, j]] as f32);
+        }
+        if est.multi_channel_spatial_maps {
+            for ch in 0..num_clusters {
+                for r in 0..h {
+                    for cc in 0..h {
+                        sm_out[[out_pos, ch, r, cc]] =
+                            finite_or_zero_f32(spatial_maps[[cell_idx, ch, r, cc]]);
+                    }
+                }
+            }
+        } else {
+            for r in 0..h {
+                for cc in 0..h {
+                    sm_out[[out_pos, 0, r, cc]] =
+                        finite_or_zero_f32(spatial_maps[[cell_idx, c, r, cc]]);
+                }
+            }
+        }
+        cluster_ids_out.push(c as i32);
+        cell_indices_out.push(cell_idx as i32);
+    }
+
+    for (cluster_id, positions) in by_cluster {
+        let model = est
+            .models
+            .get(&cluster_id)
+            .ok_or_else(|| anyhow::anyhow!("missing CNN for cluster {cluster_id}"))?;
+        let nc = positions.len();
+        let mut sf_flat = Vec::with_capacity(nc * num_clusters);
+        let sch = if est.multi_channel_spatial_maps {
+            num_clusters
+        } else {
+            1
+        };
+        let mut sm_flat = Vec::with_capacity(nc * sch * h * h);
+        for &p in &positions {
+            for j in 0..num_clusters {
+                sf_flat.push(sf_out[[p, j]]);
+            }
+            for ch in 0..sch {
+                for r in 0..h {
+                    for cc in 0..h {
+                        sm_flat.push(sm_out[[p, ch, r, cc]]);
+                    }
+                }
+            }
+        }
+        let sf_tensor = Tensor::<AB, 2>::from_data(
+            burn::tensor::TensorData::new(sf_flat, [nc, num_clusters]),
+            device,
+        );
+        let sm_tensor = Tensor::<AB, 4>::from_data(
+            burn::tensor::TensorData::new(sm_flat, [nc, sch, h, h]),
+            device,
+        );
+        let betas = model.get_betas(sm_tensor, sf_tensor);
+        let dim = betas.dims()[1];
+        let betas_data = betas.into_data();
+        let betas_v: &[f32] = betas_data
+            .as_slice::<f32>()
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        let mat = betas_out.get_or_insert_with(|| Array2::<f32>::zeros((k, dim)));
+        anyhow::ensure!(
+            mat.ncols() == dim,
+            "inconsistent beta dim across clusters ({} vs {})",
+            mat.ncols(),
+            dim
+        );
+        for (i, &p) in positions.iter().enumerate() {
+            for j in 0..dim {
+                mat[[p, j]] = finite_or_zero_f32(betas_v[i * dim + j]);
+            }
+        }
+    }
+
+    let betas_mat = betas_out
+        .ok_or_else(|| anyhow::anyhow!("no per-cluster betas were computed for parity dump"))?;
+
+    std::fs::create_dir_all(&model_dir)?;
+    let out_pb = model_dir.join(format!("{}_cnn_parity.npz", sanitize_filename(gene)));
+    let out_str = out_pb
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 path {:?}", out_pb))?;
+
+    let f = File::create(out_str)?;
+    let mut npz = if model_export.compressed_npz {
+        NpzWriter::new_compressed(f)
+    } else {
+        NpzWriter::new(f)
+    };
+
+    npz.add_array("cell_indices", &Array1::from_vec(cell_indices_out))?;
+    npz.add_array("cluster_ids", &Array1::from_vec(cluster_ids_out))?;
+
+    let sf_shape = sf_out.raw_dim();
+    let sf_vec = sf_out
+        .axis_iter(Axis(0))
+        .flat_map(|row| row.iter().copied().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let sf_dump = Array2::from_shape_vec((sf_shape[0], sf_shape[1]), sf_vec)?;
+    npz.add_array("spatial_features", &sf_dump)?;
+
+    let sm_shape = sm_out.raw_dim();
+    let sm_vec: Vec<f32> = sm_out.iter().copied().collect();
+    let sm_dump =
+        Array4::from_shape_vec((sm_shape[0], sm_shape[1], sm_shape[2], sm_shape[3]), sm_vec)?;
+    npz.add_array("spatial_maps_used", &sm_dump)?;
+
+    npz.add_array("betas_rust", &betas_mat)?;
+
+    npz.add_array(
+        "meta_spatial_dim",
+        &Array1::from_vec(vec![est.spatial_dim as u32]),
+    )?;
+    npz.add_array(
+        "meta_n_clusters",
+        &Array1::from_vec(vec![num_clusters as u32]),
+    )?;
+    if let Some(model0) = est.models.values().next() {
+        npz.add_array(
+            "meta_cnn_output_activation",
+            &Array1::from_vec(vec![model0.output_activation as u32]),
+        )?;
+        let dim = betas_mat.ncols();
+        npz.add_array(
+            "meta_n_modulators",
+            &Array1::from_vec(vec![dim.saturating_sub(1) as u32]),
+        )?;
+    }
+
+    npz.finish()?;
+    Ok(Some(out_str.to_string()))
+}
+
+/// Environment variable controlling the optional CNN training-data dump
+/// (see [`export_cnn_train_data_npz`]). Set to `1`, `true`, or `on` to enable.
+pub const SPACETRAVLR_DUMP_CNN_TRAIN_DATA_ENV: &str = "SPACETRAVLR_DUMP_CNN_TRAIN_DATA";
+
+fn train_data_dump_enabled() -> bool {
+    matches!(
+        std::env::var(SPACETRAVLR_DUMP_CNN_TRAIN_DATA_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
+
+/// When enabled (see [`ModelExportConfig::write_cnn_train_data_npz`] or the legacy
+/// `save_cnn_weights` + `SPACETRAVLR_DUMP_CNN_TRAIN_DATA` path), snapshot **every** per-cluster
+/// CNN training input (post-scaling `x`, target `y`, spatial features, single-channel spatial-map
+/// slice that the CNN actually consumes, and the lasso anchor init) plus all hyperparameters needed
+/// to reproduce the fit elsewhere. The dump lives at `{model_export.output_subdir}/{gene}_cnn_train_data.npz`
+/// (with a sibling `_cnn_train_meta.json`) and is consumed by `scripts/python_train_cnn.py` to train
+/// a parallel PyTorch reference and write a matching `{gene}_python_betadata.feather`.
+#[allow(clippy::too_many_arguments)]
+fn export_cnn_train_data_npz<AB: AutodiffBackend, AnB: Backend>(
+    est: &ClusteredGCNNWR<AB>,
+    estimator: &SpatialCellularProgramsEstimator<AB, AnB>,
+    gene: &str,
+    training_dir: &str,
+    model_export: &ModelExportConfig,
+    excluded_clusters: Option<&HashSet<usize>>,
+    xy: &Array2<f64>,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    cached_spatial: Option<&CachedSpatialData>,
+    obs_names: &[String],
+    scale_modulators: bool,
+    unscale_betas_on_export: bool,
+    cnn: &CnnConfig,
+    learning_rate: f64,
+    epochs: usize,
+) -> anyhow::Result<Option<String>> {
+    use crate::estimator::{create_spatial_features, finite_or_zero_f32, xyc2spatial_fast};
+    use ndarray::Axis;
+
+    let write_for_python = model_export.write_cnn_train_data_npz;
+    let write_via_dump_env = model_export.save_cnn_weights && train_data_dump_enabled();
+    if est.models.is_empty() || (!write_for_python && !write_via_dump_env) {
+        return Ok(None);
+    }
+    let sub = model_export.output_subdir.trim().trim_matches('/');
+    if sub.is_empty() {
+        anyhow::bail!("model_export.output_subdir is empty");
+    }
+    let model_dir = Path::new(training_dir).join(sub);
+
+    let mut cluster_ids: Vec<usize> = est
+        .models
+        .keys()
+        .copied()
+        .filter(|c| !excluded_clusters.map(|ex| ex.contains(c)).unwrap_or(false))
+        .collect();
+    cluster_ids.sort_unstable();
+    if cluster_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let (mut x_mat, y_vec) = estimator.build_x_modulators_and_target_y(xy)?;
+    if scale_modulators {
+        if let Some(scales) = estimator.modulator_scales.as_ref() {
+            apply_modulator_scales_inplace(&mut x_mat, scales);
+        }
+    }
+    let n_obs = x_mat.nrows();
+    anyhow::ensure!(
+        clusters.len() == n_obs,
+        "clusters len {} != n_obs {}",
+        clusters.len(),
+        n_obs
+    );
+    anyhow::ensure!(
+        obs_names.len() == n_obs,
+        "obs_names len {} != n_obs {}",
+        obs_names.len(),
+        n_obs
+    );
+    let n_mods = x_mat.ncols();
+
+    let owned_sf;
+    let owned_sm;
+    let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
+        (&c.spatial_features, &c.spatial_maps)
+    } else {
+        owned_sf = create_spatial_features(xy, clusters, num_clusters, est.spatial_feature_radius);
+        owned_sm = xyc2spatial_fast(
+            xy,
+            clusters,
+            num_clusters,
+            est.spatial_dim,
+            est.spatial_dim,
+            cnn.ego_center_spatial_maps,
+        );
+        (&owned_sf, &owned_sm)
+    };
+    let h = est.spatial_dim;
+
+    std::fs::create_dir_all(&model_dir)?;
+    let out_pb = model_dir.join(format!("{}_cnn_train_data.npz", sanitize_filename(gene)));
+    let out_str = out_pb
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 path {:?}", out_pb))?;
+    let f = File::create(out_str)?;
+    let mut npz = if model_export.compressed_npz {
+        NpzWriter::new_compressed(f)
+    } else {
+        NpzWriter::new(f)
+    };
+
+    npz.add_array(
+        "cluster_ids",
+        &Array1::from_vec(cluster_ids.iter().map(|&x| x as i32).collect::<Vec<_>>()),
+    )?;
+    npz.add_array(
+        "meta_spatial_dim",
+        &Array1::from_vec(vec![est.spatial_dim as u32]),
+    )?;
+    npz.add_array(
+        "meta_n_clusters",
+        &Array1::from_vec(vec![num_clusters as u32]),
+    )?;
+    npz.add_array("meta_n_modulators", &Array1::from_vec(vec![n_mods as u32]))?;
+    if let Some(model0) = est.models.values().next() {
+        npz.add_array(
+            "meta_cnn_output_activation",
+            &Array1::from_vec(vec![model0.output_activation as u32]),
+        )?;
+    }
+    npz.add_array("meta_epochs", &Array1::from_vec(vec![epochs as u32]))?;
+    npz.add_array(
+        "meta_cnn_minibatch_size",
+        &Array1::from_vec(vec![cnn.cnn_minibatch_size as u32]),
+    )?;
+    npz.add_array("meta_learning_rate", &Array1::from_vec(vec![learning_rate]))?;
+    npz.add_array("meta_adam_beta_1", &Array1::from_vec(vec![cnn.adam_beta_1]))?;
+    npz.add_array("meta_adam_beta_2", &Array1::from_vec(vec![cnn.adam_beta_2]))?;
+    npz.add_array(
+        "meta_adam_epsilon",
+        &Array1::from_vec(vec![cnn.adam_epsilon]),
+    )?;
+    npz.add_array(
+        "meta_weight_decay",
+        &Array1::from_vec(vec![cnn.weight_decay.unwrap_or(f64::NAN)]),
+    )?;
+    npz.add_array(
+        "meta_grad_clip_norm",
+        &Array1::from_vec(vec![cnn.grad_clip_norm.unwrap_or(f64::NAN)]),
+    )?;
+    npz.add_array(
+        "meta_mean_beta_lasso_prior_weight",
+        &Array1::from_vec(vec![cnn.mean_beta_lasso_prior_weight]),
+    )?;
+    npz.add_array(
+        "meta_scale_modulators",
+        &Array1::from_vec(vec![u32::from(scale_modulators)]),
+    )?;
+    npz.add_array(
+        "meta_unscale_betas_on_export",
+        &Array1::from_vec(vec![u32::from(unscale_betas_on_export)]),
+    )?;
+
+    let scales_vec: Vec<f64> = match estimator.modulator_scales.as_ref() {
+        Some(s) => s.iter().copied().collect(),
+        None => vec![1.0; n_mods],
+    };
+    npz.add_array("modulator_scales", &Array1::from_vec(scales_vec))?;
+
+    for &c_id in &cluster_ids {
+        let indices: Vec<usize> = (0..n_obs).filter(|&i| clusters[i] == c_id).collect();
+        if indices.is_empty() {
+            continue;
+        }
+        let nc = indices.len();
+        let prefix = format!("c{:04}_", c_id);
+
+        npz.add_array(
+            format!("{prefix}cell_indices").as_str(),
+            &Array1::from_vec(indices.iter().map(|&i| i as i32).collect::<Vec<_>>()),
+        )?;
+
+        let x_c = x_mat.select(Axis(0), &indices);
+        let mut x_c = x_c;
+        if let Some(mask) = est
+            .regulator_masks_by_cluster
+            .as_ref()
+            .and_then(|m| m.get(&c_id))
+        {
+            for (j, allowed) in mask.iter().copied().enumerate().take(x_c.ncols()) {
+                if !allowed {
+                    x_c.column_mut(j).fill(0.0);
+                }
+            }
+        }
+        let x_f32: Vec<f32> = x_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect();
+        let x_arr = Array2::from_shape_vec((nc, n_mods), x_f32)?;
+        npz.add_array(format!("{prefix}x_scaled").as_str(), &x_arr)?;
+
+        let y_c = y_vec.select(Axis(0), &indices);
+        let y_f32: Vec<f32> = y_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect();
+        npz.add_array(format!("{prefix}y").as_str(), &Array1::from_vec(y_f32))?;
+
+        let sf_c = spatial_features.select(Axis(0), &indices);
+        let sf_f32: Vec<f32> = sf_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect();
+        let sf_arr = Array2::from_shape_vec((nc, num_clusters), sf_f32)?;
+        npz.add_array(format!("{prefix}spatial_features").as_str(), &sf_arr)?;
+
+        let sm_ch = if cnn.multi_channel_spatial_maps {
+            num_clusters
+        } else {
+            1
+        };
+        let mut sm_arr = Array4::<f32>::zeros((nc, sm_ch, h, h));
+        for (out_pos, &cell_idx) in indices.iter().enumerate() {
+            if cnn.multi_channel_spatial_maps {
+                for ch in 0..num_clusters {
+                    for r in 0..h {
+                        for cc in 0..h {
+                            sm_arr[[out_pos, ch, r, cc]] =
+                                finite_or_zero_f32(spatial_maps[[cell_idx, ch, r, cc]]);
+                        }
+                    }
+                }
+            } else {
+                for r in 0..h {
+                    for cc in 0..h {
+                        sm_arr[[out_pos, 0, r, cc]] =
+                            finite_or_zero_f32(spatial_maps[[cell_idx, c_id, r, cc]]);
+                    }
+                }
+            }
+        }
+        npz.add_array(format!("{prefix}spatial_maps_used").as_str(), &sm_arr)?;
+
+        let intercept = *est
+            .lasso_intercepts
+            .get(&c_id)
+            .ok_or_else(|| anyhow::anyhow!("missing lasso intercept for cluster {c_id}"))?;
+        let coef = est
+            .lasso_coefficients
+            .get(&c_id)
+            .ok_or_else(|| anyhow::anyhow!("missing lasso coef for cluster {c_id}"))?;
+        let mut anchors = Vec::with_capacity(n_mods + 1);
+        anchors.push(finite_or_zero_f32(intercept as f32));
+        for v in coef.column(0).iter() {
+            anchors.push(finite_or_zero_f32(*v as f32));
+        }
+        anyhow::ensure!(
+            anchors.len() == n_mods + 1,
+            "anchors len {} != n_mods+1 ({})",
+            anchors.len(),
+            n_mods + 1
+        );
+        npz.add_array(
+            format!("{prefix}anchors_init").as_str(),
+            &Array1::from_vec(anchors),
+        )?;
+    }
+
+    npz.finish()?;
+
+    let meta_pb = model_dir.join(format!("{}_cnn_train_meta.json", sanitize_filename(gene)));
+    let activation_str = match cnn.output_activation {
+        crate::config::CnnOutputActivation::Identity => "identity",
+        crate::config::CnnOutputActivation::Sigmoid => "sigmoid",
+        crate::config::CnnOutputActivation::Tanh => "tanh",
+        crate::config::CnnOutputActivation::SigmoidX2 => "sigmoid-x2",
+    };
+    let meta = serde_json::json!({
+        "gene": gene,
+        "n_clusters": num_clusters,
+        "n_modulators": n_mods,
+        "spatial_dim": est.spatial_dim,
+        "output_activation": activation_str,
+        "epochs": epochs,
+        "learning_rate": learning_rate,
+        "adam_beta_1": cnn.adam_beta_1,
+        "adam_beta_2": cnn.adam_beta_2,
+        "adam_epsilon": cnn.adam_epsilon,
+        "weight_decay": cnn.weight_decay,
+        "grad_clip_norm": cnn.grad_clip_norm,
+        "mean_beta_lasso_prior_weight": cnn.mean_beta_lasso_prior_weight,
+        "cnn_minibatch_size": cnn.cnn_minibatch_size,
+        "scale_modulators": scale_modulators,
+        "unscale_betas_on_export": unscale_betas_on_export,
+        "modulator_names": estimator.modulators_genes,
+        "regulators": estimator.regulators,
+        "lr_pairs": estimator.lr_pairs,
+        "tfl_pairs": estimator.tfl_pairs,
+        "extra_modulators": estimator.extra_modulators,
+        "obs_names": obs_names,
+        "cluster_ids": cluster_ids.iter().map(|&c| c as u32).collect::<Vec<_>>(),
+    });
+    let mf = File::create(&meta_pb)?;
+    serde_json::to_writer(mf, &meta)?;
+
     Ok(Some(out_str.to_string()))
 }
 
@@ -1342,8 +1948,8 @@ pub fn patch_adata_var_mean_lasso_r2_locked(
             Ok(true) => {
                 return patch_adata_var_mean_lasso_r2_merged(h5ad_path, accum, Some(training_dir))
                     .with_context(|| {
-                    format!("patch var scores while holding {}", lock_path.display())
-                });
+                        format!("patch var scores while holding {}", lock_path.display())
+                    });
             }
             Ok(false) => {}
             Err(e) => {
@@ -1745,6 +2351,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         spaceship_config: &SpaceshipConfig,
         config_source_path: Option<PathBuf>,
         join_training: bool,
+        verbose: bool,
         mean_r2_accum_parent: Option<MeanLassoR2Accum>,
         device: &AB::Device,
     ) -> anyhow::Result<()>
@@ -2094,6 +2701,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     num_clusters,
                     spatial_dim,
                     spatial_dim,
+                    cnn.ego_center_spatial_maps,
                 ),
             });
             pipeline_step_end(&hud, "precompute shared spatial feature tensors", t_sp);
@@ -2287,6 +2895,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let model_export_w = model_export.clone();
                 let collect_top_k = hybrid_collect_top_k;
                 let mean_r2_accum_w = mean_r2_accum.clone();
+                let verbose_w = verbose;
 
                 let handle = thread::Builder::new()
                     .stack_size(8 * 1024 * 1024)
@@ -2550,6 +3159,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     }
                                 }
                             };
+                            let cnn_epoch_slot_fit = if worker_run_full_cnn {
+                                hud.as_ref().and_then(|h| {
+                                    h.lock()
+                                        .ok()
+                                        .map(|mut g| g.ensure_gene_cnn_epoch_slot(&gene, epochs))
+                                })
+                            } else {
+                                None
+                            };
                             let fit_ok = estimator
                                 .fit_with_cache(
                                     &xy,
@@ -2567,6 +3185,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     &cnn_w,
                                     &device,
                                     Some(cached_spatial.as_ref()),
+                                    cnn_epoch_slot_fit,
                                     &mut on_lasso_progress,
                                 )
                                 .is_ok();
@@ -2574,6 +3193,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 if let Some(hh) = hud.as_ref() {
                                     if let Ok(mut g) = hh.lock() {
                                         g.clear_gene_lasso_cluster_progress(&gene);
+                                        g.clear_gene_cnn_epoch_slot(&gene);
                                     }
                                 }
                             }
@@ -2649,6 +3269,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 } else if decision.use_cnn {
                                                     if let Some(inn) = estimator.estimator.as_mut()
                                                     {
+                                                        let cnn_epoch_slot_refine = hud
+                                                            .as_ref()
+                                                            .and_then(|h| {
+                                                                h.lock().ok().map(|mut g| {
+                                                                    g.ensure_gene_cnn_epoch_slot(
+                                                                        &gene,
+                                                                        epochs,
+                                                                    )
+                                                                })
+                                                            });
                                                         inn.fit_cnn_refinement(
                                                             ClusteredGcnNwrCnnRefineInputs {
                                                                 x: &x_mat,
@@ -2663,6 +3293,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                                 cached_spatial: Some(
                                                                     cached_spatial.as_ref(),
                                                                 ),
+                                                                cnn_epoch_slot: cnn_epoch_slot_refine,
                                                             },
                                                         );
                                                     }
@@ -2688,10 +3319,49 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             }
 
+                            if verbose_w && fit_ok {
+                                if let Some(est_inner) = estimator.estimator.as_ref() {
+                                    for s in &est_inner.cluster_training_summaries {
+                                        let lasso_pass = s.lasso_r2.is_finite()
+                                            && s.lasso_r2 >= score_threshold;
+                                        let has_cnn =
+                                            est_inner.models.contains_key(&s.cluster_id);
+                                        let cnn_disp = if s.cnn_r2.is_finite() {
+                                            format!("{:.6}", s.cnn_r2)
+                                        } else {
+                                            "nan".into()
+                                        };
+                                        let cnn_pass = has_cnn
+                                            && s.cnn_r2.is_finite()
+                                            && s.cnn_r2 >= score_threshold;
+                                        let skip_cnn_npz_weights = !lasso_pass
+                                            || (export_per_cell
+                                                && has_cnn
+                                                && (!s.cnn_r2.is_finite()
+                                                    || s.cnn_r2 < score_threshold));
+                                        eprintln!(
+                                            "[verbose] gene={} cluster={} n_cells={} n_mods={} lasso_r2={:.6} lasso_pass={} cnn_r2={} cnn_model={} cnn_pass={} skip_cnn_npz_weights={} threshold={:.6}",
+                                            gene,
+                                            s.cluster_id,
+                                            s.n_cells,
+                                            s.n_modulators,
+                                            s.lasso_r2,
+                                            lasso_pass,
+                                            cnn_disp,
+                                            has_cnn,
+                                            cnn_pass,
+                                            skip_cnn_npz_weights,
+                                            score_threshold
+                                        );
+                                    }
+                                }
+                            }
+
                             let mut wrote = false;
                             let mut orphan_zero_mod_betas = false;
                             let mut bad_lasso_r2_clusters: HashSet<usize> = HashSet::new();
                             let mut bad_betadata_clusters: HashSet<usize> = HashSet::new();
+                            let mut skip_cnn_weight_export_clusters: HashSet<usize> = HashSet::new();
                             let mut n_betadata_beta_columns: Option<usize> = None;
                             if fit_ok {
                                 if let Some(est_inner) = estimator.estimator.as_mut() {
@@ -2700,14 +3370,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             bad_lasso_r2_clusters.insert(s.cluster_id);
                                             bad_betadata_clusters.insert(s.cluster_id);
                                             s.lasso_r2 = 0.0;
-                                        }
-                                        if export_per_cell
-                                            && est_inner.models.contains_key(&s.cluster_id)
-                                            && (!s.cnn_r2.is_finite()
-                                                || s.cnn_r2 < score_threshold)
-                                        {
-                                            bad_betadata_clusters.insert(s.cluster_id);
-                                            s.cnn_r2 = 0.0;
                                         }
                                     }
                                     for &cid in &bad_lasso_r2_clusters {
@@ -2719,9 +3381,22 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             coef.fill(0.0);
                                         }
                                     }
+                                    skip_cnn_weight_export_clusters = bad_lasso_r2_clusters.clone();
+                                    if export_per_cell {
+                                        for s in &est_inner.cluster_training_summaries {
+                                            if est_inner.models.contains_key(&s.cluster_id)
+                                                && (!s.cnn_r2.is_finite()
+                                                    || s.cnn_r2 < score_threshold)
+                                            {
+                                                skip_cnn_weight_export_clusters
+                                                    .insert(s.cluster_id);
+                                            }
+                                        }
+                                    }
                                     if let Some(ref h) = hud {
                                         if let Ok(mut g) = h.lock() {
                                             g.clear_gene_lasso_cluster_progress(&gene);
+                                            g.clear_gene_cnn_epoch_slot(&gene);
                                             g.set_gene_status(&gene, format!("write | {n_mods} m"));
                                         }
                                     }
@@ -2967,7 +3642,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             &gene,
                                             &training_dir,
                                             &model_export_w,
-                                            Some(&bad_betadata_clusters),
+                                            Some(&skip_cnn_weight_export_clusters),
                                         ) {
                                             Ok(Some(path)) => {
                                                 log_line(
@@ -2984,6 +3659,77 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                         gene, e
                                                     ),
                                                 );
+                                            }
+                                        }
+                                        match export_cnn_parity_npz(
+                                            est,
+                                            &gene,
+                                            &training_dir,
+                                            &model_export_w,
+                                            Some(&skip_cnn_weight_export_clusters),
+                                            &xy,
+                                            &clusters,
+                                            num_clusters,
+                                            Some(cached_spatial.as_ref()),
+                                            &device,
+                                        ) {
+                                            Ok(Some(path)) => {
+                                                log_line(
+                                                    &hud,
+                                                    format!(">> wrote cnn parity {}", path),
+                                                );
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                log_line(
+                                                    &hud,
+                                                    format!(
+                                                        ">> warn (cnn parity dump) {}: {}",
+                                                        gene, e
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if wrote && export_per_cell {
+                                        if let Some(est) = estimator.estimator.as_ref() {
+                                            match export_cnn_train_data_npz(
+                                                est,
+                                                &estimator,
+                                                &gene,
+                                                &training_dir,
+                                                &model_export_w,
+                                                Some(&skip_cnn_weight_export_clusters),
+                                                &xy,
+                                                &clusters,
+                                                num_clusters,
+                                                Some(cached_spatial.as_ref()),
+                                                obs_names.as_ref(),
+                                                scale_modulators_w,
+                                                unscale_betas_on_export_w,
+                                                &cnn_w,
+                                                learning_rate,
+                                                epochs,
+                                            ) {
+                                                Ok(Some(path)) => {
+                                                    log_line(
+                                                        &hud,
+                                                        format!(
+                                                            ">> wrote cnn train data {}",
+                                                            path
+                                                        ),
+                                                    );
+                                                }
+                                                Ok(None) => {}
+                                                Err(e) => {
+                                                    log_line(
+                                                        &hud,
+                                                        format!(
+                                                            ">> warn (cnn train data dump) {}: {}",
+                                                            gene, e
+                                                        ),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -3168,6 +3914,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             spaceship_config,
                             config_source_path.clone(),
                             join_training,
+                            verbose,
                             Some(mean_lasso_accum_ensure_cnn_scores(
                                 mean_r2_accum.clone(),
                                 all_var_names.len(),
@@ -3404,14 +4151,14 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn fit_with_cache<F: FnMut(usize, usize)>(
+    pub fn fit_with_cache<F: FnMut(usize, usize) + Send>(
         &mut self,
         xy: &Array2<f64>,
         clusters: &Array1<usize>,
         num_clusters: usize,
         epochs: usize,
         learning_rate: f64,
-        _score_threshold: f64,
+        score_threshold: f64,
         l1_reg: f64,
         group_reg: f64,
         n_iter: usize,
@@ -3421,6 +4168,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         cnn: &CnnConfig,
         device: &AB::Device,
         cached_spatial: Option<&CachedSpatialData>,
+        cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
         lasso_progress: F,
     ) -> anyhow::Result<()> {
         let (mut x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
@@ -3445,8 +4193,13 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 tol,
                 ..Default::default()
             };
-            let mut est =
-                ClusteredGCNNWR::new(params, self.spatial_dim, cnn.spatial_feature_radius);
+            let mut est = ClusteredGCNNWR::new(
+                params,
+                self.spatial_dim,
+                cnn.spatial_feature_radius,
+                cnn.ego_center_spatial_maps,
+                cnn.multi_channel_spatial_maps,
+            );
             est.group_reg_vec = self.group_reg_vec.clone();
             est.regulator_masks_by_cluster = self.regulator_masks_by_cluster.clone();
             self.estimator = Some(est);
@@ -3463,9 +4216,11 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     device,
                     epochs,
                     learning_rate,
+                    score_threshold,
                     seed_only: self.seed_only,
                     cnn,
                     cached_spatial,
+                    cnn_epoch_slot,
                 },
                 lasso_progress,
             );
@@ -3518,6 +4273,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             estimator_type,
             &cnn,
             device,
+            None,
             None,
             |_, _| {},
         )
@@ -4086,7 +4842,9 @@ mod mean_lasso_r2_patch_tests {
                             .into(),
                     ])?;
                     a.set_obs(obs)?;
-                    let var = DataFrame::new(vec![Series::new("gene_ids".into(), vec!["g0", "g1"]).into()])?;
+                    let var = DataFrame::new(vec![
+                        Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
+                    ])?;
                     a.set_var(var)?;
                     let dense = Array2::from_elem((2, 2), 0.5f64);
                     let csr = dense_to_csr_f64(&dense)?;

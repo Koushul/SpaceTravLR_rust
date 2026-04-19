@@ -1,6 +1,8 @@
 use anndata::{AnnData, AnnDataOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::Context;
+
+use crate::betadata::obs_series_row_str;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,10 +206,11 @@ pub fn prepare_condition_splits(
         )
     })?;
 
+    let series = condition_series.as_materialized_series();
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (idx, v) in condition_series.as_materialized_series().iter().enumerate() {
-        let raw = v.to_string();
-        let label = if raw == "null" || raw.trim().is_empty() {
+    for idx in 0..series.len() {
+        let raw = obs_series_row_str(series, idx).unwrap_or_default();
+        let label = if raw.trim().is_empty() {
             "_na".to_string()
         } else {
             raw

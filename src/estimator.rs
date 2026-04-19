@@ -1,4 +1,4 @@
-use crate::config::CnnConfig;
+use crate::config::{CnnConfig, CnnLrSchedule};
 use crate::lasso::{GroupLasso, GroupLassoParams};
 use crate::model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 use burn::grad_clipping::GradientClippingConfig;
@@ -8,21 +8,55 @@ use burn::prelude::*;
 use burn::tensor::ElementConversion;
 use burn::tensor::backend::AutodiffBackend;
 use ndarray::{Array1, Array2, Array4, ArrayView1, Axis, s};
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Vision path uses `Conv2d` with one input channel. Take only the map for the cluster being
-/// trained (`cluster_id`), matching Python `RotatedTensorDataset`:
-/// `sp_maps[idx, cluster : cluster + 1, :, :]`.
+/// Concurrent group-lasso fits per gene (CPU); CNN remains sequential on the device.
+const GROUP_LASSO_MAX_CONCURRENT: usize = 4;
+
 fn spatial_maps_for_cluster_cnn(
     spatial_maps: &Array4<f32>,
     row_indices: &[usize],
     cluster_id: usize,
 ) -> Array4<f32> {
-    spatial_maps
-        .select(Axis(0), row_indices)
-        .slice(s![.., cluster_id..cluster_id + 1, .., ..])
-        .to_owned()
+    let k = row_indices.len();
+    if k == 0 {
+        return Array4::zeros((0, 1, spatial_maps.shape()[2], spatial_maps.shape()[3]));
+    }
+    let h = spatial_maps.shape()[2];
+    let w = spatial_maps.shape()[3];
+    let mut out = Array4::<f32>::zeros((k, 1, h, w));
+    for (out_i, &src_i) in row_indices.iter().enumerate() {
+        out.slice_mut(s![out_i, 0, .., ..])
+            .assign(&spatial_maps.slice(s![src_i, cluster_id, .., ..]));
+    }
+    out
+}
+
+fn spatial_maps_all_clusters_for_cnn(
+    spatial_maps: &Array4<f32>,
+    row_indices: &[usize],
+) -> Array4<f32> {
+    let k = row_indices.len();
+    let nc = spatial_maps.shape()[1];
+    let h = spatial_maps.shape()[2];
+    let w = spatial_maps.shape()[3];
+    if k == 0 {
+        return Array4::zeros((0, nc, h, w));
+    }
+    let mut out = Array4::<f32>::zeros((k, nc, h, w));
+    for (out_i, &src_i) in row_indices.iter().enumerate() {
+        out.slice_mut(s![out_i, .., .., ..])
+            .assign(&spatial_maps.slice(s![src_i, .., .., ..]));
+    }
+    out
 }
 
 /// Precomputed spatial data shared across all per-gene training runs.
@@ -37,7 +71,7 @@ pub(crate) fn finite_or_zero_f64(x: f64) -> f64 {
 }
 
 #[inline]
-fn finite_or_zero_f32(x: f32) -> f32 {
+pub fn finite_or_zero_f32(x: f32) -> f32 {
     if x.is_finite() { x } else { 0.0 }
 }
 
@@ -73,6 +107,102 @@ fn r2_score_from_pred_slice(y_true: ArrayView1<f64>, y_pred: &[f32]) -> f64 {
     r2_in_sample_from_residuals(n, ss_tot, ss_res)
 }
 
+fn cnn_lr_for_epoch(
+    base_lr: f64,
+    epoch: usize,
+    total_epochs: usize,
+    schedule: CnnLrSchedule,
+    warmup_epochs: usize,
+    cosine_min_ratio: f64,
+) -> f64 {
+    if total_epochs == 0 {
+        return base_lr;
+    }
+    let w = warmup_epochs.min(total_epochs);
+    if w > 0 && epoch < w {
+        return base_lr * (epoch + 1) as f64 / w as f64;
+    }
+    match schedule {
+        CnnLrSchedule::Constant => base_lr,
+        CnnLrSchedule::Cosine => {
+            let post = total_epochs.saturating_sub(w).max(1);
+            let t = (epoch.saturating_sub(w)) as f64 / post.saturating_sub(1).max(1) as f64;
+            let lr_min = base_lr * cosine_min_ratio;
+            lr_min + (base_lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * t).cos())
+        }
+    }
+}
+
+fn lasso_pred_align_weight_epoch(cnn: &CnnConfig, epoch: usize, total_epochs: usize) -> f32 {
+    if cnn.lasso_pred_align_weight <= 0.0 {
+        return 0.0;
+    }
+    let w0 = cnn.lasso_pred_align_weight as f32;
+    if cnn.lasso_pred_align_linear_decay && total_epochs > 1 {
+        let denom = total_epochs.saturating_sub(1).max(1) as f32;
+        w0 * (1.0 - (epoch as f32) / denom)
+    } else {
+        w0
+    }
+}
+
+fn y_lasso_tensor_from_xy<B: AutodiffBackend>(
+    x_c: &Array2<f64>,
+    intercept: f64,
+    lasso_coef: &Array2<f64>,
+    device: &B::Device,
+) -> Tensor<B, 1> {
+    let cluster_n = x_c.nrows();
+    let n_mods = lasso_coef.nrows();
+    let mut v = Vec::with_capacity(cluster_n);
+    for i in 0..cluster_n {
+        let mut s = intercept;
+        for j in 0..n_mods {
+            s += x_c[[i, j]] * lasso_coef[[j, 0]];
+        }
+        v.push(finite_or_zero_f32(s as f32));
+    }
+    Tensor::<B, 1>::from_data(burn::tensor::TensorData::new(v, [cluster_n]), device)
+}
+
+fn cnn_training_loss<B: AutodiffBackend>(
+    model: &CellularNicheNetwork<B>,
+    sm_tensor: Tensor<B, 4>,
+    x_tensor: Tensor<B, 2>,
+    sf_tensor: Tensor<B, 2>,
+    y_tensor: Tensor<B, 1>,
+    mean_beta_lasso_prior_weight: f32,
+    y_lasso_tensor: Option<Tensor<B, 1>>,
+    lasso_pred_align_weight: f32,
+) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    let betas = model.get_betas(sm_tensor, sf_tensor);
+    let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), x_tensor);
+    let y_loss = burn::nn::loss::MseLoss::new().forward(
+        y_pred.clone(),
+        y_tensor,
+        burn::nn::loss::Reduction::Mean,
+    );
+    let mut total = y_loss.clone();
+    if mean_beta_lasso_prior_weight > 0.0 {
+        let mean_betas = betas.mean_dim(0);
+        let lasso_row = model.anchors.clone().unsqueeze_dim(0);
+        let prior = burn::nn::loss::MseLoss::new().forward(
+            mean_betas,
+            lasso_row,
+            burn::nn::loss::Reduction::Mean,
+        );
+        total = total + prior.mul_scalar(mean_beta_lasso_prior_weight);
+    }
+    if lasso_pred_align_weight > 0.0 {
+        if let Some(yl) = y_lasso_tensor {
+            let align =
+                burn::nn::loss::MseLoss::new().forward(y_pred, yl, burn::nn::loss::Reduction::Mean);
+            total = total + align.mul_scalar(lasso_pred_align_weight);
+        }
+    }
+    (total, y_loss)
+}
+
 fn cnn_r2_from_forward<B: AutodiffBackend>(
     model: &CellularNicheNetwork<B>,
     sm_tensor: Tensor<B, 4>,
@@ -87,6 +217,226 @@ fn cnn_r2_from_forward<B: AutodiffBackend>(
         Err(_) => return f64::NAN,
     };
     r2_score_from_pred_slice(y_true, pred)
+}
+
+fn gather_rows_4_f32(a: &Array4<f32>, idx: &[usize]) -> Array4<f32> {
+    if idx.is_empty() {
+        let sh = a.shape();
+        return Array4::zeros((0, sh[1], sh[2], sh[3]));
+    }
+    let c = a.shape()[1];
+    let h = a.shape()[2];
+    let w = a.shape()[3];
+    let mut out = Array4::<f32>::zeros((idx.len(), c, h, w));
+    for (oi, &i) in idx.iter().enumerate() {
+        out.slice_mut(s![oi, .., .., ..])
+            .assign(&a.slice(s![i, .., .., ..]));
+    }
+    out
+}
+
+fn gather_rows_2_f64(a: &Array2<f64>, idx: &[usize]) -> Array2<f64> {
+    let cols = a.ncols();
+    let mut out = Array2::zeros((idx.len(), cols));
+    for (oi, &i) in idx.iter().enumerate() {
+        out.row_mut(oi).assign(&a.row(i));
+    }
+    out
+}
+
+fn gather_rows_1_f64(a: &Array1<f64>, idx: &[usize]) -> Array1<f64> {
+    Array1::from_vec(idx.iter().map(|&i| a[i]).collect())
+}
+
+fn gather_y_lasso_batch<B: AutodiffBackend>(
+    full: &Tensor<B, 1>,
+    idx: &[usize],
+    device: &B::Device,
+) -> Tensor<B, 1> {
+    let sl = full
+        .clone()
+        .into_data()
+        .as_slice::<f32>()
+        .expect("y_lasso f32")
+        .to_vec();
+    let v: Vec<f32> = idx.iter().map(|&i| finite_or_zero_f32(sl[i])).collect();
+    Tensor::from_data(burn::tensor::TensorData::new(v, [idx.len()]), device)
+}
+
+fn tensor_from_sm<B: AutodiffBackend>(a: &Array4<f32>, device: &B::Device) -> Tensor<B, 4> {
+    let (b, c, h, w) = (a.shape()[0], a.shape()[1], a.shape()[2], a.shape()[3]);
+    Tensor::from_data(
+        burn::tensor::TensorData::new(
+            a.iter().cloned().map(finite_or_zero_f32).collect(),
+            [b, c, h, w],
+        ),
+        device,
+    )
+}
+
+fn tensor_from_x<B: AutodiffBackend>(a: &Array2<f64>, device: &B::Device) -> Tensor<B, 2> {
+    let (r, c) = (a.nrows(), a.ncols());
+    Tensor::from_data(
+        burn::tensor::TensorData::new(
+            a.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
+            [r, c],
+        ),
+        device,
+    )
+}
+
+fn tensor_from_y<B: AutodiffBackend>(a: &Array1<f64>, device: &B::Device) -> Tensor<B, 1> {
+    let n = a.len();
+    Tensor::from_data(
+        burn::tensor::TensorData::new(
+            a.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
+            [n],
+        ),
+        device,
+    )
+}
+
+fn train_cluster_cnn_epochs<B: AutodiffBackend>(
+    mut model: CellularNicheNetwork<B>,
+    device: &B::Device,
+    sm_c: &Array4<f32>,
+    x_c: &Array2<f64>,
+    sf_c: &Array2<f64>,
+    y_c: &Array1<f64>,
+    cluster_n: usize,
+    cluster_id: usize,
+    y_lasso_opt: Option<Tensor<B, 1>>,
+    beta_prior_w: f32,
+    cnn: &CnnConfig,
+    learning_rate: f64,
+    epochs: usize,
+    cnn_epoch_slot: Option<&Arc<CnnEpochHudSlot>>,
+) -> (CellularNicheNetwork<B>, Vec<f32>, bool) {
+    let mut adam = AdamConfig::new()
+        .with_beta_1(cnn.adam_beta_1 as f32)
+        .with_beta_2(cnn.adam_beta_2 as f32)
+        .with_epsilon(cnn.adam_epsilon as f32);
+    if let Some(wd) = cnn.weight_decay {
+        adam = adam.with_weight_decay(Some(WeightDecayConfig::new(wd as f32)));
+    }
+    if let Some(gc) = cnn.grad_clip_norm {
+        adam = adam.with_grad_clipping(Some(GradientClippingConfig::Norm(gc as f32)));
+    }
+    let mut optim = adam.init::<B, CellularNicheNetwork<B>>();
+    let bs_eff = if cnn.cnn_minibatch_size == 0 {
+        cluster_n
+    } else {
+        cnn.cnn_minibatch_size.min(cluster_n).max(1)
+    };
+    let mut cnn_train_mse_epochs = Vec::with_capacity(epochs);
+    let mut cnn_diverged = false;
+    let patience = cnn.cnn_early_stop_patience;
+    let min_ep = cnn.cnn_early_stop_min_epochs;
+    let mut best_mse = f32::INFINITY;
+    let mut no_improve_epochs = 0usize;
+    let mut best_model: Option<CellularNicheNetwork<B>> = None;
+
+    for epoch in 0..epochs {
+        if let Some(s) = cnn_epoch_slot.as_ref() {
+            s.set_current(epoch + 1);
+        }
+        let lr = cnn_lr_for_epoch(
+            learning_rate,
+            epoch,
+            epochs,
+            cnn.lr_schedule,
+            cnn.lr_warmup_epochs,
+            cnn.cosine_lr_min_ratio,
+        );
+        let align_w = lasso_pred_align_weight_epoch(cnn, epoch, epochs);
+        let mut order: Vec<usize> = (0..cluster_n).collect();
+        let mut rng = ChaCha8Rng::seed_from_u64(
+            0x9E37_79B9_7F4A7C15_u64 ^ (cluster_id as u64).wrapping_shl(32) ^ (epoch as u64),
+        );
+        order.shuffle(&mut rng);
+
+        let mut epoch_mse_num = 0.0f32;
+        let mut epoch_mse_den = 0.0f32;
+
+        let mut pos = 0usize;
+        while pos < cluster_n {
+            let end = (pos + bs_eff).min(cluster_n);
+            let batch_idx = &order[pos..end];
+            pos = end;
+
+            let sm_b = gather_rows_4_f32(sm_c, batch_idx);
+            let x_b = gather_rows_2_f64(x_c, batch_idx);
+            let sf_b = gather_rows_2_f64(sf_c, batch_idx);
+            let y_b = gather_rows_1_f64(y_c, batch_idx);
+            let batch_n = batch_idx.len();
+
+            let sm_tensor = tensor_from_sm(&sm_b, device);
+            let x_tensor = tensor_from_x(&x_b, device);
+            let sf_tensor = tensor_from_sf(&sf_b, device);
+            let y_tensor = tensor_from_y(&y_b, device);
+            let y_lasso_b = y_lasso_opt
+                .as_ref()
+                .map(|yl| gather_y_lasso_batch(yl, batch_idx, device));
+
+            let (loss, y_mse) = cnn_training_loss(
+                &model,
+                sm_tensor,
+                x_tensor,
+                sf_tensor,
+                y_tensor,
+                beta_prior_w,
+                y_lasso_b,
+                align_w,
+            );
+            let raw_step = y_mse.into_scalar().elem::<f32>();
+            let w = batch_n as f32;
+            epoch_mse_num += raw_step * w;
+            epoch_mse_den += w;
+
+            if !raw_step.is_finite() {
+                cnn_diverged = true;
+                break;
+            }
+            let grads = loss.backward();
+            let grads = burn::optim::GradientsParams::from_grads(grads, &model);
+            model = optim.step(lr, model, grads);
+        }
+
+        if cnn_diverged {
+            break;
+        }
+
+        let mse = if epoch_mse_den > 0.0 {
+            finite_or_zero_f32(epoch_mse_num / epoch_mse_den)
+        } else {
+            f32::NAN
+        };
+        if !mse.is_finite() {
+            cnn_diverged = true;
+            break;
+        }
+        cnn_train_mse_epochs.push(mse);
+        if mse < best_mse {
+            best_mse = mse;
+            no_improve_epochs = 0;
+            best_model = Some(model.clone());
+        } else if epoch + 1 >= min_ep && patience > 0 {
+            no_improve_epochs += 1;
+            if no_improve_epochs >= patience {
+                break;
+            }
+        }
+    }
+
+    if let Some(m) = best_model {
+        model = m;
+    }
+
+    (model, cnn_train_mse_epochs, cnn_diverged)
+}
+
+fn tensor_from_sf<B: AutodiffBackend>(a: &Array2<f64>, device: &B::Device) -> Tensor<B, 2> {
+    tensor_from_x(a, device)
 }
 
 fn min_max_finite_col(col: ndarray::ArrayView1<f64>) -> (f32, f32) {
@@ -118,12 +468,155 @@ pub struct ClusterTrainingSummary {
     pub cnn_r2: f64,
 }
 
+struct LassoPassData {
+    cluster_id: usize,
+    indices: Vec<usize>,
+    cluster_n: usize,
+    lasso_coef: Array2<f64>,
+    intercept: f64,
+    lasso_converged: bool,
+    lasso_fista_iters: usize,
+    lasso_train_mse: f64,
+    r2: f64,
+}
+
+enum ClusterLassoPhase {
+    Skipped,
+    FitErrored,
+    BelowThreshold(ClusterTrainingSummary),
+    Pass(LassoPassData),
+}
+
+fn fit_cluster_group_lasso(
+    c_id: usize,
+    n_samples: usize,
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    clusters: &Array1<usize>,
+    params: GroupLassoParams,
+    group_regs: Option<Vec<f64>>,
+    regulator_masks: Option<&HashMap<usize, Vec<bool>>>,
+    score_threshold: f64,
+) -> ClusterLassoPhase {
+    let indices: Vec<usize> = (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
+    if indices.is_empty() {
+        return ClusterLassoPhase::Skipped;
+    }
+
+    let mut x_c = x.select(Axis(0), &indices);
+    if let Some(mask) = regulator_masks.and_then(|m| m.get(&c_id)) {
+        for (j, allowed) in mask.iter().copied().enumerate().take(x_c.ncols()) {
+            if !allowed {
+                x_c.column_mut(j).fill(0.0);
+            }
+        }
+    }
+    let y_c = y.select(Axis(0), &indices).insert_axis(Axis(1));
+
+    let mut lasso = if let Some(regs) = group_regs {
+        GroupLasso::new_with_regs(params, regs)
+    } else {
+        GroupLasso::new(params)
+    };
+
+    let lasso_converged = match lasso.fit(&x_c, &y_c, None) {
+        Ok(_) => true,
+        Err(crate::lasso::GroupLassoError::ConvergenceWarning) => false,
+        Err(e) => {
+            println!("⚠️ Lasso fit error for cluster {}: {:?}", c_id, e);
+            return ClusterLassoPhase::FitErrored;
+        }
+    };
+
+    let fitted = lasso.fitted.as_ref().unwrap();
+    let lasso_coef = fitted.coef.mapv(finite_or_zero_f64);
+    let intercept = finite_or_zero_f64(fitted.intercept[[0, 0]]);
+    let lasso_fista_iters = lasso.last_fista_iterations;
+
+    let y_pred_lasso = lasso.predict(&x_c).unwrap();
+    let y_c_flat = y_c.column(0);
+    let y_pred_flat = y_pred_lasso.column(0);
+    let ss_res: f64 = y_c_flat
+        .iter()
+        .zip(y_pred_flat.iter())
+        .map(|(yi, yhat)| (yi - yhat).powi(2))
+        .sum();
+    let cluster_n = indices.len();
+    let lasso_train_mse = ss_res / cluster_n.max(1) as f64;
+    let y_mean = y_c_flat.mean().unwrap_or(0.0);
+    let ss_tot: f64 = y_c_flat.iter().map(|yi| (yi - y_mean).powi(2)).sum();
+    let r2 = finite_or_zero_f64(r2_in_sample_from_residuals(cluster_n, ss_tot, ss_res));
+
+    if !r2.is_finite() || r2 < score_threshold {
+        return ClusterLassoPhase::BelowThreshold(ClusterTrainingSummary {
+            cluster_id: c_id,
+            n_cells: cluster_n,
+            n_modulators: lasso_coef.nrows(),
+            lasso_r2: r2,
+            lasso_train_mse,
+            lasso_fista_iters,
+            lasso_converged,
+            cnn_train_mse_epochs: Vec::new(),
+            cnn_r2: f64::NAN,
+        });
+    }
+
+    ClusterLassoPhase::Pass(LassoPassData {
+        cluster_id: c_id,
+        indices,
+        cluster_n,
+        lasso_coef,
+        intercept,
+        lasso_converged,
+        lasso_fista_iters,
+        lasso_train_mse,
+        r2,
+    })
+}
+
 pub struct FittedClusterResult<B: AutodiffBackend> {
     pub cluster_id: usize,
     pub model: CellularNicheNetwork<B>,
     pub r2: f64,
     pub lasso_coef: Array2<f64>,
     pub intercept: f64,
+}
+
+#[derive(Debug)]
+pub struct CnnEpochHudSlot {
+    current: AtomicUsize,
+    total: AtomicUsize,
+}
+
+impl CnnEpochHudSlot {
+    pub fn new(total_epochs: usize) -> Arc<Self> {
+        let total = total_epochs.max(1);
+        Arc::new(Self {
+            current: AtomicUsize::new(0),
+            total: AtomicUsize::new(total),
+        })
+    }
+
+    pub fn reconfigure(&self, total_epochs: usize) {
+        let total = total_epochs.max(1);
+        self.total.store(total, Ordering::Relaxed);
+        self.current.store(0, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn set_current(&self, one_based_epoch: usize) {
+        self.current.store(one_based_epoch, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn current(&self) -> usize {
+        self.current.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn total(&self) -> usize {
+        self.total.load(Ordering::Relaxed)
+    }
 }
 
 pub struct ClusteredGcnNwrFitInputs<'a, 'd, B: AutodiffBackend> {
@@ -135,9 +628,12 @@ pub struct ClusteredGcnNwrFitInputs<'a, 'd, B: AutodiffBackend> {
     pub device: &'d B::Device,
     pub epochs: usize,
     pub learning_rate: f64,
+    /// Minimum in-sample Lasso R² per cluster; clusters below this skip CNN/seed export for that gene.
+    pub score_threshold: f64,
     pub seed_only: bool,
     pub cnn: &'a CnnConfig,
     pub cached_spatial: Option<&'a CachedSpatialData>,
+    pub cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
 }
 
 pub struct ClusteredGcnNwrCnnRefineInputs<'a, 'd, B: AutodiffBackend> {
@@ -151,12 +647,15 @@ pub struct ClusteredGcnNwrCnnRefineInputs<'a, 'd, B: AutodiffBackend> {
     pub learning_rate: f64,
     pub cnn: &'a CnnConfig,
     pub cached_spatial: Option<&'a CachedSpatialData>,
+    pub cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
 }
 
 pub struct ClusteredGCNNWR<B: AutodiffBackend> {
     pub params: GroupLassoParams,
     pub spatial_dim: usize,
     pub spatial_feature_radius: f64,
+    pub ego_center_spatial_maps: bool,
+    pub multi_channel_spatial_maps: bool,
     pub models: HashMap<usize, CellularNicheNetwork<B>>,
     pub r2_scores: HashMap<usize, f64>,
     pub lasso_coefficients: HashMap<usize, Array2<f64>>,
@@ -167,11 +666,19 @@ pub struct ClusteredGCNNWR<B: AutodiffBackend> {
 }
 
 impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
-    pub fn new(params: GroupLassoParams, spatial_dim: usize, spatial_feature_radius: f64) -> Self {
+    pub fn new(
+        params: GroupLassoParams,
+        spatial_dim: usize,
+        spatial_feature_radius: f64,
+        ego_center_spatial_maps: bool,
+        multi_channel_spatial_maps: bool,
+    ) -> Self {
         Self {
             params,
             spatial_dim,
             spatial_feature_radius,
+            ego_center_spatial_maps,
+            multi_channel_spatial_maps,
             models: HashMap::new(),
             r2_scores: HashMap::new(),
             lasso_coefficients: HashMap::new(),
@@ -182,10 +689,10 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         }
     }
 
-    pub fn fit<F: FnMut(usize, usize)>(
+    pub fn fit<F: FnMut(usize, usize) + Send>(
         &mut self,
         inputs: ClusteredGcnNwrFitInputs<'_, '_, B>,
-        mut lasso_progress: F,
+        lasso_progress: F,
     ) {
         let ClusteredGcnNwrFitInputs {
             x,
@@ -196,9 +703,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             device,
             epochs,
             learning_rate,
+            score_threshold,
             seed_only,
             cnn,
             cached_spatial,
+            cnn_epoch_slot,
         } = inputs;
         let n_samples = x.nrows();
         let to_fit: Vec<usize> = (0..num_clusters)
@@ -219,93 +728,185 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 num_clusters,
                 self.spatial_dim,
                 self.spatial_dim,
+                self.ego_center_spatial_maps,
             );
             (&owned_sf, &owned_sm)
         };
 
         self.cluster_training_summaries.clear();
         let mut training_summaries: Vec<ClusterTrainingSummary> = Vec::new();
-
-        lasso_progress(0, n_celltypes);
         let mut fitted_results: Vec<FittedClusterResult<B>> = Vec::new();
-        let mut done_lasso = 0usize;
 
-        for &c_id in &to_fit {
-            let fitted_one: Option<FittedClusterResult<B>> = (|| {
-                let indices: Vec<usize> = (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
-                if indices.is_empty() {
-                    return None;
+        let lasso_progress = Arc::new(Mutex::new(lasso_progress));
+        let lasso_done = Arc::new(AtomicUsize::new(0));
+        {
+            let mut cb = lasso_progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cb(0, n_celltypes);
+        }
+
+        let params = self.params.clone();
+        let group_regs = self.group_reg_vec.clone();
+        let regulator_masks = self.regulator_masks_by_cluster.as_ref();
+
+        let phase_results: Vec<ClusterLassoPhase> = if n_celltypes == 0 {
+            Vec::new()
+        } else {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(GROUP_LASSO_MAX_CONCURRENT)
+                .build()
+                .expect("group lasso thread pool");
+            pool.install(|| {
+                (0..to_fit.len())
+                    .into_par_iter()
+                    .map(|idx| {
+                        let c_id = to_fit[idx];
+                        let out = fit_cluster_group_lasso(
+                            c_id,
+                            n_samples,
+                            x,
+                            y,
+                            clusters,
+                            params.clone(),
+                            group_regs.clone(),
+                            regulator_masks,
+                            score_threshold,
+                        );
+                        let d = lasso_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        lasso_progress
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())(d, n_celltypes);
+                        out
+                    })
+                    .collect()
+            })
+        };
+
+        for (phase, c_id) in phase_results.into_iter().zip(to_fit.iter().copied()) {
+            match phase {
+                ClusterLassoPhase::Skipped | ClusterLassoPhase::FitErrored => {}
+                ClusterLassoPhase::BelowThreshold(s) => {
+                    debug_assert_eq!(s.cluster_id, c_id);
+                    training_summaries.push(s);
                 }
+                ClusterLassoPhase::Pass(pass) => {
+                    debug_assert_eq!(pass.cluster_id, c_id);
+                    let LassoPassData {
+                        cluster_id: c_id,
+                        indices,
+                        cluster_n,
+                        lasso_coef,
+                        intercept,
+                        lasso_converged,
+                        lasso_fista_iters,
+                        lasso_train_mse,
+                        r2,
+                    } = pass;
 
-                let x_c = x.select(Axis(0), &indices);
-                let mut x_c = x_c;
-                if let Some(mask) = self
-                    .regulator_masks_by_cluster
-                    .as_ref()
-                    .and_then(|m| m.get(&c_id))
-                {
-                    for (j, allowed) in mask.iter().copied().enumerate().take(x_c.ncols()) {
-                        if !allowed {
-                            x_c.column_mut(j).fill(0.0);
+                    let mut x_c = x.select(Axis(0), &indices);
+                    if let Some(mask) = self
+                        .regulator_masks_by_cluster
+                        .as_ref()
+                        .and_then(|m| m.get(&c_id))
+                    {
+                        for (j, allowed) in mask.iter().copied().enumerate().take(x_c.ncols()) {
+                            if !allowed {
+                                x_c.column_mut(j).fill(0.0);
+                            }
                         }
                     }
-                }
-                let y_c = y.select(Axis(0), &indices).insert_axis(Axis(1));
+                    let y_c = y.select(Axis(0), &indices).insert_axis(Axis(1));
 
-                let mut lasso = if let Some(regs) = &self.group_reg_vec {
-                    GroupLasso::new_with_regs(self.params.clone(), regs.clone())
-                } else {
-                    GroupLasso::new(self.params.clone())
-                };
+                    let mut anchors_vec = vec![finite_or_zero_f32(intercept as f32)];
+                    anchors_vec.extend(
+                        lasso_coef
+                            .column(0)
+                            .iter()
+                            .map(|&v| finite_or_zero_f32(v as f32)),
+                    );
 
-                let lasso_converged = match lasso.fit(&x_c, &y_c, None) {
-                    Ok(_) => true,
-                    Err(crate::lasso::GroupLassoError::ConvergenceWarning) => false,
-                    Err(e) => {
-                        println!("⚠️ Lasso fit error for cluster {}: {:?}", c_id, e);
-                        return None;
+                    let anchors_tensor = Tensor::<B, 1>::from_data(
+                        burn::tensor::TensorData::new(anchors_vec.clone(), [lasso_coef.nrows() + 1]),
+                        device,
+                    );
+
+                    let vision_in_channels = if cnn.multi_channel_spatial_maps {
+                        num_clusters
+                    } else {
+                        1
+                    };
+                    let config = CellularNicheNetworkConfig {
+                        n_modulators: lasso_coef.nrows(),
+                        n_clusters: num_clusters,
+                        vision_in_channels,
+                    };
+                    let model =
+                        config.init::<B>(device, anchors_tensor.clone(), cnn.output_activation);
+
+                    if seed_only {
+                        training_summaries.push(ClusterTrainingSummary {
+                            cluster_id: c_id,
+                            n_cells: cluster_n,
+                            n_modulators: lasso_coef.nrows(),
+                            lasso_r2: r2,
+                            lasso_train_mse,
+                            lasso_fista_iters,
+                            lasso_converged,
+                            cnn_train_mse_epochs: Vec::new(),
+                            cnn_r2: f64::NAN,
+                        });
+                        fitted_results.push(FittedClusterResult {
+                            cluster_id: c_id,
+                            model,
+                            r2,
+                            lasso_coef,
+                            intercept,
+                        });
+                        continue;
                     }
-                };
 
-                let fitted = lasso.fitted.as_ref().unwrap();
-                let lasso_coef = fitted.coef.mapv(finite_or_zero_f64);
-                let intercept = finite_or_zero_f64(fitted.intercept[[0, 0]]);
-                let lasso_fista_iters = lasso.last_fista_iterations;
+                    let sf_c = spatial_features.select(Axis(0), &indices);
+                    let sm_c = if cnn.multi_channel_spatial_maps {
+                        spatial_maps_all_clusters_for_cnn(spatial_maps, &indices)
+                    } else {
+                        spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id)
+                    };
+                    let y_1d = y_c.column(0).into_owned();
 
-                let y_pred_lasso = lasso.predict(&x_c).unwrap();
-                let y_c_flat = y_c.column(0);
-                let y_pred_flat = y_pred_lasso.column(0);
-                let ss_res: f64 = y_c_flat
-                    .iter()
-                    .zip(y_pred_flat.iter())
-                    .map(|(yi, yhat)| (yi - yhat).powi(2))
-                    .sum();
-                let cluster_n = indices.len();
-                let lasso_train_mse = ss_res / cluster_n.max(1) as f64;
-                let y_mean = y_c_flat.mean().unwrap_or(0.0);
-                let ss_tot: f64 = y_c_flat.iter().map(|yi| (yi - y_mean).powi(2)).sum();
-                let r2 = finite_or_zero_f64(r2_in_sample_from_residuals(cluster_n, ss_tot, ss_res));
+                    let y_lasso_opt: Option<Tensor<B, 1>> = if cnn.lasso_pred_align_weight > 0.0 {
+                        Some(y_lasso_tensor_from_xy(&x_c, intercept, &lasso_coef, device))
+                    } else {
+                        None
+                    };
+                    let beta_prior_w = cnn.mean_beta_lasso_prior_weight as f32;
 
-                let mut anchors_vec = vec![finite_or_zero_f32(intercept as f32)];
-                anchors_vec.extend(
-                    lasso_coef
-                        .column(0)
-                        .iter()
-                        .map(|&v| finite_or_zero_f32(v as f32)),
-                );
+                    let (model, cnn_train_mse_epochs, cnn_diverged) = train_cluster_cnn_epochs(
+                        model,
+                        device,
+                        &sm_c,
+                        &x_c,
+                        &sf_c,
+                        &y_1d,
+                        cluster_n,
+                        c_id,
+                        y_lasso_opt,
+                        beta_prior_w,
+                        cnn,
+                        learning_rate,
+                        epochs,
+                        cnn_epoch_slot.as_ref(),
+                    );
 
-                let anchors_tensor = Tensor::<B, 1>::from_data(
-                    burn::tensor::TensorData::new(anchors_vec.clone(), [lasso_coef.nrows() + 1]),
-                    device,
-                );
+                    let cnn_r2 = if cnn_diverged {
+                        f64::NAN
+                    } else {
+                        let sm_tensor = tensor_from_sm(&sm_c, device);
+                        let x_tensor = tensor_from_x(&x_c, device);
+                        let sf_tensor = tensor_from_sf(&sf_c, device);
+                        cnn_r2_from_forward(&model, sm_tensor, x_tensor, sf_tensor, y_c.column(0))
+                    };
 
-                let config = CellularNicheNetworkConfig {
-                    n_modulators: lasso_coef.nrows(),
-                    n_clusters: num_clusters,
-                };
-                let mut model = config.init::<B>(device, anchors_tensor, cnn.output_activation);
-
-                if seed_only {
                     training_summaries.push(ClusterTrainingSummary {
                         cluster_id: c_id,
                         n_cells: cluster_n,
@@ -314,10 +915,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         lasso_train_mse,
                         lasso_fista_iters,
                         lasso_converged,
-                        cnn_train_mse_epochs: Vec::new(),
-                        cnn_r2: f64::NAN,
+                        cnn_train_mse_epochs,
+                        cnn_r2,
                     });
-                    return Some(FittedClusterResult {
+
+                    fitted_results.push(FittedClusterResult {
                         cluster_id: c_id,
                         model,
                         r2,
@@ -325,98 +927,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         intercept,
                     });
                 }
-
-                let x_tensor = Tensor::<B, 2>::from_data(
-                    burn::tensor::TensorData::new(
-                        x_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                        [cluster_n, lasso_coef.nrows()],
-                    ),
-                    device,
-                );
-                let y_tensor = Tensor::<B, 1>::from_data(
-                    burn::tensor::TensorData::new(
-                        y_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                        [cluster_n],
-                    ),
-                    device,
-                );
-                let sf_c = spatial_features.select(Axis(0), &indices);
-                let sf_tensor = Tensor::<B, 2>::from_data(
-                    burn::tensor::TensorData::new(
-                        sf_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                        [cluster_n, num_clusters],
-                    ),
-                    device,
-                );
-                let sm_c = spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id);
-                let sm_tensor = Tensor::<B, 4>::from_data(
-                    burn::tensor::TensorData::new(
-                        sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
-                        [cluster_n, 1, self.spatial_dim, self.spatial_dim],
-                    ),
-                    device,
-                );
-
-                let mut adam = AdamConfig::new()
-                    .with_beta_1(cnn.adam_beta_1 as f32)
-                    .with_beta_2(cnn.adam_beta_2 as f32)
-                    .with_epsilon(cnn.adam_epsilon as f32);
-                if let Some(wd) = cnn.weight_decay {
-                    adam = adam.with_weight_decay(Some(WeightDecayConfig::new(wd as f32)));
-                }
-                if let Some(gc) = cnn.grad_clip_norm {
-                    adam = adam.with_grad_clipping(Some(GradientClippingConfig::Norm(gc as f32)));
-                }
-                let mut optim = adam.init::<B, CellularNicheNetwork<B>>();
-                let mut cnn_train_mse_epochs = Vec::with_capacity(epochs);
-                for _epoch in 0..epochs {
-                    let y_pred =
-                        model.forward(sm_tensor.clone(), x_tensor.clone(), sf_tensor.clone());
-                    let loss = burn::nn::loss::MseLoss::new().forward(
-                        y_pred,
-                        y_tensor.clone(),
-                        burn::nn::loss::Reduction::Mean,
-                    );
-                    let mse = finite_or_zero_f32(loss.clone().into_scalar().elem());
-                    cnn_train_mse_epochs.push(mse);
-                    let grads = loss.backward();
-                    let grads = burn::optim::GradientsParams::from_grads(grads, &model);
-                    model = optim.step(learning_rate, model, grads);
-                }
-
-                let cnn_r2 = cnn_r2_from_forward(
-                    &model,
-                    sm_tensor.clone(),
-                    x_tensor.clone(),
-                    sf_tensor.clone(),
-                    y_c.column(0),
-                );
-
-                training_summaries.push(ClusterTrainingSummary {
-                    cluster_id: c_id,
-                    n_cells: cluster_n,
-                    n_modulators: lasso_coef.nrows(),
-                    lasso_r2: r2,
-                    lasso_train_mse,
-                    lasso_fista_iters,
-                    lasso_converged,
-                    cnn_train_mse_epochs,
-                    cnn_r2,
-                });
-
-                Some(FittedClusterResult {
-                    cluster_id: c_id,
-                    model,
-                    r2,
-                    lasso_coef,
-                    intercept,
-                })
-            })();
-            if let Some(t) = fitted_one {
-                fitted_results.push(t);
             }
-            done_lasso += 1;
-            lasso_progress(done_lasso, n_celltypes);
         }
 
         self.cluster_training_summaries = training_summaries;
@@ -427,6 +938,17 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             self.lasso_coefficients
                 .insert(fit.cluster_id, fit.lasso_coef);
             self.lasso_intercepts.insert(fit.cluster_id, fit.intercept);
+        }
+
+        for s in &self.cluster_training_summaries {
+            if !s.cnn_r2.is_finite() {
+                self.models.remove(&s.cluster_id);
+            } else if cnn.drop_cnn_if_insample_worse_than_lasso
+                && s.lasso_r2.is_finite()
+                && s.cnn_r2 + cnn.cnn_vs_lasso_arbitration_margin < s.lasso_r2
+            {
+                self.models.remove(&s.cluster_id);
+            }
         }
     }
 
@@ -442,6 +964,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             learning_rate,
             cnn,
             cached_spatial,
+            cnn_epoch_slot,
         } = inputs;
         let n_samples = x.nrows();
 
@@ -458,6 +981,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 num_clusters,
                 self.spatial_dim,
                 self.spatial_dim,
+                self.ego_center_spatial_maps,
             );
             (&owned_sf, &owned_sm)
         };
@@ -478,13 +1002,12 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 continue;
             }
 
-            let mut model = match self.models.remove(&c_id) {
+            let model = match self.models.remove(&c_id) {
                 Some(m) => m,
                 None => continue,
             };
 
             let cluster_n = indices.len();
-            let n_modulators = x.ncols();
             let x_c = x.select(Axis(0), &indices);
             let mut x_c = x_c;
             if let Some(mask) = self
@@ -499,73 +1022,58 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 }
             }
             let y_c = y.select(Axis(0), &indices);
+            let y_1d = Array1::from_vec(y_c.iter().copied().collect());
 
-            let x_tensor = Tensor::<B, 2>::from_data(
-                burn::tensor::TensorData::new(
-                    x_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                    [cluster_n, n_modulators],
-                ),
-                device,
-            );
-            let y_tensor = Tensor::<B, 1>::from_data(
-                burn::tensor::TensorData::new(
-                    y_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                    [cluster_n],
-                ),
-                device,
-            );
             let sf_c = spatial_features.select(Axis(0), &indices);
-            let sf_tensor = Tensor::<B, 2>::from_data(
-                burn::tensor::TensorData::new(
-                    sf_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                    [cluster_n, num_clusters],
-                ),
+            let sm_c = if self.multi_channel_spatial_maps {
+                spatial_maps_all_clusters_for_cnn(spatial_maps, &indices)
+            } else {
+                spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id)
+            };
+
+            let y_lasso_opt: Option<Tensor<B, 1>> = if cnn.lasso_pred_align_weight > 0.0 {
+                if let (Some(coef), Some(&inter)) = (
+                    self.lasso_coefficients.get(&c_id),
+                    self.lasso_intercepts.get(&c_id),
+                ) {
+                    Some(y_lasso_tensor_from_xy(&x_c, inter, coef, device))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let beta_prior_w = cnn.mean_beta_lasso_prior_weight as f32;
+
+            let (model, cnn_train_mse_epochs, cnn_diverged) = train_cluster_cnn_epochs(
+                model,
                 device,
-            );
-            let sm_c = spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id);
-            let sm_tensor = Tensor::<B, 4>::from_data(
-                burn::tensor::TensorData::new(
-                    sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
-                    [cluster_n, 1, self.spatial_dim, self.spatial_dim],
-                ),
-                device,
-            );
-
-            let mut adam = AdamConfig::new()
-                .with_beta_1(cnn.adam_beta_1 as f32)
-                .with_beta_2(cnn.adam_beta_2 as f32)
-                .with_epsilon(cnn.adam_epsilon as f32);
-            if let Some(wd) = cnn.weight_decay {
-                adam = adam.with_weight_decay(Some(WeightDecayConfig::new(wd as f32)));
-            }
-            if let Some(gc) = cnn.grad_clip_norm {
-                adam = adam.with_grad_clipping(Some(GradientClippingConfig::Norm(gc as f32)));
-            }
-            let mut optim = adam.init::<B, CellularNicheNetwork<B>>();
-            let mut cnn_train_mse_epochs = Vec::with_capacity(epochs);
-            for _epoch in 0..epochs {
-                let y_pred = model.forward(sm_tensor.clone(), x_tensor.clone(), sf_tensor.clone());
-                let loss = burn::nn::loss::MseLoss::new().forward(
-                    y_pred,
-                    y_tensor.clone(),
-                    burn::nn::loss::Reduction::Mean,
-                );
-                let mse = finite_or_zero_f32(loss.clone().into_scalar().elem());
-                cnn_train_mse_epochs.push(mse);
-                let grads = loss.backward();
-                let grads = burn::optim::GradientsParams::from_grads(grads, &model);
-                model = optim.step(learning_rate, model, grads);
-            }
-
-            let cnn_r2 = cnn_r2_from_forward(
-                &model,
-                sm_tensor.clone(),
-                x_tensor.clone(),
-                sf_tensor.clone(),
-                y_c.view(),
+                &sm_c,
+                &x_c,
+                &sf_c,
+                &y_1d,
+                cluster_n,
+                c_id,
+                y_lasso_opt,
+                beta_prior_w,
+                cnn,
+                learning_rate,
+                epochs,
+                cnn_epoch_slot.as_ref(),
             );
 
-            self.models.insert(c_id, model);
+            let cnn_r2 = if cnn_diverged {
+                f64::NAN
+            } else {
+                let sm_tensor = tensor_from_sm(&sm_c, device);
+                let x_tensor = tensor_from_x(&x_c, device);
+                let sf_tensor = tensor_from_sf(&sf_c, device);
+                cnn_r2_from_forward(&model, sm_tensor, x_tensor, sf_tensor, y_1d.view())
+            };
+
+            if !cnn_diverged && cnn_r2.is_finite() {
+                self.models.insert(c_id, model);
+            }
 
             if let Some(s) = summaries_by_cluster.get_mut(&c_id) {
                 s.cnn_train_mse_epochs = cnn_train_mse_epochs;
@@ -576,6 +1084,17 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         let mut ordered: Vec<ClusterTrainingSummary> = summaries_by_cluster.into_values().collect();
         ordered.sort_by_key(|s| s.cluster_id);
         self.cluster_training_summaries = ordered;
+
+        if cnn.drop_cnn_if_insample_worse_than_lasso {
+            for s in &self.cluster_training_summaries {
+                if s.lasso_r2.is_finite()
+                    && s.cnn_r2.is_finite()
+                    && s.cnn_r2 + cnn.cnn_vs_lasso_arbitration_margin < s.lasso_r2
+                {
+                    self.models.remove(&s.cluster_id);
+                }
+            }
+        }
     }
 
     pub fn predict_betas(
@@ -603,6 +1122,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 num_clusters,
                 self.spatial_dim,
                 self.spatial_dim,
+                self.ego_center_spatial_maps,
             );
             (&owned_sf, &owned_sm)
         };
@@ -616,33 +1136,38 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             }
 
             if let Some(model) = self.models.get(&c_id) {
-                let cluster_n = indices.len();
                 let sf_c = spatial_features.select(Axis(0), &indices);
-                let sf_tensor = Tensor::<B, 2>::from_data(
-                    burn::tensor::TensorData::new(
-                        sf_c.iter().map(|&v| finite_or_zero_f32(v as f32)).collect(),
-                        [cluster_n, num_clusters],
-                    ),
-                    device,
-                );
-                let sm_c = spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id);
-                let sm_tensor = Tensor::<B, 4>::from_data(
-                    burn::tensor::TensorData::new(
-                        sm_c.iter().cloned().map(finite_or_zero_f32).collect(),
-                        [cluster_n, 1, self.spatial_dim, self.spatial_dim],
-                    ),
-                    device,
-                );
+                let sf_tensor = tensor_from_sf(&sf_c, device);
+                let sm_c = if self.multi_channel_spatial_maps {
+                    spatial_maps_all_clusters_for_cnn(spatial_maps, &indices)
+                } else {
+                    spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id)
+                };
+                let sm_tensor = tensor_from_sm(&sm_c, device);
 
                 let betas_tensor = model.get_betas(sm_tensor, sf_tensor);
                 let betas_data = betas_tensor.into_data();
                 let betas_v: &[f32] = betas_data.as_slice::<f32>().unwrap();
 
-                let n_betas = n_modulators + 1;
-                for (i, idx) in indices.iter().enumerate() {
-                    for j in 0..n_betas {
-                        let v = betas_v[i * n_betas + j];
-                        all_betas[[*idx, j]] = finite_or_zero_f32(v) as f64;
+                let cnn_has_nan = betas_v.iter().any(|v| !v.is_finite());
+                if !cnn_has_nan {
+                    let n_betas = n_modulators + 1;
+                    for (i, idx) in indices.iter().enumerate() {
+                        for j in 0..n_betas {
+                            let v = betas_v[i * n_betas + j];
+                            all_betas[[*idx, j]] = finite_or_zero_f32(v) as f64;
+                        }
+                    }
+                } else if let Some(lasso_coef) = self.lasso_coefficients.get(&c_id) {
+                    let intercept = finite_or_zero_f64(
+                        self.lasso_intercepts.get(&c_id).copied().unwrap_or(0.0),
+                    );
+                    let coef_col = lasso_coef.column(0);
+                    for &idx in &indices {
+                        all_betas[[idx, 0]] = intercept;
+                        for (j, &v) in coef_col.iter().enumerate() {
+                            all_betas[[idx, j + 1]] = finite_or_zero_f64(v);
+                        }
                     }
                 }
             } else if let Some(lasso_coef) = self.lasso_coefficients.get(&c_id) {
@@ -667,6 +1192,7 @@ pub fn xyc2spatial_fast(
     num_clusters: usize,
     m: usize,
     n: usize,
+    ego_center: bool,
 ) -> Array4<f32> {
     let num_cells = xy.nrows();
     let x_col = xy.column(0);
@@ -680,10 +1206,10 @@ pub fn xyc2spatial_fast(
     let cell_width = span_x / n as f32;
     let cell_height = span_y / m as f32;
 
-    let cx_grid: Vec<f32> = (0..n)
+    let cx_global: Vec<f32> = (0..n)
         .map(|j| xmin + (j as f32 + 0.5) * cell_width)
         .collect();
-    let cy_grid: Vec<f32> = (0..m)
+    let cy_global: Vec<f32> = (0..m)
         .map(|i| ymax - (i as f32 + 0.5) * cell_height)
         .collect();
 
@@ -695,30 +1221,47 @@ pub fn xyc2spatial_fast(
         .enumerate()
         .for_each(|(s, mut cell_maps)| {
             let cluster_s = clusters[s];
-            if cluster_s < num_clusters {
-                let x_s = xy[[s, 0]] as f32;
-                let y_s = xy[[s, 1]] as f32;
-                if !x_s.is_finite() || !y_s.is_finite() {
-                    return;
+            if cluster_s >= num_clusters {
+                return;
+            }
+            let x_s = xy[[s, 0]] as f32;
+            let y_s = xy[[s, 1]] as f32;
+            if !x_s.is_finite() || !y_s.is_finite() {
+                return;
+            }
+
+            let cx_ego = ego_center.then(|| {
+                let half_x = span_x * 0.5;
+                (0..n)
+                    .map(|j| x_s - half_x + (j as f32 + 0.5) * cell_width)
+                    .collect::<Vec<f32>>()
+            });
+            let cy_ego = ego_center.then(|| {
+                let half_y = span_y * 0.5;
+                let top_y = y_s + half_y;
+                (0..m)
+                    .map(|i| top_y - (i as f32 + 0.5) * cell_height)
+                    .collect::<Vec<f32>>()
+            });
+            let cx_grid: &[f32] = cx_ego.as_deref().unwrap_or(&cx_global);
+            let cy_grid: &[f32] = cy_ego.as_deref().unwrap_or(&cy_global);
+
+            let mut channel_map = cell_maps.index_axis_mut(Axis(0), cluster_s);
+
+            for i in 0..m {
+                let gy = cy_grid[i];
+                if !gy.is_finite() {
+                    continue;
                 }
-
-                let mut channel_map = cell_maps.index_axis_mut(Axis(0), cluster_s);
-
-                for i in 0..m {
-                    let gy = cy_grid[i];
-                    if !gy.is_finite() {
+                let dy2 = (y_s - gy).powi(2);
+                for j in 0..n {
+                    let gx = cx_grid[j];
+                    if !gx.is_finite() {
                         continue;
                     }
-                    let dy2 = (y_s - gy).powi(2);
-                    for j in 0..n {
-                        let gx = cx_grid[j];
-                        if !gx.is_finite() {
-                            continue;
-                        }
-                        let dx2 = (x_s - gx).powi(2);
-                        let d = (dx2 + dy2).sqrt().max(1e-6);
-                        channel_map[[i, j]] = 1.0 / d;
-                    }
+                    let dx2 = (x_s - gx).powi(2);
+                    let d = (dx2 + dy2).sqrt().max(1e-6);
+                    channel_map[[i, j]] = 1.0 / d;
                 }
             }
         });
@@ -783,6 +1326,7 @@ pub fn create_spatial_features(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CnnLrSchedule;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
 
@@ -958,7 +1502,7 @@ mod tests {
     fn xyc2spatial_shape() {
         let xy = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]];
         let clusters = Array1::from_vec(vec![0, 1, 0]);
-        let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8);
+        let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8, false);
         assert_eq!(maps.shape(), &[3, 2, 8, 8]);
     }
 
@@ -966,7 +1510,7 @@ mod tests {
     fn spatial_maps_for_cluster_cnn_shape_matches_conv1() {
         let xy = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]];
         let clusters = Array1::from_vec(vec![0, 1, 0]);
-        let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8);
+        let maps = xyc2spatial_fast(&xy, &clusters, 2, 8, 8, false);
         let sm = spatial_maps_for_cluster_cnn(&maps, &[0, 2], 0);
         assert_eq!(sm.shape(), &[2, 1, 8, 8]);
         assert_eq!(
@@ -981,7 +1525,7 @@ mod tests {
         // Cell 0 is cluster 0 → only channel 0 should have nonzero entries
         let xy = array![[0.5, 0.5], [1.5, 1.5]];
         let clusters = Array1::from_vec(vec![0, 1]);
-        let maps = xyc2spatial_fast(&xy, &clusters, 2, 4, 4);
+        let maps = xyc2spatial_fast(&xy, &clusters, 2, 4, 4, false);
 
         // Cell 0, cluster 0 channel should have nonzero values
         let ch0_sum: f32 = maps.slice(ndarray::s![0, 0, .., ..]).iter().sum();
@@ -996,7 +1540,7 @@ mod tests {
     fn xyc2spatial_inverse_distance_positive() {
         let xy = array![[0.5, 0.5]];
         let clusters = Array1::from_vec(vec![0]);
-        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4);
+        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4, false);
         // All values in the active channel should be positive (1/d > 0)
         for &v in maps.slice(ndarray::s![0, 0, .., ..]).iter() {
             assert!(v > 0.0, "Inverse distance should be positive");
@@ -1007,7 +1551,7 @@ mod tests {
     fn xyc2spatial_closer_grid_points_higher_value() {
         let xy = array![[0.0, 1.0]]; // at the top-left area
         let clusters = Array1::from_vec(vec![0]);
-        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4);
+        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4, false);
         let channel = maps.slice(ndarray::s![0, 0, .., ..]);
         // The grid point closest to the cell should have the highest value
         let max_val = channel.iter().cloned().fold(0.0_f32, f32::max);
@@ -1018,7 +1562,7 @@ mod tests {
     fn xyc2spatial_nan_cell_is_zero() {
         let xy = array![[f64::NAN, 0.0], [1.0, 1.0]];
         let clusters = Array1::from_vec(vec![0, 0]);
-        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4);
+        let maps = xyc2spatial_fast(&xy, &clusters, 1, 4, 4, false);
         let cell0_sum: f32 = maps.slice(ndarray::s![0, .., .., ..]).iter().sum();
         assert_abs_diff_eq!(cell0_sum, 0.0, epsilon = 1e-10);
     }
@@ -1027,8 +1571,8 @@ mod tests {
     fn xyc2spatial_deterministic() {
         let xy = array![[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]];
         let clusters = Array1::from_vec(vec![0, 1, 0]);
-        let m1 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4);
-        let m2 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4);
+        let m1 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4, false);
+        let m2 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4, false);
         assert_eq!(m1, m2);
     }
 
@@ -1061,5 +1605,23 @@ mod tests {
         assert_abs_diff_eq!(sf[[0, 5]], 1.0, epsilon = 1e-10);
         // Other cluster columns should be zero
         assert_abs_diff_eq!(sf[[0, 1]], 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn cnn_lr_constant_matches_base_after_warmup() {
+        let base = 2e-4;
+        let lr = cnn_lr_for_epoch(base, 10, 100, CnnLrSchedule::Constant, 5, 0.01);
+        assert!((lr - base).abs() < 1e-18);
+    }
+
+    #[test]
+    fn cnn_lr_cosine_endpoints() {
+        let base = 1.0;
+        let min_r = 0.01;
+        let t = 20usize;
+        let lr0 = cnn_lr_for_epoch(base, 0, t, CnnLrSchedule::Cosine, 0, min_r);
+        let lr_last = cnn_lr_for_epoch(base, t - 1, t, CnnLrSchedule::Cosine, 0, min_r);
+        assert!((lr0 - base).abs() < 1e-9, "got {lr0}");
+        assert!((lr_last - base * min_r).abs() < 1e-9, "got {lr_last}");
     }
 }

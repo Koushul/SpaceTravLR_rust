@@ -98,14 +98,6 @@ name = "spatial_viewer"
 path = "src/bin/spatial_viewer.rs"
 required-features = ["spatial-viewer"]
 
-[[example]]
-name = "mock_h5ad_roundtrip"
-path = "examples/mock_h5ad_roundtrip.rs"
-
-[[example]]
-name = "repack_h5ad_var"
-path = "examples/repack_h5ad_var.rs"
-
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }

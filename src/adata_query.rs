@@ -4,9 +4,9 @@ use anndata::data::SelectInfoElem;
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use ndarray::{Array2, s};
-use polars::datatypes::AnyValue;
 use polars::prelude::*;
 
+use crate::betadata::obs_series_row_str;
 use crate::spatial_estimator::{
     load_spatial_coords_f64, obsm_get_dense_matrix_f64, read_expression_matrix_dense_f64,
 };
@@ -151,15 +151,6 @@ fn resolve_cell_type_column(obs: &DataFrame) -> Option<String> {
     None
 }
 
-fn any_value_to_cell_type_str(v: AnyValue<'_>) -> String {
-    match v {
-        AnyValue::Null => String::new(),
-        AnyValue::String(s) => s.to_string(),
-        AnyValue::StringOwned(s) => s.to_string(),
-        _ => v.to_string(),
-    }
-}
-
 /// Resolved `obs` column name, sorted category list, and per-obs category index (`u16::MAX` = unknown).
 pub fn cell_type_encoding(
     adata: &AnnData<H5>,
@@ -173,8 +164,8 @@ pub fn cell_type_encoding(
         .map_err(|_| anyhow::anyhow!("obs column {:?} missing", col_name))?;
     let series = cell_col.as_materialized_series();
     let mut uniq: HashSet<String> = HashSet::new();
-    for v in series.iter() {
-        let s = any_value_to_cell_type_str(v);
+    for i in 0..series.len() {
+        let s = obs_series_row_str(series, i).unwrap_or_default();
         let t = s.trim();
         if t.is_empty() || t.eq_ignore_ascii_case("null") {
             continue;
@@ -192,8 +183,8 @@ pub fn cell_type_encoding(
         .map(|(i, s)| (s.clone(), i as u16))
         .collect();
     let mut codes = Vec::with_capacity(series.len());
-    for v in series.iter() {
-        let s = any_value_to_cell_type_str(v);
+    for i in 0..series.len() {
+        let s = obs_series_row_str(series, i).unwrap_or_default();
         let t = s.trim();
         if t.is_empty() || t.eq_ignore_ascii_case("null") {
             codes.push(u16::MAX);

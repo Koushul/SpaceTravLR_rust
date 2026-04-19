@@ -1,5 +1,5 @@
 use crate::config::{CnnTrainingMode, SpaceshipConfig};
-use crate::estimator::ClusterTrainingSummary;
+use crate::estimator::{ClusterTrainingSummary, CnnEpochHudSlot};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -137,6 +137,7 @@ pub struct TrainingHudState {
     pub active_genes: HashMap<String, String>,
     /// Per-gene LASSO progress: clusters (cell types) completed / total, for TUI only.
     pub gene_lasso_cluster_progress: HashMap<String, (usize, usize)>,
+    pub gene_cnn_epoch_slots: HashMap<String, Arc<CnnEpochHudSlot>>,
     pub n_cells: usize,
     pub n_clusters: usize,
     pub cell_type_counts: Vec<(String, usize)>,
@@ -190,6 +191,7 @@ impl TrainingHudState {
             genes_rounds: 0,
             active_genes: HashMap::new(),
             gene_lasso_cluster_progress: HashMap::new(),
+            gene_cnn_epoch_slots: HashMap::new(),
             n_cells: 0,
             n_clusters: 0,
             cell_type_counts: Vec::new(),
@@ -236,6 +238,7 @@ impl TrainingHudState {
         self.genes_rounds = 0;
         self.active_genes.clear();
         self.gene_lasso_cluster_progress.clear();
+        self.gene_cnn_epoch_slots.clear();
         self.n_cells = 0;
         self.n_clusters = 0;
         self.cell_type_counts.clear();
@@ -297,6 +300,31 @@ impl TrainingHudState {
             .insert(gene.to_string(), status.to_string());
     }
 
+    pub fn ensure_gene_cnn_epoch_slot(
+        &mut self,
+        gene: &str,
+        total_epochs: usize,
+    ) -> Arc<CnnEpochHudSlot> {
+        use std::collections::hash_map::Entry;
+        let key = gene.to_string();
+        match self.gene_cnn_epoch_slots.entry(key) {
+            Entry::Occupied(e) => {
+                let s = e.get().clone();
+                s.reconfigure(total_epochs);
+                s
+            }
+            Entry::Vacant(v) => {
+                let s = CnnEpochHudSlot::new(total_epochs);
+                v.insert(s.clone());
+                s
+            }
+        }
+    }
+
+    pub fn clear_gene_cnn_epoch_slot(&mut self, gene: &str) {
+        self.gene_cnn_epoch_slots.remove(gene);
+    }
+
     pub fn set_gene_lasso_cluster_progress(&mut self, gene: &str, done: usize, total: usize) {
         if total == 0 {
             self.gene_lasso_cluster_progress.remove(gene);
@@ -319,6 +347,7 @@ impl TrainingHudState {
     pub fn remove_gene(&mut self, gene: &str) {
         self.active_genes.remove(gene);
         self.gene_lasso_cluster_progress.remove(gene);
+        self.gene_cnn_epoch_slots.remove(gene);
     }
 
     pub fn should_cancel(&self) -> bool {

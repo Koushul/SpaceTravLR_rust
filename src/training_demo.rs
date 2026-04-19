@@ -380,6 +380,7 @@ fn apply_demo_hud_baseline(g: &mut TrainingHudState, total_genes: usize) {
     g.genes_exported_cnn = 0;
     g.active_genes.clear();
     g.gene_lasso_cluster_progress.clear();
+    g.gene_cnn_epoch_slots.clear();
     g.gene_train_times.clear();
     g.gene_r2_mean.clear();
     g.perf_stats_generation = 0;

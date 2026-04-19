@@ -116,3 +116,40 @@ fn celloracle_writes_feather() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn celloracle_writes_feather_using_h5ad_instead_of_positional() {
+    let dir = std::env::temp_dir().join(format!(
+        "spacetravlr_celloracle_cli_h5ad_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_minimal_mouse_grn_parquet(&dir).unwrap();
+    let h5ad = dir.join("tiny.h5ad");
+    write_tiny_mouse_h5ad(&h5ad).unwrap();
+    let out_feather = dir.join("priors2.feather");
+
+    let status = Command::new(spacetravlr_exe())
+        .args([
+            "--h5ad",
+            h5ad.to_str().unwrap(),
+            "--celloracle",
+            "--celloracle-skip-preprocess",
+            "--celloracle-layer",
+            "X",
+            "--celloracle-species",
+            "mouse",
+            "--celloracle-network-data-dir",
+            dir.to_str().unwrap(),
+            "--celloracle-output",
+            out_feather.to_str().unwrap(),
+        ])
+        .status()
+        .expect("spawn");
+    assert!(status.success(), "celloracle CLI with --h5ad failed");
+
+    assert!(out_feather.is_file(), "feather not written");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
