@@ -57,7 +57,7 @@ const SPACETRAVLR_HELP_STYLES: Styles = Styles::styled()
 
 const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) training from Visium-style spatial AnnData (.h5ad).
 
-• Load spaceship_config.toml (or pass --config), then apply CLI overrides.
+• Load spaceship_config.toml from the repo build, install data/ next to the binary, or pass --config, then apply CLI overrides.
 • Use --plain for line-oriented logs instead of the full-screen dashboard (when built with `tui`).
 • Subcommand run-summary writes the HTML report without training."#;
 
@@ -152,7 +152,7 @@ struct RunSummaryCli {
         short = 'c',
         long,
         value_name = "PATH",
-        help = "spaceship_config.toml overlay (merged on top of repo/cwd base; omitted keys keep base values)"
+        help = "spaceship_config.toml overlay (merged on top of repo or install data/ base; omitted keys keep base values)"
     )]
     config: Option<PathBuf>,
     #[arg(
@@ -216,7 +216,7 @@ struct Cli {
         long,
         value_name = "PATH",
         help_heading = "Input",
-        help = "spaceship_config.toml overlay (merged on top of repo/cwd base; omitted keys keep base values)"
+        help = "spaceship_config.toml overlay (merged on top of repo or install data/ base; omitted keys keep base values)"
     )]
     config: Option<PathBuf>,
 
@@ -997,7 +997,7 @@ fn eprint_join_style_resume_cli_notes(cli: &Cli, repro: &Path, explicit_join_fla
     };
     if cli.config.is_some() {
         eprintln!(
-            "Note: {via}: primary training contract is {}; --config overlays it; repo spaceship_config.toml fills keys missing from the repro.",
+            "Note: {via}: primary training contract is {}; --config overlays it; repo or install data/spaceship_config.toml fills keys missing from the repro.",
             repro.display()
         );
     }

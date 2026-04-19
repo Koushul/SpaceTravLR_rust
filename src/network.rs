@@ -77,7 +77,7 @@ pub fn resolve_species_network_parquet(
 
     anyhow::bail!(
         "Could not find GRN network file {:?} for species {:?}. \
-Prebuilt binaries do not bundle these files; copy `human_network.parquet` / `mouse_network.parquet` from the SpaceTravLR_rust repo `data/` (or clone the repo) and set [{}] to that directory, or set [grn].network_data_dir in spaceship_config.toml. \
+Prebuilt binaries do not bundle these files; run `scripts/install.sh` (downloads into `data/` next to the binary), copy `human_network.parquet` / `mouse_network.parquet` from the SpaceTravLR_rust repo `data/`, or set [{}] / [grn].network_data_dir. \
 You can also place a `data/` folder next to the executable (or walk up from the current cwd). Tried:\n  {}",
         filename,
         species,

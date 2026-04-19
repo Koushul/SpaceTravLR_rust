@@ -1,8 +1,9 @@
 #!/usr/bin/env sh
 # SpaceTravLR CLI installer — keep tarball names in sync with src/self_update.rs
 # (GITHUB_REPO, tarball_name, LINUX_GNU_*, prebuilt_tarball_target).
-# After binaries: downloads human_network.parquet + mouse_network.parquet into INSTALL_DIR/data/
-# from raw.githubusercontent.com (release tag, then main). curl -fsSL …/install.sh | sh
+# After binaries: downloads human_network.parquet + mouse_network.parquet + spaceship_config.toml
+# into INSTALL_DIR/data/ from raw.githubusercontent.com (release tag, then main).
+# curl -fsSL …/install.sh | sh
 set -e
 
 REPO="${SPACETRAVLR_GITHUB_REPO:-Koushul/SpaceTravLR_rust}"
@@ -309,16 +310,47 @@ install_release() {
 }
 
 # GRN parquet files for training (same search path as spacetravlr: install_dir/data/).
+install_spaceship_config_toml() {
+    DATA_DIR="${INSTALL_DIR}/data"
+    mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
+    _dest="${DATA_DIR}/spaceship_config.toml"
+    if [ -f "$_dest" ]; then
+        _sz=$(wc -c < "$_dest" 2>/dev/null | tr -d '[:space:]' || echo 0)
+        if [ "${INSTALL_REFRESH_GRN_DATA:-0}" != "1" ] && [ "${_sz:-0}" -gt 512 ] 2>/dev/null; then
+            return 0
+        fi
+    fi
+    _ok=0
+    for ref in "$VERSION" main; do
+        _url="https://raw.githubusercontent.com/${REPO}/${ref}/spaceship_config.toml"
+        if curl -fsSL "$_url" -o "${_dest}.part" 2>/dev/null; then
+            mv "${_dest}.part" "$_dest"
+            _ok=1
+            break
+        fi
+        rm -f "${_dest}.part"
+    done
+    if [ "$_ok" != "1" ]; then
+        warn "Could not download spaceship_config.toml from GitHub (tried tag ${VERSION} and main). Copy into ${DATA_DIR}/ or pass --config."
+    fi
+}
+
 install_grn_data() {
+    DATA_DIR="${INSTALL_DIR}/data"
+    mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
+
+    progress_line 90 "Downloading spaceship_config.toml (default CLI config)…"
+    install_spaceship_config_toml
+    if [ -f "${DATA_DIR}/spaceship_config.toml" ]; then
+        progress_line 91 "spaceship_config.toml at ${DATA_DIR}/"
+    fi
+
     if [ "${INSTALL_SKIP_GRN_DATA:-0}" = "1" ]; then
         progress_line 95 "Skipping GRN parquet download (INSTALL_SKIP_GRN_DATA=1)"
         [ "$QUIET" -eq 0 ] && info "  Skipping human_network.parquet / mouse_network.parquet (set SPACETRAVLR_DATA_DIR or copy data/ yourself)"
         progress_line 100 "Complete"
         return 0
     fi
-
-    DATA_DIR="${INSTALL_DIR}/data"
-    mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
 
     progress_line 92 "Downloading GRN parquet (human_network, mouse_network) from GitHub…"
     _failed=0
@@ -347,7 +379,7 @@ install_grn_data() {
     done
 
     if [ "$_failed" -eq 0 ]; then
-        progress_line 97 "GRN data ready at ${DATA_DIR} (spacetravlr finds this next to the binary)"
+        progress_line 97 "Bundle ready at ${DATA_DIR} (GRN parquets + spaceship_config.toml next to the binary)"
     else
         progress_line 97 "Install finished (GRN files incomplete — see warning above)"
     fi
@@ -394,7 +426,7 @@ dry_run() {
     progress_line 100 "Dry run"
     printf '  REPO=%s\n  VERSION=%s\n  TARGET=%s\n  TAR=%s\n  INSTALL_DIR=%s\n' \
         "$REPO" "$VERSION" "$TARGET" "$(tarball_basename)" "$INSTALL_DIR"
-    printf '  GRN data → %s/data/ (human_network.parquet, mouse_network.parquet from GitHub raw, tag then main)\n' \
+    printf '  Bundle → %s/data/ (spaceship_config.toml + human_network.parquet + mouse_network.parquet from GitHub raw, tag then main)\n' \
         "$INSTALL_DIR"
     info "Unset INSTALL_DRY_RUN to install."
 }
@@ -455,7 +487,7 @@ show_help() {
     _row "INSTALL_TEST_VERSION=v..." "Pin release tag (e.g. tests)"
     _row "INSTALL_VERIFY_CHECKSUM=0" "Skip SHA256 verification (unsafe)"
     _row "INSTALL_SKIP_GRN_DATA=1" "Skip downloading human_network.parquet / mouse_network.parquet"
-    _row "INSTALL_REFRESH_GRN_DATA=1" "Re-download GRN parquet even if already present"
+    _row "INSTALL_REFRESH_GRN_DATA=1" "Re-download GRN parquet and spaceship_config.toml even if already present"
     _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat (Linux x86_64; overrides glibc probe)"
     _row "SPACETRAVLR_INSTALL_COLOR=1" "Enable ANSI colors (default off; use with --color)"
     _row "NO_COLOR" "Set (any value) to disable colors per no-color.org"

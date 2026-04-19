@@ -49,12 +49,31 @@ fn merge_toml_table_underlay_maps(
     }
 }
 
-/// `GrnConfig` deserializes `max_lr` as an alias of `max_ligands`. After underlay merge, both keys
-/// can appear in `[grn]` (repro has `max_ligands`, repo spaceship has `max_lr`), which serde
-/// rejects as a duplicate field. Prefer the repro value (`max_ligands`).
-fn dedupe_grn_max_ligand_toml_keys(grn: &mut toml::map::Map<String, toml::Value>) {
+/// `GrnConfig` deserializes `max_lr` / `max_lr_pairs` as aliases of `max_ligands`. After underlay
+/// merge, both `max_ligands` and `max_lr` can appear (repro vs repo spaceship); serde rejects
+/// duplicate fields. Prefer the value already in the repro (`max_ligands`).
+fn dedupe_grn_max_ligand_toml_keys_after_underlay(grn: &mut toml::map::Map<String, toml::Value>) {
     if grn.contains_key("max_ligands") && grn.contains_key("max_lr") {
         grn.remove("max_lr");
+    }
+    if grn.contains_key("max_ligands") && grn.contains_key("max_lr_pairs") {
+        grn.remove("max_lr_pairs");
+    }
+}
+
+/// After `--config` / overlay merge: alias keys from the overlay should win over `max_ligands`
+/// when more than one of the group is present; otherwise normalize to a single `max_ligands` key.
+fn dedupe_grn_max_ligand_toml_keys_after_overlay(grn: &mut toml::map::Map<String, toml::Value>) {
+    let ml = grn.remove("max_ligands");
+    let lr = grn.remove("max_lr");
+    let pairs = grn.remove("max_lr_pairs");
+    let resolved = if lr.is_some() || pairs.is_some() {
+        lr.or(pairs).or(ml)
+    } else {
+        ml
+    };
+    if let Some(v) = resolved {
+        grn.insert("max_ligands".to_string(), v);
     }
 }
 
@@ -79,7 +98,7 @@ pub fn merge_spaceship_underlay_into_toml(into: &mut toml::Value, underlay_root:
         }
     }
     if let Some(grn) = into_t.get_mut("grn").and_then(|v| v.as_table_mut()) {
-        dedupe_grn_max_ligand_toml_keys(grn);
+        dedupe_grn_max_ligand_toml_keys_after_underlay(grn);
     }
 }
 
@@ -103,6 +122,9 @@ pub fn merge_spaceship_overlay_into_toml(into: &mut toml::Value, overlay_root: &
                 *entry = toml::Value::Table(ov_sec.clone());
             }
         }
+    }
+    if let Some(grn) = into_t.get_mut("grn").and_then(|v| v.as_table_mut()) {
+        dedupe_grn_max_ligand_toml_keys_after_overlay(grn);
     }
 }
 
@@ -789,6 +811,38 @@ pub fn expand_user_path(s: &str) -> String {
     s.to_string()
 }
 
+/// Resolve `spaceship_config.toml` next to prebuilt binaries (`…/data/`, same layout as
+/// `install.sh`) or under `SPACETRAVLR_DATA_DIR`, then cwd (see [`crate::network::SPACETRAVLR_DATA_DIR_ENV`]).
+pub fn resolve_spaceship_config_toml_path() -> Option<PathBuf> {
+    const DATA_DIR_ENV: &str = "SPACETRAVLR_DATA_DIR";
+    for name in ["spaceship_config.toml", "SpaceshipConfig.toml"] {
+        if let Ok(dir) = std::env::var(DATA_DIR_ENV) {
+            let dir = dir.trim();
+            if !dir.is_empty() {
+                let p = PathBuf::from(expand_user_path(dir)).join(name);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                for rel in ["data", "../data"] {
+                    let p = parent.join(rel).join(name);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        let cwd_rel = Path::new(name);
+        if cwd_rel.is_file() {
+            return Some(cwd_rel.to_path_buf());
+        }
+    }
+    None
+}
+
 /// Strip a `file:` / `file://` URL prefix so pasted Finder / browser paths open correctly.
 fn strip_file_url_prefix(s: &str) -> &str {
     let Some(rest) = s.strip_prefix("file:") else {
@@ -976,19 +1030,24 @@ impl SpaceshipConfig {
             toml::from_str(&text).with_context(|| format!("parse run repro {}", path.display()))?;
 
         let repo = Self::repo_spaceship_config_path();
-        if repo.is_file() {
-            match std::fs::read_to_string(&repo) {
+        let underlay_path = if repo.is_file() {
+            Some(repo)
+        } else {
+            resolve_spaceship_config_toml_path()
+        };
+        if let Some(ref up) = underlay_path {
+            match std::fs::read_to_string(up) {
                 Ok(repo_text) => match toml::from_str::<toml::Value>(&repo_text) {
                     Ok(repo_root) => {
                         merge_spaceship_underlay_into_toml(&mut root, &repo_root);
                     }
                     Err(e) => eprintln!(
-                        "Warning: failed to parse repo spaceship {}: {}",
-                        repo.display(),
+                        "Warning: failed to parse spaceship underlay {}: {}",
+                        up.display(),
                         e
                     ),
                 },
-                Err(e) => eprintln!("Warning: failed to read {}: {}", repo.display(), e),
+                Err(e) => eprintln!("Warning: failed to read {}: {}", up.display(), e),
             }
         }
 
@@ -1041,7 +1100,7 @@ impl SpaceshipConfig {
 
     /// `spaceship_config.toml` next to the workspace `Cargo.toml` for this crate (the repo root when building `spacetravlr` from this tree).
     ///
-    /// At runtime after `cargo install` from another machine, this path may not exist; callers fall back to cwd discovery or [`SpaceshipConfig::default`].
+    /// At runtime after `cargo install` from another machine, this path may not exist; callers fall back to [`resolve_spaceship_config_toml_path`] or [`SpaceshipConfig::default`].
     pub fn repo_spaceship_config_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("spaceship_config.toml")
     }
@@ -1051,13 +1110,7 @@ impl SpaceshipConfig {
         if repo.is_file() {
             return Some(repo);
         }
-        for name in &["spaceship_config.toml", "SpaceshipConfig.toml"] {
-            let p = Path::new(name);
-            if p.is_file() {
-                return Some(p.to_path_buf());
-            }
-        }
-        None
+        resolve_spaceship_config_toml_path()
     }
 
     fn read_config_base_document() -> anyhow::Result<(toml::Value, Option<PathBuf>)> {
@@ -1070,21 +1123,18 @@ impl SpaceshipConfig {
                 Err(e) => eprintln!("Warning: failed to parse {}: {}", repo.display(), e),
             }
         }
-        for name in &["spaceship_config.toml", "SpaceshipConfig.toml"] {
-            let p = Path::new(name);
-            if p.is_file() {
-                let text =
-                    std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
-                match toml::from_str::<toml::Value>(&text) {
-                    Ok(v) => return Ok((v, Some(p.to_path_buf()))),
-                    Err(e) => eprintln!("Warning: failed to parse {}: {}", p.display(), e),
-                }
+        if let Some(p) = resolve_spaceship_config_toml_path() {
+            let text =
+                std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+            match toml::from_str::<toml::Value>(&text) {
+                Ok(v) => return Ok((v, Some(p))),
+                Err(e) => eprintln!("Warning: failed to parse {}: {}", p.display(), e),
             }
         }
         Ok((toml::Value::Table(Default::default()), None))
     }
 
-    /// Load base TOML (repo [`repo_spaceship_config_path`], else cwd `spaceship_config.toml`, else empty + serde defaults),
+    /// Load base TOML (repo [`repo_spaceship_config_path`], else [`resolve_spaceship_config_toml_path`], else empty + serde defaults),
     /// then merge `overlay` on top for keys in [`SPACESHIP_MERGE_SECTIONS`].
     pub fn try_load_merged(overlay: Option<&Path>) -> anyhow::Result<Self> {
         let (mut doc, base_path) = Self::read_config_base_document()?;
@@ -1102,7 +1152,7 @@ impl SpaceshipConfig {
                 );
             } else {
                 eprintln!(
-                    "Loaded --config {} (no repo/cwd spaceship TOML; serde defaults for omitted keys).",
+                    "Loaded --config {} (no base spaceship TOML; serde defaults for omitted keys).",
                     p.display()
                 );
             }
@@ -1544,6 +1594,26 @@ layer = "L0"
         assert_eq!(cfg.data.adata_path, "/repro.h5ad");
         assert_eq!(cfg.data.layer, "LX");
         assert_eq!(cfg.data.cluster_annot, "c1");
+    }
+
+    #[test]
+    fn overlay_max_lr_with_repro_max_ligands_deserializes_join_style_merge() {
+        let mut root: toml::Value = toml::from_str(
+            r#"
+[data]
+adata_path = "/x.h5ad"
+layer = "L"
+cluster_annot = "c"
+
+[grn]
+max_ligands = 50
+"#,
+        )
+        .unwrap();
+        let ov: toml::Value = toml::from_str("[grn]\nmax_lr = 120\n").unwrap();
+        merge_spaceship_overlay_into_toml(&mut root, &ov);
+        let cfg: SpaceshipConfig = toml::from_str(&toml::to_string_pretty(&root).unwrap()).unwrap();
+        assert_eq!(cfg.grn.max_ligands, Some(120));
     }
 }
 

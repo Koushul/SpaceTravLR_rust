@@ -63,7 +63,7 @@ pub use config::{
     CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, HybridCnnGatingConfig,
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
     default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
-    normalize_ui_path, resolve_training_target_genes,
+    normalize_ui_path, resolve_spaceship_config_toml_path, resolve_training_target_genes,
 };
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
