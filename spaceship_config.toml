@@ -20,7 +20,7 @@ cluster_annot   = "cell_type"
 # Radius for spatial neighbor detection
 radius           = 300
 # Grid resolution for spatial convolution kernel
-spatial_dim      = 32
+spatial_dim      = 64
 # Distance threshold for contact-based signaling
 contact_distance = 30
 # Linear scale on Gaussian weights in received-ligand aggregation
@@ -80,9 +80,9 @@ drop_cnn_if_insample_worse_than_lasso = true
 
 [lasso]
 # Element-wise L1 penalty
-l1_reg    = 1e-9
+l1_reg    = 1e-5
 # Group-L2 penalty
-group_reg = 1e-9
+group_reg = 1e-7
 # Max FISTA iterations
 n_iter    = 500
 # Relative convergence tolerance
