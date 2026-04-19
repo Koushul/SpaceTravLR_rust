@@ -310,6 +310,7 @@ install_release() {
 }
 
 # GRN parquet files for training (same search path as spacetravlr: install_dir/data/).
+# Keep raw URL logic in sync with `src/self_update.rs` (`sync_spaceship_config_toml` runs on `spacetravlr --update`).
 install_spaceship_config_toml() {
     DATA_DIR="${INSTALL_DIR}/data"
     mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"

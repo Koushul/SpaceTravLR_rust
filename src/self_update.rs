@@ -199,6 +199,55 @@ fn download_to_path(url: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Same `Owner/name` default as `scripts/install.sh` (`SPACETRAVLR_GITHUB_REPO`).
+fn github_repo_slug() -> String {
+    std::env::var("SPACETRAVLR_GITHUB_REPO")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| GITHUB_REPO.to_string())
+}
+
+/// Writes `install_dir/data/spaceship_config.toml` from raw GitHub, matching `install_spaceship_config_toml` in `scripts/install.sh` (release tag, then `main`).
+fn sync_spaceship_config_toml(install_dir: &Path, version_tag: &str) {
+    let repo = github_repo_slug();
+    let data_dir = install_dir.join("data");
+    let dest = data_dir.join("spaceship_config.toml");
+    let part = data_dir.join("spaceship_config.toml.part");
+
+    let res = (|| -> Result<()> {
+        fs::create_dir_all(&data_dir).with_context(|| format!("mkdir {}", data_dir.display()))?;
+        let tag = version_tag.trim();
+        let mut last_err: Option<anyhow::Error> = None;
+        for ref_name in [tag, "main"] {
+            let url = format!(
+                "https://raw.githubusercontent.com/{repo}/{ref_name}/spaceship_config.toml"
+            );
+            if part.exists() {
+                fs::remove_file(&part).ok();
+            }
+            match download_to_path(&url, &part) {
+                Ok(()) => {
+                    fs::rename(&part, &dest)
+                        .with_context(|| format!("install {}", dest.display()))?;
+                    eprintln!("Updated {}", dest.display());
+                    return Ok(());
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no download attempts")))
+    })();
+
+    if let Err(e) = res {
+        eprintln!(
+            "Warning: could not refresh spaceship_config.toml (tried tag {version_tag:?} and main): {e}\n\
+             Copy spaceship_config.toml into {} or re-run install.sh.",
+            data_dir.display()
+        );
+    }
+}
+
 fn atomic_replace_file(src: &Path, dst: &Path) -> Result<()> {
     let parent = dst.parent().context("destination has no parent")?;
     fs::create_dir_all(parent)?;
@@ -319,6 +368,8 @@ pub fn run(update_version: Option<&str>) -> Result<()> {
          */
         atomic_replace_file(&src, &dst)?;
     }
+
+    sync_spaceship_config_toml(&install_dir, remote_tag);
 
     fs::remove_dir_all(&tmp_root).ok();
 

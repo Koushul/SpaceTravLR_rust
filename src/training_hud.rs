@@ -136,7 +136,7 @@ pub struct TrainingHudState {
     pub genes_tf_ablated: usize,
     pub genes_rounds: usize,
     pub active_genes: HashMap<String, String>,
-    /// Per-gene LASSO progress: clusters (cell types) completed / total, for TUI only.
+    /// Per-gene progress: parallel Lasso clusters done / total, then sequential CNN clusters done / total (TUI only).
     pub gene_lasso_cluster_progress: HashMap<String, (usize, usize)>,
     pub gene_cnn_epoch_slots: HashMap<String, Arc<CnnEpochHudSlot>>,
     pub n_cells: usize,
@@ -471,19 +471,13 @@ pub fn log_line(hud: &Option<TrainingHud>, msg: String) {
     }
 }
 
-pub fn pipeline_step_begin(hud: &Option<TrainingHud>, label: &str) -> Instant {
-    if hud.is_none() {
-        println!("[pipeline] … {}", label);
-    }
+pub fn pipeline_step_begin(_hud: &Option<TrainingHud>, _label: &str) -> Instant {
     Instant::now()
 }
 
 pub fn pipeline_step_end(hud: &Option<TrainingHud>, label: &str, started: Instant) {
     if hud.is_none() {
-        println!(
-            "[pipeline] done {} ({:.1}s)",
-            label,
-            started.elapsed().as_secs_f64()
-        );
+        let s = started.elapsed().as_secs_f64();
+        println!("+ {:.1}s  {}", s, label);
     }
 }

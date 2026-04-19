@@ -76,7 +76,7 @@ lasso_pred_align_weight = 0.05
 lasso_pred_align_linear_decay = true
 # If CNN in-sample R² is worse than Lasso, drop CNN for that cluster (export uses Lasso); margin relaxes the comparison
 drop_cnn_if_insample_worse_than_lasso = true
-# cnn_vs_lasso_arbitration_margin = 0.0
+cnn_vs_lasso_arbitration_margin = 0.2
 
 [lasso]
 # Element-wise L1 penalty
@@ -97,9 +97,9 @@ unscale_betas_on_export = false
 [training]
 # Default when omitted: seed. Use full or hybrid to enable CNN paths.
 mode            = "seed"
-epochs          = 50
+epochs          = 150
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
-learning_rate   = 2e-4
+learning_rate   = 5e-3
 # Minimum mean lasso R² to allow CNN in hybrid mode (also used when hybrid.min_mean_lasso_r2_for_cnn is unset)
 score_threshold = 0.1
 # Optional target subset (CLI: --genes / --max-genes). Persisted in spacetravlr_run_repro.toml for --join-output-dir.

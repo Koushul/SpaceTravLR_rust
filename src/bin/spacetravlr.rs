@@ -58,7 +58,7 @@ const SPACETRAVLR_HELP_STYLES: Styles = Styles::styled()
 const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) training from Visium-style spatial AnnData (.h5ad).
 
 • Load spaceship_config.toml from the repo build, install data/ next to the binary, or pass --config, then apply CLI overrides.
-• Use --plain for line-oriented logs instead of the full-screen dashboard (when built with `tui`).
+• Use --plain for compact line-oriented logs instead of the full-screen dashboard (when built with `tui`).
 • Subcommand run-summary writes the HTML report without training."#;
 
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
@@ -199,7 +199,7 @@ struct Cli {
         long,
         action = ArgAction::SetTrue,
         help_heading = "Install",
-        help = "Download the latest release and replace spacetravlr, spacetravlr-perturb, and spatial_viewer next to this executable (opt-in; uses the network only when you pass this flag). Requires build with `self-update`."
+        help = "Download the latest release and replace spacetravlr, spacetravlr-perturb, and spatial_viewer next to this executable; also refreshes data/spaceship_config.toml from GitHub (same layout as install.sh). Opt-in; uses the network only when you pass this flag. Requires build with `self-update`."
     )]
     update: bool,
 
@@ -384,6 +384,14 @@ struct Cli {
     weighted_ligand_scale_factor: Option<f64>,
 
     #[arg(
+        long = "spatial_dim",
+        value_name = "N",
+        help_heading = "Training",
+        help = "CNN spatial map grid edge length (square H=W) — overrides [spatial].spatial_dim"
+    )]
+    spatial_dim: Option<usize>,
+
+    #[arg(
         long,
         value_name = "DIR",
         help_heading = "Output",
@@ -442,7 +450,7 @@ struct Cli {
     #[arg(
         long,
         help_heading = "Interface",
-        help = "Print line-oriented logs instead of the full-screen dashboard (when built with `tui`)"
+        help = "Compact line-oriented logs instead of the full-screen dashboard (when built with `tui`)"
     )]
     plain: bool,
 
@@ -906,6 +914,9 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     if let Some(v) = cli.weighted_ligand_scale_factor {
         cfg.spatial.weighted_ligand_scale_factor = v;
     }
+    if let Some(v) = cli.spatial_dim {
+        cfg.spatial.spatial_dim = v.max(1);
+    }
     if let Some(p) = &cli.h5ad {
         cfg.data.adata_path = expand_user_path(p.to_string_lossy().as_ref());
     }
@@ -1017,6 +1028,7 @@ fn eprint_join_style_resume_cli_notes(cli: &Cli, repro: &Path, explicit_join_fla
         || cli.output_dir.is_some()
         || cli.cnn_output_activation.is_some()
         || cli.weighted_ligand_scale_factor.is_some()
+        || cli.spatial_dim.is_some()
         || cli.train_modulators.is_some()
     {
         eprintln!(
@@ -1110,6 +1122,16 @@ fn grn_modulator_label(cfg: &SpaceshipConfig) -> String {
     }
 }
 
+fn plain_trim_chars(s: &str, max: usize) -> String {
+    let t = s.trim();
+    let n = t.chars().count();
+    if n <= max {
+        return t.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    t.chars().take(keep).collect::<String>() + "…"
+}
+
 fn print_plain_preamble(
     summary: &RunConfigSummary,
     cfg: &SpaceshipConfig,
@@ -1118,52 +1140,41 @@ fn print_plain_preamble(
     mode: &str,
     n_parallel: usize,
 ) {
+    let dev = plain_trim_chars(&summary.compute_device_detail, 88);
     println!(
-        "SpaceTravLR  |  {}  |  {} workers  |  {} epochs/gene",
-        mode, n_parallel, summary.epochs_per_gene
+        "plain  {}  {}×w  {}ep  {}  {}",
+        mode, n_parallel, summary.epochs_per_gene, summary.compute_backend, dev
     );
+    println!("data {}", dataset);
+    println!("out  {}", output_dir);
+    let repro = if cfg.execution.write_minimal_repro_h5ad {
+        "repro:h5ad"
+    } else {
+        "repro:off"
+    };
+    let cfg_line = plain_trim_chars(&summary.config_source, 96);
     println!(
-        "Compute:     {} — {}",
-        summary.compute_backend, summary.compute_device_detail
-    );
-    println!("Config:      {}", summary.config_source);
-    println!("Dataset:     {}", dataset);
-    println!("Output:      {}", output_dir);
-    println!(
-        "Layer:       {}  |  obs: {}",
-        summary.layer, summary.cluster_annot
-    );
-    println!(
-        "Spatial:     r={}  dim={}  contact={}  weighted_ligand_scale={}",
+        "cfg {}  {}  layer={} obs={}  r={} dim={} cd={} wlig={}  l1={:.0e} g={:.0e} n={} tol={:.0e}  CNN={} lr={:.0e} thr={}  GRN tf≤{} L={} mods={}  genes: {}",
+        cfg_line,
+        repro,
+        summary.layer,
+        summary.cluster_annot,
         summary.spatial_radius,
         summary.spatial_dim,
         summary.contact_distance,
-        summary.weighted_ligand_scale_factor
-    );
-    println!(
-        "Lasso:       l1={:.3e}  group={:.3e}  n_iter={}  tol={:.1e}",
-        summary.l1_reg, summary.group_reg, summary.n_iter, summary.tol
-    );
-    println!(
-        "Training:    mode={}  lr={:.3e}  score≥{}",
-        summary.cnn_training_mode, summary.learning_rate, summary.score_threshold
-    );
-    println!(
-        "GRN:         tf_lig≥{}  max_ligands={}  mods={}",
+        summary.weighted_ligand_scale_factor,
+        summary.l1_reg,
+        summary.group_reg,
+        summary.n_iter,
+        summary.tol,
+        summary.cnn_training_mode,
+        summary.learning_rate,
+        summary.score_threshold,
         summary.tf_ligand_cutoff,
         summary.max_ligands,
-        grn_modulator_label(cfg)
+        grn_modulator_label(cfg),
+        summary.gene_selection,
     );
-    println!("Genes:       {}", summary.gene_selection);
-    println!(
-        "Minimal repro: {}",
-        if cfg.execution.write_minimal_repro_h5ad {
-            "on (spacetravlr_minimal_repro.h5ad)"
-        } else {
-            "off"
-        }
-    );
-    println!("{}", "—".repeat(60));
 }
 
 fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
@@ -2080,7 +2091,6 @@ fn main() -> anyhow::Result<()> {
     let verbose = cli.verbose;
 
     if !use_dashboard {
-        print_compute_notice(&compute);
         print_plain_preamble(
             &run_summary,
             &cfg,
@@ -2092,13 +2102,13 @@ fn main() -> anyhow::Result<()> {
         if join_training {
             if condition_column.is_some() {
                 println!(
-                    "Join mode (condition): shared parent directory {}; each conditions/<group>/ uses .lock coordination",
-                    output_dir
+                    "join+conditions  parent={}  locks per conditions/<group>/",
+                    output_dir.trim_end_matches('/')
                 );
             } else {
                 println!(
-                    "Join mode: shared directory {}; unfinished genes claimed via .lock; existing *_betadata.feather skipped",
-                    output_dir
+                    "join  out={}  skip existing *_betadata.feather · claim genes via .lock",
+                    output_dir.trim_end_matches('/')
                 );
             }
         }
@@ -2109,7 +2119,7 @@ fn main() -> anyhow::Result<()> {
             let splits =
                 prepare_condition_splits(&path, &output_dir, condition_col, join_training)?;
             println!(
-                "Condition split: obs.{:?} -> {} groups (betadata under {}/conditions/<group>/)",
+                "split  obs.{}  ·  {} groups  ·  {}/conditions/<name>/",
                 condition_col,
                 splits.len(),
                 output_dir.trim_end_matches('/')
@@ -2117,33 +2127,34 @@ fn main() -> anyhow::Result<()> {
             if join_training {
                 let dir_status = scan_condition_status(&output_dir)?;
                 if !dir_status.is_empty() {
-                    println!("Condition status (from filesystem):");
+                    let mut parts = Vec::with_capacity(dir_status.len());
                     for cs in &dir_status {
-                        let status = if cs.n_locks > 0 {
-                            "in progress"
+                        let st = if cs.n_locks > 0 {
+                            "run"
                         } else if cs.n_done() > 0 {
-                            "has results"
+                            "ok"
                         } else {
-                            "not started"
+                            "·"
                         };
-                        println!(
-                            "  {}: {} done ({} feather + {} orphan + {} tf_ablated), {} active locks [{}]",
+                        parts.push(format!(
+                            "{}:d={}/fe={}/o={}/ta={}/L={}/{}",
                             cs.label,
                             cs.n_done(),
                             cs.n_feathers,
                             cs.n_orphans,
                             cs.n_tf_ablated,
                             cs.n_locks,
-                            status,
-                        );
+                            st
+                        ));
                     }
+                    println!("join {}", parts.join("  "));
                 }
             }
             for split in splits {
                 let split_output_dir = split.output_dir.display().to_string();
                 let obs_subset = Arc::from(split.obs_indices.into_boxed_slice());
                 println!(
-                    "Running split '{}' ({} cells) -> {}",
+                    "→  '{}'  {} cells  {}",
                     split.label, split.n_obs, split_output_dir
                 );
                 let params = FitAllGenesParams {
@@ -2229,7 +2240,7 @@ fn main() -> anyhow::Result<()> {
             };
             fit_all_genes_dispatch(&params, &compute)?;
         }
-        println!("Finished.");
+        println!("done.");
         return Ok(());
     }
 

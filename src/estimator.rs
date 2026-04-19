@@ -11,8 +11,8 @@ use ndarray::{Array1, Array2, Array4, ArrayView1, Axis, s};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
-use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -740,9 +740,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         let lasso_progress = Arc::new(Mutex::new(lasso_progress));
         let lasso_done = Arc::new(AtomicUsize::new(0));
         {
-            let mut cb = lasso_progress
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cb = lasso_progress.lock().unwrap_or_else(|e| e.into_inner());
             cb(0, n_celltypes);
         }
 
@@ -774,14 +772,21 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                             score_threshold,
                         );
                         let d = lasso_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        lasso_progress
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())(d, n_celltypes);
+                        lasso_progress.lock().unwrap_or_else(|e| e.into_inner())(d, n_celltypes);
                         out
                     })
                     .collect()
             })
         };
+
+        let n_cnn_clusters = phase_results
+            .iter()
+            .filter(|p| matches!(p, ClusterLassoPhase::Pass(_)))
+            .count();
+        if !seed_only && n_cnn_clusters > 0 {
+            lasso_progress.lock().unwrap_or_else(|e| e.into_inner())(0, n_cnn_clusters);
+        }
+        let mut cnn_cluster_done = 0usize;
 
         for (phase, c_id) in phase_results.into_iter().zip(to_fit.iter().copied()) {
             match phase {
@@ -827,7 +832,10 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     );
 
                     let anchors_tensor = Tensor::<B, 1>::from_data(
-                        burn::tensor::TensorData::new(anchors_vec.clone(), [lasso_coef.nrows() + 1]),
+                        burn::tensor::TensorData::new(
+                            anchors_vec.clone(),
+                            [lasso_coef.nrows() + 1],
+                        ),
                         device,
                     );
 
@@ -926,6 +934,12 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         lasso_coef,
                         intercept,
                     });
+
+                    cnn_cluster_done += 1;
+                    lasso_progress.lock().unwrap_or_else(|e| e.into_inner())(
+                        cnn_cluster_done,
+                        n_cnn_clusters,
+                    );
                 }
             }
         }
@@ -952,7 +966,11 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         }
     }
 
-    pub fn fit_cnn_refinement(&mut self, inputs: ClusteredGcnNwrCnnRefineInputs<'_, '_, B>) {
+    pub fn fit_cnn_refinement<F: FnMut(usize, usize) + Send>(
+        &mut self,
+        inputs: ClusteredGcnNwrCnnRefineInputs<'_, '_, B>,
+        mut cluster_progress: F,
+    ) {
         let ClusteredGcnNwrCnnRefineInputs {
             x,
             y,
@@ -992,6 +1010,15 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             .cloned()
             .map(|s| (s.cluster_id, s))
             .collect();
+
+        let n_cnn_clusters = (0..num_clusters)
+            .filter(|&c| self.models.contains_key(&c))
+            .filter(|&c| (0..n_samples).any(|i| clusters[i] == c))
+            .count();
+        if n_cnn_clusters > 0 {
+            cluster_progress(0, n_cnn_clusters);
+        }
+        let mut cnn_cluster_done = 0usize;
 
         for c_id in 0..num_clusters {
             if !self.models.contains_key(&c_id) {
@@ -1079,6 +1106,9 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 s.cnn_train_mse_epochs = cnn_train_mse_epochs;
                 s.cnn_r2 = cnn_r2;
             }
+
+            cnn_cluster_done += 1;
+            cluster_progress(cnn_cluster_done, n_cnn_clusters);
         }
 
         let mut ordered: Vec<ClusterTrainingSummary> = summaries_by_cluster.into_values().collect();

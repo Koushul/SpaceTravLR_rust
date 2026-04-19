@@ -2376,33 +2376,18 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             if obs_row_subset.is_none() {
                 let repro_path = Path::new(training_dir).join(RUN_REPRO_TOML_FILENAME);
                 match spaceship_config.write_run_repro_toml_if_missing(Path::new(training_dir)) {
-                    Ok(Some(p)) => log_line(
-                        &hud,
-                        format!(
-                            "Wrote {} (shared run config for additional trainers: use --join-output-dir on other hosts)",
-                            p.display()
-                        ),
-                    ),
+                    Ok(Some(p)) => log_line(&hud, format!("repro: wrote {}", p.display())),
                     Ok(None) => {
                         if join_training {
-                            log_line(
-                                &hud,
-                                format!(
-                                    "Join mode: using existing run config {}",
-                                    repro_path.display()
-                                ),
-                            );
+                            log_line(&hud, format!("repro: join using {}", repro_path.display()));
                         }
                     }
-                    Err(e) => log_line(
-                        &hud,
-                        format!("Could not write run repro TOML (early): {}", e),
-                    ),
+                    Err(e) => log_line(&hud, format!("repro: early write failed: {}", e)),
                 }
             } else if join_training {
                 log_line(
                     &hud,
-                    "Join mode (condition split): canonical spacetravlr_run_repro.toml is under the parent output directory, not this conditions/<group>/ folder.".to_string(),
+                    "repro: join+condition — canonical TOML lives on parent output dir".to_string(),
                 );
             }
 
@@ -2414,7 +2399,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 log_line(
                     &hud,
                     format!(
-                        "Condition subset: {} / {} cells (read-only; .h5ad file untouched)",
+                        "subset: {} / {} cells (read-only on .h5ad)",
                         rows.len(),
                         setup_adata.n_obs()
                     ),
@@ -2430,20 +2415,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let mut target_genes =
                 crate::config::filter_training_var_names(&all_var_names, gene_filter.as_deref());
             if let Some(ref filter) = gene_filter {
-                log_line(&hud, format!("Filtering for specific genes: {:?}", filter));
                 log_line(
                     &hud,
-                    format!("Retained {} genes for training", target_genes.len()),
+                    format!("genes: filter {:?} -> {}", filter, target_genes.len()),
                 );
             }
             if let Some(n) = max_genes {
                 if target_genes.len() > n {
                     target_genes.truncate(n);
                     let preview: Vec<_> = target_genes.iter().take(5).cloned().collect();
-                    log_line(
-                        &hud,
-                        format!("Using first {} genes (preview: {:?})", n, preview),
-                    );
+                    log_line(&hud, format!("genes: cap {} (e.g. {:?})", n, preview));
                 }
             }
 
@@ -2494,9 +2475,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             pipeline_step_end(&hud, "build cluster labels & cell-type map", t_cl);
             if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
                 log_line(
-                &hud,
-                "TF priors provided, but no cell-type label column (cell_type / cell_types / celltype); using target-level TF priors without per-cell_type masking.".to_string(),
-            );
+                    &hud,
+                    "TF priors: no cell_type column — target-level priors (no per-type mask)"
+                        .to_string(),
+                );
             }
 
             if let Some(ref h) = hud {
@@ -2525,7 +2507,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let t_tf = pipeline_step_begin(&hud, "load TF priors (feather)");
                 let loaded = crate::network::TfPriors::from_feather(path, &all_var_names)?;
                 pipeline_step_end(&hud, "load TF priors (feather)", t_tf);
-                log_line(&hud, format!("Loaded TF priors from {}", path));
+                log_line(&hud, format!("TF priors: {}", path));
                 Some(Arc::new(loaded))
             } else if use_tf_modulators {
                 let co_path = Path::new(training_dir).join("celloracle_tf_priors.feather");
@@ -2611,7 +2593,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     log_line(
                         &hud,
                         format!(
-                            "Wrote CellOracle TF priors ({} edges, p ≤ {}) to {}",
+                            "CellOracle priors: {} edges p≤{} -> {}",
                             links.len(),
                             p_max,
                             co_path.display()
@@ -2620,12 +2602,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 } else {
                     log_line(
                         &hud,
-                        format!("Reusing cached CellOracle TF priors: {}", co_path.display()),
+                        format!("CellOracle priors: reuse {}", co_path.display()),
                     );
                 }
                 let loaded = crate::network::TfPriors::from_feather(co_path_str, &all_var_names)?;
                 pipeline_step_end(&hud, "CellOracle GRN inference (auto TF priors)", t_co);
-                log_line(&hud, format!("Loaded TF priors from {}", co_path.display()));
                 Some(Arc::new(loaded))
             } else {
                 None
@@ -2664,19 +2645,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     layer,
                 )?;
                 verify_minimal_repro_adata_loadable(&out, layer, cluster_annot)?;
-                log_line(
-                    &hud,
-                    format!(
-                        "Wrote minimal reproducibility AnnData (sparse X/layers, obsm coordinates; no precomputed spatial maps or ligand tensors): {}",
-                        out
-                    ),
-                );
+                log_line(&hud, format!("minimal repro .h5ad -> {}", out));
                 out
             } else {
                 log_line(
-                &hud,
-                "Skipping spacetravlr_minimal_repro.h5ad (execution.write_minimal_repro_h5ad = false); using input AnnData for training.".to_string(),
-            );
+                    &hud,
+                    "minimal repro: off (train from input .h5ad)".to_string(),
+                );
                 adata_path.to_string()
             };
             pipeline_step_end(&hud, repro_label, t_repro);
@@ -2733,7 +2708,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 log_line(
                     &hud,
                     format!(
-                        "GRN extras from config: {} extra modulator gene(s), {} extra L–R pair(s)",
+                        "GRN: +{} extra mod genes, +{} LR pairs",
                         resolved_ex_mod.len(),
                         resolved_ex_lr.len()
                     ),
@@ -2746,12 +2721,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
                     let n_cells = xy.nrows();
                     let k = hybrid_gating.moran_k_neighbors.max(1);
-                    let mut msg = format!(
-                        "Moran kNN graph ({} cells, k={}; KD-tree build + queries)",
-                        n_cells, k
-                    );
+                    let mut msg = format!("Moran kNN  n={} k={}", n_cells, k);
                     if n_cells > 8_000 {
-                        msg.push_str(" — can take a while at very large n");
+                        msg.push_str(" (slow)");
                     }
                     let t_nb = pipeline_step_begin(&hud, &msg);
                     let nb = build_neighbors(xy.as_ref(), k);
@@ -2841,10 +2813,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         acc = 0;
                         let n = remove_stale_lock_files_in_dir(Path::new(&training_dir_j), secs);
                         if n > 0 {
-                            log_line(
-                                &hud_j,
-                                format!(">> periodic sweep: removed {n} stale .lock file(s)"),
-                            );
+                            log_line(&hud_j, format!("locks: swept {n} stale"));
                         }
                     }
                 }))
@@ -2854,10 +2823,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
             log_line(
                 &hud,
-                format!(
-                    "Spawning {} worker threads for {} genes (each opens HDF5 once)…",
-                    n_workers, total_genes
-                ),
+                format!("workers={} genes={} (HDF5 each)", n_workers, total_genes),
             );
             let t_workers = pipeline_step_begin(&hud, "per-gene training (workers running)");
             let cluster_annot_for_workers = cluster_annot.to_string();
@@ -2925,7 +2891,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 .map(|g| g.should_cancel())
                                 .unwrap_or(false)
                             {
-                                log_line(&hud, ">> worker: cancel signal received".to_string());
+                                log_line(&hud, "cancel".to_string());
                                 break;
                             }
 
@@ -2951,7 +2917,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     if let Ok(mut g) = h.lock() {
                                         g.genes_skipped += 1;
                                     }
-                                    log_line(&hud, format!(">> skip (cached) {}", gene));
+                                    log_line(&hud, format!("skip cached {}", gene));
                                 }
                                 if let Some(ref p) = pb {
                                     p.inc(1);
@@ -2977,7 +2943,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     log_line(
                                                         &hud,
                                                         format!(
-                                                            ">> removed stale lock {} ({:.0}s old)",
+                                                            "lock: rm stale {} ({:.0}s)",
                                                             gene,
                                                             age.as_secs_f64()
                                                         ),
@@ -3000,7 +2966,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     if let Ok(mut g) = h.lock() {
                                         g.genes_skipped += 1;
                                     }
-                                    log_line(&hud, format!(">> skip (lock) {}", gene));
+                                    log_line(&hud, format!("skip lock {}", gene));
                                 }
                                 if let Some(ref p) = pb {
                                     p.inc(1);
@@ -3060,7 +3026,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 Err(e) => {
                                     log_line(
                                         &hud,
-                                        format!("❌ estimator init failed {}: {}", gene, e),
+                                        format!("fail init {}: {}", gene, e),
                                     );
                                     if let Some(ref h) = hud {
                                         if let Ok(mut g) = h.lock() {
@@ -3104,10 +3070,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     }
                                     log_line(
                                         &hud,
-                                        format!(
-                                            ">> tf_ablated (TF modulators off; had TF-only GRN/prior support) {}",
-                                            gene
-                                        ),
+                                        format!("tf_ablated {}", gene),
                                     );
                                 } else {
                                     let _ = fs::File::create(&orphan_path);
@@ -3119,12 +3082,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         }
                                     }
                                     let msg = if absent_tf_when_required {
-                                        format!(
-                                            ">> orphan (use_tf_modulators on but no TF regulators for target) {}",
-                                            gene
-                                        )
+                                        format!("orphan no_tf_regs {}", gene)
                                     } else {
-                                        format!(">> orphan (no modulators) {}", gene)
+                                        format!("orphan no_mods {}", gene)
                                     };
                                     log_line(&hud, msg);
                                 }
@@ -3295,6 +3255,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                                 ),
                                                                 cnn_epoch_slot: cnn_epoch_slot_refine,
                                                             },
+                                                            |done, total| {
+                                                                if let Some(hh) = hud.as_ref() {
+                                                                    if let Ok(mut g) = hh.lock() {
+                                                                        g.set_gene_lasso_cluster_progress(
+                                                                            &gene, done, total,
+                                                                        );
+                                                                    }
+                                                                }
+                                                            },
                                                         );
                                                     }
                                                     export_per_cell = true;
@@ -3308,10 +3277,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         Err(e) => {
                                             log_line(
                                                 &hud,
-                                                format!(
-                                                    "hybrid design matrix failed {}: {}",
-                                                    gene, e
-                                                ),
+                                                format!("fail hybrid_design {}: {}", gene, e),
                                             );
                                             export_per_cell = false;
                                         }
@@ -3466,15 +3432,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 }
                                             }
                                             let orphan_msg = if !has_any_mod_beta {
-                                                format!(
-                                                    ">> orphan (no non-zero modulator betas) {}",
-                                                    gene
-                                                )
+                                                format!("orphan zero_betas {}", gene)
                                             } else {
-                                                format!(
-                                                    ">> orphan (all TF modulator betas are zero) {}",
-                                                    gene
-                                                )
+                                                format!("orphan zero_tf_betas {}", gene)
                                             };
                                             log_line(&hud, orphan_msg);
                                         } else {
@@ -3569,15 +3529,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 }
                                             }
                                             let orphan_msg = if !has_any_mod_beta {
-                                                format!(
-                                                    ">> orphan (no non-zero modulator betas) {}",
-                                                    gene
-                                                )
+                                                format!("orphan zero_betas {}", gene)
                                             } else {
-                                                format!(
-                                                    ">> orphan (all TF modulator betas are zero) {}",
-                                                    gene
-                                                )
+                                                format!("orphan zero_tf_betas {}", gene)
                                             };
                                             log_line(&hud, orphan_msg);
                                         } else {
@@ -3623,14 +3577,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     if let Ok(mut g) = h.lock() {
                                         g.genes_done += 1;
                                     }
-                                    log_line(&hud, format!(">> wrote {}", gene));
+                                    log_line(&hud, format!("ok {}", gene));
                                 }
                             } else if !orphan_zero_mod_betas {
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
                                         g.genes_failed += 1;
                                     }
-                                    log_line(&hud, format!(">> fail (fit/export) {}", gene));
+                                    log_line(&hud, format!("fail {}", gene));
                                 }
                             }
 
@@ -3645,19 +3599,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             Some(&skip_cnn_weight_export_clusters),
                                         ) {
                                             Ok(Some(path)) => {
-                                                log_line(
-                                                    &hud,
-                                                    format!(">> wrote cnn model {}", path),
-                                                );
+                                                log_line(&hud, format!("cnn_npz {}", path));
                                             }
                                             Ok(None) => {}
                                             Err(e) => {
                                                 log_line(
                                                     &hud,
-                                                    format!(
-                                                        ">> warn (cnn model export) {}: {}",
-                                                        gene, e
-                                                    ),
+                                                    format!("cnn_npz warn {}: {}", gene, e),
                                                 );
                                             }
                                         }
@@ -3674,19 +3622,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             &device,
                                         ) {
                                             Ok(Some(path)) => {
-                                                log_line(
-                                                    &hud,
-                                                    format!(">> wrote cnn parity {}", path),
-                                                );
+                                                log_line(&hud, format!("cnn_parity {}", path));
                                             }
                                             Ok(None) => {}
                                             Err(e) => {
                                                 log_line(
                                                     &hud,
-                                                    format!(
-                                                        ">> warn (cnn parity dump) {}: {}",
-                                                        gene, e
-                                                    ),
+                                                    format!("cnn_parity warn {}: {}", gene, e),
                                                 );
                                             }
                                         }
@@ -3712,22 +3654,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 epochs,
                                             ) {
                                                 Ok(Some(path)) => {
-                                                    log_line(
-                                                        &hud,
-                                                        format!(
-                                                            ">> wrote cnn train data {}",
-                                                            path
-                                                        ),
-                                                    );
+                                                    log_line(&hud, format!("cnn_train_npz {}", path));
                                                 }
                                                 Ok(None) => {}
                                                 Err(e) => {
                                                     log_line(
                                                         &hud,
-                                                        format!(
-                                                            ">> warn (cnn train data dump) {}: {}",
-                                                            gene, e
-                                                        ),
+                                                        format!("cnn_train_npz warn {}: {}", gene, e),
                                                     );
                                                 }
                                             }
@@ -3938,11 +3871,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             "mean_lasso_r2"
                         };
                         let msg = if join_training {
-                            format!(
-                                "Join mode: merged var['{cols}'] into training AnnData (advisory flock)."
-                            )
+                            format!("var: merged {cols} (join flock)")
                         } else {
-                            format!("Updated var['{cols}'] on training AnnData.")
+                            format!("var: wrote {cols}")
                         };
                         log_line(&hud, msg);
                     }
@@ -3962,15 +3893,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
 
             if join_training {
-                log_line(
-                    &hud,
-                    "Join mode: did not overwrite spacetravlr_run_repro.toml (canonical copy from leader run)"
-                        .to_string(),
-                );
+                log_line(&hud, "repro: unchanged (join)".to_string());
             } else if obs_row_subset.is_none() {
                 match spaceship_config.write_run_repro_toml(Path::new(training_dir)) {
-                    Ok(p) => log_line(&hud, format!("Wrote run repro {}", p.display())),
-                    Err(e) => log_line(&hud, format!("Run repro TOML not written: {}", e)),
+                    Ok(p) => log_line(&hud, format!("repro: {}", p.display())),
+                    Err(e) => log_line(&hud, format!("repro: not written: {}", e)),
                 }
             }
 
@@ -3985,8 +3912,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 betadata_pattern: "*_betadata.feather",
                 config_source_path: config_source_path.as_deref(),
             }) {
-                Ok(p) => log_line(&hud, format!("Wrote run summary {}", p.display())),
-                Err(e) => log_line(&hud, format!("Run summary HTML failed: {}", e)),
+                Ok(p) => log_line(&hud, format!("summary: {}", p.display())),
+                Err(e) => log_line(&hud, format!("summary: failed: {}", e)),
             }
 
             print_training_outcome_banner(&hud);
