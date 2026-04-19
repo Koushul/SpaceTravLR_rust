@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use spacetravlr::config::{SpaceshipConfig, expand_user_path};
+use spacetravlr::scanpy_preprocess::training_prep_subdir;
 use spacetravlr::spatial_estimator::materialize_canonical_training_adata;
 
 fn repo_root() -> PathBuf {
@@ -47,13 +48,13 @@ fn materialize_reuse_canonical_skips_full_copy_second_pass() {
         .expect("materialize first");
     let d1 = t1.elapsed();
 
-    let canonical = out_dir.join("SlideTags_human_tonsil_processed.h5ad");
-    assert_eq!(
-        PathBuf::from(expand_user_path(path1.trim())),
-        canonical,
-        "first pass should end on canonical path, got {path1}"
+    let resolved1 = PathBuf::from(expand_user_path(path1.trim()));
+    assert!(
+        resolved1 == foreign || resolved1.starts_with(training_prep_subdir(&out_dir)),
+        "first pass should keep input or use prep cache under spacetravlr_prep, got {}",
+        resolved1.display()
     );
-    assert!(canonical.is_file(), "missing {}", canonical.display());
+    assert!(resolved1.is_file(), "missing {}", resolved1.display());
 
     let mut path2 = foreign.to_string_lossy().to_string();
     let t2 = Instant::now();
@@ -65,8 +66,8 @@ fn materialize_reuse_canonical_skips_full_copy_second_pass() {
         "materialize_canonical_training_adata: first={d1:?} second={d2:?} (second should be fast reuse)"
     );
 
-    let resolved = PathBuf::from(expand_user_path(path2.trim()));
-    assert_eq!(resolved, canonical);
+    let resolved2 = PathBuf::from(expand_user_path(path2.trim()));
+    assert_eq!(resolved1, resolved2);
 
     assert!(
         d1 < std::time::Duration::from_secs(120) && d2 < std::time::Duration::from_secs(120),

@@ -6,8 +6,8 @@ use crate::cnn_gating::{
     predict_lasso_y,
 };
 use crate::config::{
-    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, RUN_REPRO_TOML_FILENAME,
-    SpaceshipConfig, expand_user_path,
+    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, LassoConfig, ModelExportConfig,
+    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, expand_user_path,
 };
 use crate::estimator::{
     CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs,
@@ -32,7 +32,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 use ndarray::{Array1, Array2, Array4};
 use ndarray_npy::NpzWriter;
-use polars::prelude::{DataFrame, NamedFrom, Series};
+use polars::datatypes::DataType;
+use polars::io::ipc::IpcCompression;
+use polars::prelude::{
+    Column, DataFrame, IpcReader, IpcWriter, NamedFrom, SerReader, SerWriter, Series,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -46,6 +50,13 @@ const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
 /// Advisory lock for [`patch_adata_var_mean_lasso_r2_locked`]. Suffix is not `.lock` so
 /// [`remove_stale_lock_files_in_dir`] never deletes it while a patch is in progress.
 pub const VAR_SCORES_PATCH_FLOCK: &str = "spacetravlr_var_scores_patch.flock";
+
+/// Per-gene mean Lasso R² (and optional mean CNN R²) beside the training `.h5ad` (Arrow IPC / Feather, LZ4).
+pub const GENE_PERFORMANCE_FEATHER_NAME: &str = "spacetravlr_gene_performance.feather";
+
+pub fn gene_performance_feather_path(training_dir: &Path) -> PathBuf {
+    training_dir.join(GENE_PERFORMANCE_FEATHER_NAME)
+}
 
 /// `use_tf_modulators` is on and every fitted TF coefficient column is zero (column indices
 /// `1..=n_tf` in per-cell β; column 0 is intercept).
@@ -1743,21 +1754,10 @@ fn export_cnn_train_data_npz<AB: AutodiffBackend, AnB: Backend>(
     Ok(Some(out_str.to_string()))
 }
 
-fn copy_h5ad_reflink_or_full(from: &Path, to: &Path) -> anyhow::Result<()> {
-    reflink::reflink_or_copy(from, to).with_context(|| {
-        format!(
-            "copy (reflink or full) {} -> {}",
-            from.display(),
-            to.display()
-        )
-    })?;
-    Ok(())
-}
-
 /// Parallel-safe per-gene mean Lasso R² and optional mean CNN R² (see [`patch_adata_var_mean_lasso_r2`]).
 ///
-/// Training merges finite entries into `adata.var` under a flock (`--join-output-dir`); non-finite
-/// slots leave prior on-disk values unchanged.
+/// Training merges finite entries into [`GENE_PERFORMANCE_FEATHER_NAME`] under a flock
+/// (`--join-output-dir`); non-finite slots leave prior on-disk values unchanged.
 ///
 /// `mean_cnn_r2_scores` is used for [`CnnTrainingMode::Full`] runs and for hybrid top‑K phase 2
 /// (accumulator is upgraded before the second pass). Seed-only training omits it.
@@ -1805,19 +1805,192 @@ fn mean_lasso_accum_ensure_cnn_scores(accum: MeanLassoR2Accum, n_vars: usize) ->
     }
 }
 
-fn f64_var_column_or_nan(df: &DataFrame, name: &str, n: usize) -> anyhow::Result<Vec<f64>> {
-    match df.column(name) {
-        Ok(c) => {
-            let ca = c.f64()?;
-            anyhow::ensure!(
-                ca.len() == n,
-                "column {name} length {} != n_vars {n}",
-                ca.len()
-            );
-            Ok((0..n).map(|i| ca.get(i).unwrap_or(f64::NAN)).collect())
+fn genes_ordered_for_accum(accum: &MeanLassoR2Accum) -> anyhow::Result<Vec<String>> {
+    let n = accum.scores.len();
+    let mut out: Vec<Option<String>> = vec![None; n];
+    for (g, &i) in accum.gene_to_idx.iter() {
+        anyhow::ensure!(i < n, "gene index {i} out of range for n_vars {n}");
+        if out[i].is_some() {
+            anyhow::bail!("duplicate var index {i} in gene_to_idx map");
         }
-        Err(_) => Ok(vec![f64::NAN; n]),
+        out[i] = Some(g.clone());
     }
+    for (i, slot) in out.iter().enumerate() {
+        anyhow::ensure!(
+            slot.is_some(),
+            "missing gene name for var row index {i} (incomplete gene_to_idx)"
+        );
+    }
+    Ok(out.into_iter().flatten().collect())
+}
+
+fn read_gene_performance_feather_prev(
+    feather_path: &Path,
+    genes_ordered: &[String],
+    with_cnn: bool,
+) -> anyhow::Result<(Vec<f64>, Option<Vec<f64>>)> {
+    let n = genes_ordered.len();
+    let nan_block = || vec![f64::NAN; n];
+    if !feather_path.is_file() {
+        return Ok((nan_block(), with_cnn.then_some(nan_block())));
+    }
+    let f = File::open(feather_path).with_context(|| format!("open {}", feather_path.display()))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("parse IPC {}", feather_path.display()))?;
+    let gene_col = df
+        .column("gene")
+        .with_context(|| format!("{}: missing 'gene' column", feather_path.display()))?
+        .cast(&DataType::String)
+        .with_context(|| format!("{}: cast gene to string", feather_path.display()))?;
+    let gca = gene_col.str().with_context(|| format!(
+        "{}: gene column not string-like",
+        feather_path.display()
+    ))?;
+    let lasso_ca = df
+        .column("mean_lasso_r2")
+        .with_context(|| format!(
+            "{}: missing 'mean_lasso_r2'",
+            feather_path.display()
+        ))?
+        .f64()
+        .with_context(|| format!(
+            "{}: mean_lasso_r2 not f64",
+            feather_path.display()
+        ))?;
+    let h = df.height();
+    let mut lmap: HashMap<String, f64> = HashMap::new();
+    for i in 0..h {
+        let key = gca.get(i).unwrap_or("").to_string();
+        lmap.insert(key, lasso_ca.get(i).unwrap_or(f64::NAN));
+    }
+
+    let mut cmap: HashMap<String, f64> = HashMap::new();
+    if with_cnn {
+        let cca = df
+            .column("mean_cnn_r2")
+            .with_context(|| format!(
+                "{}: missing 'mean_cnn_r2' (accum tracks CNN scores)",
+                feather_path.display()
+            ))?
+            .f64()
+            .with_context(|| format!(
+                "{}: mean_cnn_r2 not f64",
+                feather_path.display()
+            ))?;
+        for i in 0..h {
+            let key = gca.get(i).unwrap_or("").to_string();
+            cmap.insert(key, cca.get(i).unwrap_or(f64::NAN));
+        }
+    }
+
+    let prev_lasso: Vec<f64> = genes_ordered
+        .iter()
+        .map(|g| *lmap.get(g.as_str()).unwrap_or(&f64::NAN))
+        .collect();
+    let prev_cnn = with_cnn.then(|| {
+        genes_ordered
+            .iter()
+            .map(|g| *cmap.get(g.as_str()).unwrap_or(&f64::NAN))
+            .collect()
+    });
+    Ok((prev_lasso, prev_cnn))
+}
+
+fn write_gene_performance_feather_atomic(
+    feather_path: &Path,
+    genes_ordered: &[String],
+    col_lasso: &[f64],
+    col_cnn: Option<&[f64]>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        genes_ordered.len() == col_lasso.len(),
+        "gene / lasso column length mismatch"
+    );
+    if let Some(cc) = col_cnn {
+        anyhow::ensure!(cc.len() == genes_ordered.len(), "gene / cnn column length mismatch");
+    }
+    let mut columns: Vec<Column> = vec![
+        Series::new("gene".into(), genes_ordered.to_vec()).into(),
+        Series::new("mean_lasso_r2".into(), col_lasso.to_vec()).into(),
+    ];
+    if let Some(cc) = col_cnn {
+        columns.push(Series::new("mean_cnn_r2".into(), cc.to_vec()).into());
+    }
+    let mut out_df = DataFrame::new(columns)?;
+
+    let fname = feather_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("spacetravlr_gene_performance.feather");
+    let tmp = feather_path.with_file_name(format!("{fname}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
+    w.finish(&mut out_df)
+        .with_context(|| format!("write IPC {}", tmp.display()))?;
+    std::fs::rename(&tmp, feather_path).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            tmp.display(),
+            feather_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn patch_gene_performance_feather_merged(
+    feather_path: &Path,
+    h5ad_path: &Path,
+    accum: &MeanLassoR2Accum,
+    orphan_training_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let genes_ordered = genes_ordered_for_accum(accum)?;
+    let n = genes_ordered.len();
+
+    let adata = AnnData::<H5>::open(H5::open(h5ad_path)?)?;
+    let n_vars = adata.n_vars();
+    anyhow::ensure!(
+        n_vars == n,
+        ".h5ad n_vars {} != training accumulator n_vars {}",
+        n_vars,
+        n
+    );
+    adata.close()?;
+
+    let (prev_lasso, prev_cnn_template) =
+        read_gene_performance_feather_prev(feather_path, &genes_ordered, accum.mean_cnn_r2_scores.is_some())?;
+
+    let mut col: Vec<f64> = Vec::with_capacity(n);
+    for (prev, slot) in prev_lasso.iter().zip(accum.scores.iter()) {
+        let acc = f64::from_bits(slot.load(Ordering::Acquire));
+        col.push(if acc.is_finite() { acc } else { *prev });
+    }
+
+    let mut col_cnn: Option<Vec<f64>> = if let Some(ref cnn_scores) = accum.mean_cnn_r2_scores {
+        anyhow::ensure!(
+            cnn_scores.len() == n,
+            "mean_cnn_r2 len {} != training n_vars {}",
+            cnn_scores.len(),
+            n
+        );
+        let prev_cnn = prev_cnn_template.unwrap_or_else(|| vec![f64::NAN; n]);
+        let mut v: Vec<f64> = Vec::with_capacity(n);
+        for (prev, slot) in prev_cnn.iter().zip(cnn_scores.iter()) {
+            let acc = f64::from_bits(slot.load(Ordering::Acquire));
+            v.push(if acc.is_finite() { acc } else { *prev });
+        }
+        Some(v)
+    } else {
+        None
+    };
+
+    if let Some(dir) = orphan_training_dir {
+        apply_orphan_marker_zeros(dir, &accum.gene_to_idx, &mut col, &mut col_cnn)?;
+    }
+
+    write_gene_performance_feather_atomic(feather_path, &genes_ordered, &col, col_cnn.as_deref())?;
+    Ok(())
 }
 
 fn apply_orphan_marker_zeros(
@@ -1852,76 +2025,19 @@ fn apply_orphan_marker_zeros(
     Ok(())
 }
 
-fn patch_adata_var_mean_lasso_r2_merged(
-    path: &Path,
-    accum: &MeanLassoR2Accum,
-    orphan_training_dir: Option<&Path>,
-) -> anyhow::Result<()> {
-    let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
-    let mut df = adata.read_var()?;
-    let n = accum.scores.len();
-    anyhow::ensure!(
-        df.height() == n,
-        "var rows {} != training n_vars {}",
-        df.height(),
-        n
-    );
-    let prev_lasso = f64_var_column_or_nan(&df, "mean_lasso_r2", n)?;
-    let mut col: Vec<f64> = Vec::with_capacity(n);
-    for (prev, slot) in prev_lasso.iter().zip(accum.scores.iter()) {
-        let acc = f64::from_bits(slot.load(Ordering::Acquire));
-        col.push(if acc.is_finite() { acc } else { *prev });
-    }
-
-    let mut col_cnn: Option<Vec<f64>> = if let Some(ref cnn_scores) = accum.mean_cnn_r2_scores {
-        anyhow::ensure!(
-            cnn_scores.len() == n,
-            "mean_cnn_r2 len {} != training n_vars {}",
-            cnn_scores.len(),
-            n
-        );
-        let prev_cnn = f64_var_column_or_nan(&df, "mean_cnn_r2", n)?;
-        let mut v: Vec<f64> = Vec::with_capacity(n);
-        for (prev, slot) in prev_cnn.iter().zip(cnn_scores.iter()) {
-            let acc = f64::from_bits(slot.load(Ordering::Acquire));
-            v.push(if acc.is_finite() { acc } else { *prev });
-        }
-        Some(v)
-    } else {
-        None
-    };
-
-    if let Some(dir) = orphan_training_dir {
-        apply_orphan_marker_zeros(dir, &accum.gene_to_idx, &mut col, &mut col_cnn)?;
-    }
-
-    let s = Series::new("mean_lasso_r2".into(), col);
-    if df.column("mean_lasso_r2").is_ok() {
-        df = df.drop("mean_lasso_r2")?;
-    }
-    df.with_column(s)?;
-
-    if let Some(col_cnn) = col_cnn {
-        let s_cnn = Series::new("mean_cnn_r2".into(), col_cnn);
-        if df.column("mean_cnn_r2").is_ok() {
-            df = df.drop("mean_cnn_r2")?;
-        }
-        df.with_column(s_cnn)?;
-    }
-
-    adata.set_var(df)?;
-    adata.close()?;
-    Ok(())
-}
-
-/// Writes `mean_lasso_r2` (and `mean_cnn_r2` when tracked) into `adata.var`. Finite values in
-/// `accum` replace per row; otherwise existing on-disk values are kept — suitable for join/resume.
+/// Writes per-gene training scores to [`GENE_PERFORMANCE_FEATHER_NAME`] next to the training `.h5ad`
+/// (`path`). `path` is only used to locate the feather file and to verify `.h5ad` `n_vars` matches
+/// the accumulator. Finite values in `accum` win; otherwise prior feather (or NaN) is kept.
 pub fn patch_adata_var_mean_lasso_r2(path: &Path, accum: &MeanLassoR2Accum) -> anyhow::Result<()> {
-    patch_adata_var_mean_lasso_r2_merged(path, accum, None)
+    let feather = path
+        .parent()
+        .context("training .h5ad path has no parent directory")?
+        .join(GENE_PERFORMANCE_FEATHER_NAME);
+    patch_gene_performance_feather_merged(&feather, path, accum, None)
 }
 
-/// Same merge as [`patch_adata_var_mean_lasso_r2`], under an advisory flock in `training_dir`
-/// (not HDF5 file locking; see [`crate::ensure_hdf5_no_file_locking`]).
+/// Same merge as [`patch_adata_var_mean_lasso_r2`] into [`GENE_PERFORMANCE_FEATHER_NAME`], under an
+/// advisory flock in `training_dir` (not HDF5 file locking; see [`crate::ensure_hdf5_no_file_locking`]).
 pub fn patch_adata_var_mean_lasso_r2_locked(
     training_dir: &Path,
     h5ad_path: &Path,
@@ -1946,10 +2062,19 @@ pub fn patch_adata_var_mean_lasso_r2_locked(
         }
         match lock_file.try_lock_exclusive() {
             Ok(true) => {
-                return patch_adata_var_mean_lasso_r2_merged(h5ad_path, accum, Some(training_dir))
-                    .with_context(|| {
-                        format!("patch var scores while holding {}", lock_path.display())
-                    });
+                let feather = gene_performance_feather_path(training_dir);
+                return patch_gene_performance_feather_merged(
+                    &feather,
+                    h5ad_path,
+                    accum,
+                    Some(training_dir),
+                )
+                .with_context(|| {
+                    format!(
+                        "patch gene performance feather while holding {}",
+                        lock_path.display()
+                    )
+                });
             }
             Ok(false) => {}
             Err(e) => {
@@ -1964,12 +2089,15 @@ pub fn patch_adata_var_mean_lasso_r2_locked(
     );
 }
 
-/// Ensures the training `.h5ad` is the canonical `{output_dir}/{stem}_processed.h5ad` with CSR `X`/layers
-/// (`stem` from [`crate::config::canonical_training_prep_stem`]).
+/// Validates the training `.h5ad` path is readable. **Never writes to disk** — training reads `X` /
+/// layers dense in memory (via [`read_expression_matrix_dense_f64`]), so CSR/strip passes that would
+/// rewrite the input are not run here. Auto-prep ([`crate::scanpy_preprocess::ensure_training_adata_ready`])
+/// is the only place that writes derived `.h5ad` files (always under `output_dir/spacetravlr_prep/`,
+/// never modifying the user's input).
 pub fn materialize_canonical_training_adata(
     adata_path: &mut String,
-    output_dir: &Path,
-    original_input_for_stem: &Path,
+    _output_dir: &Path,
+    _original_input_for_stem: &Path,
     _cfg: &SpaceshipConfig,
     _network_data_dir: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -1978,51 +2106,7 @@ pub fn materialize_canonical_training_adata(
     if !current.is_file() {
         anyhow::bail!("AnnData not found at {}.", current.display());
     }
-    if !current
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("h5ad"))
-        .unwrap_or(false)
-    {
-        *adata_path = expanded;
-        return Ok(());
-    }
-    let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
-    let canonical = crate::scanpy_preprocess::training_processed_h5ad_path(output_dir, &stem);
-
-    let already_prepared =
-        crate::scanpy_preprocess::training_h5ad_is_fully_prepared(&current).unwrap_or(false);
-
-    if current != canonical {
-        let reuse_canonical = canonical.is_file()
-            && canonical.metadata()?.modified()? >= current.metadata()?.modified()?
-            && (already_prepared
-                || crate::scanpy_preprocess::adata_x_and_layers_are_csr(&canonical)
-                    .unwrap_or(false));
-        if reuse_canonical {
-            *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
-        } else {
-            let _ = std::fs::remove_file(&canonical);
-            if already_prepared || crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)? {
-                copy_h5ad_reflink_or_full(&current, &canonical)?;
-            } else {
-                crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(
-                    &current, &canonical, false,
-                )?;
-            }
-            *adata_path = expand_user_path(canonical.to_string_lossy().as_ref());
-        }
-    } else if !already_prepared && !crate::scanpy_preprocess::adata_x_and_layers_are_csr(&current)?
-    {
-        crate::scanpy_preprocess::ensure_h5ad_csr_layers_on_path(&current, &current, false)?;
-    }
-
-    let training_on_disk = if current != canonical {
-        canonical
-    } else {
-        current
-    };
-    crate::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&training_on_disk)?;
+    *adata_path = expanded;
     Ok(())
 }
 
@@ -2785,6 +2869,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let stale_lock_secs = spaceship_config.execution.stale_lock_secs;
             let scale_modulators_w = spaceship_config.lasso.scale_modulators;
             let unscale_betas_on_export_w = spaceship_config.lasso.unscale_betas_on_export;
+            let parallel_lasso_clusters_w = spaceship_config.lasso.parallel_lasso_clusters;
 
             let janitor_stop = Arc::new(AtomicBool::new(false));
             let janitor_handle = if stale_lock_secs > 0 {
@@ -3141,6 +3226,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     n_iter,
                                     tol,
                                     scale_modulators_w,
+                                    parallel_lasso_clusters_w,
                                     "lasso",
                                     &cnn_w,
                                     &device,
@@ -3693,6 +3779,10 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     &gene,
                                                     &est.cluster_training_summaries,
                                                     n_betadata_beta_columns,
+                                                    Some((
+                                                        cnn_w.drop_cnn_if_insample_worse_than_lasso,
+                                                        cnn_w.cnn_vs_lasso_arbitration_margin,
+                                                    )),
                                                 );
                                             }
                                         }
@@ -3866,21 +3956,29 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 ) {
                     Ok(()) => {
                         let cols = if mean_r2_accum.mean_cnn_r2_scores.is_some() {
-                            "mean_lasso_r2', 'mean_cnn_r2"
+                            "mean_lasso_r2, mean_cnn_r2"
                         } else {
                             "mean_lasso_r2"
                         };
                         let msg = if join_training {
-                            format!("var: merged {cols} (join flock)")
+                            format!(
+                                "gene_performance: merged {} → {} (join flock)",
+                                cols,
+                                GENE_PERFORMANCE_FEATHER_NAME
+                            )
                         } else {
-                            format!("var: wrote {cols}")
+                            format!(
+                                "gene_performance: wrote {} → {}",
+                                cols,
+                                GENE_PERFORMANCE_FEATHER_NAME
+                            )
                         };
                         log_line(&hud, msg);
                     }
                     Err(e) => log_line(
                         &hud,
                         format!(
-                            "Could not write var training score columns (mean_lasso_r2{}): {}",
+                            "Could not write gene performance feather (mean_lasso_r2{}): {}",
                             if mean_r2_accum.mean_cnn_r2_scores.is_some() {
                                 ", mean_cnn_r2"
                             } else {
@@ -4091,6 +4189,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         n_iter: usize,
         tol: f64,
         scale_modulators: bool,
+        parallel_lasso_clusters: bool,
         _estimator_type: &str,
         cnn: &CnnConfig,
         device: &AB::Device,
@@ -4148,6 +4247,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     cnn,
                     cached_spatial,
                     cnn_epoch_slot,
+                    parallel_lasso_clusters,
                 },
                 lasso_progress,
             );
@@ -4197,6 +4297,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             n_iter,
             tol,
             scale_mod,
+            LassoConfig::default().parallel_lasso_clusters,
             estimator_type,
             &cnn,
             device,
@@ -4337,12 +4438,16 @@ mod scale_columns_tests {
 #[cfg(test)]
 mod mean_lasso_r2_patch_tests {
     use super::{
-        AnnData, AnnDataOp, ArrayData, Backend, MeanLassoR2Accum, dense_to_csr_f64,
+        AnnData, AnnDataOp, ArrayData, MeanLassoR2Accum, dense_to_csr_f64,
         patch_adata_var_mean_lasso_r2, patch_adata_var_mean_lasso_r2_locked,
+        GENE_PERFORMANCE_FEATHER_NAME,
     };
     use anndata_hdf5::H5;
     use ndarray::Array2;
-    use polars::prelude::{DataFrame, NamedFrom, Series};
+    use polars::io::ipc::IpcCompression;
+    use polars::prelude::{
+        Column, DataFrame, IpcReader, IpcWriter, NamedFrom, SerReader, SerWriter, Series,
+    };
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Once;
@@ -4352,6 +4457,67 @@ mod mean_lasso_r2_patch_tests {
 
     static PATCH_TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
     static HDF5_TEST_LOCK_ENV: Once = Once::new();
+
+    fn feather_path(h5ad: &std::path::Path) -> std::path::PathBuf {
+        h5ad
+            .parent()
+            .expect("parent")
+            .join(GENE_PERFORMANCE_FEATHER_NAME)
+    }
+
+    fn read_perf_lasso_column(h5ad: &std::path::Path) -> anyhow::Result<Vec<f64>> {
+        let f = std::fs::File::open(feather_path(h5ad))?;
+        let df = IpcReader::new(f).finish()?;
+        let r2 = df.column("mean_lasso_r2")?.f64()?;
+        Ok((0..df.height())
+            .map(|i| r2.get(i).unwrap_or(f64::NAN))
+            .collect())
+    }
+
+    fn read_perf_lasso_cnn_columns(
+        h5ad: &std::path::Path,
+    ) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
+        let f = std::fs::File::open(feather_path(h5ad))?;
+        let df = IpcReader::new(f).finish()?;
+        let r2 = df.column("mean_lasso_r2")?.f64()?;
+        let cnn = df.column("mean_cnn_r2")?.f64()?;
+        let n = df.height();
+        let l = (0..n)
+            .map(|i| r2.get(i).unwrap_or(f64::NAN))
+            .collect::<Vec<_>>();
+        let c = (0..n)
+            .map(|i| cnn.get(i).unwrap_or(f64::NAN))
+            .collect::<Vec<_>>();
+        Ok((l, c))
+    }
+
+    fn write_seed_perf_feather(
+        path: &std::path::Path,
+        genes: &[&str],
+        lasso: &[f64],
+        cnn: Option<&[f64]>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(genes.len() == lasso.len());
+        if let Some(c) = cnn {
+            anyhow::ensure!(c.len() == genes.len());
+        }
+        let mut cols: Vec<Column> = vec![
+            Series::new(
+                "gene".into(),
+                genes.iter().map(|g| (*g).to_string()).collect::<Vec<_>>(),
+            )
+            .into(),
+            Series::new("mean_lasso_r2".into(), lasso.to_vec()).into(),
+        ];
+        if let Some(c) = cnn {
+            cols.push(Series::new("mean_cnn_r2".into(), c.to_vec()).into());
+        }
+        let mut df = DataFrame::new(cols)?;
+        let f = std::fs::File::create(path)?;
+        let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
+        w.finish(&mut df)?;
+        Ok(())
+    }
 
     #[test]
     fn patch_var_mean_lasso_r2_column() {
@@ -4419,12 +4585,9 @@ mod mean_lasso_r2_patch_tests {
                 };
                 patch_adata_var_mean_lasso_r2(&p, &accum)?;
 
-                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
-                let v = a2.read_var()?;
-                let r2 = v.column("mean_lasso_r2")?.f64()?;
-                anyhow::ensure!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
-                anyhow::ensure!(r2.get(1).unwrap().is_nan());
-                a2.close()?;
+                let r2 = read_perf_lasso_column(&p)?;
+                anyhow::ensure!((r2[0] - 0.25).abs() < 1e-9);
+                anyhow::ensure!(r2[1].is_nan());
                 Ok(())
             })();
 
@@ -4512,15 +4675,11 @@ mod mean_lasso_r2_patch_tests {
                 };
                 patch_adata_var_mean_lasso_r2(&p, &accum)?;
 
-                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
-                let v = a2.read_var()?;
-                let r2 = v.column("mean_lasso_r2")?.f64()?;
-                anyhow::ensure!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
-                anyhow::ensure!(r2.get(1).unwrap().is_nan());
-                let cnn = v.column("mean_cnn_r2")?.f64()?;
-                anyhow::ensure!((cnn.get(0).unwrap() - 0.5).abs() < 1e-9);
-                anyhow::ensure!(cnn.get(1).unwrap().is_nan());
-                a2.close()?;
+                let (r2, cnn) = read_perf_lasso_cnn_columns(&p)?;
+                anyhow::ensure!((r2[0] - 0.25).abs() < 1e-9);
+                anyhow::ensure!(r2[1].is_nan());
+                anyhow::ensure!((cnn[0] - 0.5).abs() < 1e-9);
+                anyhow::ensure!(cnn[1].is_nan());
                 Ok(())
             })();
 
@@ -4581,7 +4740,6 @@ mod mean_lasso_r2_patch_tests {
                     a.set_obs(obs)?;
                     let var = DataFrame::new(vec![
                         Series::new("gene_ids".into(), vec!["g0", "g1"]).into(),
-                        Series::new("mean_lasso_r2".into(), vec![f64::NAN, 0.7f64]).into(),
                     ])?;
                     a.set_var(var)?;
                     let dense = Array2::from_elem((2, 2), 0.5f64);
@@ -4590,6 +4748,13 @@ mod mean_lasso_r2_patch_tests {
                     a.close()?;
                 }
                 thread::sleep(Duration::from_millis(5));
+
+                write_seed_perf_feather(
+                    &feather_path(&p),
+                    &["G0", "G1"],
+                    &[f64::NAN, 0.7f64],
+                    None,
+                )?;
 
                 let mut m: HashMap<String, usize> = HashMap::new();
                 m.insert("G0".into(), 0);
@@ -4605,12 +4770,9 @@ mod mean_lasso_r2_patch_tests {
                 };
                 patch_adata_var_mean_lasso_r2(&p, &accum)?;
 
-                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
-                let v = a2.read_var()?;
-                let r2 = v.column("mean_lasso_r2")?.f64()?;
-                anyhow::ensure!((r2.get(0).unwrap() - 0.25).abs() < 1e-9);
-                anyhow::ensure!((r2.get(1).unwrap() - 0.7).abs() < 1e-9);
-                a2.close()?;
+                let r2 = read_perf_lasso_column(&p)?;
+                anyhow::ensure!((r2[0] - 0.25).abs() < 1e-9);
+                anyhow::ensure!((r2[1] - 0.7).abs() < 1e-9);
                 Ok(())
             })();
 
@@ -4704,12 +4866,9 @@ mod mean_lasso_r2_patch_tests {
                 };
                 patch_adata_var_mean_lasso_r2_locked(&dir, &p, &accum2)?;
 
-                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
-                let v = a2.read_var()?;
-                let r2 = v.column("mean_lasso_r2")?.f64()?;
-                anyhow::ensure!((r2.get(0).unwrap() - 0.1).abs() < 1e-9);
-                anyhow::ensure!((r2.get(1).unwrap() - 0.2).abs() < 1e-9);
-                a2.close()?;
+                let r2 = read_perf_lasso_column(&p)?;
+                anyhow::ensure!((r2[0] - 0.1).abs() < 1e-9);
+                anyhow::ensure!((r2[1] - 0.2).abs() < 1e-9);
                 Ok(())
             })();
 
@@ -4798,15 +4957,11 @@ mod mean_lasso_r2_patch_tests {
                 };
                 patch_adata_var_mean_lasso_r2_locked(&dir, &p, &accum)?;
 
-                let a2 = AnnData::<H5>::open(H5::open(&p)?)?;
-                let v = a2.read_var()?;
-                let r2 = v.column("mean_lasso_r2")?.f64()?;
-                anyhow::ensure!((r2.get(0).unwrap() - 0.0).abs() < 1e-12);
-                anyhow::ensure!(r2.get(1).unwrap().is_nan());
-                let cnn = v.column("mean_cnn_r2")?.f64()?;
-                anyhow::ensure!((cnn.get(0).unwrap() - 0.0).abs() < 1e-12);
-                anyhow::ensure!((cnn.get(1).unwrap() - 0.4).abs() < 1e-9);
-                a2.close()?;
+                let (r2, cnn) = read_perf_lasso_cnn_columns(&p)?;
+                anyhow::ensure!((r2[0] - 0.0).abs() < 1e-12);
+                anyhow::ensure!(r2[1].is_nan());
+                anyhow::ensure!((cnn[0] - 0.0).abs() < 1e-12);
+                anyhow::ensure!((cnn[1] - 0.4).abs() < 1e-9);
                 Ok(())
             })();
 

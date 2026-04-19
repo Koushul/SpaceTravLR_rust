@@ -72,7 +72,8 @@ pub use estimator::{
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
-    SpatialCellularProgramsEstimator, materialize_canonical_training_adata,
+    GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator,
+    gene_performance_feather_path, materialize_canonical_training_adata,
     read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
 };
 pub use training_hud::RunConfigSummary;

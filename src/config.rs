@@ -238,6 +238,10 @@ pub struct LassoConfig {
     pub scale_modulators: bool,
     #[serde(default = "default_true")]
     pub unscale_betas_on_export: bool,
+    /// When **true**, fit in-sample group Lasso **per cluster in parallel** (Rayon, up to a small fixed pool).
+    /// Default **false** (sequential per cluster; does not affect gene-level `--parallel` workers).
+    #[serde(default = "default_false")]
+    pub parallel_lasso_clusters: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -711,6 +715,7 @@ impl Default for LassoConfig {
             tol: 1e-4,
             scale_modulators: true,
             unscale_betas_on_export: true,
+            parallel_lasso_clusters: false,
         }
     }
 }
@@ -926,7 +931,7 @@ pub fn canonical_adata_stem(adata_path: &std::path::Path) -> String {
         .collect()
 }
 
-/// Stem for run artifacts such as `{stem}_processed.h5ad` under `output_dir`.
+/// Stem for run artifacts (prep filenames under `output_dir/spacetravlr_prep/`, and CLI `{stem}_processed.h5ad`).
 ///
 /// Trailing `_processed` segments (ASCII case-insensitive) are removed so a file named
 /// `dataset_processed.h5ad` maps to `dataset_processed.h5ad`, not `dataset_processed_processed.h5ad`.
@@ -1629,6 +1634,32 @@ mod lasso_scaling_config_tests {
     #[test]
     fn default_lasso_has_unscale_betas_true() {
         assert!(LassoConfig::default().unscale_betas_on_export);
+    }
+
+    #[test]
+    fn default_lasso_parallel_clusters_false() {
+        assert!(!LassoConfig::default().parallel_lasso_clusters);
+    }
+
+    #[test]
+    fn toml_explicit_parallel_lasso_clusters_true_parsed() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 5
+learning_rate = 0.001
+score_threshold = 0.1
+
+[lasso]
+parallel_lasso_clusters = true
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.lasso.parallel_lasso_clusters);
     }
 
     #[test]

@@ -735,9 +735,9 @@ fn fmt_r2_fixed(r: f64) -> String {
 }
 
 fn perf_sort_key(entry: &(String, f64, Option<f64>, usize)) -> f64 {
-    let (_, lasso, cnn, _) = entry;
-    match cnn {
-        Some(c) if c.is_finite() => *c,
+    let (_, lasso, blended, _) = entry;
+    match blended {
+        Some(b) if b.is_finite() => *b,
         _ => *lasso,
     }
 }
@@ -747,34 +747,25 @@ fn perf_panel_has_cnn(st: &TrainingHudState) -> bool {
         && st
             .gene_r2_mean
             .iter()
-            .any(|(_, _, cnn, _)| matches!(cnn, Some(c) if c.is_finite()))
+            .any(|(_, _, blended, _)| matches!(blended, Some(b) if b.is_finite()))
 }
 
+/// `blended` is mean per-cluster R² after CNN-vs-Lasso arbitration when present; else mean Lasso.
 fn spans_r2_value(
     lasso: f64,
-    cnn: Option<f64>,
+    blended: Option<f64>,
     pal: &TuiColors,
     has_cnn: bool,
     highlight: Style,
 ) -> Vec<Span<'static>> {
     if has_cnn {
-        if let Some(cv) = cnn.filter(|c| c.is_finite()) {
-            let (arrow, arrow_style) = if cv > lasso {
-                ("▲", Style::default().fg(pal.c_wrote))
-            } else if cv < lasso {
-                ("▼", Style::default().fg(pal.c_fail))
-            } else {
-                ("─", Style::default().fg(pal.muted))
-            };
-            return vec![
-                Span::styled(fmt_r2_fixed(cv), highlight),
-                Span::styled(arrow, arrow_style),
-            ];
+        if let Some(cv) = blended.filter(|c| c.is_finite()) {
+            return vec![Span::styled(fmt_r2_fixed(cv), highlight)];
         }
-        return vec![
-            Span::styled(fmt_r2_fixed(lasso), Style::default().fg(pal.title)),
-            Span::styled(" ", Style::default().fg(pal.muted)),
-        ];
+        return vec![Span::styled(
+            fmt_r2_fixed(lasso),
+            Style::default().fg(pal.title),
+        )];
     }
     vec![Span::styled(fmt_r2_fixed(lasso), highlight)]
 }
@@ -787,12 +778,11 @@ fn fmt_lasso_float(x: f64) -> String {
     }
 }
 
-fn perf_r2_columns(inner_w: usize, has_cnn: bool) -> (usize, usize) {
+fn perf_r2_columns(inner_w: usize) -> (usize, usize) {
     const MID: usize = 2;
     const R2_COL: usize = 7;
-    const R2_COL_CNN: usize = 8;
     const MOD_COL: usize = 5;
-    let r2w = if has_cnn { R2_COL_CNN } else { R2_COL };
+    let r2w = R2_COL;
     let w = inner_w.max(MID + 2);
     let half = (w - MID) / 2;
     let gene_w = half.saturating_sub(r2w + MOD_COL);
@@ -822,7 +812,7 @@ fn build_perf_panel_lines(
     }
 
     let has_cnn = perf_panel_has_cnn(st);
-    let (half, gene_w) = perf_r2_columns(inner_w, has_cnn);
+    let (half, gene_w) = perf_r2_columns(inner_w);
 
     let mut v = st.gene_r2_mean.clone();
     v.sort_by(|a, b| {
@@ -844,14 +834,14 @@ fn build_perf_panel_lines(
         Vec::with_capacity(2 + PERF_R2_LEADERBOARD_LEN.min(n_genes));
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<hw$}", "▲ best", hw = half),
+            format!("{:<hw$}", "best R²", hw = half),
             Style::default()
                 .fg(pal.c_topr2)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().fg(pal.muted)),
         Span::styled(
-            format!("{:<hw$}", "▼ worst", hw = half),
+            format!("{:<hw$}", "worst R²", hw = half),
             Style::default()
                 .fg(pal.c_botr2)
                 .add_modifier(Modifier::BOLD),

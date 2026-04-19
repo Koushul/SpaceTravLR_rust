@@ -468,6 +468,33 @@ pub struct ClusterTrainingSummary {
     pub cnn_r2: f64,
 }
 
+/// In-sample R² for HUD / leaderboards after the same arbitration as CNN export: when
+/// `drop_cnn_if_insample_worse_than_lasso` holds and CNN is worse than Lasso (including margin),
+/// returns `lasso_r2`; otherwise finite `cnn_r2`, else `lasso_r2`.
+pub fn cluster_insample_r2_for_hud(
+    s: &ClusterTrainingSummary,
+    drop_cnn_if_insample_worse_than_lasso: bool,
+    cnn_vs_lasso_arbitration_margin: f64,
+) -> f64 {
+    let l = s.lasso_r2;
+    let c = s.cnn_r2;
+    if drop_cnn_if_insample_worse_than_lasso
+        && l.is_finite()
+        && c.is_finite()
+        && c + cnn_vs_lasso_arbitration_margin < l
+    {
+        return l;
+    }
+    if c.is_finite() {
+        return c;
+    }
+    if l.is_finite() {
+        l
+    } else {
+        f64::NAN
+    }
+}
+
 struct LassoPassData {
     cluster_id: usize,
     indices: Vec<usize>,
@@ -634,6 +661,7 @@ pub struct ClusteredGcnNwrFitInputs<'a, 'd, B: AutodiffBackend> {
     pub cnn: &'a CnnConfig,
     pub cached_spatial: Option<&'a CachedSpatialData>,
     pub cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
+    pub parallel_lasso_clusters: bool,
 }
 
 pub struct ClusteredGcnNwrCnnRefineInputs<'a, 'd, B: AutodiffBackend> {
@@ -708,6 +736,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             cnn,
             cached_spatial,
             cnn_epoch_slot,
+            parallel_lasso_clusters,
         } = inputs;
         let n_samples = x.nrows();
         let to_fit: Vec<usize> = (0..num_clusters)
@@ -750,7 +779,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
 
         let phase_results: Vec<ClusterLassoPhase> = if n_celltypes == 0 {
             Vec::new()
-        } else {
+        } else if parallel_lasso_clusters {
             let pool = ThreadPoolBuilder::new()
                 .num_threads(GROUP_LASSO_MAX_CONCURRENT)
                 .build()
@@ -777,6 +806,26 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     })
                     .collect()
             })
+        } else {
+            (0..to_fit.len())
+                .map(|idx| {
+                    let c_id = to_fit[idx];
+                    let out = fit_cluster_group_lasso(
+                        c_id,
+                        n_samples,
+                        x,
+                        y,
+                        clusters,
+                        params.clone(),
+                        group_regs.clone(),
+                        regulator_masks,
+                        score_threshold,
+                    );
+                    let d = lasso_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    lasso_progress.lock().unwrap_or_else(|e| e.into_inner())(d, n_celltypes);
+                    out
+                })
+                .collect()
         };
 
         let n_cnn_clusters = phase_results

@@ -331,7 +331,7 @@ fn demo_worker(
             g.genes_done = g.genes_done.saturating_add(1);
             g.genes_rounds = g.genes_rounds.saturating_add(1);
             g.record_gene_export_mode(run_full_cnn);
-            g.record_training_metrics(&gene, &summaries, None);
+            g.record_training_metrics(&gene, &summaries, None, None);
             g.remove_gene(&gene);
         }
     }

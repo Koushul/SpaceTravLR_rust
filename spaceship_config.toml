@@ -5,7 +5,9 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 [data]
-# Path to .h5ad dataset. Leave empty for interactive prompt (TUI) or pass --h5ad.
+# Path to your input .h5ad (the file you own on disk). Leave empty for interactive prompt (TUI) or pass --h5ad.
+# The input file is never modified. If auto-prep needs to add layers (cell_type, imputed_count, …), it writes
+# a derived .h5ad under output_dir/spacetravlr_prep/ and records that path; the input stays read-only.
 # adata_path      = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/ThePerturbedBrain/slideseq_brain_processed.h5ad"
 # Expression layer to read from AnnData
 layer           = "imputed_count"
@@ -80,9 +82,9 @@ cnn_vs_lasso_arbitration_margin = 0.2
 
 [lasso]
 # Element-wise L1 penalty
-l1_reg    = 1e-5
+l1_reg    = 1e-4
 # Group-L2 penalty
-group_reg = 1e-7
+group_reg = 1e-5
 # Max FISTA iterations
 n_iter    = 500
 # Relative convergence tolerance
@@ -93,6 +95,9 @@ scale_modulators = true
 # When scale_modulators is true, divide exported betas by column std (original expression units).
 # Set false to export scaled-space betas (CellOracle-style). Default true.
 unscale_betas_on_export = false
+# Parallel in-sample group Lasso across clusters per gene (Rayon; independent of [execution].n_parallel).
+# Default false (sequential). Set true for faster Lasso when many clusters per gene.
+# parallel_lasso_clusters = true
 
 [training]
 # Default when omitted: seed. Use full or hybrid to enable CNN paths.

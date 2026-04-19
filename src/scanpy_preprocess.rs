@@ -36,19 +36,19 @@
 //!
 //! | Step | Function | Output |
 //! |------|----------|--------|
-//! | Full QC → UMAP/Leiden → magic-impute | [`full_preprocess`] / [`full_preprocess_maybe_log`] | `<stem>_processed.h5ad` |
+//! | Full QC → UMAP/Leiden → magic-impute | [`full_preprocess`] / [`full_preprocess_maybe_log`] | caller-chosen path (training auto-prep: [`training_prep_h5ad_path`] under **`spacetravlr_prep/`**) |
 //! | Imputation + CSR only | [`imputed_count_from_normalized`] / [`magic_impute_and_attach_batch`] | `<stem>_imputed.h5ad` |
 //! | `leiden` → `cell_type` (path helper) | [`cell_type_patch_h5ad_path`] | sibling filename |
 //! | `leiden` → `cell_type` (write) | [`write_cell_type_from_leiden`] | caller-chosen path |
 //! | MAGIC batch column resolution | [`resolve_magic_batch_obs_column`] | CLI / config wiring |
-//! | Training auto-prep | [`ensure_training_adata_ready`] (pass **`[data].condition`** as MAGIC batch when set) | updates path in place |
+//! | Training auto-prep | [`ensure_training_adata_ready`] (pass **`[data].condition`** as MAGIC batch when set) | updates **`adata_path`** to the input when no prep is needed, else a stable file under **`output_dir/spacetravlr_prep/`** |
 //!
 //! **CLI:** **`spacetravlr --process-h5ad --h5ad …`** → [`full_preprocess_maybe_log`] (or reuse when output is fresh).
 //! **`spacetravlr --impute --h5ad …`** → [`imputed_count_from_normalized`] (same imputation+CSR as the full pipeline).
 //! With **`--condition`**, the same obs column name is used as the MAGIC batch axis unless **`--magic-batch-obs`** overrides.
 //!
 //! **Training:** [`ensure_training_adata_ready`] uses [`plan_training_prep`] to pick the minimal
-//! fix; when **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
+//! fix; derived `.h5ad` files go under **`spacetravlr_prep/`** (content-keyed from the source path + mtime), not a top-level `{stem}_processed.h5ad` copy. When **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
 //!
 //! **Spatial coordinates:** After cell/gene filtering, when **`obsm['unscaled_spatial']`** is absent
 //! and a 2D array exists under **`spatial`** / **`X_spatial`** / **`spatial_loc`**, the embedded
@@ -67,6 +67,8 @@ use serde_json::json;
 use std::env;
 use std::ffi::OsString;
 use std::io::Write;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -988,8 +990,57 @@ pub fn write_cell_type_from_leiden_echo_uv_to_stderr(
 }
 
 /// `{stem}_processed.h5ad` under **`output_dir`** (stem from [`crate::config::canonical_training_prep_stem`]).
+///
+/// Used for explicit CLI outputs (e.g. **`--process-h5ad`**). Training auto-prep uses
+/// [`training_prep_h5ad_path`] instead so the input file is not mirrored at the run root.
 pub fn training_processed_h5ad_path(output_dir: &Path, stem: &str) -> PathBuf {
     output_dir.join(format!("{stem}_processed.h5ad"))
+}
+
+pub const TRAINING_PREP_SUBDIR: &str = "spacetravlr_prep";
+
+pub fn training_prep_subdir(output_dir: &Path) -> PathBuf {
+    output_dir.join(TRAINING_PREP_SUBDIR)
+}
+
+fn stem_sanitized_for_filename(stem: &str) -> String {
+    stem.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '_',
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+pub fn prep_cache_key(source: &Path) -> anyhow::Result<u64> {
+    let canon = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
+    let nanos = std::fs::metadata(&canon)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = DefaultHasher::new();
+    canon.to_string_lossy().hash(&mut h);
+    nanos.hash(&mut h);
+    Ok(h.finish())
+}
+
+pub fn training_prep_h5ad_path(
+    output_dir: &Path,
+    source: &Path,
+    stem: &str,
+    role: &str,
+) -> anyhow::Result<PathBuf> {
+    let dir = training_prep_subdir(output_dir);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("mkdir training prep {}", dir.display()))?;
+    let key = prep_cache_key(source)?;
+    let stem_tok = stem_sanitized_for_filename(stem);
+    Ok(dir.join(format!("{stem_tok}_{key:016x}_{role}.h5ad")))
 }
 
 /// Removes precomputed CNN spatial tensors, received-/weighted-ligand matrices, and `spacetravlr_cache_*` `uns`
@@ -1146,11 +1197,15 @@ fn ensure_magic_batch_obs_column_exists(source_h5ad: &Path, batch_col: &str) -> 
 ///
 /// When **`obs_batch_column`** is set, imputation matches the batch-clusterwise pattern: one MAGIC fit
 /// per distinct **(annotation × batch)** pair in **`adata.obs`**, then rows are written back in obs order.
+///
+/// **`strip_heavy_after`**: when **true**, run [`strip_heavy_training_artifacts_from_h5ad`] on **`dest_h5ad`**
+/// after the uv write (extra HDF5 pass; auto-prep callers pass **false** to keep training fast).
 pub fn magic_impute_and_attach_batch(
     source_h5ad: &Path,
     dest_h5ad: &Path,
     obs_batch_column: Option<&str>,
     capture_output: bool,
+    strip_heavy_after: bool,
 ) -> anyhow::Result<String> {
     let p = source_h5ad
         .to_str()
@@ -1189,7 +1244,9 @@ pub fn magic_impute_and_attach_batch(
         );
     }
 
-    strip_heavy_training_artifacts_from_h5ad(dest_h5ad)?;
+    if strip_heavy_after {
+        strip_heavy_training_artifacts_from_h5ad(dest_h5ad)?;
+    }
 
     Ok(log)
 }
@@ -1200,7 +1257,7 @@ pub fn magic_impute_and_attach(
     dest_h5ad: &Path,
     capture_output: bool,
 ) -> anyhow::Result<String> {
-    magic_impute_and_attach_batch(source_h5ad, dest_h5ad, None, capture_output)
+    magic_impute_and_attach_batch(source_h5ad, dest_h5ad, None, capture_output, true)
 }
 
 /// Clusterwise **magic-impute** on **`layers["normalized_count"]`** + CSR write → **`<stem>_imputed.h5ad`**.
@@ -1245,6 +1302,7 @@ pub enum TrainingPrepPlan {
 pub fn plan_training_prep(
     r: &AdataTrainingReadiness,
     output_dir: &Path,
+    source: &Path,
     stem: &str,
 ) -> anyhow::Result<TrainingPrepPlan> {
     if r.has_cell_type && r.has_imputed_count && r.has_normalized_count {
@@ -1253,21 +1311,21 @@ pub fn plan_training_prep(
     let can_impute_only = r.has_normalized_count && (r.has_cell_type || r.has_leiden);
     if !r.has_cell_type && r.has_leiden && r.has_normalized_count && r.has_imputed_count {
         return Ok(TrainingPrepPlan::PatchCellType {
-            out: training_cell_type_patch_h5ad_path(output_dir, stem),
+            out: training_prep_h5ad_path(output_dir, source, stem, "celltype")?,
         });
     }
     if can_impute_only && r.has_cell_type && !r.has_imputed_count {
         return Ok(TrainingPrepPlan::ImputeOnly {
-            out: training_processed_h5ad_path(output_dir, stem),
+            out: training_prep_h5ad_path(output_dir, source, stem, "imputed")?,
         });
     }
     if can_impute_only && !r.has_cell_type && !r.has_imputed_count && r.has_leiden {
-        let patched = training_cell_type_patch_h5ad_path(output_dir, stem);
-        let out = training_processed_h5ad_path(output_dir, stem);
+        let patched = training_prep_h5ad_path(output_dir, source, stem, "celltype_patch")?;
+        let out = training_prep_h5ad_path(output_dir, source, stem, "imputed")?;
         return Ok(TrainingPrepPlan::PatchThenImpute { patched, out });
     }
     Ok(TrainingPrepPlan::FullPreprocess {
-        out: training_processed_h5ad_path(output_dir, stem),
+        out: training_prep_h5ad_path(output_dir, source, stem, "fullprep")?,
     })
 }
 
@@ -1281,8 +1339,13 @@ pub fn plan_training_prep(
 /// ([`TrainingPrepPlan::FullPreprocess`]); empty **`species`** is resolved via
 /// [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
 ///
-/// Prepared files are written under **`output_dir`**. Use [`crate::config::canonical_training_prep_stem`] on
-/// the pre-prep path for **`original_input_for_stem`** so filenames match the user's dataset stem.
+/// Prepared files are written under **`output_dir/spacetravlr_prep/`** (see [`training_prep_h5ad_path`]).
+/// Use [`crate::config::canonical_training_prep_stem`] on the pre-prep path for **`original_input_for_stem`**
+/// so filename stems match the user's dataset.
+///
+/// **The user's input `.h5ad` is never modified.** When auto-prep runs, derived files live under
+/// `output_dir/spacetravlr_prep/` (see [`training_prep_h5ad_path`]). Optional post-write
+/// [`strip_heavy_training_artifacts_from_h5ad`] / extra HDF5 passes are skipped here for speed.
 pub fn ensure_training_adata_ready(
     adata_path: &mut String,
     output_dir: &Path,
@@ -1307,7 +1370,7 @@ pub fn ensure_training_adata_ready(
 
     let stem = crate::config::canonical_training_prep_stem(original_input_for_stem);
     let r = probe_adata_training_readiness(&p)?;
-    let plan = plan_training_prep(&r, output_dir, &stem)?;
+    let plan = plan_training_prep(&r, output_dir, &p, &stem)?;
     // #region agent log
     agent_debug_ndjson(
         "F",
@@ -1341,7 +1404,6 @@ pub fn ensure_training_adata_ready(
                 out.display(),
                 p.display()
             );
-            strip_heavy_training_artifacts_from_h5ad(&out)?;
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
             return Ok(());
         }
@@ -1364,7 +1426,7 @@ pub fn ensure_training_adata_ready(
                 "spacetravlr: adding layers[\"imputed_count\"] (clusterwise) → {}",
                 out.display()
             );
-            magic_impute_and_attach_batch(&p, &out, magic_batch_obs, false)?;
+            magic_impute_and_attach_batch(&p, &out, magic_batch_obs, false, false)?;
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
         }
         TrainingPrepPlan::PatchThenImpute { patched, out } => {
@@ -1374,7 +1436,7 @@ pub fn ensure_training_adata_ready(
             );
             let _ = std::fs::remove_file(&patched);
             write_cell_type_from_leiden(&p, &patched)?;
-            magic_impute_and_attach_batch(&patched, &out, magic_batch_obs, false)?;
+            magic_impute_and_attach_batch(&patched, &out, magic_batch_obs, false, false)?;
             let _ = std::fs::remove_file(&patched);
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
         }
@@ -1383,8 +1445,14 @@ pub fn ensure_training_adata_ready(
                 "spacetravlr: running full Scanpy preprocess (UMAP, Leiden, cell_type, imputation) → {}",
                 out.display()
             );
-            let (written, _) =
-                full_preprocess_maybe_log(&p, &out, false, magic_batch_obs, spatial_microns)?;
+            let (written, _) = full_preprocess_maybe_log(
+                &p,
+                &out,
+                false,
+                magic_batch_obs,
+                spatial_microns,
+                false,
+            )?;
             debug_assert_eq!(written, out);
             *adata_path = expand_user_path(written.to_string_lossy().as_ref());
         }
@@ -1485,6 +1553,7 @@ pub fn full_preprocess(adata_in: &Path) -> anyhow::Result<PathBuf> {
         false,
         None,
         SpatialMicronsOptions::default(),
+        true,
     )?;
     Ok(path)
 }
@@ -1494,12 +1563,16 @@ pub fn full_preprocess(adata_in: &Path) -> anyhow::Result<PathBuf> {
 /// **`magic_batch_obs`**: optional `adata.obs` column name; when set, MAGIC runs per **(cell_type or leiden) × batch** group (see [`magic_impute_and_attach_batch`]).
 ///
 /// **`spatial_microns`**: passed to the Scanpy embed (see [`SpatialMicronsOptions`]).
+///
+/// **`strip_heavy_after`**: when **false**, skip [`strip_heavy_training_artifacts_from_h5ad`] after the
+/// preprocess write (saves a slow HDF5 rewrite; use **true** for CLI `--process-h5ad` hygiene).
 pub fn full_preprocess_maybe_log(
     adata_in: &Path,
     dest_processed: &Path,
     capture_output: bool,
     magic_batch_obs: Option<&str>,
     spatial_microns: SpatialMicronsOptions,
+    strip_heavy_after: bool,
 ) -> anyhow::Result<(PathBuf, Option<String>)> {
     let adata_str = adata_in
         .to_str()
@@ -1575,7 +1648,9 @@ pub fn full_preprocess_maybe_log(
         );
     }
 
-    strip_heavy_training_artifacts_from_h5ad(dest_processed)?;
+    if strip_heavy_after {
+        strip_heavy_training_artifacts_from_h5ad(dest_processed)?;
+    }
 
     let log = if capture_output {
         Some(log_scanpy)
@@ -1759,6 +1834,7 @@ a.write_h5ad(p)
             true,
             None,
             SpatialMicronsOptions::default(),
+            true,
         )
         .expect("preprocess");
         let log = log.expect("captured");
@@ -1851,6 +1927,7 @@ a.write_h5ad(p)
             true,
             None,
             SpatialMicronsOptions::default(),
+            true,
         )
         .expect("preprocess");
         let log = log.expect("captured");
@@ -1961,6 +2038,7 @@ a.write_h5ad(p)
                 species: "human".into(),
                 target_median_nn_um: None,
             },
+            true,
         )
         .expect("preprocess");
         let log = log.expect("captured");
@@ -2011,7 +2089,13 @@ a.write_h5ad(p)
 
     #[test]
     fn plan_training_prep_all_branches() {
-        let out = Path::new("/tmp/spacetravlr_plan_test_out");
+        let tmp = std::env::temp_dir().join(format!("spacetravlr_plan_branches_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("dummy_source.h5ad");
+        std::fs::write(&src, b"x").unwrap();
+        let out = tmp.join("run_out");
+        std::fs::create_dir_all(&out).unwrap();
         let stem = "stem";
         let r = |has_cell_type, has_leiden, has_normalized_count, has_imputed_count| {
             AdataTrainingReadiness {
@@ -2023,72 +2107,74 @@ a.write_h5ad(p)
         };
 
         assert_eq!(
-            plan_training_prep(&r(true, false, true, true), out, stem).unwrap(),
+            plan_training_prep(&r(true, false, true, true), &out, &src, stem).unwrap(),
             TrainingPrepPlan::Noop
         );
         assert_eq!(
-            plan_training_prep(&r(true, true, true, true), out, stem).unwrap(),
+            plan_training_prep(&r(true, true, true, true), &out, &src, stem).unwrap(),
             TrainingPrepPlan::Noop
         );
 
         assert_eq!(
-            plan_training_prep(&r(false, true, true, true), out, stem).unwrap(),
+            plan_training_prep(&r(false, true, true, true), &out, &src, stem).unwrap(),
             TrainingPrepPlan::PatchCellType {
-                out: training_cell_type_patch_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "celltype").unwrap(),
             }
         );
 
         assert_eq!(
-            plan_training_prep(&r(true, false, true, false), out, stem).unwrap(),
+            plan_training_prep(&r(true, false, true, false), &out, &src, stem).unwrap(),
             TrainingPrepPlan::ImputeOnly {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "imputed").unwrap(),
             }
         );
         assert_eq!(
-            plan_training_prep(&r(true, true, true, false), out, stem).unwrap(),
+            plan_training_prep(&r(true, true, true, false), &out, &src, stem).unwrap(),
             TrainingPrepPlan::ImputeOnly {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "imputed").unwrap(),
             }
         );
 
         assert_eq!(
-            plan_training_prep(&r(false, true, true, false), out, stem).unwrap(),
+            plan_training_prep(&r(false, true, true, false), &out, &src, stem).unwrap(),
             TrainingPrepPlan::PatchThenImpute {
-                patched: training_cell_type_patch_h5ad_path(out, stem),
-                out: training_processed_h5ad_path(out, stem),
+                patched: training_prep_h5ad_path(&out, &src, stem, "celltype_patch").unwrap(),
+                out: training_prep_h5ad_path(&out, &src, stem, "imputed").unwrap(),
             }
         );
 
         assert_eq!(
-            plan_training_prep(&r(false, false, true, false), out, stem).unwrap(),
+            plan_training_prep(&r(false, false, true, false), &out, &src, stem).unwrap(),
             TrainingPrepPlan::FullPreprocess {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "fullprep").unwrap(),
             }
         );
         assert_eq!(
-            plan_training_prep(&r(true, false, false, false), out, stem).unwrap(),
+            plan_training_prep(&r(true, false, false, false), &out, &src, stem).unwrap(),
             TrainingPrepPlan::FullPreprocess {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "fullprep").unwrap(),
             }
         );
         assert_eq!(
-            plan_training_prep(&r(false, true, false, false), out, stem).unwrap(),
+            plan_training_prep(&r(false, true, false, false), &out, &src, stem).unwrap(),
             TrainingPrepPlan::FullPreprocess {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "fullprep").unwrap(),
             }
         );
         assert_eq!(
-            plan_training_prep(&r(false, false, false, true), out, stem).unwrap(),
+            plan_training_prep(&r(false, false, false, true), &out, &src, stem).unwrap(),
             TrainingPrepPlan::FullPreprocess {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "fullprep").unwrap(),
             }
         );
         assert_eq!(
-            plan_training_prep(&r(true, false, false, true), out, stem).unwrap(),
+            plan_training_prep(&r(true, false, false, true), &out, &src, stem).unwrap(),
             TrainingPrepPlan::FullPreprocess {
-                out: training_processed_h5ad_path(out, stem),
+                out: training_prep_h5ad_path(&out, &src, stem, "fullprep").unwrap(),
             }
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn write_h5ad_probe_fixture(path: &Path, py_body: &str) -> anyhow::Result<()> {
@@ -2161,12 +2247,12 @@ a.obs["leiden"] = np.array([str(i % 3) for i in range(n_obs)], dtype=object)
         assert!(r.has_normalized_count);
         assert!(!r.has_imputed_count);
 
-        let plan = plan_training_prep(&r, &dir, "stem").expect("plan");
+        let plan = plan_training_prep(&r, &dir, &path, "stem").expect("plan");
         assert_eq!(
             plan,
             TrainingPrepPlan::PatchThenImpute {
-                patched: training_cell_type_patch_h5ad_path(&dir, "stem"),
-                out: training_processed_h5ad_path(&dir, "stem"),
+                patched: training_prep_h5ad_path(&dir, &path, "stem", "celltype_patch").unwrap(),
+                out: training_prep_h5ad_path(&dir, &path, "stem", "imputed").unwrap(),
             }
         );
 
@@ -2203,11 +2289,11 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
         assert!(!r.has_imputed_count);
         assert!(r.has_normalized_count);
 
-        let plan = plan_training_prep(&r, &dir, "s").expect("plan");
+        let plan = plan_training_prep(&r, &dir, &path, "s").expect("plan");
         assert_eq!(
             plan,
             TrainingPrepPlan::ImputeOnly {
-                out: training_processed_h5ad_path(&dir, "s"),
+                out: training_prep_h5ad_path(&dir, &path, "s", "imputed").unwrap(),
             }
         );
 
@@ -2246,7 +2332,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
         assert!(r.has_normalized_count);
         assert!(r.has_imputed_count);
 
-        let plan = plan_training_prep(&r, &dir, "s").expect("plan");
+        let plan = plan_training_prep(&r, &dir, &path, "s").expect("plan");
         assert_eq!(plan, TrainingPrepPlan::Noop);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2280,7 +2366,7 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
         .expect("fixture");
 
         let dst = dir.join("out.h5ad");
-        magic_impute_and_attach_batch(&src, &dst, Some("sample"), false).expect("magic batch");
+        magic_impute_and_attach_batch(&src, &dst, Some("sample"), false, true).expect("magic batch");
 
         let ad = AnnData::<H5>::open(H5::open(&dst).expect("open")).expect("read");
         assert!(ad.layers().get("imputed_count").is_some());
@@ -2289,7 +2375,7 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
         ad.close().expect("close");
 
         let dst2 = dir.join("out_nobatch.h5ad");
-        magic_impute_and_attach_batch(&src, &dst2, None, false).expect("magic no batch");
+        magic_impute_and_attach_batch(&src, &dst2, None, false, true).expect("magic no batch");
         let ad2 = AnnData::<H5>::open(H5::open(&dst2).expect("open2")).expect("read2");
         assert!(ad2.layers().get("imputed_count").is_some());
         ad2.close().expect("close2");
@@ -2324,7 +2410,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
         .expect("fixture");
 
         let dst = dir.join("bad.h5ad");
-        let err = magic_impute_and_attach_batch(&src, &dst, Some("no_such_column"), true)
+        let err = magic_impute_and_attach_batch(&src, &dst, Some("no_such_column"), true, true)
             .expect_err("expected uv/python failure");
         let msg = format!("{err:#}");
         assert!(

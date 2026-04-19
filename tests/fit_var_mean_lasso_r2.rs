@@ -1,16 +1,20 @@
-//! End-to-end: tiny `.h5ad` + minimal GRN parquet → `fit_all_genes` → `var['mean_lasso_r2']`
-//! finite for every trained gene (no all-NaN regression).
+//! End-to-end: tiny `.h5ad` + minimal GRN parquet → `fit_all_genes` →
+//! `spacetravlr_gene_performance.feather` with finite `mean_lasso_r2` per trained gene.
 
 use anndata::data::ArrayData;
-use anndata::{AnnData, AnnDataOp, Backend};
+use anndata::{AnnData, AnnDataOp};
 use anndata_hdf5::H5;
 use burn::backend::NdArray;
 use burn::backend::ndarray::NdArrayDevice;
 use burn_autodiff::Autodiff;
 use ndarray::Array2;
-use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Series};
+use polars::prelude::{
+    DataFrame, IpcReader, NamedFrom, ParquetWriter, SerReader, Series,
+};
 use spacetravlr::config::SpaceshipConfig;
-use spacetravlr::spatial_estimator::{SpatialCellularProgramsEstimator, dense_to_csr_f64};
+use spacetravlr::spatial_estimator::{
+    SpatialCellularProgramsEstimator, dense_to_csr_f64, GENE_PERFORMANCE_FEATHER_NAME,
+};
 use std::path::Path;
 
 fn write_minimal_mouse_grn_parquet(dir: &Path) -> anyhow::Result<()> {
@@ -67,7 +71,7 @@ fn write_mock_training_h5ad(path: &Path) -> anyhow::Result<()> {
 }
 
 #[test]
-fn fit_all_genes_writes_finite_mean_lasso_r2_to_var() {
+fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
     let dir = std::env::temp_dir().join(format!("spacetravlr_fit_var_r2_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -132,20 +136,33 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_var() {
     )
     .expect("fit_all_genes");
 
-    let a = AnnData::<H5>::open(H5::open(&h5ad).unwrap()).unwrap();
-    let v = a.read_var().unwrap();
-    let col = v.column("mean_lasso_r2").expect("mean_lasso_r2 column");
-    let r2 = col.f64().unwrap();
-    assert_eq!(r2.len(), 3, "one slot per gene");
-    for (i, name) in ["Reg1", "Tgt1", "Reg2"].iter().enumerate() {
-        let x = r2.get(i).unwrap();
-        assert!(
-            x.is_finite(),
-            "gene {name} mean_lasso_r2 should be finite, got {x}"
-        );
-        assert!(x >= 0.0, "gene {name} mean_lasso_r2 unexpected {x}");
+    let perf_path = dir.join(GENE_PERFORMANCE_FEATHER_NAME);
+    assert!(
+        perf_path.is_file(),
+        "expected {}",
+        perf_path.display()
+    );
+    let f = std::fs::File::open(&perf_path).unwrap();
+    let df = IpcReader::new(f).finish().unwrap();
+    let genes = df.column("gene").unwrap().str().unwrap();
+    let r2 = df.column("mean_lasso_r2").unwrap().f64().unwrap();
+    assert_eq!(df.height(), 3, "one row per var gene");
+    for name in ["Reg1", "Tgt1", "Reg2"] {
+        let mut found = false;
+        for i in 0..df.height() {
+            if genes.get(i) == Some(name) {
+                let x = r2.get(i).unwrap();
+                assert!(
+                    x.is_finite(),
+                    "gene {name} mean_lasso_r2 should be finite, got {x}"
+                );
+                assert!(x >= 0.0, "gene {name} mean_lasso_r2 unexpected {x}");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "missing gene {name} in feather");
     }
-    a.close().unwrap();
 
     let _ = std::fs::remove_dir_all(&dir);
 }

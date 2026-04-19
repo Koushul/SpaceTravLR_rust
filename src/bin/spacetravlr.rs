@@ -65,7 +65,7 @@ const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
 Multi-host / shared storage
   Start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine.
-  Per-gene var['mean_lasso_r2'] (and mean_cnn_r2 when used) are merged into the training .h5ad under an advisory flock in the output directory (no single-host-only step).
+  Per-gene mean_lasso_r2 (and mean_cnn_r2 when used) are merged into spacetravlr_gene_performance.feather in the output directory under an advisory flock (no single-host-only step).
 
 Condition splits
   With --condition, --join-output-dir points to the parent output directory; conditions/<group>/ subdirectories are auto-discovered from the repro TOML."#;
@@ -1378,6 +1378,7 @@ fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
         true,
         batch,
         spatial_microns,
+        true,
     )?;
     if let Some(l) = log {
         eprint!("{l}");
@@ -1409,7 +1410,7 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
         cli.magic_batch_obs.as_deref(),
         cli.condition.as_deref(),
     );
-    let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true)?;
+    let log = magic_impute_and_attach_batch(&h5ad, &out, batch_owned.as_deref(), true, true)?;
     eprint!("{log}");
     Ok(())
 }
@@ -1490,6 +1491,7 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
                     true,
                     batch_owned.as_deref(),
                     spatial_microns,
+                    true,
                 )?;
                 if let Some(l) = log {
                     eprint!("{l}");

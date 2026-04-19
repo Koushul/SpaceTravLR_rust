@@ -145,8 +145,9 @@ pub struct TrainingHudState {
     pub started: Instant,
     pub finished: Option<Result<(), String>>,
     pub cancel_requested: Arc<AtomicBool>,
-    /// Per completed gene for the TUI best / worst list: `(gene, mean_lasso_r2, mean_cnn_r2, n_modulators)`.
-    /// `mean_cnn_r2` is `Some` when the spatial CNN ran for that gene (mean over clusters with finite `cnn_r2`).
+    /// Per completed gene for the TUI best / worst list: `(gene, mean_lasso_r2, mean_blended_r2, n_modulators)`.
+    /// `mean_blended_r2` is `Some` when any cluster has finite `cnn_r2`: mean over clusters of
+    /// [`crate::estimator::cluster_insample_r2_for_hud`] (CNN where kept, else Lasso), matching export arbitration.
     /// Fourth field: count of `beta_*` columns in written betadata (non-zero across rows/cells);
     /// falls back to design-matrix width when not supplied (e.g. training demo).
     pub gene_r2_mean: Vec<(String, f64, Option<f64>, usize)>,
@@ -266,25 +267,28 @@ impl TrainingHudState {
         gene: &str,
         summaries: &[ClusterTrainingSummary],
         n_betadata_beta_columns: Option<usize>,
+        cnn_arbitration: Option<(bool, f64)>,
     ) {
         if summaries.is_empty() {
             return;
         }
         let mean_lasso: f64 =
             summaries.iter().map(|s| s.lasso_r2).sum::<f64>() / summaries.len() as f64;
-        let mut cnn_sum = 0.0_f64;
-        let mut n_cnn = 0usize;
-        for s in summaries {
-            if s.cnn_r2.is_finite() {
-                cnn_sum += s.cnn_r2;
-                n_cnn += 1;
-            }
-        }
-        let mean_cnn = (n_cnn > 0).then_some(cnn_sum / n_cnn as f64);
+        let (drop_worse, margin) = cnn_arbitration.unwrap_or((true, 0.0));
+        let any_finite_cnn = summaries.iter().any(|s| s.cnn_r2.is_finite());
+        let mean_blended = any_finite_cnn.then(|| {
+            summaries
+                .iter()
+                .map(|s| {
+                    crate::estimator::cluster_insample_r2_for_hud(s, drop_worse, margin)
+                })
+                .sum::<f64>()
+                / summaries.len() as f64
+        });
         let n_modulators = n_betadata_beta_columns
             .unwrap_or_else(|| summaries.iter().map(|s| s.n_modulators).max().unwrap_or(0));
         self.gene_r2_mean
-            .push((gene.to_string(), mean_lasso, mean_cnn, n_modulators));
+            .push((gene.to_string(), mean_lasso, mean_blended, n_modulators));
         self.perf_stats_generation = self.perf_stats_generation.wrapping_add(1);
     }
 
