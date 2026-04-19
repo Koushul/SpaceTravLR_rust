@@ -39,3 +39,5 @@ docs/_jupyter_cache/
 .readthedocs.lock
 
 ablation_training_configs/
+scripts/*.py
+scripts/retro_validation/
