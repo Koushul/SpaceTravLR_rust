@@ -41,3 +41,9 @@ docs/_jupyter_cache/
 ablation_training_configs/
 scripts/*.py
 scripts/retro_validation/
+
+PIIS0092867425005720.pdf
+data/geo_perturbseq/
+data/hf_perturbmulti/
+perturb_multi_imputation/
+snrna_human_tonsil_2026-04-20/
