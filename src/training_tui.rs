@@ -1278,13 +1278,16 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
         let now_rocket = now_heartbeat;
         let sheep_snapshot: Vec<Instant> = falling_sheep.clone();
+        let draw_state: Option<TrainingHudState> = hud.lock().ok().map(|g| (*g).clone());
         terminal.draw(|f| {
             let area = f.area();
             let pal = TuiColors::resolve(theme_slot);
             let bg = Style::default().bg(pal.bg);
             f.render_widget(Block::default().style(bg), area);
 
-            let Ok(st) = hud.lock() else { return };
+            let Some(st) = draw_state.as_ref() else {
+                return;
+            };
 
             let cpu_pct = sys.global_cpu_usage();
             let used_mem = sys.used_memory();

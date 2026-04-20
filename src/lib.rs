@@ -68,6 +68,7 @@ pub use config::{
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
     ClusteredGcnNwrFitInputs, CnnEpochHudSlot, FittedClusterResult,
+    run_benchmark_mock_cluster_cnn_training,
 };
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};

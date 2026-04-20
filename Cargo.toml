@@ -98,6 +98,10 @@ name = "spatial_viewer"
 path = "src/bin/spatial_viewer.rs"
 required-features = ["spatial-viewer"]
 
+[[bin]]
+name = "cnn_train_bench"
+path = "src/bin/cnn_train_bench.rs"
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }

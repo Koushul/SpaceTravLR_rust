@@ -33,13 +33,44 @@ fn env_truthy(name: &str) -> bool {
 /// Burn **WebGPU** backend when the `wgpu` crate can request an adapter, otherwise Burn **NdArray** on CPU.
 /// `SPACETRAVLR_FORCE_CPU` / `SPACETRAVLR_DISABLE_WGPU` force CPU (no adapter probe).
 pub(crate) fn select_compute_backend() -> ComputeChoice {
-    if env_truthy("SPACETRAVLR_FORCE_CPU") || env_truthy("SPACETRAVLR_DISABLE_WGPU") {
-        return ComputeChoice::NdArray(NdArrayDevice::Cpu);
-    }
+    let choice = if env_truthy("SPACETRAVLR_FORCE_CPU") || env_truthy("SPACETRAVLR_DISABLE_WGPU") {
+        ComputeChoice::NdArray(NdArrayDevice::Cpu)
+    } else {
+        match wgpu_adapter_probe_cached().as_ref() {
+            Some(_) => ComputeChoice::Wgpu(WgpuDevice::default()),
+            None => ComputeChoice::NdArray(NdArrayDevice::Cpu),
+        }
+    };
+    log_compute_backend_choice(&choice);
+    choice
+}
 
-    match wgpu_adapter_probe_cached().as_ref() {
-        Some(_) => ComputeChoice::Wgpu(WgpuDevice::default()),
-        None => ComputeChoice::NdArray(NdArrayDevice::Cpu),
+fn log_compute_backend_choice(choice: &ComputeChoice) {
+    if env_truthy("SPACETRAVLR_QUIET_COMPUTE") {
+        return;
+    }
+    match choice {
+        ComputeChoice::Wgpu(_) => {
+            if let Some(info) = wgpu_adapter_probe_cached().as_ref() {
+                eprintln!(
+                    "spacetravlr: CNN/compute backend = WebGPU (adapter `{}`, {:?})",
+                    info.name, info.device_type
+                );
+            } else {
+                eprintln!("spacetravlr: CNN/compute backend = WebGPU");
+            }
+        }
+        ComputeChoice::NdArray(_) => {
+            if env_truthy("SPACETRAVLR_FORCE_CPU") || env_truthy("SPACETRAVLR_DISABLE_WGPU") {
+                eprintln!(
+                    "spacetravlr: CNN/compute backend = CPU (NdArray) — SPACETRAVLR_FORCE_CPU or SPACETRAVLR_DISABLE_WGPU is set"
+                );
+            } else {
+                eprintln!(
+                    "spacetravlr: CNN/compute backend = CPU (NdArray) — no usable wgpu adapter (CNN training will be much slower than WebGPU)"
+                );
+            }
+        }
     }
 }
 

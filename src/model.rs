@@ -47,6 +47,8 @@ pub struct CellularNicheNetwork<B: Backend> {
     pub(crate) spatial_features_mlp: SpatialMLP<B>,
     pub(crate) mlp: HeadMLP<B>,
     pub anchors: Tensor<B, 1>,
+    /// Row view of `anchors` with shape `[1, n_betas]` for broadcast multiply without per-step `unsqueeze`.
+    pub(crate) anchors_row: Tensor<B, 2>,
     pub(crate) output_activation: u8,
 }
 
@@ -103,6 +105,9 @@ impl CellularNicheNetworkConfig {
                 .init(device)
         };
 
+        let n_anchor = anchors.dims()[0];
+        let anchors_row = anchors.clone().reshape([1, n_anchor]);
+
         CellularNicheNetwork {
             conv_layers: VisionEncoder {
                 conv1: Conv2dConfig::new([in_ch, 16], [3, 3])
@@ -141,6 +146,7 @@ impl CellularNicheNetworkConfig {
                 l2: LinearConfig::new(64, dim).init(device),
             },
             anchors,
+            anchors_row,
             output_activation: cnn_output_activation_tag(output_activation),
         }
     }
@@ -184,6 +190,8 @@ impl<B: Backend> CellularNicheNetwork<B> {
         let x = self.conv_layers.prelu3.forward(x);
         let x = burn::tensor::module::max_pool2d(x, [2, 2], [2, 2], [0, 0], [1, 1]);
 
+        // Burn's `adaptive_avg_pool2d` takes `Tensor` by value; three pyramid levels need three
+        // graph forks from `x` (two clones + one consume is the minimal split here).
         let p1 = burn::tensor::module::adaptive_avg_pool2d(x.clone(), [1, 1]);
         let p2 = burn::tensor::module::adaptive_avg_pool2d(x.clone(), [2, 2]);
         let p3 = burn::tensor::module::adaptive_avg_pool2d(x, [4, 4]);
@@ -205,17 +213,21 @@ impl<B: Backend> CellularNicheNetwork<B> {
         let out = self.mlp.l2.forward(out);
         let betas = apply_cnn_output_activation(self.output_activation, out);
 
-        betas.mul(self.anchors.clone().unsqueeze_dim(0))
+        betas.mul(self.anchors_row.clone())
     }
 
     pub fn linear_readout_y(betas: Tensor<B, 2>, inputs_x: Tensor<B, 2>) -> Tensor<B, 1> {
         let dims = betas.dims();
         let batch = dims[0];
         let n_betas = dims[1];
-
-        let beta0 = betas.clone().slice([0..batch, 0..1]).reshape([batch]);
-        let beta_rest = betas.slice([0..batch, 1..n_betas]);
-
+        if n_betas <= 1 {
+            return betas.reshape([batch]);
+        }
+        let mut parts = betas
+            .split_with_sizes(vec![1, n_betas.saturating_sub(1)], 1)
+            .into_iter();
+        let beta0 = parts.next().expect("split column 0").reshape([batch]);
+        let beta_rest = parts.next().expect("split rest");
         let y_interaction = (beta_rest * inputs_x).sum_dim(1).reshape([batch]);
         beta0.add(y_interaction)
     }
