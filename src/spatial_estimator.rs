@@ -96,7 +96,11 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     cluster_betadata_row_keys: &HashMap<usize, String>,
     unscale_betas_on_export: bool,
 ) -> anyhow::Result<()> {
-    let mut cluster_ids: Vec<usize> = est_inner.lasso_coefficients.keys().copied().collect();
+    // Always emit ONE row per cell type seen in obs (the full training universe),
+    // not just the clusters that successfully fit. Clusters with no Lasso fit, that
+    // were filtered as "bad", or that errored out, get a row of zeros so downstream
+    // Betabase joins by `cell_type` key never fall back to row 0.
+    let mut cluster_ids: Vec<usize> = cluster_betadata_row_keys.keys().copied().collect();
     cluster_ids.sort();
     if cluster_ids.is_empty() {
         return Ok(());
@@ -109,6 +113,9 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
         if bad_betadata_clusters.contains(&c_id) {
             continue;
         }
+        let Some(coefs) = est_inner.lasso_coefficients.get(&c_id) else {
+            continue;
+        };
         let intercept = finite_or_zero_f64(
             est_inner
                 .lasso_intercepts
@@ -117,21 +124,19 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
                 .unwrap_or(0.0),
         );
         mat[[i, 0]] = intercept;
-        if let Some(coefs) = est_inner.lasso_coefficients.get(&c_id) {
-            for j in 0..coefs.nrows().min(n_mods) {
-                let mut b = finite_or_zero_f64(coefs[[j, 0]]);
-                if unscale_betas_on_export {
-                    if let Some(scales) = modulator_scales {
-                        if j < scales.len() {
-                            let sj = scales[j];
-                            if sj != 1.0 {
-                                b /= sj;
-                            }
+        for j in 0..coefs.nrows().min(n_mods) {
+            let mut b = finite_or_zero_f64(coefs[[j, 0]]);
+            if unscale_betas_on_export {
+                if let Some(scales) = modulator_scales {
+                    if j < scales.len() {
+                        let sj = scales[j];
+                        if sj != 1.0 {
+                            b /= sj;
                         }
                     }
                 }
-                mat[[i, 1 + j]] = b;
             }
+            mat[[i, 1 + j]] = b;
         }
     }
 
@@ -3451,16 +3456,29 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             }
                                         }
                                     } else {
+                                        // Always emit ONE row per cell type seen in obs (training
+                                        // universe), so downstream Betabase joins by `Cluster` key
+                                        // never fall back to "row 0" for clusters that didn't fit.
+                                        // Clusters that were skipped, errored, fell below
+                                        // threshold, or simply have no Lasso coefficients get a
+                                        // row of zeros (intercept = 0, all βs = 0) and are treated
+                                        // as no contribution.
                                         let mut cluster_ids: Vec<usize> =
-                                            est_inner.lasso_coefficients.keys().copied().collect();
+                                            cluster_betadata_row_keys.keys().copied().collect();
                                         cluster_ids.sort();
 
                                         let rows: Vec<Vec<f64>> = cluster_ids
                                             .iter()
                                             .map(|&c_id| {
+                                                let zero_row = || vec![0.0; 1 + n_mods];
                                                 if bad_betadata_clusters.contains(&c_id) {
-                                                    return vec![0.0; 1 + n_mods];
+                                                    return zero_row();
                                                 }
+                                                let Some(coefs) =
+                                                    est_inner.lasso_coefficients.get(&c_id)
+                                                else {
+                                                    return zero_row();
+                                                };
                                                 let intercept = finite_or_zero_f64(
                                                     est_inner
                                                         .lasso_intercepts
@@ -3468,7 +3486,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                         .copied()
                                                         .unwrap_or(0.0),
                                                 );
-                                                let coefs = &est_inner.lasso_coefficients[&c_id];
                                                 let mut row = Vec::with_capacity(1 + n_mods);
                                                 row.push(intercept);
                                                 for j in 0..coefs.nrows() {
@@ -3487,6 +3504,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                         }
                                                     }
                                                     row.push(b);
+                                                }
+                                                while row.len() < 1 + n_mods {
+                                                    row.push(0.0);
                                                 }
                                                 row
                                             })
