@@ -78,6 +78,86 @@ fn cluster_rows_all_tf_coef_columns_zero(rows: &[Vec<f64>], n_tf: usize) -> bool
     (1..=n_tf).all(|j| !rows.iter().any(|r| j < r.len() && r[j] != 0.0))
 }
 
+/// CNN-mode counterpart to the seed-only per-cluster betadata Feather: writes
+/// `<training_dir>/lasso_coefs/<gene>_lasso_coefs.feather` with one row per cluster
+/// (label column `cell_type`, then `beta0` + `beta_<modulator>` columns) using the
+/// raw lasso intercepts/coefficients (no CNN). Mirrors the seed-only branch's
+/// scaling, zeroing of bad-fit clusters, and cluster→label mapping so downstream
+/// code (Betabase / spatial_viewer) sees identical numbers regardless of CNN mode.
+#[allow(clippy::too_many_arguments)]
+fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
+    training_dir: &Path,
+    gene: &str,
+    est_inner: &crate::estimator::ClusteredGCNNWR<AB>,
+    modulator_scales: Option<&Array1<f64>>,
+    col_names: &[String],
+    n_mods: usize,
+    bad_betadata_clusters: &HashSet<usize>,
+    cluster_betadata_row_keys: &HashMap<usize, String>,
+    unscale_betas_on_export: bool,
+) -> anyhow::Result<()> {
+    let mut cluster_ids: Vec<usize> = est_inner.lasso_coefficients.keys().copied().collect();
+    cluster_ids.sort();
+    if cluster_ids.is_empty() {
+        return Ok(());
+    }
+
+    let n_cols_full = col_names.len();
+    let n_rows = cluster_ids.len();
+    let mut mat = Array2::<f64>::zeros((n_rows, n_cols_full));
+    for (i, &c_id) in cluster_ids.iter().enumerate() {
+        if bad_betadata_clusters.contains(&c_id) {
+            continue;
+        }
+        let intercept = finite_or_zero_f64(
+            est_inner
+                .lasso_intercepts
+                .get(&c_id)
+                .copied()
+                .unwrap_or(0.0),
+        );
+        mat[[i, 0]] = intercept;
+        if let Some(coefs) = est_inner.lasso_coefficients.get(&c_id) {
+            for j in 0..coefs.nrows().min(n_mods) {
+                let mut b = finite_or_zero_f64(coefs[[j, 0]]);
+                if unscale_betas_on_export {
+                    if let Some(scales) = modulator_scales {
+                        if j < scales.len() {
+                            let sj = scales[j];
+                            if sj != 1.0 {
+                                b /= sj;
+                            }
+                        }
+                    }
+                }
+                mat[[i, 1 + j]] = b;
+            }
+        }
+    }
+
+    let ids: Vec<String> = cluster_ids
+        .iter()
+        .map(|&c| {
+            cluster_betadata_row_keys
+                .get(&c)
+                .cloned()
+                .unwrap_or_else(|| c.to_string())
+        })
+        .collect();
+
+    let dir = training_dir.join("lasso_coefs");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    let out_path = dir.join(format!("{}_lasso_coefs.feather", gene));
+    write_betadata_feather(
+        out_path.to_string_lossy().as_ref(),
+        "cell_type",
+        &ids,
+        col_names,
+        &mat,
+    )
+}
+
 /// Remove `*.lock` files in `dir` whose modification time is at least `stale_secs` old.
 /// Returns how many files were deleted. No-op if `stale_secs == 0` or `dir` is not a directory.
 pub(crate) fn remove_stale_lock_files_in_dir(dir: &Path, stale_secs: u64) -> usize {
@@ -3348,6 +3428,26 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             .is_ok()
                                             {
                                                 wrote = true;
+
+                                                if let Err(e) = write_lasso_coefs_feather_for_gene(
+                                                    Path::new(&training_dir),
+                                                    &gene,
+                                                    est_inner,
+                                                    estimator.modulator_scales.as_ref(),
+                                                    &col_names,
+                                                    n_mods,
+                                                    &bad_betadata_clusters,
+                                                    &cluster_betadata_row_keys,
+                                                    unscale_betas_on_export_w,
+                                                ) {
+                                                    log_line(
+                                                        &hud,
+                                                        format!(
+                                                            "lasso_coefs warn {}: {}",
+                                                            gene, e
+                                                        ),
+                                                    );
+                                                }
                                             }
                                         }
                                     } else {

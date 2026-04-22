@@ -11,11 +11,11 @@ use ndarray::Array2;
 use polars::prelude::{
     DataFrame, IpcReader, NamedFrom, ParquetWriter, SerReader, Series,
 };
-use spacetravlr::config::SpaceshipConfig;
+use spacetravlr::config::{CnnTrainingMode, SpaceshipConfig};
 use spacetravlr::spatial_estimator::{
     SpatialCellularProgramsEstimator, dense_to_csr_f64, GENE_PERFORMANCE_FEATHER_NAME,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn write_minimal_mouse_grn_parquet(dir: &Path) -> anyhow::Result<()> {
     let mut df = DataFrame::new(vec![
@@ -70,16 +70,22 @@ fn write_mock_training_h5ad(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
-    let dir = std::env::temp_dir().join(format!("spacetravlr_fit_var_r2_{}", std::process::id()));
+fn setup_run_dir(suffix: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "spacetravlr_fit_var_r2_{}_{}",
+        std::process::id(),
+        suffix
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     write_minimal_mouse_grn_parquet(&dir).unwrap();
-
     let h5ad = dir.join("mock_train.h5ad");
     write_mock_training_h5ad(&h5ad).unwrap();
+    dir
+}
 
+fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode) {
+    let h5ad = dir.join("mock_train.h5ad");
     let mut cfg = SpaceshipConfig::default();
     cfg.data.adata_path = h5ad.to_string_lossy().into_owned();
     cfg.data.layer = "X".into();
@@ -88,6 +94,7 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
     cfg.grn.use_lr_modulators = false;
     cfg.grn.use_tfl_modulators = false;
     cfg.training.score_threshold = -1.0;
+    cfg.training.mode = Some(mode);
     cfg.execution.output_dir = dir.to_string_lossy().into_owned();
     cfg.lasso.n_iter = 200;
     cfg.execution.n_parallel = 1;
@@ -132,7 +139,9 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
         &device,
     )
     .expect("fit_all_genes");
+}
 
+fn assert_gene_performance_feather(dir: &Path) {
     let perf_path = dir.join(GENE_PERFORMANCE_FEATHER_NAME);
     assert!(
         perf_path.is_file(),
@@ -159,6 +168,77 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
             }
         }
         assert!(found, "missing gene {name} in feather");
+    }
+}
+
+#[test]
+fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
+    let dir = setup_run_dir("seed");
+    run_fit_all_genes(&dir, CnnTrainingMode::Seed);
+    assert_gene_performance_feather(&dir);
+
+    let lasso_dir = dir.join("lasso_coefs");
+    assert!(
+        !lasso_dir.exists(),
+        "seed-only mode must NOT create {}",
+        lasso_dir.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fit_all_genes_full_cnn_writes_lasso_coefs_per_cluster_feathers() {
+    let dir = setup_run_dir("full");
+    run_fit_all_genes(&dir, CnnTrainingMode::Full);
+    assert_gene_performance_feather(&dir);
+
+    let lasso_dir = dir.join("lasso_coefs");
+    assert!(
+        lasso_dir.is_dir(),
+        "full-CNN mode must create {}",
+        lasso_dir.display()
+    );
+
+    for gene in ["Reg1", "Tgt1", "Reg2"] {
+        let per_cell = dir.join(format!("{gene}_betadata.feather"));
+        if !per_cell.is_file() {
+            continue;
+        }
+        let cell_df = IpcReader::new(std::fs::File::open(&per_cell).unwrap())
+            .finish()
+            .unwrap();
+        assert!(
+            cell_df.column("CellID").is_ok(),
+            "{gene}: per-cell betadata uses CellID id column"
+        );
+
+        let p = lasso_dir.join(format!("{gene}_lasso_coefs.feather"));
+        assert!(p.is_file(), "expected {}", p.display());
+        let df = IpcReader::new(std::fs::File::open(&p).unwrap())
+            .finish()
+            .unwrap();
+        let label = df.column("cell_type").expect("cell_type column");
+        let labels: Vec<String> = label
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|o| o.unwrap_or("").to_string())
+            .collect();
+        assert!(
+            labels.iter().any(|s| s == "ct_a") && labels.iter().any(|s| s == "ct_b"),
+            "{gene}: cell_type rows should be the cluster annotation labels, got {:?}",
+            labels
+        );
+        assert!(df.column("beta0").is_ok(), "{gene}: beta0 column");
+        let mut has_mod = false;
+        for col in df.get_column_names() {
+            if col.starts_with("beta_") {
+                has_mod = true;
+                break;
+            }
+        }
+        assert!(has_mod, "{gene}: at least one beta_<modulator> column");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
