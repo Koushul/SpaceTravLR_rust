@@ -20,7 +20,6 @@ pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
 pub mod celloracle;
-pub mod cnn_gating;
 pub mod condition_split;
 pub mod config;
 pub mod estimator;
@@ -57,18 +56,17 @@ pub use betadata::{
     GeneMatrix, TopBetaCoefficient, betadata_collect_interactions_parallel, write_betadata_feather,
     write_betadata_feather_to_writer,
 };
-pub use cnn_gating::CnnGateDecision;
-pub use cnn_gating::CnnGateGeneInputs;
 pub use config::{
-    CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, HybridCnnGatingConfig,
+    CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode,
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
     default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
-    normalize_ui_path, resolve_spaceship_config_toml_path, resolve_training_target_genes,
+    mix_execution_random_seed, normalize_ui_path, resolve_spaceship_config_toml_path,
+    resolve_training_target_genes,
 };
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
     ClusteredGcnNwrFitInputs, CnnEpochHudSlot, FittedClusterResult,
-    run_benchmark_mock_cluster_cnn_training,
+    run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs,
 };
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};

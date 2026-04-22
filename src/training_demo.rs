@@ -310,16 +310,6 @@ fn demo_worker(
                     55 + (gene_hash(&gene).wrapping_add(e as u32) % 65) as u64,
                 ));
             }
-        } else if hud
-            .lock()
-            .map(|g| g.run_config.cnn_training_mode == "hybrid")
-            .unwrap_or(false)
-        {
-            {
-                let mut g = hud.lock().unwrap_or_else(|e| e.into_inner());
-                g.set_gene_status(&gene, format!("hybrid gate | {n_mods} mods"));
-            }
-            thread::sleep(demo_delay_ms(140 + (gene_hash(&gene) % 120) as u64));
         }
 
         thread::sleep(demo_delay_ms(100 + (gene_hash(&gene) % 150) as u64));

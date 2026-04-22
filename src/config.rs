@@ -102,6 +102,19 @@ pub fn merge_spaceship_underlay_into_toml(into: &mut toml::Value, underlay_root:
     }
 }
 
+/// Mix a global per-run seed with a UTF-8 tag (e.g. target gene) using FNV-1a 64-bit.
+/// Stable across processes (no `std` hasher randomization).
+pub fn mix_execution_random_seed(base: u64, tag: &str) -> u64 {
+    const OFFSET: u64 = 14695981039346656037;
+    const PRIME: u64 = 1099511628211;
+    let mut h = base ^ OFFSET;
+    for &b in tag.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
 /// Merges `[data]`, `[spatial]`, … from `overlay_root` into a TOML document that will deserialize
 /// as [`SpaceshipConfig`]. Unknown top-level keys in `overlay_root` are ignored.
 pub fn merge_spaceship_overlay_into_toml(into: &mut toml::Value, overlay_root: &toml::Value) {
@@ -242,46 +255,19 @@ pub struct LassoConfig {
     /// Default **false** (sequential per cluster; does not affect gene-level `--parallel` workers).
     #[serde(default = "default_false")]
     pub parallel_lasso_clusters: bool,
+    /// Group Lasso solve path: `Some(true)` = Gram-matrix FISTA; `Some(false)` = residual (full-data) gradients;
+    /// `None` = auto (Gram when `n_rows > n_cols` on augmented design including intercept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gram_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CnnTrainingMode {
     #[serde(alias = "minimal", alias = "seed-only")]
+    #[default]
     Seed,
     Full,
-    #[default]
-    Hybrid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HybridCnnGatingConfig {
-    /// Smallest cluster cell count must be at least this for CNN (sample-complexity gate).
-    pub min_cells_per_cluster_for_cnn: usize,
-    /// If modulator count exceeds this, Moran's p must pass `moran_p_value_max_when_over_modulator_cap`.
-    pub max_modulators_soft_for_cnn: Option<usize>,
-    pub moran_k_neighbors: usize,
-    pub moran_permutations: usize,
-    pub moran_p_value_max: f64,
-    pub moran_p_value_max_when_over_modulator_cap: Option<f64>,
-    pub require_all_clusters_lasso_converged: bool,
-    /// If None, `TrainingConfig.score_threshold` is used as the minimum mean lasso R² for CNN.
-    pub min_mean_lasso_r2_for_cnn: Option<f64>,
-    pub min_mean_target_expression_for_cnn: Option<f64>,
-    pub hybrid_modulator_spatial_weight: f64,
-    pub cnn_force_genes_file: Option<String>,
-    pub cnn_skip_genes_file: Option<String>,
-    /// If set, phase 1 only records candidates; phase 2 runs CNN for the top-K by `rank_score`.
-    pub hybrid_cnn_top_k: Option<usize>,
-    /// 0 = conservative (stricter Moran p and mean R² gates → fewer CNNs). 1 = permissive.
-    /// 0.5 reproduces the effective thresholds implied by `moran_p_value_max` / mean R² alone (legacy behavior).
-    #[serde(default = "default_hybrid_cnn_permissiveness")]
-    pub hybrid_cnn_permissiveness: f64,
-}
-
-fn default_hybrid_cnn_permissiveness() -> f64 {
-    0.5
 }
 
 fn default_true() -> bool {
@@ -292,54 +278,6 @@ fn default_one_f64() -> f64 {
     1.0
 }
 
-impl Default for HybridCnnGatingConfig {
-    fn default() -> Self {
-        Self {
-            min_cells_per_cluster_for_cnn: 80,
-            max_modulators_soft_for_cnn: Some(256),
-            moran_k_neighbors: 8,
-            moran_permutations: 99,
-            moran_p_value_max: 0.05,
-            moran_p_value_max_when_over_modulator_cap: Some(0.01),
-            require_all_clusters_lasso_converged: true,
-            min_mean_lasso_r2_for_cnn: None,
-            min_mean_target_expression_for_cnn: None,
-            hybrid_modulator_spatial_weight: 1.0,
-            cnn_force_genes_file: None,
-            cnn_skip_genes_file: None,
-            hybrid_cnn_top_k: None,
-            hybrid_cnn_permissiveness: default_hybrid_cnn_permissiveness(),
-        }
-    }
-}
-
-impl HybridCnnGatingConfig {
-    fn permissiveness_t(&self) -> f64 {
-        self.hybrid_cnn_permissiveness.clamp(0.0, 1.0)
-    }
-
-    pub fn effective_moran_p_max(&self) -> f64 {
-        let t = self.permissiveness_t();
-        let f = 0.3 + 1.4 * t;
-        (self.moran_p_value_max * f).clamp(1e-12, 1.0)
-    }
-
-    pub fn effective_moran_p_strict(&self) -> f64 {
-        let base = self
-            .moran_p_value_max_when_over_modulator_cap
-            .unwrap_or(self.moran_p_value_max);
-        let t = self.permissiveness_t();
-        let f = 0.3 + 1.4 * t;
-        (base * f).clamp(1e-12, 1.0)
-    }
-
-    pub fn effective_min_mean_lasso_r2(&self, base_min_r2: f64) -> f64 {
-        let t = self.permissiveness_t();
-        let r2f = 1.4 - 0.8 * t;
-        (base_min_r2 * r2f).max(0.0)
-    }
-}
-
 fn default_training_mode_option() -> Option<CnnTrainingMode> {
     Some(CnnTrainingMode::Seed)
 }
@@ -347,15 +285,13 @@ fn default_training_mode_option() -> Option<CnnTrainingMode> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrainingConfig {
-    /// Kept for CLI/back-compat; hybrid runs lasso first per gene regardless.
+    /// Kept for CLI/back-compat; full CNN still runs Lasso first per gene.
     pub seed_only: bool,
     #[serde(default = "default_training_mode_option")]
     pub mode: Option<CnnTrainingMode>,
     pub epochs: usize,
     pub learning_rate: f64,
     pub score_threshold: f64,
-    #[serde(default)]
-    pub hybrid: HybridCnnGatingConfig,
     /// Subset of AnnData `var` to train (`--genes`, `[training] genes`). Persisted in
     /// `spacetravlr_run_repro.toml` for `--join-output-dir`.
     #[serde(default)]
@@ -415,8 +351,16 @@ fn default_cnn_minibatch_size() -> usize {
     512
 }
 
+fn default_cnn_max_cells_per_epoch() -> Option<usize> {
+    Some(3000)
+}
+
 fn default_false() -> bool {
     false
+}
+
+fn default_execution_random_seed() -> u64 {
+    42
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +403,22 @@ pub struct CnnConfig {
     /// Per-optimizer-step batch size over cells within a cluster. `0` = full batch (one step per epoch).
     #[serde(default = "default_cnn_minibatch_size")]
     pub cnn_minibatch_size: usize,
+    /// Maximum optimizer steps per epoch (`None` = sweep all cells each epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnn_max_batches_per_epoch: Option<usize>,
+    /// Per-epoch **cell limit** for smart subsampling. When `cluster_n` exceeds this
+    /// value, each epoch trains on a uniform random subset of `cnn_max_cells_per_epoch`
+    /// cells (`ceil(cnn_max_cells_per_epoch / cnn_minibatch_size)` optimizer steps);
+    /// otherwise the full cluster is used (the inner loop terminates naturally).
+    /// Per-epoch reshuffle makes coverage uniform in expectation across epochs.
+    /// Combined with [`Self::cnn_max_batches_per_epoch`] via `min`. `None` = no cell cap
+    /// (legacy full-sweep behavior). Default `Some(3000)` — tune in `[cnn]` config.
+    #[serde(default = "default_cnn_max_cells_per_epoch")]
+    pub cnn_max_cells_per_epoch: Option<usize>,
+    /// When > 0, skip CNN training for clusters with fewer than this many cells (Lasso is still fit
+    /// when it passes the score threshold; exports use Lasso for those clusters). `0` = no minimum.
+    #[serde(default)]
+    pub min_cells_for_cnn: usize,
     /// When true, feed all cluster channels `[batch, n_clusters, H, W]` into conv1 (cross-cell-type layout).
     /// When false (default), only the focal cluster channel `[batch, 1, H, W]` (matches legacy behavior).
     #[serde(default = "default_false")]
@@ -478,6 +438,9 @@ pub struct ExecutionConfig {
     /// If > 0, remove a gene `*.lock` file older than this many seconds before claiming the gene,
     /// and run a background sweep about every 10 minutes over the output directory (crash recovery on shared storage).
     pub stale_lock_secs: u64,
+    /// RNG seed for Lasso (per target via [`mix_execution_random_seed`]) and CNN minibatch order.
+    #[serde(default = "default_execution_random_seed")]
+    pub random_seed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,6 +663,9 @@ impl Default for CnnConfig {
             drop_cnn_if_insample_worse_than_lasso: true,
             cnn_vs_lasso_arbitration_margin: 0.0,
             cnn_minibatch_size: 512,
+            cnn_max_batches_per_epoch: None,
+            cnn_max_cells_per_epoch: default_cnn_max_cells_per_epoch(),
+            min_cells_for_cnn: 0,
             multi_channel_spatial_maps: false,
             ego_center_spatial_maps: false,
         }
@@ -716,6 +682,7 @@ impl Default for LassoConfig {
             scale_modulators: true,
             unscale_betas_on_export: true,
             parallel_lasso_clusters: false,
+            gram_override: None,
         }
     }
 }
@@ -728,7 +695,6 @@ impl Default for TrainingConfig {
             epochs: 10,
             learning_rate: 1e-3,
             score_threshold: 0.2,
-            hybrid: HybridCnnGatingConfig::default(),
             genes: None,
             max_genes: None,
         }
@@ -769,6 +735,7 @@ impl Default for ExecutionConfig {
             output_dir: String::new(),
             write_minimal_repro_h5ad: false,
             stale_lock_secs: 0,
+            random_seed: default_execution_random_seed(),
         }
     }
 }
@@ -1186,13 +1153,6 @@ impl SpaceshipConfig {
 
     pub fn full_cnn(&self) -> bool {
         matches!(self.resolved_cnn_mode(), CnnTrainingMode::Full)
-    }
-
-    pub fn min_mean_lasso_r2_for_hybrid_cnn(&self) -> f64 {
-        self.training
-            .hybrid
-            .min_mean_lasso_r2_for_cnn
-            .unwrap_or(self.training.score_threshold)
     }
 
     pub fn resolve_adata_path(&self) -> String {
@@ -1642,6 +1602,11 @@ mod lasso_scaling_config_tests {
     }
 
     #[test]
+    fn default_lasso_gram_override_none() {
+        assert!(LassoConfig::default().gram_override.is_none());
+    }
+
+    #[test]
     fn toml_explicit_parallel_lasso_clusters_true_parsed() {
         let toml = r#"
 [data]
@@ -1729,5 +1694,26 @@ tol = 1e-4
         let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
         assert!(cfg.lasso.scale_modulators);
         assert!(cfg.lasso.unscale_betas_on_export);
+    }
+
+    #[test]
+    fn toml_gram_override_false_parsed() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[training]
+mode = "seed"
+epochs = 5
+learning_rate = 0.001
+score_threshold = 0.1
+
+[lasso]
+gram_override = false
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.lasso.gram_override, Some(false));
     }
 }

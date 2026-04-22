@@ -201,7 +201,6 @@ fn cnn_mode_label(mode: CnnTrainingMode) -> &'static str {
     match mode {
         CnnTrainingMode::Seed => "seed",
         CnnTrainingMode::Full => "full",
-        CnnTrainingMode::Hybrid => "hybrid",
     }
 }
 

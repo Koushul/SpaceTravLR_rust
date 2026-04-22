@@ -5,21 +5,16 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 [data]
-# Path to your input .h5ad (the file you own on disk). Leave empty for interactive prompt (TUI) or pass --h5ad.
-# The input file is never modified. If auto-prep needs to add layers (cell_type, imputed_count, …), it writes
-# a derived .h5ad under output_dir/spacetravlr_prep/ and records that path; the input stays read-only.
-# adata_path      = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/ThePerturbedBrain/slideseq_brain_processed.h5ad"
+# adata_path      = "/Unhinged/soul/slideseq_brain_processed.h5ad"
 # Expression layer to read from AnnData
 layer           = "imputed_count"
 # obs column holding integer cluster labels
 cluster_annot   = "cell_type"
-# Optional: split training by this obs column (e.g. treatment, batch).
+# Optional: split training by this condition
 # condition      = "batch"
-# Optional: one obs_names value per line; perturbation loads only those cells (smaller RAM; ROI-only GRN).
-# perturb_obs_subset_file = "roi_obs_names.txt"
 
 [spatial]
-# Radius for spatial neighbor detection
+# Distance threshold for secreted signaling
 radius           = 300
 # Grid resolution for spatial convolution kernel
 spatial_dim      = 64
@@ -31,9 +26,7 @@ weighted_ligand_scale_factor = 1.0
 [grn]
 # Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
 # network_data_dir = "/path/to/your/data"
-# Optional: Feather/IPC TF priors with columns: source, target, cell_type.
-# If omitted and use_tf_modulators is true, training writes celloracle_tf_priors.feather in the output dir.
-# tf_priors_feather = "/Users/koush/Projects/jishnulab/SpaceTravLR/tutorial/SlideTagsKidney/xenium_skin_links.feather"
+# tf_priors_feather = "/prior_links.feather"
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.1
 # Max p-value for CellOracle Bayesian ridge edges to enter the TF priors feather (default 0.05).
@@ -63,7 +56,19 @@ spatial_feature_radius = 300.0
 # After final head linear, before lasso-anchor scaling: identity | sigmoid | tanh | sigmoidx2 (2·sigmoid, (0,2))
 output_activation = "sigmoidx2"
 # Per-optimizer-step batch size over cells within a cluster (0 = full batch per epoch)
-cnn_minibatch_size = 512
+cnn_minibatch_size = 256
+# Cap optimizer steps per epoch (omit or null = full pass over all cells each epoch).
+# Example: 32 with minibatch 512 processes at most ~16k cells per epoch (rest next epoch).
+# cnn_max_batches_per_epoch = 32
+# Smart subsampling cell limit: when a cluster has more cells than this, each epoch
+# trains on a uniform random subset of `cnn_max_cells_per_epoch` cells (translates to
+# ceil(cnn_max_cells_per_epoch / cnn_minibatch_size) optimizer steps). Smaller clusters
+# train on the full cluster. Per-epoch reshuffle gives uniform spatial coverage in
+# expectation across epochs. Combined with cnn_max_batches_per_epoch via min.
+# Default: 3000. Set null to disable (legacy full-sweep behavior).
+cnn_max_cells_per_epoch = 1000
+# Skip CNN when a cluster has fewer than this many cells (Lasso kept if it passed the score threshold). 0 = off.
+# min_cells_for_cnn = 32
 # Weak prior: MSE between batch-mean effective betas and Lasso anchors (default in code ~1e-3–1e-2 range; keeps mean near Lasso while allowing per-cell spatial variation)
 # mean_beta_lasso_prior_weight = 0.005
 # LR schedule: constant | cosine (cosine decays to learning_rate * cosine_lr_min_ratio after optional warmup)
@@ -97,15 +102,17 @@ scale_modulators = true
 unscale_betas_on_export = false
 # Parallel in-sample group Lasso across clusters per gene (Rayon; independent of [execution].n_parallel).
 # Default false (sequential). Set true for faster Lasso when many clusters per gene.
-# parallel_lasso_clusters = true
+parallel_lasso_clusters = false
+# Group Lasso backend: omit or null = auto (Gram path when n > p on augmented design).
+gram_override = true
 
 [training]
-# Default when omitted: seed. Use full or hybrid to enable CNN paths.
-mode            = "seed"
+# Default when omitted: seed. Use full to enable per-cell CNN refinement.
+mode            = "full"
 epochs          = 150
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
-learning_rate   = 5e-3
-# Minimum mean lasso R² to allow CNN in hybrid mode (also used when hybrid.min_mean_lasso_r2_for_cnn is unset)
+learning_rate   = 4e-4
+# Minimum mean Lasso R² per cluster to count as passing the Lasso gate (CNN uses the same threshold in full mode).
 score_threshold = 0.1
 # Optional target subset (CLI: --genes / --max-genes). Persisted in spacetravlr_run_repro.toml for --join-output-dir.
 # genes = ["GENE1", "GENE2"]
@@ -114,6 +121,8 @@ score_threshold = 0.1
 
 
 [execution]
+# Global RNG seed: Lasso (mixed per target gene) and CNN minibatch shuffle. Default 42; CLI: --random-seed
+# random_seed = 42
 # Number of parallel gene-training workers
 n_parallel  = 9
 # Directory for *_betadata.feather. Leave empty to use cwd/{adata_stem}_YYYY-MM-DD (local date).
@@ -134,36 +143,11 @@ n_propagation     = 4
 # Value is grid_spacing / radius (smaller = more accurate, larger = faster).
 #   0.5 → ~3% error, ~12x faster at 5000+ cells
 #   0.3 → ~1% error, ~6x faster
-# Comment out or omit for exact O(N²) computation.
 # ligand_grid_factor = 0.2
-# Optional defaults for `spacetravlr-perturb` (--export / TUI) when --cells-csv is omitted; paths relative to the run TOML’s directory unless absolute.
 # cells_csv = "cell_scope.csv"
 # cells_csv_column = "my_cells"
 
 [model_export]
-# Export CNN weights (.npz) for genes that run per-cell CNN refinement (omit or false = off).
 save_cnn_weights = false
-# Write {gene}_cnn_train_data.npz + {gene}_cnn_train_meta.json for scripts/python_train_cnn.py (same tensors as Rust; no SPACETRAVLR_DUMP_CNN_TRAIN_DATA). CLI: --write-cnn-train-data-npz
-# write_cnn_train_data_npz = false
-# Use compressed .npz (numpy savez_compressed format).
 compressed_npz = true
-# Subdirectory under [execution].output_dir for CNN .npz exports
 output_subdir = "CNN_weights"
-
-# Hybrid gating (only when mode = "hybrid"); see src/cnn_gating.rs / log gate_* fields
-[training.hybrid]
-min_cells_per_cluster_for_cnn = 80
-max_modulators_soft_for_cnn = 600
-moran_k_neighbors = 8
-moran_permutations = 99
-moran_p_value_max = 0.05
-moran_p_value_max_when_over_modulator_cap = 0.01
-require_all_clusters_lasso_converged = true
-# min_mean_lasso_r2_for_cnn = 0.15
-# min_mean_target_expression_for_cnn = 0.01
-hybrid_modulator_spatial_weight = 1.0
-# 0 = stricter gates (fewer CNNs), 1 = looser; 0.5 matches pre-knob behavior (default if omitted)
-hybrid_cnn_permissiveness = 1
-# cnn_force_genes_file = "path/to/allow.txt"
-# cnn_skip_genes_file = "path/to/skip.txt"
-# hybrid_cnn_top_k = 50

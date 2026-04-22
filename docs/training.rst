@@ -16,7 +16,7 @@ Common flags
    Worker threads (one active gene per worker).
 
 ``--training-mode``
-   ``full``, ``seed``, or ``hybrid`` CNN modes (see CLI help).
+   ``full`` or ``seed`` CNN modes (see CLI help).
 
 ``--output-dir`` / ``--join-output-dir``
    Fresh run directory vs. resume or multi-host shared storage.

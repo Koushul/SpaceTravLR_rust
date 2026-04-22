@@ -404,10 +404,7 @@ fn workers_single_column(
             );
             let pc = if status.contains("export") || status.contains("write") {
                 pal.c_wrote
-            } else if status.contains("lasso")
-                || status.contains("hybrid")
-                || status.to_lowercase().contains("cnn")
-            {
+            } else if status.contains("lasso") || status.to_lowercase().contains("cnn") {
                 pal.grape
             } else if status.contains("fail") {
                 pal.c_fail
@@ -743,7 +740,7 @@ fn perf_sort_key(entry: &(String, f64, Option<f64>, usize)) -> f64 {
 }
 
 fn perf_panel_has_cnn(st: &TrainingHudState) -> bool {
-    (st.full_cnn || st.run_config.cnn_training_mode == "hybrid")
+    st.full_cnn
         && st
             .gene_r2_mean
             .iter()
@@ -1320,7 +1317,6 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             // ── Header ────────────────────────────────────────────────────────
             let mode = match st.run_config.cnn_training_mode.as_str() {
                 "full" => "full",
-                "hybrid" => "hybrid",
                 _ => "seed",
             };
             let status_txt = if st.should_cancel() {

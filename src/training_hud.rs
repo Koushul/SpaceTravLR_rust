@@ -71,7 +71,6 @@ impl RunConfigSummary {
         let cnn_training_mode = match cfg.resolved_cnn_mode() {
             CnnTrainingMode::Seed => "seed",
             CnnTrainingMode::Full => "full",
-            CnnTrainingMode::Hybrid => "hybrid",
         }
         .to_string();
 
