@@ -5,5 +5,6 @@ pub mod singular_values;
 pub mod subsampling;
 
 pub use group_lasso::{
-    ClusteredGroupLasso, GroupLasso, GroupLassoError, GroupLassoParams, ScaleReg,
+    ClusteredGroupLasso, GroupLasso, GroupLassoError, GroupLassoParams,
+    largest_eigenvalue_symmetric_power_iter, should_use_gram_path, ScaleReg,
 };

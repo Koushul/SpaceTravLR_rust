@@ -37,6 +37,9 @@
 use std::collections::{HashMap, HashSet};
 
 use ndarray::{Array1, Array2, Axis, s};
+use rand::Rng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
 use crate::lasso::fista::{FistaProblem, IterInfo, minimise as fista_minimise};
@@ -98,6 +101,11 @@ pub struct GroupLassoParams {
 
     /// Reuse coefficients from a previous `fit` call.
     pub warm_start: bool,
+
+    /// When `Some(true)`, always use the Gram-matrix FISTA path (`n`×`p`² setup, `p`² inner steps).
+    /// When `Some(false)`, always use the residual path (two `n`×`p` matmuls per gradient).
+    /// When `None`, use Gram when `n_rows > n_cols` on the augmented design matrix (intercept column included).
+    pub gram_override: Option<bool>,
 }
 
 impl Default for GroupLassoParams {
@@ -114,6 +122,7 @@ impl Default for GroupLassoParams {
             frobenius_lipschitz: false,
             seed: 0,
             warm_start: false,
+            gram_override: None,
         }
     }
 }
@@ -145,6 +154,74 @@ impl std::fmt::Display for GroupLassoError {
 impl std::error::Error for GroupLassoError {}
 
 type ClusterLassoPredictRowResult = Result<(Vec<usize>, Array2<f64>), GroupLassoError>;
+
+#[inline]
+fn gram_trace_symmetric(g: &Array2<f64>) -> f64 {
+    let n = g.nrows().min(g.ncols());
+    (0..n).map(|i| g[[i, i]]).sum::<f64>()
+}
+
+pub fn largest_eigenvalue_symmetric_power_iter(
+    g: &Array2<f64>,
+    seed: u64,
+    max_iter: usize,
+) -> f64 {
+    let n = g.nrows();
+    if n == 0 || g.ncols() != n {
+        return 0.0;
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed ^ 0xCAFE_BABE);
+    let mut v = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        v[i] = rng.gen_range(-0.5..0.5);
+    }
+    let nv = v.dot(&v).sqrt();
+    if nv < 1e-15 {
+        v.fill(1.0 / (n as f64).sqrt());
+    } else {
+        v /= nv;
+    }
+
+    let mut rayleigh = 0.0_f64;
+    let iter_n = max_iter.max(16);
+    for _ in 0..iter_n {
+        let gv = g.dot(&v);
+        rayleigh = v.dot(&gv);
+        let gn = gv.dot(&gv).sqrt();
+        if gn < 1e-18 {
+            break;
+        }
+        v = gv / gn;
+    }
+    rayleigh.abs().max(1e-18)
+}
+
+pub fn should_use_gram_path(n_rows: usize, n_cols_aug: usize, gram_override: Option<bool>) -> bool {
+    match gram_override {
+        Some(true) => true,
+        Some(false) => false,
+        None => n_rows > n_cols_aug,
+    }
+}
+
+#[derive(Clone)]
+struct GramCache {
+    gram: Array2<f64>,
+    xty: Array2<f64>,
+    y_norm: f64,
+}
+
+fn build_gram_cache(x_aug: &Array2<f64>, y: &Array2<f64>) -> GramCache {
+    let n = x_aug.nrows() as f64;
+    let gram = x_aug.t().dot(x_aug) / n;
+    let xty = x_aug.t().dot(y) / n;
+    let y_norm = 0.5 * y.iter().map(|v| v * v).sum::<f64>() / n;
+    GramCache {
+        gram,
+        xty,
+        y_norm,
+    }
+}
 
 // ── Fitted state ──────────────────────────────────────────────────────────────
 
@@ -327,6 +404,14 @@ impl GroupLasso {
         1.5 * s_max * s_max / n
     }
 
+    fn estimate_lipschitz_from_gram(&self, gram: &Array2<f64>) -> f64 {
+        if self.params.frobenius_lipschitz {
+            let tr = gram_trace_symmetric(gram);
+            return tr.max(1e-18);
+        }
+        1.5 * largest_eigenvalue_symmetric_power_iter(gram, self.params.seed, 128)
+    }
+
     // ── Regularisation penalty ────────────────────────────────────────────────
 
     /// Compute the full regularisation penalty for a coefficient matrix `coef`
@@ -423,11 +508,6 @@ impl GroupLasso {
         // Prepare augmented matrix
         let (x_aug, x_means, y_prep) = self.prepare_dataset(x, &y2d);
 
-        // Lipschitz constant
-        let l0 = lipschitz
-            .or(self.lipschitz)
-            .unwrap_or_else(|| self.estimate_lipschitz(&x_aug));
-
         let num_targets = y_prep.ncols();
 
         // Initialise weights
@@ -449,32 +529,57 @@ impl GroupLasso {
 
         let w0 = Self::join(&init_intercept, &init_coef);
 
-        // Capture data for the closure (we need owned copies)
-        let x_aug_owned = x_aug.clone();
-        let y_owned = y_prep.clone();
         let masks_owned = masks.clone();
         let regs_owned = regs.clone();
         let l1_reg = self.params.l1_reg;
         let fit_intercept = self.params.fit_intercept;
 
-        // Build the FISTA-compatible problem struct
-        let problem = GroupLassoProblem {
-            x_aug: x_aug_owned,
-            y: y_owned,
-            masks: masks_owned,
-            group_regs: regs_owned,
-            l1_reg,
-            fit_intercept,
-        };
+        let use_gram =
+            should_use_gram_path(x_aug.nrows(), x_aug.ncols(), self.params.gram_override);
 
-        let result = fista_minimise(
-            &problem,
-            w0,
-            l0,
-            self.params.n_iter,
-            self.params.tol,
-            None::<fn(&IterInfo)>,
-        );
+        let result = if use_gram {
+            let cache = build_gram_cache(&x_aug, &y_prep);
+            let l0g = lipschitz
+                .or(self.lipschitz)
+                .unwrap_or_else(|| self.estimate_lipschitz_from_gram(&cache.gram));
+            let gram_problem = GramLassoProblem {
+                gram: cache.gram,
+                xty: cache.xty,
+                y_norm: cache.y_norm,
+                masks: masks_owned.clone(),
+                group_regs: regs_owned.clone(),
+                l1_reg,
+                fit_intercept,
+            };
+            fista_minimise(
+                &gram_problem,
+                w0,
+                l0g,
+                self.params.n_iter,
+                self.params.tol,
+                None::<fn(&IterInfo)>,
+            )
+        } else {
+            let l0 = lipschitz
+                .or(self.lipschitz)
+                .unwrap_or_else(|| self.estimate_lipschitz(&x_aug));
+            let problem = GroupLassoProblem {
+                x_aug: x_aug.clone(),
+                y: y_prep.clone(),
+                masks: masks_owned,
+                group_regs: regs_owned,
+                l1_reg,
+                fit_intercept,
+            };
+            fista_minimise(
+                &problem,
+                w0,
+                l0,
+                self.params.n_iter,
+                self.params.tol,
+                None::<fn(&IterInfo)>,
+            )
+        };
 
         self.last_fista_iterations = result.iterations;
         self.lipschitz = Some(result.lipschitz);
@@ -601,6 +706,42 @@ impl FistaProblem for GroupLassoProblem {
     }
 }
 
+struct GramLassoProblem {
+    gram: Array2<f64>,
+    xty: Array2<f64>,
+    y_norm: f64,
+    masks: Vec<Vec<bool>>,
+    group_regs: Vec<f64>,
+    l1_reg: f64,
+    fit_intercept: bool,
+}
+
+impl FistaProblem for GramLassoProblem {
+    fn smooth_loss(&self, w: &Array2<f64>) -> f64 {
+        let gw = self.gram.dot(w);
+        let quad = 0.5 * gw.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f64>();
+        let lin = self.xty.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f64>();
+        quad - lin + self.y_norm
+    }
+
+    fn smooth_grad(&self, w: &Array2<f64>) -> Array2<f64> {
+        let mut g = self.gram.dot(w);
+        g -= &self.xty;
+        if !self.fit_intercept {
+            g.row_mut(0).fill(0.0);
+        }
+        g
+    }
+
+    fn prox(&self, w: &Array2<f64>, lipschitz: f64) -> Array2<f64> {
+        let (intercept, coef) = GroupLasso::split(w);
+        let scaled_l1 = self.l1_reg / lipschitz;
+        let scaled_regs: Vec<f64> = self.group_regs.iter().map(|r| r / lipschitz).collect();
+        let new_coef = l1_l2_prox(&coef, scaled_l1, &scaled_regs, &self.masks);
+        GroupLasso::join(&intercept, &new_coef)
+    }
+}
+
 // ── Clustered Group Lasso ─────────────────────────────────────────────────────
 
 /// Fits an independent `GroupLasso` model for each cluster in the data.
@@ -636,12 +777,13 @@ impl ClusteredGroupLasso {
             ));
         }
 
-        let unique_ids: Vec<i64> = clusters
+        let mut unique_ids: Vec<i64> = clusters
             .iter()
             .cloned()
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
+        unique_ids.sort_unstable();
 
         // Prepare data for each cluster
         let mut cluster_data = Vec::new();
@@ -704,12 +846,13 @@ impl ClusteredGroupLasso {
             ));
         }
 
-        let unique_ids: Vec<i64> = clusters
+        let mut unique_ids: Vec<i64> = clusters
             .iter()
             .cloned()
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
+        unique_ids.sort_unstable();
         let num_targets = self
             .models
             .values()
@@ -818,6 +961,81 @@ mod tests {
         let x = Array2::from_shape_fn((n, 5), |(i, j)| ((i * 7 + j * 13) % 97) as f64 / 97.0);
         let y = Array2::from_shape_fn((n, 1), |(i, _)| 2.0 * x[[i, 0]] - 1.5 * x[[i, 1]]);
         (x, y)
+    }
+
+    #[test]
+    fn gram_path_matches_residual_coefficients() {
+        let (x, y) = xy_with_intercept();
+        let base = GroupLassoParams {
+            groups: vec![0, 1, 2],
+            group_reg: 1e-8,
+            l1_reg: 1e-8,
+            n_iter: 3000,
+            tol: 1e-9,
+            frobenius_lipschitz: true,
+            ..Default::default()
+        };
+
+        let mut residual = GroupLasso::new(GroupLassoParams {
+            gram_override: Some(false),
+            ..base.clone()
+        });
+        let mut gram_m = GroupLasso::new(GroupLassoParams {
+            gram_override: Some(true),
+            ..base
+        });
+
+        let _ = residual.fit(&x, &y, None);
+        let _ = gram_m.fit(&x, &y, None);
+
+        let pr = residual.predict(&x).unwrap();
+        let pg = gram_m.predict(&x).unwrap();
+        let max_pred_diff: f64 = pr
+            .iter()
+            .zip(pg.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_pred_diff < 1e-6,
+            "Gram vs residual predictions should match; max_abs_diff={max_pred_diff}"
+        );
+    }
+
+    #[test]
+    fn gram_quadratic_loss_matches_mse_loss_random_w() {
+        let (x, y) = sparse_xy();
+        let (n, p) = (x.nrows(), x.ncols());
+        let x_means = x.mean_axis(Axis(0)).unwrap().insert_axis(Axis(0));
+        let x_centred: Array2<f64> =
+            Array2::from_shape_fn((n, p), |(i, j)| x[[i, j]] - x_means[[0, j]]);
+        let mut x_aug = Array2::zeros((n, p + 1));
+        x_aug.column_mut(0).fill(1.0);
+        x_aug.slice_mut(s![.., 1..]).assign(&x_centred);
+        let y_prep = y.clone();
+
+        let cache = build_gram_cache(&x_aug, &y_prep);
+
+        let w = Array2::from_shape_fn((x_aug.ncols(), y_prep.ncols()), |(r, c)| {
+            ((r + 7) as f64 * 0.03 + (c as f64) * 0.01).sin()
+        });
+
+        let l_res = GroupLasso::mse_loss(&x_aug, &y_prep, &w);
+        let gram_p = GramLassoProblem {
+            gram: cache.gram.clone(),
+            xty: cache.xty.clone(),
+            y_norm: cache.y_norm,
+            masks: vec![],
+            group_regs: vec![],
+            l1_reg: 0.0,
+            fit_intercept: true,
+        };
+        let l_gram = gram_p.smooth_loss(&w);
+        assert_abs_diff_eq!(l_gram, l_res, epsilon = 1e-10);
+
+        let g_res = GroupLasso::mse_grad(&x_aug, &y_prep, &w);
+        let g_gram = gram_p.smooth_grad(&w);
+        let diff: f64 = g_res.iter().zip(g_gram.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff < 1e-9, "grad diff sum={diff}");
     }
 
     #[test]

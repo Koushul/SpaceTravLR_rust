@@ -74,7 +74,6 @@ Condition splits
 enum TrainingModeArg {
     Full,
     Seed,
-    Hybrid,
 }
 
 impl From<TrainingModeArg> for CnnTrainingMode {
@@ -82,7 +81,6 @@ impl From<TrainingModeArg> for CnnTrainingMode {
         match value {
             TrainingModeArg::Full => CnnTrainingMode::Full,
             TrainingModeArg::Seed => CnnTrainingMode::Seed,
-            TrainingModeArg::Hybrid => CnnTrainingMode::Hybrid,
         }
     }
 }
@@ -298,7 +296,7 @@ struct Cli {
         value_name = "MODE",
         value_enum,
         help_heading = "Training",
-        help = "seed | full | hybrid CNN (default from config, usually seed)"
+        help = "seed | full CNN (default from config, usually seed)"
     )]
     training_mode: Option<TrainingModeArg>,
 
@@ -317,6 +315,14 @@ struct Cli {
         help = "Parallel worker threads (one gene per worker at a time)"
     )]
     parallel: Option<usize>,
+
+    #[arg(
+        long = "random-seed",
+        value_name = "U64",
+        help_heading = "Training",
+        help = "Global RNG seed — Lasso (per target) and CNN minibatch shuffles ([execution].random_seed)"
+    )]
+    random_seed: Option<u64>,
 
     #[arg(
         long,
@@ -845,6 +851,9 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Res
     if let Some(v) = cli.parallel {
         cfg.execution.n_parallel = v.max(1);
     }
+    if let Some(s) = cli.random_seed {
+        cfg.execution.random_seed = s;
+    }
     if cli.save_cnn_weights {
         cfg.model_export.save_cnn_weights = true;
     }
@@ -883,6 +892,9 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     }
     if let Some(v) = cli.parallel {
         cfg.execution.n_parallel = v.max(1);
+    }
+    if let Some(s) = cli.random_seed {
+        cfg.execution.random_seed = s;
     }
     if let Some(v) = cli.max_ligands {
         cfg.grn.max_ligands = Some(v.max(1));
@@ -2066,7 +2078,6 @@ fn main() -> anyhow::Result<()> {
     let mode_label = match cfg.resolved_cnn_mode() {
         CnnTrainingMode::Seed => "seed",
         CnnTrainingMode::Full => "full",
-        CnnTrainingMode::Hybrid => "hybrid",
     };
     #[cfg(feature = "tui")]
     let full_cnn = cfg.full_cnn();
@@ -2181,9 +2192,6 @@ fn main() -> anyhow::Result<()> {
                     n_iter: cfg.lasso.n_iter,
                     tol: cfg.lasso.tol,
                     cnn_training_mode: cfg.resolved_cnn_mode(),
-                    hybrid_pass2_full_cnn: false,
-                    hybrid_gating: &cfg.training.hybrid,
-                    min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
                     gene_filter: gene_filter.clone(),
                     max_genes,
                     n_parallel,
@@ -2223,9 +2231,6 @@ fn main() -> anyhow::Result<()> {
                 n_iter: cfg.lasso.n_iter,
                 tol: cfg.lasso.tol,
                 cnn_training_mode: cfg.resolved_cnn_mode(),
-                hybrid_pass2_full_cnn: false,
-                hybrid_gating: &cfg.training.hybrid,
-                min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
                 gene_filter: gene_filter.clone(),
                 max_genes,
                 n_parallel,
@@ -2307,9 +2312,6 @@ fn main() -> anyhow::Result<()> {
                         n_iter: cfg.lasso.n_iter,
                         tol: cfg.lasso.tol,
                         cnn_training_mode: cfg.resolved_cnn_mode(),
-                        hybrid_pass2_full_cnn: false,
-                        hybrid_gating: &cfg.training.hybrid,
-                        min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
                         gene_filter: gene_filter.clone(),
                         max_genes,
                         n_parallel,
@@ -2350,9 +2352,6 @@ fn main() -> anyhow::Result<()> {
                     n_iter: cfg.lasso.n_iter,
                     tol: cfg.lasso.tol,
                     cnn_training_mode: cfg.resolved_cnn_mode(),
-                    hybrid_pass2_full_cnn: false,
-                    hybrid_gating: &cfg.training.hybrid,
-                    min_mean_lasso_r2_for_cnn: cfg.min_mean_lasso_r2_for_hybrid_cnn(),
                     gene_filter,
                     max_genes,
                     n_parallel,

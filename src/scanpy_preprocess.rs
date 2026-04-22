@@ -20,7 +20,14 @@
 //! stored in **`layers["normalized_count"]`** and **`X`** is left as-is for **`scale` / HVG /
 //! PCA** (avoids double transform and Scanpy **`normalize_total`** warnings on log-like data).
 //!
-//! Scanpy then runs through Leiden. **Clusterwise Markov imputation** on `normalized_count` uses
+//! When **`layers["normalized_count"]`** and **`layers["imputed_count"]`** are already present,
+//! the embed skips QC filters, spatial microns, normalization, scaling, HVG, PCA, neighbors,
+//! UMAP, and MAGIC (layers are left unchanged aside from optional CSR conversion at write). If
+//! **`obs["cell_type"]`** is missing, it runs **`sc.tl.leiden`** only (reusing **`obsp`** graphs
+//! when **`connectivities`** exists, otherwise a compact **`sc.pp.neighbors`** on **`X`** or
+//! **`obsm["X_pca"]`**), then copies Leiden labels into **`obs["cell_type"]`**.
+//!
+//! **Otherwise**, after QC and embedding, **clusterwise Markov imputation** on `normalized_count` uses
 //! isolated **`uv`** with [**magic-impute**](https://pypi.org/project/magic-impute/) (one
 //! **`MAGIC.fit_transform`** per `cell_type` or `leiden` label; optional **batch** column for
 //! (cluster × batch) groups). The same **`uv`** step **CSR-sparsifies `X` and every `layers` matrix**
@@ -560,6 +567,31 @@ def _infer_x_is_log1p(adata) -> bool:
     return False
 
 
+def _spacetravlr_strip_heavy_training_artifacts(adata):
+    def _lig_key(k):
+        lk = str(k).lower()
+        return "weighted_ligand" in lk or "received_ligand" in lk
+
+    for k in list(adata.obsm.keys()):
+        if k in ("spacetravlr_spatial_features", "spacetravlr_spatial_maps_flat") or _lig_key(k):
+            del adata.obsm[k]
+    for k in list(adata.layers.keys()):
+        if _lig_key(k):
+            del adata.layers[k]
+    for k in list(adata.obsp.keys()):
+        if _lig_key(k):
+            del adata.obsp[k]
+    for k in list(adata.uns.keys()):
+        if str(k).startswith("spacetravlr_cache_") or _lig_key(k):
+            del adata.uns[k]
+
+
+def _as_csr_magic(m):
+    if sp.issparse(m):
+        return m.tocsr()
+    return sp.csr_matrix(np.asarray(m, dtype=np.float64))
+
+
 src = Path(sys.argv[1])
 dest_final = Path(sys.argv[2])
 if src.suffix.lower() != ".h5ad":
@@ -575,6 +607,50 @@ batch_col = (
 )
 adata = _read_h5ad(str(src))
 _fast_uv = os.environ.get("SPACETRAVLR_TEST_FAST_UV") == "1"
+_layers_ready = (
+    "normalized_count" in adata.layers and "imputed_count" in adata.layers
+)
+if _layers_ready:
+    print(
+        "spacetravlr_preprocess: layers['normalized_count'] and layers['imputed_count'] present; skipping filters, spatial microns, normalize/HVG/PCA/UMAP/MAGIC",
+        file=sys.stderr,
+    )
+    if "cell_type" not in adata.obs.columns:
+        if "leiden" not in adata.obs.columns:
+            if "connectivities" in adata.obsp:
+                try:
+                    import igraph  # noqa: F401
+                    sc.tl.leiden(adata, flavor="igraph", n_iterations=2)
+                except ImportError:
+                    sc.tl.leiden(adata)
+            elif "X_pca" in adata.obsm:
+                no = int(adata.n_obs) - 1
+                n_nb = min(10, max(2, no)) if _fast_uv else min(15, max(2, no))
+                sc.pp.neighbors(adata, n_neighbors=n_nb, use_rep="X_pca")
+                try:
+                    import igraph  # noqa: F401
+                    sc.tl.leiden(adata, flavor="igraph", n_iterations=2)
+                except ImportError:
+                    sc.tl.leiden(adata)
+            else:
+                no = int(adata.n_obs) - 1
+                n_nb = min(10, max(2, no)) if _fast_uv else min(15, max(2, no))
+                sc.pp.neighbors(adata, n_neighbors=n_nb)
+                try:
+                    import igraph  # noqa: F401
+                    sc.tl.leiden(adata, flavor="igraph", n_iterations=2)
+                except ImportError:
+                    sc.tl.leiden(adata)
+        adata.obs["cell_type"] = adata.obs["leiden"].astype(str)
+    a = adata
+    _spacetravlr_strip_heavy_training_artifacts(a)
+    a.X = _as_csr_magic(a.X)
+    for k in list(a.layers.keys()):
+        a.layers[k] = _as_csr_magic(a.layers[k])
+    a.write_h5ad(dest_final)
+    print("wrote_processed", dest_final)
+    raise SystemExit(0)
+
 sc.pp.filter_cells(adata, min_genes=100)
 sc.pp.filter_genes(adata, min_cells=3)
 
@@ -807,31 +883,6 @@ else:
         out[m] = magic_impute_rows(sub, int(idx.size))
 
 a.layers["imputed_count"] = out
-
-
-def _spacetravlr_strip_heavy_training_artifacts(adata):
-    def _lig_key(k):
-        lk = str(k).lower()
-        return "weighted_ligand" in lk or "received_ligand" in lk
-
-    for k in list(adata.obsm.keys()):
-        if k in ("spacetravlr_spatial_features", "spacetravlr_spatial_maps_flat") or _lig_key(k):
-            del adata.obsm[k]
-    for k in list(adata.layers.keys()):
-        if _lig_key(k):
-            del adata.layers[k]
-    for k in list(adata.obsp.keys()):
-        if _lig_key(k):
-            del adata.obsp[k]
-    for k in list(adata.uns.keys()):
-        if str(k).startswith("spacetravlr_cache_") or _lig_key(k):
-            del adata.uns[k]
-
-
-def _as_csr_magic(m):
-    if sp.issparse(m):
-        return m.tocsr()
-    return sp.csr_matrix(np.asarray(m, dtype=np.float64))
 
 
 _spacetravlr_strip_heavy_training_artifacts(a)
@@ -1296,6 +1347,8 @@ pub enum TrainingPrepPlan {
     PatchCellType { out: PathBuf },
     ImputeOnly { out: PathBuf },
     PatchThenImpute { patched: PathBuf, out: PathBuf },
+    /// Both expression layers exist; add **`obs['cell_type']`** via Leiden only (no MAGIC/UMAP).
+    LayersLeidenAnnotate { out: PathBuf },
     FullPreprocess { out: PathBuf },
 }
 
@@ -1312,6 +1365,11 @@ pub fn plan_training_prep(
     if !r.has_cell_type && r.has_leiden && r.has_normalized_count && r.has_imputed_count {
         return Ok(TrainingPrepPlan::PatchCellType {
             out: training_prep_h5ad_path(output_dir, source, stem, "celltype")?,
+        });
+    }
+    if r.has_imputed_count && r.has_normalized_count && !r.has_cell_type && !r.has_leiden {
+        return Ok(TrainingPrepPlan::LayersLeidenAnnotate {
+            out: training_prep_h5ad_path(output_dir, source, stem, "layers_leiden")?,
         });
     }
     if can_impute_only && r.has_cell_type && !r.has_imputed_count {
@@ -1336,8 +1394,9 @@ pub fn plan_training_prep(
 /// column (use the same name as **`[data].condition`** when training is split by that column).
 ///
 /// **`spatial_microns`**: heuristic **`obsm['spatial']` → µm** during full Scanpy preprocess only
-/// ([`TrainingPrepPlan::FullPreprocess`]); empty **`species`** is resolved via
-/// [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
+/// ([`TrainingPrepPlan::FullPreprocess`]). For [`TrainingPrepPlan::LayersLeidenAnnotate`], spatial
+/// microns are skipped so species resolution is not required. Empty **`species`** is otherwise
+/// resolved via [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
 ///
 /// Prepared files are written under **`output_dir/spacetravlr_prep/`** (see [`training_prep_h5ad_path`]).
 /// Use [`crate::config::canonical_training_prep_stem`] on the pre-prep path for **`original_input_for_stem`**
@@ -1375,7 +1434,7 @@ pub fn ensure_training_adata_ready(
     agent_debug_ndjson(
         "F",
         "scanpy_preprocess.rs:ensure_training_adata_ready",
-        "training auto-prep plan; spatial_microns only in FullPreprocess",
+        "training auto-prep plan; spatial_microns in FullPreprocess only (skipped for LayersLeidenAnnotate)",
         "preprocess",
         json!({
             "adata_in": p.to_string_lossy(),
@@ -1395,6 +1454,7 @@ pub fn ensure_training_adata_ready(
         TrainingPrepPlan::PatchCellType { out } => Some(out.clone()),
         TrainingPrepPlan::ImputeOnly { out } => Some(out.clone()),
         TrainingPrepPlan::PatchThenImpute { out, .. } => Some(out.clone()),
+        TrainingPrepPlan::LayersLeidenAnnotate { out } => Some(out.clone()),
         TrainingPrepPlan::FullPreprocess { out } => Some(out.clone()),
     };
     if let Some(out) = reuse_out {
@@ -1439,6 +1499,24 @@ pub fn ensure_training_adata_ready(
             magic_impute_and_attach_batch(&patched, &out, magic_batch_obs, false, false)?;
             let _ = std::fs::remove_file(&patched);
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
+        }
+        TrainingPrepPlan::LayersLeidenAnnotate { out } => {
+            eprintln!(
+                "spacetravlr: expression layers present; Leiden → cell_type only (no re-impute/UMAP) → {}",
+                out.display()
+            );
+            let mut microns_skip = spatial_microns.clone();
+            microns_skip.skip = true;
+            let (written, _) = full_preprocess_maybe_log(
+                &p,
+                &out,
+                false,
+                None,
+                microns_skip,
+                false,
+            )?;
+            debug_assert_eq!(written, out);
+            *adata_path = expand_user_path(written.to_string_lossy().as_ref());
         }
         TrainingPrepPlan::FullPreprocess { out } => {
             eprintln!(
@@ -2140,6 +2218,13 @@ a.write_h5ad(p)
             TrainingPrepPlan::PatchThenImpute {
                 patched: training_prep_h5ad_path(&out, &src, stem, "celltype_patch").unwrap(),
                 out: training_prep_h5ad_path(&out, &src, stem, "imputed").unwrap(),
+            }
+        );
+
+        assert_eq!(
+            plan_training_prep(&r(false, false, true, true), &out, &src, stem).unwrap(),
+            TrainingPrepPlan::LayersLeidenAnnotate {
+                out: training_prep_h5ad_path(&out, &src, stem, "layers_leiden").unwrap(),
             }
         );
 

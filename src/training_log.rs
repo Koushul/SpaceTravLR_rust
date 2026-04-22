@@ -1,7 +1,5 @@
-use crate::cnn_gating::CnnGateDecision;
 use crate::estimator::ClusterTrainingSummary;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -37,7 +35,6 @@ pub struct GeneTrainingRollup {
     pub frac_lasso_converged: f64,
     pub sum_cnn_epochs_ran: usize,
     pub n_clusters: usize,
-    pub gate: Option<HashMap<String, String>>,
     pub clusters: Vec<ClusterTrainingLogRow>,
 }
 
@@ -93,7 +90,6 @@ fn parse_gene_training_log_lines(lines: &[String]) -> anyhow::Result<Option<Gene
     let mut learning_rate = 0.0f64;
     let mut lasso_n_iter_max = 0usize;
     let mut lasso_tol = 0.0f64;
-    let mut gate: Option<HashMap<String, String>> = None;
     let mut clusters: Vec<ClusterTrainingLogRow> = Vec::new();
 
     let mut i = 0usize;
@@ -110,29 +106,6 @@ fn parse_gene_training_log_lines(lines: &[String]) -> anyhow::Result<Option<Gene
         let line = lines[i].trim_end();
         if line.is_empty() {
             i += 1;
-            continue;
-        }
-        if line.starts_with("# hybrid_cnn_gate") {
-            i += 1;
-            let mut g = HashMap::new();
-            while i < lines.len() {
-                let cur_line = lines[i].trim_end();
-                if cur_line.is_empty() {
-                    break;
-                }
-                if cur_line.starts_with('#') {
-                    break;
-                }
-                if let Some((k, v)) = cur_line.split_once('\t') {
-                    if k.starts_with("gate_") {
-                        g.insert(k.to_string(), v.to_string());
-                    }
-                }
-                i += 1;
-            }
-            if !g.is_empty() {
-                gate = Some(g);
-            }
             continue;
         }
         if line.starts_with("# summary:") {
@@ -209,7 +182,6 @@ fn parse_gene_training_log_lines(lines: &[String]) -> anyhow::Result<Option<Gene
         frac_lasso_converged,
         sum_cnn_epochs_ran,
         n_clusters: clusters.len(),
-        gate,
         clusters,
     }))
 }
@@ -246,7 +218,6 @@ pub struct WriteGeneTrainingLogArgs<'a> {
     pub lasso_n_iter_max: usize,
     pub lasso_tol: f64,
     pub summaries: &'a [ClusterTrainingSummary],
-    pub gate: Option<&'a CnnGateDecision>,
 }
 
 pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::Result<()> {
@@ -260,7 +231,6 @@ pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::R
         lasso_n_iter_max,
         lasso_tol,
         summaries,
-        gate,
     } = args;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -277,38 +247,6 @@ pub fn write_gene_training_log(args: WriteGeneTrainingLogArgs<'_>) -> std::io::R
     writeln!(w, "lasso_n_iter_max\t{}", lasso_n_iter_max)?;
     writeln!(w, "lasso_tol\t{}", lasso_tol)?;
     writeln!(w)?;
-
-    if let Some(g) = gate {
-        writeln!(
-            w,
-            "# hybrid_cnn_gate (empty use_cnn means non-hybrid or pass-2 full CNN)"
-        )?;
-        writeln!(w, "gate_use_cnn\t{}", g.use_cnn)?;
-        writeln!(w, "gate_reason\t{}", g.reason.replace('\t', " "))?;
-        writeln!(w, "gate_min_cells_per_cluster\t{}", g.min_cells_per_cluster)?;
-        writeln!(w, "gate_n_modulators\t{}", g.n_modulators)?;
-        writeln!(w, "gate_n_lr_pairs\t{}", g.n_lr_pairs)?;
-        writeln!(w, "gate_n_tfl_pairs\t{}", g.n_tfl_pairs)?;
-        writeln!(
-            w,
-            "gate_modulator_spatial_fraction\t{:.6}",
-            g.modulator_spatial_fraction
-        )?;
-        writeln!(w, "gate_mean_lasso_r2\t{:.6}", g.mean_lasso_r2)?;
-        writeln!(w, "gate_all_lasso_converged\t{}", g.all_lasso_converged)?;
-        writeln!(w, "gate_moran_i\t{:.8}", g.moran_i)?;
-        writeln!(w, "gate_moran_p_value\t{:.8}", g.moran_p_value)?;
-        writeln!(w, "gate_moran_permutations\t{}", g.moran_permutations)?;
-        writeln!(w, "gate_forced_allowlist\t{}", g.forced_by_allowlist)?;
-        writeln!(w, "gate_blocked_skip_list\t{}", g.blocked_by_denylist)?;
-        if let Some(m) = g.mean_target_expression {
-            writeln!(w, "gate_mean_target_expression\t{:.8}", m)?;
-        } else {
-            writeln!(w, "gate_mean_target_expression\tNA")?;
-        }
-        writeln!(w, "gate_rank_score\t{:.6}", g.rank_score)?;
-        writeln!(w)?;
-    }
 
     writeln!(
         w,

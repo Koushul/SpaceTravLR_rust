@@ -1,17 +1,13 @@
 use crate::betadata::{
     build_cluster_id_to_betadata_cluster_key_map, obs_series_row_str, write_betadata_feather,
 };
-use crate::cnn_gating::{
-    CnnGateDecision, CnnGateGeneInputs, build_neighbors, decide_cnn_for_gene, load_gene_set_file,
-    predict_lasso_y,
-};
 use crate::config::{
-    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, LassoConfig, ModelExportConfig,
-    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, expand_user_path,
+    CnnConfig, CnnTrainingMode, ExecutionConfig, LassoConfig, ModelExportConfig,
+    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, expand_user_path, mix_execution_random_seed,
 };
 use crate::estimator::{
-    CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs,
-    CnnEpochHudSlot, finite_or_zero_f64,
+    CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrFitInputs, CnnEpochHudSlot,
+    finite_or_zero_f64,
 };
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -1759,8 +1755,7 @@ fn export_cnn_train_data_npz<AB: AutodiffBackend, AnB: Backend>(
 /// Training merges finite entries into [`GENE_PERFORMANCE_FEATHER_NAME`] under a flock
 /// (`--join-output-dir`); non-finite slots leave prior on-disk values unchanged.
 ///
-/// `mean_cnn_r2_scores` is used for [`CnnTrainingMode::Full`] runs and for hybrid top‑K phase 2
-/// (accumulator is upgraded before the second pass). Seed-only training omits it.
+/// `mean_cnn_r2_scores` is used for [`CnnTrainingMode::Full`] runs. Seed-only training omits it.
 #[derive(Clone)]
 pub struct MeanLassoR2Accum {
     pub gene_to_idx: Arc<HashMap<String, usize>>,
@@ -1790,18 +1785,6 @@ fn init_mean_lasso_r2_accum(all_var_names: &[String], with_mean_cnn_r2: bool) ->
         gene_to_idx: Arc::new(gene_to_idx),
         scores,
         mean_cnn_r2_scores,
-    }
-}
-
-fn mean_lasso_accum_ensure_cnn_scores(accum: MeanLassoR2Accum, n_vars: usize) -> MeanLassoR2Accum {
-    if accum.mean_cnn_r2_scores.is_some() {
-        return accum;
-    }
-    let nan = f64::NAN.to_bits();
-    MeanLassoR2Accum {
-        gene_to_idx: accum.gene_to_idx,
-        scores: accum.scores,
-        mean_cnn_r2_scores: Some(Arc::new((0..n_vars).map(|_| AtomicU64::new(nan)).collect())),
     }
 }
 
@@ -2420,9 +2403,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
         n_iter: usize,
         tol: f64,
         cnn_training_mode: CnnTrainingMode,
-        hybrid_pass2_full_cnn: bool,
-        hybrid_gating: &HybridCnnGatingConfig,
-        min_mean_lasso_r2_for_cnn: f64,
         gene_filter: Option<Vec<String>>,
         max_genes: Option<usize>,
         n_parallel: usize,
@@ -2765,12 +2745,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             });
             pipeline_step_end(&hud, "precompute shared spatial feature tensors", t_sp);
 
-            let compute_mean_for_hybrid = matches!(cnn_training_mode, CnnTrainingMode::Hybrid)
-                && !hybrid_pass2_full_cnn
-                && hybrid_gating.min_mean_target_expression_for_cnn.is_some();
-
             let gene_mean_arc: Option<Arc<HashMap<String, f64>>> =
-                if max_ligands.is_some_and(|k| k > 0) || compute_mean_for_hybrid {
+                if max_ligands.is_some_and(|k| k > 0) {
                     let t_m =
                         pipeline_step_begin(&hud, "per-gene mean expression (full matrix pass)");
                     let gm = compute_gene_mean_expression(
@@ -2800,45 +2776,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
             let extra_mod_arc = Arc::new(resolved_ex_mod);
             let extra_lr_arc = Arc::new(resolved_ex_lr);
-
-            let neighbors: Arc<Vec<Vec<usize>>> =
-                if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
-                    let n_cells = xy.nrows();
-                    let k = hybrid_gating.moran_k_neighbors.max(1);
-                    let mut msg = format!("Moran kNN  n={} k={}", n_cells, k);
-                    if n_cells > 8_000 {
-                        msg.push_str(" (slow)");
-                    }
-                    let t_nb = pipeline_step_begin(&hud, &msg);
-                    let nb = build_neighbors(xy.as_ref(), k);
-                    pipeline_step_end(&hud, &msg, t_nb);
-                    Arc::new(nb)
-                } else {
-                    Arc::new(Vec::new())
-                };
-
-            let (force_genes, skip_genes) =
-                if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
-                    let f = if let Some(ref p) = hybrid_gating.cnn_force_genes_file {
-                        load_gene_set_file(Path::new(p))?
-                    } else {
-                        HashSet::new()
-                    };
-                    let s = if let Some(ref p) = hybrid_gating.cnn_skip_genes_file {
-                        load_gene_set_file(Path::new(p))?
-                    } else {
-                        HashSet::new()
-                    };
-                    (Arc::new(f), Arc::new(s))
-                } else {
-                    (Arc::new(HashSet::new()), Arc::new(HashSet::new()))
-                };
-
-            let hybrid_collect_top_k = matches!(cnn_training_mode, CnnTrainingMode::Hybrid)
-                && !hybrid_pass2_full_cnn
-                && hybrid_gating.hybrid_cnn_top_k.is_some();
-            let cnn_candidates: Arc<Mutex<Vec<(String, f64, CnnGateDecision)>>> =
-                Arc::new(Mutex::new(Vec::new()));
 
             let layer_for_workers = layer.to_string();
             let cnn_for_workers = cnn.clone();
@@ -2870,6 +2807,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let scale_modulators_w = spaceship_config.lasso.scale_modulators;
             let unscale_betas_on_export_w = spaceship_config.lasso.unscale_betas_on_export;
             let parallel_lasso_clusters_w = spaceship_config.lasso.parallel_lasso_clusters;
+            let gram_override_w = spaceship_config.lasso.gram_override;
+            let random_seed_w = spaceship_config.execution.random_seed;
 
             let janitor_stop = Arc::new(AtomicBool::new(false));
             let janitor_handle = if stale_lock_secs > 0 {
@@ -2936,15 +2875,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
-                let hybrid_pass2 = hybrid_pass2_full_cnn;
-                let hybrid_cfg = hybrid_gating.clone();
-                let min_mean_r2 = min_mean_lasso_r2_for_cnn;
-                let neighbors_w = neighbors.clone();
-                let force_w = force_genes.clone();
-                let skip_w = skip_genes.clone();
-                let candidates_w = cnn_candidates.clone();
                 let model_export_w = model_export.clone();
-                let collect_top_k = hybrid_collect_top_k;
                 let mean_r2_accum_w = mean_r2_accum.clone();
                 let verbose_w = verbose;
 
@@ -3179,18 +3110,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 continue;
                             }
 
-                            let worker_run_full_cnn =
-                                hybrid_pass2 || matches!(cnn_mode_w, CnnTrainingMode::Full);
+                            let worker_run_full_cnn = matches!(cnn_mode_w, CnnTrainingMode::Full);
                             estimator.seed_only = !worker_run_full_cnn;
-                            if matches!(cnn_mode_w, CnnTrainingMode::Hybrid) && !hybrid_pass2 {
-                                estimator.seed_only = true;
-                            }
-                            let phase_str =
-                                if matches!(cnn_mode_w, CnnTrainingMode::Hybrid) && !hybrid_pass2 {
-                                    format!("hybrid | {n_mods} m")
-                                } else {
-                                    format!("{n_mods} mods")
-                                };
+                            let phase_str = format!("{n_mods} mods");
                             if let Some(ref h) = hud {
                                 if let Ok(mut g) = h.lock() {
                                     g.set_gene_status(&gene, &phase_str);
@@ -3227,11 +3149,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     tol,
                                     scale_modulators_w,
                                     parallel_lasso_clusters_w,
+                                    gram_override_w,
                                     "lasso",
                                     &cnn_w,
                                     &device,
                                     Some(cached_spatial.as_ref()),
                                     cnn_epoch_slot_fit,
+                                    random_seed_w,
                                     &mut on_lasso_progress,
                                 )
                                 .is_ok();
@@ -3244,132 +3168,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             }
 
-                            let mut export_per_cell =
-                                matches!(cnn_mode_w, CnnTrainingMode::Full) || hybrid_pass2;
-                            let mut gate_record: Option<CnnGateDecision> = None;
-
-                            if fit_ok {
-                                let hybrid_gate = matches!(cnn_mode_w, CnnTrainingMode::Hybrid)
-                                    && !hybrid_pass2
-                                    && n_mods > 0;
-                                if hybrid_gate {
-                                    match estimator.build_x_modulators_and_target_y(&xy) {
-                                        Ok((mut x_mat, y_vec)) => {
-                                            if scale_modulators_w {
-                                                if let Some(ref scales) =
-                                                    estimator.modulator_scales
-                                                {
-                                                    apply_modulator_scales_inplace(
-                                                        &mut x_mat, scales,
-                                                    );
-                                                }
-                                            }
-                                            let decision_opt =
-                                                estimator.estimator.as_ref().map(|inn| {
-                                                    let summaries_snapshot =
-                                                        inn.cluster_training_summaries.clone();
-                                                    let yhat = predict_lasso_y(
-                                                        &inn.lasso_coefficients,
-                                                        &inn.lasso_intercepts,
-                                                        &x_mat,
-                                                        &clusters,
-                                                    );
-                                                    let residuals: Vec<f64> = y_vec
-                                                        .iter()
-                                                        .zip(yhat.iter())
-                                                        .map(|(a, b)| a - b)
-                                                        .collect();
-                                                    let mean_tgt = gene_mean_arc
-                                                        .as_ref()
-                                                        .and_then(|m| m.get(&gene).copied());
-                                                    decide_cnn_for_gene(
-                                                        &hybrid_cfg,
-                                                        min_mean_r2,
-                                                        &CnnGateGeneInputs {
-                                                            gene: gene.as_str(),
-                                                            summaries: &summaries_snapshot,
-                                                            n_regulators: estimator.regulators.len(),
-                                                            n_lr_pairs: estimator.lr_pairs.len(),
-                                                            n_tfl_pairs: estimator.tfl_pairs.len(),
-                                                            residuals: &residuals,
-                                                            neighbors: neighbors_w.as_ref(),
-                                                            force_genes: &force_w,
-                                                            skip_genes: &skip_w,
-                                                            mean_target_expression: mean_tgt,
-                                                        },
-                                                    )
-                                                });
-                                            if let Some(decision) = decision_opt {
-                                                gate_record = Some(decision.clone());
-                                                if collect_top_k {
-                                                    export_per_cell = false;
-                                                    if decision.use_cnn {
-                                                        if let Ok(mut c) = candidates_w.lock() {
-                                                            c.push((
-                                                                gene.clone(),
-                                                                decision.rank_score,
-                                                                decision,
-                                                            ));
-                                                        }
-                                                    }
-                                                } else if decision.use_cnn {
-                                                    if let Some(inn) = estimator.estimator.as_mut()
-                                                    {
-                                                        let cnn_epoch_slot_refine = hud
-                                                            .as_ref()
-                                                            .and_then(|h| {
-                                                                h.lock().ok().map(|mut g| {
-                                                                    g.ensure_gene_cnn_epoch_slot(
-                                                                        &gene,
-                                                                        epochs,
-                                                                    )
-                                                                })
-                                                            });
-                                                        inn.fit_cnn_refinement(
-                                                            ClusteredGcnNwrCnnRefineInputs {
-                                                                x: &x_mat,
-                                                                y: &y_vec,
-                                                                xy: &xy,
-                                                                clusters: &clusters,
-                                                                num_clusters,
-                                                                device: &device,
-                                                                epochs,
-                                                                learning_rate,
-                                                                cnn: &cnn_w,
-                                                                cached_spatial: Some(
-                                                                    cached_spatial.as_ref(),
-                                                                ),
-                                                                cnn_epoch_slot: cnn_epoch_slot_refine,
-                                                            },
-                                                            |done, total| {
-                                                                if let Some(hh) = hud.as_ref() {
-                                                                    if let Ok(mut g) = hh.lock() {
-                                                                        g.set_gene_lasso_cluster_progress(
-                                                                            &gene, done, total,
-                                                                        );
-                                                                    }
-                                                                }
-                                                            },
-                                                        );
-                                                    }
-                                                    export_per_cell = true;
-                                                } else {
-                                                    export_per_cell = false;
-                                                }
-                                            } else {
-                                                export_per_cell = false;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            log_line(
-                                                &hud,
-                                                format!("fail hybrid_design {}: {}", gene, e),
-                                            );
-                                            export_per_cell = false;
-                                        }
-                                    }
-                                }
-                            }
+                            let export_per_cell = matches!(cnn_mode_w, CnnTrainingMode::Full);
 
                             if verbose_w && fit_ok {
                                 if let Some(est_inner) = estimator.estimator.as_ref() {
@@ -3766,7 +3565,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             lasso_n_iter_max: n_iter,
                                             lasso_tol: tol,
                                             summaries: &est.cluster_training_summaries,
-                                            gate: gate_record.as_ref(),
                                         },
                                     );
                                     if let Some(ref h) = hud {
@@ -3864,89 +3662,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let _ = h.join();
             }
             pipeline_step_end(&hud, "per-gene training (workers running)", t_workers);
-
-            if matches!(cnn_training_mode, CnnTrainingMode::Hybrid) && !hybrid_pass2_full_cnn {
-                if let Some(k) = hybrid_gating.hybrid_cnn_top_k {
-                    let mut cand = cnn_candidates
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("hybrid candidate lock poisoned: {}", e))?;
-                    cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    let picked: Vec<String> = cand
-                        .iter()
-                        .filter(|t| t.2.use_cnn)
-                        .take(k)
-                        .map(|t| t.0.clone())
-                        .collect();
-                    drop(cand);
-                    if !picked.is_empty() {
-                        log_line(
-                            &hud,
-                            format!(
-                                "hybrid phase 2: re-training {} genes with full CNN (top-K)",
-                                picked.len()
-                            ),
-                        );
-                        if let Some(ref h) = hud {
-                            if let Ok(mut g) = h.lock() {
-                                let k = picked.len();
-                                g.total_genes = g.total_genes.saturating_add(k);
-                                g.genes_done = g.genes_done.saturating_sub(k);
-                                g.genes_rounds = g.genes_rounds.saturating_sub(k);
-                                g.genes_exported_seed_only =
-                                    g.genes_exported_seed_only.saturating_sub(k);
-                            }
-                        }
-                        for g in &picked {
-                            let pth = format!("{training_dir}/{g}_betadata.feather");
-                            let _ = fs::remove_file(&pth);
-                        }
-                        return Self::fit_all_genes(
-                            &worker_adata_path,
-                            obs_row_subset.clone(),
-                            radius,
-                            spatial_dim,
-                            contact_distance,
-                            tf_ligand_cutoff,
-                            max_ligands,
-                            use_tf_modulators,
-                            use_lr_modulators,
-                            use_tfl_modulators,
-                            layer,
-                            cluster_annot,
-                            cnn,
-                            epochs,
-                            learning_rate,
-                            score_threshold,
-                            l1_reg,
-                            group_reg,
-                            n_iter,
-                            tol,
-                            cnn_training_mode,
-                            true,
-                            hybrid_gating,
-                            min_mean_lasso_r2_for_cnn,
-                            Some(picked),
-                            None,
-                            n_parallel,
-                            output_dir,
-                            model_export,
-                            hud,
-                            network_data_dir,
-                            tf_priors_feather,
-                            false,
-                            spaceship_config,
-                            config_source_path.clone(),
-                            join_training,
-                            verbose,
-                            Some(mean_lasso_accum_ensure_cnn_scores(
-                                mean_r2_accum.clone(),
-                                all_var_names.len(),
-                            )),
-                            device,
-                        );
-                    }
-                }
-            }
 
             if obs_row_subset.is_none() {
                 match patch_adata_var_mean_lasso_r2_locked(
@@ -4190,11 +3905,13 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         tol: f64,
         scale_modulators: bool,
         parallel_lasso_clusters: bool,
+        gram_override: Option<bool>,
         _estimator_type: &str,
         cnn: &CnnConfig,
         device: &AB::Device,
         cached_spatial: Option<&CachedSpatialData>,
         cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
+        random_seed: u64,
         lasso_progress: F,
     ) -> anyhow::Result<()> {
         let (mut x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
@@ -4217,6 +3934,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 groups,
                 n_iter,
                 tol,
+                gram_override,
+                seed: mix_execution_random_seed(random_seed, &self.target_gene),
                 ..Default::default()
             };
             let mut est = ClusteredGCNNWR::new(
@@ -4248,6 +3967,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     cached_spatial,
                     cnn_epoch_slot,
                     parallel_lasso_clusters,
+                    random_seed,
                 },
                 lasso_progress,
             );
@@ -4285,6 +4005,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         let cnn = CnnConfig::default();
         let scale_mod = crate::config::LassoConfig::default().scale_modulators;
+        let gram_ov = crate::config::LassoConfig::default().gram_override;
         self.fit_with_cache(
             &xy,
             &clusters,
@@ -4298,11 +4019,13 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             tol,
             scale_mod,
             LassoConfig::default().parallel_lasso_clusters,
+            gram_ov,
             estimator_type,
             &cnn,
             device,
             None,
             None,
+            ExecutionConfig::default().random_seed,
             |_, _| {},
         )
     }

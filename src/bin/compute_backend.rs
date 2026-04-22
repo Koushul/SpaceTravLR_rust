@@ -2,9 +2,7 @@ use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{NdArray, Wgpu};
 use burn_autodiff::Autodiff;
-use spacetravlr::config::{
-    CnnConfig, CnnTrainingMode, HybridCnnGatingConfig, ModelExportConfig, SpaceshipConfig,
-};
+use spacetravlr::config::{CnnConfig, CnnTrainingMode, ModelExportConfig, SpaceshipConfig};
 use spacetravlr::spatial_estimator::SpatialCellularProgramsEstimator;
 use spacetravlr::training_hud::TrainingHud;
 use std::sync::OnceLock;
@@ -139,9 +137,6 @@ pub(crate) struct FitAllGenesParams<'a> {
     pub n_iter: usize,
     pub tol: f64,
     pub cnn_training_mode: CnnTrainingMode,
-    pub hybrid_pass2_full_cnn: bool,
-    pub hybrid_gating: &'a HybridCnnGatingConfig,
-    pub min_mean_lasso_r2_for_cnn: f64,
     pub gene_filter: Option<Vec<String>>,
     pub max_genes: Option<usize>,
     pub n_parallel: usize,
@@ -182,9 +177,6 @@ macro_rules! dispatch_fit_all_genes {
             $p.n_iter,
             $p.tol,
             $p.cnn_training_mode,
-            $p.hybrid_pass2_full_cnn,
-            $p.hybrid_gating,
-            $p.min_mean_lasso_r2_for_cnn,
             $p.gene_filter.clone(),
             $p.max_genes,
             $p.n_parallel,

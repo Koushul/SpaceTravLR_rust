@@ -55,16 +55,6 @@
     return rows;
   }
 
-  function gateHtml(gate) {
-    if (!gate) return "";
-    var keys = Object.keys(gate).sort();
-    if (!keys.length) return "";
-    var parts = keys.map(function (k) {
-      return "<dt>" + esc(k) + "</dt><dd>" + esc(gate[k]) + "</dd>";
-    });
-    return '<dl class="gene-gate-dl">' + parts.join("") + "</dl>";
-  }
-
   function clusterTable(clusters) {
     var h =
       "<table class=\"gene-detail-table\"><thead><tr>" +
@@ -176,7 +166,6 @@
         " · CNN epochs (config) " +
         g.cnn_epochs_config +
         "</p>" +
-        gateHtml(g.gate) +
         clusterTable(g.clusters) +
         "</div></td></tr>";
     }

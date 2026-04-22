@@ -39,7 +39,7 @@ Typical sections:
 - `**[data]**` — `adata_path`, `layer` (e.g. `imputed_count`), `cluster_annot`, optional `condition`, optional `**perturb_obs_subset_file**` (one `obs_names` per line; **perturbation** loads only those rows for smaller RAM)
 - `**[spatial]`** — `radius`, `spatial_dim`, `contact_distance`, `weighted_ligand_scale_factor`
 - `**[grn]**` — `network_data_dir`, `tf_priors_feather`, `tf_ligand_cutoff`, `max_ligands` (serde alias `max_lr_pairs`), modulator toggles, `extra_modulators`, `extra_lr`, file variants
-- `**[cnn]**`, `**[lasso]**`, `**[training]**`, `**[training.hybrid]**` — CNN/Lasso/hybrid gating (hybrid only when `mode = "hybrid"`)
+- `**[cnn]**`, `**[lasso]**`, `**[training]**` — CNN and Lasso hyperparameters
 - `**[execution]**` — `n_parallel`, `output_dir`, `write_minimal_repro_h5ad`, `stale_lock_secs` (join lock recovery)
 - `**[perturbation]**` — `beta_scale_factor`, optional `beta_cap`, `**n_propagation**`, `**ligand_grid_factor**` (grid vs exact received ligands), optional `**cells_csv**` / `**cells_csv_column**` (defaults for `spacetravlr-perturb` `**--export**` and TUI cell-scope CSV when CLI does not pass `**--cells-csv**`; paths relative to the run TOML’s directory unless absolute)
 - `**[model_export]**` — `save_cnn_weights`, `compressed_npz`, `output_subdir`
@@ -75,7 +75,7 @@ Written under `**[execution].output_dir`** (leader run). Records the **effective
 
 ### Training hyperparameters (override TOML)
 
-- `**--training-mode**` — `seed` | `full` | `hybrid`
+- `**--training-mode**` — `seed` | `full`
 - `**--epochs**`, `**--parallel**`, `**--l1-reg**`, `**--group-reg**`, `**--lr**` (CNN Adam), `**--n-iter**`, `**--tol**`
 - `**--cnn-output-activation**` — `identity` | `sigmoid` | `tanh` | `sigmoid-x2`
 - `**--weighted-ligand-scale-factor**`
