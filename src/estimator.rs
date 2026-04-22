@@ -4,10 +4,11 @@ use crate::model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
 use burn::optim::{AdamConfig, Optimizer};
+use burn::module::AutodiffModule;
 use burn::prelude::*;
 use burn::tensor::ElementConversion;
-use burn::tensor::backend::AutodiffBackend;
-use ndarray::{Array1, Array2, Array4, ArrayView1, Axis, s};
+use burn::tensor::backend::{AutodiffBackend, Backend};
+use ndarray::{Array1, Array2, Array4, ArrayView1, ArrayView2, ArrayView4, Axis, s};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
@@ -208,18 +209,49 @@ fn cnn_training_loss<B: AutodiffBackend>(
 
 fn cnn_r2_from_forward<B: AutodiffBackend>(
     model: &CellularNicheNetwork<B>,
-    sm_tensor: Tensor<B, 4>,
-    x_tensor: Tensor<B, 2>,
-    sf_tensor: Tensor<B, 2>,
+    sm_c: &Array4<f32>,
+    x_c: &Array2<f64>,
+    sf_c: &Array2<f64>,
     y_true: ArrayView1<f64>,
+    device: &B::Device,
+    inference_batch_size: usize,
 ) -> f64 {
-    let y_pred = model.forward(sm_tensor, x_tensor, sf_tensor);
-    let pred_data = y_pred.into_data();
-    let pred: &[f32] = match pred_data.as_slice::<f32>() {
-        Ok(s) => s,
-        Err(_) => return f64::NAN,
+    let n = sm_c.shape()[0];
+    if n == 0 || x_c.nrows() != n || sf_c.nrows() != n || y_true.len() != n {
+        return f64::NAN;
+    }
+    let model_infer = model.valid();
+    let bs = if inference_batch_size == 0 {
+        n
+    } else {
+        inference_batch_size.max(1).min(n)
     };
-    r2_score_from_pred_slice(y_true, pred)
+    let mut preds = Vec::with_capacity(n);
+    let mut pos = 0usize;
+    while pos < n {
+        let end = (pos + bs).min(n);
+        let sm_tensor = tensor_from_sm_view::<<B as AutodiffBackend>::InnerBackend>(
+            sm_c.slice(s![pos..end, .., .., ..]),
+            device,
+        );
+        let x_tensor = tensor_from_x_view::<<B as AutodiffBackend>::InnerBackend>(
+            x_c.slice(s![pos..end, ..]),
+            device,
+        );
+        let sf_tensor = tensor_from_sf_view::<<B as AutodiffBackend>::InnerBackend>(
+            sf_c.slice(s![pos..end, ..]),
+            device,
+        );
+        let y_pred = model_infer.forward(sm_tensor, x_tensor, sf_tensor);
+        let pred_data = y_pred.into_data();
+        let pred: &[f32] = match pred_data.as_slice::<f32>() {
+            Ok(s) => s,
+            Err(_) => return f64::NAN,
+        };
+        preds.extend_from_slice(pred);
+        pos = end;
+    }
+    r2_score_from_pred_slice(y_true, &preds)
 }
 
 fn gather_rows_4_f32(a: &Array4<f32>, idx: &[usize]) -> Array4<f32> {
@@ -251,7 +283,11 @@ fn gather_rows_1_f64(a: &Array1<f64>, idx: &[usize]) -> Array1<f64> {
     Array1::from_vec(idx.iter().map(|&i| a[i]).collect())
 }
 
-fn tensor_from_sm<B: AutodiffBackend>(a: &Array4<f32>, device: &B::Device) -> Tensor<B, 4> {
+fn tensor_from_sm<B: Backend>(a: &Array4<f32>, device: &B::Device) -> Tensor<B, 4> {
+    tensor_from_sm_view(a.view(), device)
+}
+
+fn tensor_from_sm_view<B: Backend>(a: ArrayView4<'_, f32>, device: &B::Device) -> Tensor<B, 4> {
     let (b, c, h, w) = (a.shape()[0], a.shape()[1], a.shape()[2], a.shape()[3]);
     Tensor::from_data(
         burn::tensor::TensorData::new(
@@ -262,7 +298,11 @@ fn tensor_from_sm<B: AutodiffBackend>(a: &Array4<f32>, device: &B::Device) -> Te
     )
 }
 
-fn tensor_from_x<B: AutodiffBackend>(a: &Array2<f64>, device: &B::Device) -> Tensor<B, 2> {
+fn tensor_from_x<B: Backend>(a: &Array2<f64>, device: &B::Device) -> Tensor<B, 2> {
+    tensor_from_x_view(a.view(), device)
+}
+
+fn tensor_from_x_view<B: Backend>(a: ArrayView2<'_, f64>, device: &B::Device) -> Tensor<B, 2> {
     let (r, c) = (a.nrows(), a.ncols());
     Tensor::from_data(
         burn::tensor::TensorData::new(
@@ -273,7 +313,7 @@ fn tensor_from_x<B: AutodiffBackend>(a: &Array2<f64>, device: &B::Device) -> Ten
     )
 }
 
-fn tensor_from_y<B: AutodiffBackend>(a: &Array1<f64>, device: &B::Device) -> Tensor<B, 1> {
+fn tensor_from_y<B: Backend>(a: &Array1<f64>, device: &B::Device) -> Tensor<B, 1> {
     let n = a.len();
     Tensor::from_data(
         burn::tensor::TensorData::new(
@@ -452,8 +492,12 @@ pub fn train_cluster_cnn_epochs<B: AutodiffBackend>(
     (model, cnn_train_mse_epochs, cnn_diverged)
 }
 
-fn tensor_from_sf<B: AutodiffBackend>(a: &Array2<f64>, device: &B::Device) -> Tensor<B, 2> {
+fn tensor_from_sf<B: Backend>(a: &Array2<f64>, device: &B::Device) -> Tensor<B, 2> {
     tensor_from_x(a, device)
+}
+
+fn tensor_from_sf_view<B: Backend>(a: ArrayView2<'_, f64>, device: &B::Device) -> Tensor<B, 2> {
+    tensor_from_x_view(a, device)
 }
 
 fn min_max_finite_col(col: ndarray::ArrayView1<f64>) -> (f32, f32) {
@@ -990,10 +1034,15 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     let cnn_r2 = if cnn_diverged {
                         f64::NAN
                     } else {
-                        let sm_tensor = tensor_from_sm(&sm_c, device);
-                        let x_tensor = tensor_from_x(&x_c, device);
-                        let sf_tensor = tensor_from_sf(&sf_c, device);
-                        cnn_r2_from_forward(&model, sm_tensor, x_tensor, sf_tensor, y_c.column(0))
+                        cnn_r2_from_forward(
+                            &model,
+                            &sm_c,
+                            &x_c,
+                            &sf_c,
+                            y_c.column(0),
+                            device,
+                            cnn.cnn_inference_batch_size,
+                        )
                     };
 
                     training_summaries.push(ClusterTrainingSummary {
@@ -1180,10 +1229,15 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 let cnn_r2 = if cnn_diverged {
                     f64::NAN
                 } else {
-                    let sm_tensor = tensor_from_sm(&sm_c, device);
-                    let x_tensor = tensor_from_x(&x_c, device);
-                    let sf_tensor = tensor_from_sf(&sf_c, device);
-                    cnn_r2_from_forward(&model, sm_tensor, x_tensor, sf_tensor, y_1d.view())
+                    cnn_r2_from_forward(
+                        &model,
+                        &sm_c,
+                        &x_c,
+                        &sf_c,
+                        y_1d.view(),
+                        device,
+                        cnn.cnn_inference_batch_size,
+                    )
                 };
 
                 if !cnn_diverged && cnn_r2.is_finite() {
@@ -1226,6 +1280,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         num_clusters: usize,
         device: &B::Device,
         cached_spatial: Option<&CachedSpatialData>,
+        inference_batch_size: usize,
     ) -> Array2<f64> {
         let n_samples = xy.nrows();
         let n_modulators = x.ncols();
@@ -1258,24 +1313,44 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
 
             if let Some(model) = self.models.get(&c_id) {
                 let sf_c = spatial_features.select(Axis(0), &indices);
-                let sf_tensor = tensor_from_sf(&sf_c, device);
                 let sm_c = if self.multi_channel_spatial_maps {
                     spatial_maps_all_clusters_for_cnn(spatial_maps, &indices)
                 } else {
                     spatial_maps_for_cluster_cnn(spatial_maps, &indices, c_id)
                 };
-                let sm_tensor = tensor_from_sm(&sm_c, device);
+                let cluster_n = indices.len();
+                let bs_eff = if inference_batch_size == 0 {
+                    cluster_n.max(1)
+                } else {
+                    inference_batch_size.max(1)
+                };
 
-                let betas_tensor = model.get_betas(sm_tensor, sf_tensor);
-                let betas_data = betas_tensor.into_data();
-                let betas_v: &[f32] = betas_data.as_slice::<f32>().unwrap();
+                let model_infer = model.valid();
+                let n_betas = n_modulators + 1;
+                let mut packed: Vec<f32> = Vec::with_capacity(cluster_n.saturating_mul(n_betas));
+                let mut row = 0usize;
+                while row < cluster_n {
+                    let end = (row + bs_eff).min(cluster_n);
+                    let sm_tensor = tensor_from_sm_view::<<B as AutodiffBackend>::InnerBackend>(
+                        sm_c.slice(s![row..end, .., .., ..]),
+                        device,
+                    );
+                    let sf_tensor = tensor_from_sf_view::<<B as AutodiffBackend>::InnerBackend>(
+                        sf_c.slice(s![row..end, ..]),
+                        device,
+                    );
+                    let betas_tensor = model_infer.get_betas(sm_tensor, sf_tensor);
+                    let betas_data = betas_tensor.into_data();
+                    let betas_v: &[f32] = betas_data.as_slice::<f32>().unwrap();
+                    packed.extend_from_slice(betas_v);
+                    row = end;
+                }
 
-                let cnn_has_nan = betas_v.iter().any(|v| !v.is_finite());
+                let cnn_has_nan = packed.iter().any(|v| !v.is_finite());
                 if !cnn_has_nan {
-                    let n_betas = n_modulators + 1;
                     for (i, idx) in indices.iter().enumerate() {
                         for j in 0..n_betas {
-                            let v = betas_v[i * n_betas + j];
+                            let v = packed[i * n_betas + j];
                             all_betas[[*idx, j]] = finite_or_zero_f32(v) as f64;
                         }
                     }

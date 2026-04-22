@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crate::adata_terminal_scatter::{
     self as adata_scatter, ratatui_color_for_cell_type_label, sorted_unique_labels_from_counts,
 };
@@ -1149,11 +1150,16 @@ type ScatterPanelCachePayload = (String, u16, u16, usize, Vec<Line<'static>>);
 type ScatterPanelCache = RefCell<Option<ScatterPanelCachePayload>>;
 
 pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashboardExit> {
-    enable_raw_mode()?;
+    enable_raw_mode().context(
+        "could not enable terminal raw mode (stdin is often not a TTY under scripts, CI, or some IDE tasks). \
+         Re-run with `--plain` for line-oriented logs without the full-screen dashboard",
+    )?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen).context(
+        "could not enter the terminal alternate screen; try `--plain` if you are not in a real terminal",
+    )?;
     let backend = CrosstermBackend::new(out);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(backend).context("could not initialize the TUI terminal")?;
 
     let mut sys = System::new_with_specifics(
         RefreshKind::new()

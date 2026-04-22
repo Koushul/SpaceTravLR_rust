@@ -57,6 +57,8 @@ spatial_feature_radius = 300.0
 output_activation = "sigmoidx2"
 # Per-optimizer-step batch size over cells within a cluster (0 = full batch per epoch)
 cnn_minibatch_size = 256
+# CNN forward chunk size for per-cell beta export and post-train in-sample R² only (not training)
+cnn_inference_batch_size = 512
 # Cap optimizer steps per epoch (omit or null = full pass over all cells each epoch).
 # Example: 32 with minibatch 512 processes at most ~16k cells per epoch (rest next epoch).
 # cnn_max_batches_per_epoch = 32
@@ -109,7 +111,7 @@ gram_override = true
 [training]
 # Default when omitted: seed. Use full to enable per-cell CNN refinement.
 mode            = "full"
-epochs          = 150
+epochs          = 10
 # Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
 learning_rate   = 4e-4
 # Minimum mean Lasso R² per cluster to count as passing the Lasso gate (CNN uses the same threshold in full mode).

@@ -22,6 +22,7 @@ use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::Context;
+use burn::module::AutodiffModule;
 use burn::tensor::backend::AutodiffBackend;
 use fs4::fs_std::FileExt;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -1357,15 +1358,15 @@ fn export_cnn_parity_npz<AB: AutodiffBackend>(
                 }
             }
         }
-        let sf_tensor = Tensor::<AB, 2>::from_data(
+        let sf_tensor = Tensor::<<AB as AutodiffBackend>::InnerBackend, 2>::from_data(
             burn::tensor::TensorData::new(sf_flat, [nc, num_clusters]),
             device,
         );
-        let sm_tensor = Tensor::<AB, 4>::from_data(
+        let sm_tensor = Tensor::<<AB as AutodiffBackend>::InnerBackend, 4>::from_data(
             burn::tensor::TensorData::new(sm_flat, [nc, sch, h, h]),
             device,
         );
-        let betas = model.get_betas(sm_tensor, sf_tensor);
+        let betas = model.valid().get_betas(sm_tensor, sf_tensor);
         let dim = betas.dims()[1];
         let betas_data = betas.into_data();
         let betas_v: &[f32] = betas_data
@@ -3272,6 +3273,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             num_clusters,
                                             &device,
                                             Some(cached_spatial.as_ref()),
+                                            cnn_w.cnn_inference_batch_size,
                                         );
                                         if !bad_betadata_clusters.is_empty() {
                                             for i in 0..all_betas.nrows() {

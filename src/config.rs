@@ -351,6 +351,10 @@ fn default_cnn_minibatch_size() -> usize {
     512
 }
 
+fn default_cnn_inference_batch_size() -> usize {
+    512
+}
+
 fn default_cnn_max_cells_per_epoch() -> Option<usize> {
     Some(3000)
 }
@@ -403,6 +407,10 @@ pub struct CnnConfig {
     /// Per-optimizer-step batch size over cells within a cluster. `0` = full batch (one step per epoch).
     #[serde(default = "default_cnn_minibatch_size")]
     pub cnn_minibatch_size: usize,
+    /// Cells per forward when exporting per-cell CNN betas and when computing post-training in-sample CNN R².
+    /// Does not apply to training steps ([`Self::cnn_minibatch_size`]). `0` = full cluster in one forward.
+    #[serde(default = "default_cnn_inference_batch_size")]
+    pub cnn_inference_batch_size: usize,
     /// Maximum optimizer steps per epoch (`None` = sweep all cells each epoch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnn_max_batches_per_epoch: Option<usize>,
@@ -663,6 +671,7 @@ impl Default for CnnConfig {
             drop_cnn_if_insample_worse_than_lasso: true,
             cnn_vs_lasso_arbitration_margin: 0.0,
             cnn_minibatch_size: 512,
+            cnn_inference_batch_size: 512,
             cnn_max_batches_per_epoch: None,
             cnn_max_cells_per_epoch: default_cnn_max_cells_per_epoch(),
             min_cells_for_cnn: 0,
