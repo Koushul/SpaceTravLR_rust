@@ -84,7 +84,7 @@ fn setup_run_dir(suffix: &str) -> PathBuf {
     dir
 }
 
-fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode) {
+fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Option<usize>) {
     let h5ad = dir.join("mock_train.h5ad");
     let mut cfg = SpaceshipConfig::default();
     cfg.data.adata_path = h5ad.to_string_lossy().into_owned();
@@ -98,6 +98,9 @@ fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode) {
     cfg.execution.output_dir = dir.to_string_lossy().into_owned();
     cfg.lasso.n_iter = 200;
     cfg.execution.n_parallel = 1;
+    if let Some(d) = spatial_dim_override {
+        cfg.spatial.spatial_dim = d.max(1);
+    }
 
     let device = NdArrayDevice::Cpu;
     SpatialCellularProgramsEstimator::<Autodiff<NdArray<f32, i32>>, H5>::fit_all_genes(
@@ -174,7 +177,7 @@ fn assert_gene_performance_feather(dir: &Path) {
 #[test]
 fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
     let dir = setup_run_dir("seed");
-    run_fit_all_genes(&dir, CnnTrainingMode::Seed);
+    run_fit_all_genes(&dir, CnnTrainingMode::Seed, None);
     assert_gene_performance_feather(&dir);
 
     let lasso_dir = dir.join("lasso_coefs");
@@ -190,7 +193,8 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
 #[test]
 fn fit_all_genes_full_cnn_writes_lasso_coefs_per_cluster_feathers() {
     let dir = setup_run_dir("full");
-    run_fit_all_genes(&dir, CnnTrainingMode::Full);
+    // Default `spatial_dim` is 32 (CNN grid H=W). Use a tiny grid here to keep full-CNN CPU tests fast.
+    run_fit_all_genes(&dir, CnnTrainingMode::Full, Some(8));
     assert_gene_performance_feather(&dir);
 
     let lasso_dir = dir.join("lasso_coefs");
