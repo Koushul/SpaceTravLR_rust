@@ -1,0 +1,482 @@
+[
+  {
+    "params": {
+      "n_cells": 200,
+      "n_genes": 5,
+      "n_niches": 3,
+      "n_mods_shared": 60,
+      "n_mods_gene": 8,
+      "n_mods_total": 98,
+      "n_active_mods": 12,
+      "beta_signal": 1.5,
+      "beta_noise": 0.1,
+      "sparsity": 0.65,
+      "cell_noise_scale": 0.0,
+      "gene_specific_programs": false,
+      "hidden_dim": 64,
+      "epochs": 300,
+      "seed": 42
+    },
+    "pca": {
+      "best": {
+        "ari": 1.0,
+        "nmi": 1.0,
+        "resolution": 0.3,
+        "n_clusters": 3
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 0.5,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.0,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.5877764233170665,
+          "nmi": 0.7817007367997199,
+          "n_clusters": 5
+        }
+      ],
+      "time_s": 0.29468679428100586
+    },
+    "pca_smooth": {
+      "best": {
+        "ari": 0.6027984907456072,
+        "nmi": 0.7721509311759572,
+        "resolution": 0.3,
+        "n_clusters": 5
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.6027984907456072,
+          "nmi": 0.7721509311759572,
+          "n_clusters": 5
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.35407174041090705,
+          "nmi": 0.5968268488672845,
+          "n_clusters": 7
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.353090116890113,
+          "nmi": 0.6320130349115213,
+          "n_clusters": 9
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.24662384973563858,
+          "nmi": 0.5720352059959273,
+          "n_clusters": 12
+        }
+      ],
+      "time_s": 0.29468679428100586
+    },
+    "pca_rec_target": {
+      "best": {
+        "ari": 0.0036457643321511596,
+        "nmi": 0.026003225593917833,
+        "resolution": 1.0,
+        "n_clusters": 7
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.0,
+          "nmi": 0.0,
+          "n_clusters": 1
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.0,
+          "nmi": 0.0,
+          "n_clusters": 1
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.0036457643321511596,
+          "nmi": 0.026003225593917833,
+          "n_clusters": 7
+        },
+        {
+          "resolution": 1.5,
+          "ari": -9.693093991486237e-05,
+          "nmi": 0.047632073671861445,
+          "n_clusters": 13
+        }
+      ],
+      "time_s": 0.29468679428100586
+    },
+    "model": {
+      "best": {
+        "ari": 0.5510834061740708,
+        "nmi": 0.7147612948444422,
+        "resolution": 0.3,
+        "n_clusters": 5
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.5510834061740708,
+          "nmi": 0.7147612948444422,
+          "n_clusters": 5
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.541079221270953,
+          "nmi": 0.7036369078571494,
+          "n_clusters": 5
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.37003765650436726,
+          "nmi": 0.634546011213443,
+          "n_clusters": 8
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.28875014849893504,
+          "nmi": 0.5773873815779753,
+          "n_clusters": 10
+        }
+      ],
+      "time_s": 954.1882612705231
+    },
+    "scenario_name": "Scenario A\n(sign-coded niches)"
+  },
+  {
+    "params": {
+      "n_cells": 200,
+      "n_genes": 5,
+      "n_niches": 3,
+      "n_mods_shared": 60,
+      "n_mods_gene": 8,
+      "n_mods_total": 98,
+      "n_active_mods": 12,
+      "beta_signal": 1.5,
+      "beta_noise": 0.1,
+      "sparsity": 0.65,
+      "cell_noise_scale": 0.8,
+      "gene_specific_programs": false,
+      "hidden_dim": 64,
+      "epochs": 300,
+      "seed": 42
+    },
+    "pca": {
+      "best": {
+        "ari": 1.0,
+        "nmi": 1.0,
+        "resolution": 0.3,
+        "n_clusters": 3
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 0.5,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.0,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.5664998666844606,
+          "nmi": 0.7635032993856639,
+          "n_clusters": 6
+        }
+      ],
+      "time_s": 0.2849576473236084
+    },
+    "pca_smooth": {
+      "best": {
+        "ari": 0.4926695740511901,
+        "nmi": 0.6170200703272936,
+        "resolution": 0.3,
+        "n_clusters": 4
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.4926695740511901,
+          "nmi": 0.6170200703272936,
+          "n_clusters": 4
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.4291919780221023,
+          "nmi": 0.6589334857563577,
+          "n_clusters": 6
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.28971134481346994,
+          "nmi": 0.5519181995630792,
+          "n_clusters": 9
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.21531250445038108,
+          "nmi": 0.5231374826242982,
+          "n_clusters": 12
+        }
+      ],
+      "time_s": 0.2849576473236084
+    },
+    "pca_rec_target": {
+      "best": {
+        "ari": 0.002335570699578349,
+        "nmi": 0.03268537438233862,
+        "resolution": 1.5,
+        "n_clusters": 14
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.0,
+          "nmi": 0.0,
+          "n_clusters": 1
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.0,
+          "nmi": 0.0,
+          "n_clusters": 1
+        },
+        {
+          "resolution": 1.0,
+          "ari": -0.010365965482657119,
+          "nmi": 0.01285951911930491,
+          "n_clusters": 8
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.002335570699578349,
+          "nmi": 0.03268537438233862,
+          "n_clusters": 14
+        }
+      ],
+      "time_s": 0.2849576473236084
+    },
+    "model": {
+      "best": {
+        "ari": 0.4001325575318807,
+        "nmi": 0.530838126040349,
+        "resolution": 0.3,
+        "n_clusters": 5
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.4001325575318807,
+          "nmi": 0.530838126040349,
+          "n_clusters": 5
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.397315363646133,
+          "nmi": 0.5246155849221562,
+          "n_clusters": 6
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.2639034613855283,
+          "nmi": 0.4841771467200999,
+          "n_clusters": 9
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.22978962269673722,
+          "nmi": 0.474854863943942,
+          "n_clusters": 10
+        }
+      ],
+      "time_s": 532.5524830818176
+    },
+    "scenario_name": "Scenario B\n(sign-coded + cell noise)"
+  },
+  {
+    "params": {
+      "n_cells": 200,
+      "n_genes": 5,
+      "n_niches": 3,
+      "n_mods_shared": 60,
+      "n_mods_gene": 8,
+      "n_mods_total": 98,
+      "n_active_mods": 12,
+      "beta_signal": 1.5,
+      "beta_noise": 0.1,
+      "sparsity": 0.65,
+      "cell_noise_scale": 0.8,
+      "gene_specific_programs": true,
+      "hidden_dim": 64,
+      "epochs": 300,
+      "seed": 42
+    },
+    "pca": {
+      "best": {
+        "ari": 1.0,
+        "nmi": 1.0,
+        "resolution": 0.3,
+        "n_clusters": 3
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 0.5,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.0,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.5294360343883653,
+          "nmi": 0.7395783864383385,
+          "n_clusters": 6
+        }
+      ],
+      "time_s": 4.232356071472168
+    },
+    "pca_smooth": {
+      "best": {
+        "ari": 0.6929342365060154,
+        "nmi": 0.8008133933732211,
+        "resolution": 0.3,
+        "n_clusters": 4
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.6929342365060154,
+          "nmi": 0.8008133933732211,
+          "n_clusters": 4
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.5507723801813709,
+          "nmi": 0.715395230290104,
+          "n_clusters": 5
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.36591462866762303,
+          "nmi": 0.617826567804087,
+          "n_clusters": 8
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.33439854841466177,
+          "nmi": 0.6087717833803842,
+          "n_clusters": 9
+        }
+      ],
+      "time_s": 4.232356071472168
+    },
+    "pca_rec_target": {
+      "best": {
+        "ari": 1.0,
+        "nmi": 1.0,
+        "resolution": 0.3,
+        "n_clusters": 3
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 0.5,
+          "ari": 1.0,
+          "nmi": 1.0,
+          "n_clusters": 3
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.6961919982434436,
+          "nmi": 0.8491941752747273,
+          "n_clusters": 4
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.5715520939659557,
+          "nmi": 0.7570958708788321,
+          "n_clusters": 6
+        }
+      ],
+      "time_s": 4.232356071472168
+    },
+    "model": {
+      "best": {
+        "ari": 0.4564347951428629,
+        "nmi": 0.6076338966389625,
+        "resolution": 0.3,
+        "n_clusters": 5
+      },
+      "per_resolution": [
+        {
+          "resolution": 0.3,
+          "ari": 0.4564347951428629,
+          "nmi": 0.6076338966389625,
+          "n_clusters": 5
+        },
+        {
+          "resolution": 0.5,
+          "ari": 0.41440302708792137,
+          "nmi": 0.603817910960145,
+          "n_clusters": 6
+        },
+        {
+          "resolution": 1.0,
+          "ari": 0.29932426643250726,
+          "nmi": 0.5285409754122679,
+          "n_clusters": 9
+        },
+        {
+          "resolution": 1.5,
+          "ari": 0.284439828839185,
+          "nmi": 0.5242070920724564,
+          "n_clusters": 9
+        }
+      ],
+      "time_s": 585.8662559986115
+    },
+    "scenario_name": "Scenario C\n(gene-specific + high noise)"
+  }
+]

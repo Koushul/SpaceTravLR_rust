@@ -1,0 +1,13 @@
+torch>=2.0
+torch_geometric>=2.5
+torch_scatter
+torch_sparse
+numpy<2
+scipy
+scikit-learn
+scanpy>=1.9
+leidenalg
+pandas
+pyarrow
+umap-learn
+matplotlib
