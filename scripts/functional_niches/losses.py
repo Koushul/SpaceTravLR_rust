@@ -10,22 +10,23 @@ from torch import Tensor
 
 class DGILoss(nn.Module):
     """
-    Spatial InfoNCE contrastive loss (replaces standard DGI).
+    Spatial contrastive loss: neighbor vs. non-neighbor triplets.
 
-    For each cell i, treat its spatial neighbours as POSITIVE samples and all
-    other cells as NEGATIVES.  Uses temperature-scaled cosine similarity.
+    For each cell i:
+      - Positive j: a random spatial neighbour (from the kNN graph)
+      - Negative k: a random non-neighbour cell
 
-    This directly trains the GNN to produce embeddings where spatial neighbours
-    are more similar than distant cells — the core property needed for niche
-    discovery.
+    Loss: softplus(d(z_i, z_j) - d(z_i, z_k) + margin)
 
-    L = -mean_i( mean_{j in N(i)} log softmax(sim(z_i, z_j) / tau)[j] )
+    where d = negative cosine similarity.
+
+    This is O(N) per epoch (one triplet per cell), making it practical on CPU.
+    The projection head decouples the contrastive space from the embedding space.
     """
 
-    def __init__(self, hidden_dim: int, tau: float = 0.5):
+    def __init__(self, hidden_dim: int, tau: float = 0.5, margin: float = 0.5):
         super().__init__()
-        self.tau = tau
-        # projection head (MLP) to decouple contrastive space from embedding space
+        self.margin = margin
         self.proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
@@ -43,52 +44,57 @@ class DGILoss(nn.Module):
         Parameters
         ----------
         z_raw_pos : [N, D] pre-GNN encoder outputs (real)
-        z_raw_neg : [N, D] pre-GNN encoder outputs (shuffled, unused but kept for API)
-        z_gnn     : [N, D] GNN-smoothed embeddings — THESE are used for contrast
-        adj_mask  : [N, N] normalised adjacency with 1s for neighbours
+        z_raw_neg : [N, D] pre-GNN encoder outputs (shuffled, unused)
+        z_gnn     : [N, D] GNN-smoothed embeddings
+        adj_mask  : [N, N] normalised adjacency (entries > 0 for neighbours)
 
         Returns
         -------
-        scalar InfoNCE loss
+        scalar triplet loss
         """
         N = z_gnn.size(0)
+        h = F.normalize(self.proj(z_gnn), dim=-1)   # [N, D]
 
-        # Project embeddings
-        h = F.normalize(self.proj(z_gnn), dim=-1)  # [N, D]
+        # For each cell, sample one positive neighbour
+        # and one negative non-neighbour
+        is_neighbor = (adj_mask > 0)                 # [N, N] bool
 
-        # Pairwise similarity matrix
-        sim = torch.mm(h, h.T) / self.tau            # [N, N]
+        # Random positive: pick one neighbour per anchor
+        # Mask non-neighbours with -inf before sampling
+        pos_logits = torch.where(is_neighbor, torch.zeros(N, N, device=h.device),
+                                 torch.full((N, N), float("-inf"), device=h.device))
+        pos_idx = pos_logits.softmax(dim=-1).multinomial(1).squeeze(1)   # [N]
 
-        # Mask out self-loops from positives
-        eye = torch.eye(N, device=z_gnn.device).bool()
-        sim = sim.masked_fill(eye, float("-inf"))
+        # Random negative: pick one non-neighbour per anchor
+        neg_logits = torch.where(~is_neighbor,
+                                 torch.zeros(N, N, device=h.device),
+                                 torch.full((N, N), float("-inf"), device=h.device))
+        # Mask diagonal too
+        eye = torch.eye(N, device=h.device, dtype=torch.bool)
+        neg_logits = neg_logits.masked_fill(eye, float("-inf"))
+        neg_idx = neg_logits.softmax(dim=-1).multinomial(1).squeeze(1)   # [N]
 
-        # adj_mask[i, j] = 1 if j is a neighbour of i
-        # For numerical stability, use log_softmax + gather pattern
-        log_prob = F.log_softmax(sim, dim=-1)        # [N, N]
+        h_a = h                          # [N, D] anchors
+        h_p = h[pos_idx]                 # [N, D] positives
+        h_n = h[neg_idx]                 # [N, D] negatives
 
-        # Replace -inf (masked diagonal) with 0 BEFORE masking with pos_mask
-        # to avoid 0 * -inf = nan
-        log_prob = log_prob.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+        # Cosine distance: 1 - cosine_sim (smaller = more similar)
+        d_pos = 1.0 - (h_a * h_p).sum(dim=-1)   # [N]
+        d_neg = 1.0 - (h_a * h_n).sum(dim=-1)   # [N]
 
-        # Mean log-prob over positive (neighbour) pairs
-        pos_mask = (adj_mask > 0).float()
-        n_pos = pos_mask.sum(dim=-1).clamp(min=1.0)
-        loss = -(pos_mask * log_prob).sum(dim=-1) / n_pos
-        return loss.mean()
+        # Triplet margin loss: penalise when pos is further than neg - margin
+        return F.softplus(d_pos - d_neg + self.margin).mean()
 
 
 def build_adj_mask(edge_index: Tensor, n_nodes: int) -> Tensor:
     """
-    Build a dense row-normalised adjacency matrix from edge_index.
-    For large graphs (>10k nodes) this is memory-intensive; caller should
-    decide whether to use sparse ops instead.
+    Build a dense binary adjacency matrix from edge_index.
+    Entry [i, j] = 1 if j is a spatial neighbour of i.
     """
     src, dst = edge_index
     adj = torch.zeros(n_nodes, n_nodes, device=edge_index.device)
     adj[src, dst] = 1.0
-    row_sum = adj.sum(dim=1, keepdim=True).clamp(min=1.0)
-    return adj / row_sum
+    return adj
 
 
 def spatial_smoothness_loss(z: Tensor, edge_index: Tensor, edge_weight: Tensor) -> Tensor:

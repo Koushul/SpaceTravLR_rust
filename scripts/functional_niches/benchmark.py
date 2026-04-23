@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 def flatten_betas(gene_betas: list, n_cells: int, n_mods_total: int) -> np.ndarray:
     """
     Flatten all gene beta matrices into a single [N, G * n_mods_total] matrix.
-    Missing modulators for a gene are left as 0.
+    Retains SIGN information — appropriate PCA baseline.
     """
     parts = []
     for gb in gene_betas:
@@ -53,6 +53,18 @@ def flatten_betas(gene_betas: list, n_cells: int, n_mods_total: int) -> np.ndarr
         mat[:, mod_idx] = gb.beta_values.numpy()
         parts.append(mat)
     return np.concatenate(parts, axis=1)
+
+
+def rec_target_pca(dataset, n_components: int) -> np.ndarray:
+    """
+    PCA on the model's own reconstruction target (mean |beta|).
+    This is a 'same-input' baseline: uses only what the model reconstructs.
+    Note: loses sign information, so sign-discriminative niches will confuse it.
+    """
+    from sklearn.decomposition import PCA
+    rec = dataset.rec_target.numpy()
+    pca = PCA(n_components=n_components, random_state=42)
+    return pca.fit_transform(rec)
 
 
 def spatial_smooth_pca(
@@ -191,6 +203,17 @@ def run_benchmark(
     )
     np.save(str(out / "pca_smooth_embeddings.npy"), z_pca_smooth)
 
+    # PCA on rec_target (same input as decoder, loses sign information)
+    log.info("Running PCA on rec_target (same-input baseline) ...")
+    z_rec_pca = rec_target_pca(synth.dataset, n_components=hidden_dim)
+    rec_pca_metrics = best_ari_nmi(z_rec_pca, true_labels, resolutions)
+    log.info(
+        f"  RecPCA best: ARI={rec_pca_metrics['best']['ari']:.4f}  "
+        f"NMI={rec_pca_metrics['best']['nmi']:.4f}  "
+        f"@ r={rec_pca_metrics['best']['resolution']}"
+    )
+    np.save(str(out / "rec_pca_embeddings.npy"), z_rec_pca)
+
     # ---------------------------------------------------------------
     # 2) FunctionalNicheModel
     # ---------------------------------------------------------------
@@ -242,6 +265,7 @@ def run_benchmark(
             "beta_signal": beta_signal,
             "beta_noise": beta_noise,
             "sparsity": sparsity,
+            "cell_noise_scale": cell_noise_scale,
             "gene_specific_programs": gene_specific_programs,
             "hidden_dim": hidden_dim,
             "epochs": epochs,
@@ -249,6 +273,7 @@ def run_benchmark(
         },
         "pca": {**pca_metrics, "time_s": t_pca},
         "pca_smooth": {**pca_smooth_metrics, "time_s": t_pca},
+        "pca_rec_target": {**rec_pca_metrics, "time_s": t_pca},
         "model": {**model_metrics, "time_s": t_model},
     }
 
@@ -261,33 +286,35 @@ def run_benchmark(
 
 def _print_table(results: dict) -> None:
     p = results["params"]
-    log.info("\n" + "=" * 70)
+    log.info("\n" + "=" * 75)
     log.info(f"  Benchmark: {p['n_cells']} cells  {p['n_genes']} genes  "
              f"{p['n_niches']} niches  {p['n_mods_total']} mods total")
     log.info(f"  Beta signal={p['beta_signal']}  noise={p['beta_noise']}  "
-             f"sparsity={p['sparsity']}  gene_specific={p.get('gene_specific_programs', False)}")
-    log.info("-" * 70)
-    log.info(f"{'Method':<25} {'ARI':>8} {'NMI':>8} {'Clusters':>10} {'Res':>6}")
-    log.info("-" * 70)
+             f"cell_noise={p.get('cell_noise_scale', 0.0)}  sparsity={p['sparsity']}  "
+             f"gene_specific={p.get('gene_specific_programs', False)}")
+    log.info("-" * 75)
+    log.info(f"{'Method':<30} {'ARI':>8} {'NMI':>8} {'Clusters':>10} {'Res':>6}")
+    log.info("-" * 75)
     for label, key in [
-        ("PCA (baseline)", "pca"),
+        ("PCA on raw betas", "pca"),
         ("PCA + spatial smooth", "pca_smooth"),
+        ("PCA on rec_target (|beta|)", "pca_rec_target"),
         ("FuncNiche Model", "model"),
     ]:
         if key not in results:
             continue
         b = results[key]["best"]
         log.info(
-            f"{label:<25} {b['ari']:>8.4f} {b['nmi']:>8.4f} "
+            f"{label:<30} {b['ari']:>8.4f} {b['nmi']:>8.4f} "
             f"{b['n_clusters']:>10} {b['resolution']:>6}"
         )
-    log.info("=" * 70)
+    log.info("=" * 75)
 
 
 def run_multi_benchmark(
     output_dir: str = "benchmark_output",
-    epochs: int = 150,
-    hidden_dim: int = 32,
+    epochs: int = 300,
+    hidden_dim: int = 64,
     seed: int = 42,
 ) -> list[dict]:
     """
@@ -301,25 +328,31 @@ def run_multi_benchmark(
 
     scenarios = [
         {
-            "name": "Low noise\n(both methods easy)",
-            "n_cells": 600, "n_genes": 8, "n_niches": 5,
-            "n_mods_shared": 200, "n_mods_gene": 15, "n_active_mods": 25,
+            # Easy: strong signal, no cell noise. Both PCA variants and model should succeed.
+            # PCA-on-rec_target fails because niches differ only in sign pattern.
+            "name": "Scenario A\n(sign-coded niches)",
+            "n_cells": 200, "n_genes": 5, "n_niches": 3,
+            "n_mods_shared": 60, "n_mods_gene": 8, "n_active_mods": 12,
             "beta_signal": 1.5, "beta_noise": 0.1, "sparsity": 0.65,
             "cell_noise_scale": 0.0, "gene_specific_programs": False,
         },
         {
-            "name": "High cell noise\n(spatial GNN advantage)",
-            "n_cells": 600, "n_genes": 8, "n_niches": 5,
-            "n_mods_shared": 200, "n_mods_gene": 15, "n_active_mods": 25,
+            # Medium: sign-coded niches + moderate cell noise.
+            # PCA on raw betas degrades; spatial GNN in model helps.
+            "name": "Scenario B\n(sign-coded + cell noise)",
+            "n_cells": 200, "n_genes": 5, "n_niches": 3,
+            "n_mods_shared": 60, "n_mods_gene": 8, "n_active_mods": 12,
             "beta_signal": 1.5, "beta_noise": 0.1, "sparsity": 0.65,
-            "cell_noise_scale": 2.0, "gene_specific_programs": False,
+            "cell_noise_scale": 0.8, "gene_specific_programs": False,
         },
         {
-            "name": "Gene-specific + noise\n(cross-gene aggregation wins)",
-            "n_cells": 600, "n_genes": 8, "n_niches": 5,
-            "n_mods_shared": 300, "n_mods_gene": 20, "n_active_mods": 15,
-            "beta_signal": 1.2, "beta_noise": 0.2, "sparsity": 0.75,
-            "cell_noise_scale": 1.5, "gene_specific_programs": True,
+            # Hard: gene-specific programs, high noise.
+            # Requires cross-gene aggregation to find niche identity.
+            "name": "Scenario C\n(gene-specific + high noise)",
+            "n_cells": 200, "n_genes": 5, "n_niches": 3,
+            "n_mods_shared": 60, "n_mods_gene": 8, "n_active_mods": 12,
+            "beta_signal": 1.5, "beta_noise": 0.1, "sparsity": 0.65,
+            "cell_noise_scale": 0.8, "gene_specific_programs": True,
         },
     ]
 

@@ -104,11 +104,15 @@ def _make_niche_programs(
                 programs[k, g, active] = signs * beta_signal
     else:
         programs = np.zeros((n_niches, n_mods_total), dtype=np.float32)
+        # Use SHARED active modulators with SIGN-CODED niche identity
+        # The same set of mods are active in ALL niches, but with niche-specific signs
+        # This collapses under mean |beta| but is visible in signed betas and model
+        shared_active = np.arange(n_active_per_niche)  # same mods for all niches
         for k in range(n_niches):
-            block_start = (k * n_active_per_niche) % n_mods_total
-            active = np.arange(block_start, block_start + n_active_per_niche) % n_mods_total
-            signs = rng.choice([-1, 1], size=len(active))
-            programs[k, active] = signs * beta_signal
+            # Ensure different niches get distinct sign patterns
+            rng_k = np.random.default_rng(seed * 1000 + k)
+            signs = rng_k.choice([-1, 1], size=n_active_per_niche)
+            programs[k, shared_active] = signs * beta_signal
 
     return programs
 

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from torch_geometric.nn import GATv2Conv
+from torch_geometric.nn import GCNConv
 
 from .dataset import GeneBetadata
 
@@ -15,47 +15,55 @@ from .dataset import GeneBetadata
 class ModulatorEncoder(nn.Module):
     """
     Encode a variable-length set of (modulator_id, beta_value) pairs into a
-    fixed-size vector via attention-weighted pooling.
+    fixed-size vector.
 
-    Shared weights across all genes — the modulator embedding gives each
-    regulator a unique learnable identity.
+    Fast implementation: scatter beta values into a dense per-modulator vector,
+    then apply a learnable linear projection.  This avoids expensive per-token
+    embedding lookup + MLP that is slow on CPU.
+
+    The key insight: since mod_indices are the same for all cells of the same
+    gene (they share the same modulator set), we can:
+    1. Build a dense [N, n_mods_total] sparse beta matrix via scatter
+    2. Project to hidden_dim with a single linear layer
+
+    Sign information is fully preserved.  Attention over modulators is implicit
+    in the learned projection weights.
     """
 
     def __init__(self, n_modulators: int, embed_dim: int = 32, hidden_dim: int = 64):
         super().__init__()
-        self.mod_embedding = nn.Embedding(n_modulators, embed_dim)
-        self.value_proj = nn.Linear(1, embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim * 2, hidden_dim),
+        self.n_modulators = n_modulators
+        self.proj = nn.Sequential(
+            nn.Linear(n_modulators, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-        self.attn_query = nn.Parameter(torch.randn(hidden_dim))
 
     def forward(self, mod_indices: Tensor, beta_values: Tensor) -> Tensor:
         """
         Parameters
         ----------
-        mod_indices : [B, M] int64
-        beta_values : [B, M] float32
+        mod_indices : [B, M] int64 — same for all rows (per-gene modulator indices)
+        beta_values : [B, M] float32 — signed beta coefficients
 
         Returns
         -------
         [B, hidden_dim]
         """
-        id_emb = self.mod_embedding(mod_indices)              # [B, M, embed_dim]
-        val_emb = self.value_proj(beta_values.unsqueeze(-1))  # [B, M, embed_dim]
-        x = self.mlp(torch.cat([id_emb, val_emb], dim=-1))   # [B, M, hidden_dim]
-
-        scores = (x * self.attn_query).sum(dim=-1)            # [B, M]
-        weights = scores.softmax(dim=-1).unsqueeze(-1)        # [B, M, 1]
-        return (weights * x).sum(dim=1)                       # [B, hidden_dim]
+        B = beta_values.size(0)
+        # Scatter betas into dense representation [B, n_mods_total]
+        dense = torch.zeros(B, self.n_modulators, device=beta_values.device)
+        # mod_indices is the same for all rows, so we use index_put_ efficiently
+        dense.scatter_(1, mod_indices, beta_values)
+        return self.proj(dense)  # [B, hidden_dim]
 
 
 class CellEncoder(nn.Module):
     """
-    Aggregate G per-gene modulator summaries into a single cell embedding
-    using self-attention over gene tokens.
+    Aggregate G per-gene modulator summaries into a single cell embedding.
+
+    Uses attention-weighted pooling over gene tokens (learned gene weights)
+    instead of full self-attention — much faster on CPU.
     """
 
     def __init__(
@@ -66,18 +74,14 @@ class CellEncoder(nn.Module):
         mod_hidden: int = 64,
         gene_embed_dim: int = 16,
         cell_dim: int = 64,
-        n_heads: int = 4,
+        n_heads: int = 4,  # kept for API compatibility
     ):
         super().__init__()
         self.mod_encoder = ModulatorEncoder(n_modulators, embed_dim, mod_hidden)
         self.gene_embedding = nn.Embedding(n_genes, gene_embed_dim)
         token_dim = mod_hidden + gene_embed_dim
-        # token_dim must be divisible by n_heads
-        assert token_dim % n_heads == 0, (
-            f"token_dim={token_dim} must be divisible by n_heads={n_heads}"
-        )
-        self.self_attn = nn.MultiheadAttention(token_dim, n_heads, batch_first=True)
-        self.layer_norm = nn.LayerNorm(token_dim)
+        # Learned per-gene attention weights (one scalar per gene token)
+        self.gene_attn = nn.Linear(token_dim, 1)
         self.out_proj = nn.Linear(token_dim, cell_dim)
 
     def forward(self, gene_betas: list[GeneBetadata], device: torch.device) -> Tensor:
@@ -99,34 +103,30 @@ class CellEncoder(nn.Module):
             g_emb = self.gene_embedding(g_idx)        # [N, gene_embed_dim]
             tokens.append(torch.cat([h_g, g_emb], dim=-1))  # [N, token_dim]
 
-        tokens = torch.stack(tokens, dim=1)                   # [N, G, token_dim]
-        attended, _ = self.self_attn(tokens, tokens, tokens)  # [N, G, token_dim]
-        attended = self.layer_norm(attended + tokens)         # residual
-        pooled = attended.mean(dim=1)                         # [N, token_dim]
-        return self.out_proj(pooled)                          # [N, cell_dim]
+        tokens = torch.stack(tokens, dim=1)              # [N, G, token_dim]
+
+        # Attention-weighted pool over gene tokens: [N, G, 1] → softmax → [N, G, 1]
+        scores = self.gene_attn(tokens)                  # [N, G, 1]
+        weights = scores.softmax(dim=1)                  # [N, G, 1]
+        pooled = (weights * tokens).sum(dim=1)           # [N, token_dim]
+
+        return self.out_proj(pooled)                     # [N, cell_dim]
 
 
 class SpatialGNN(nn.Module):
-    """Two-layer GATv2 graph neural network for spatial context integration."""
+    """Two-layer GCN for spatial context integration (CPU-friendly)."""
 
     def __init__(
         self,
         in_dim: int = 64,
         hidden_dim: int = 64,
         n_layers: int = 2,
-        heads: int = 4,
+        heads: int = 4,      # kept for API compatibility, unused in GCN
         dropout: float = 0.1,
     ):
         super().__init__()
         self.convs = nn.ModuleList([
-            GATv2Conv(
-                in_dim if i == 0 else hidden_dim,
-                hidden_dim,
-                heads=heads,
-                concat=False,
-                dropout=dropout,
-                edge_dim=1,
-            )
+            GCNConv(in_dim if i == 0 else hidden_dim, hidden_dim)
             for i in range(n_layers)
         ])
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_layers)])
@@ -134,7 +134,7 @@ class SpatialGNN(nn.Module):
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_weight: Tensor) -> Tensor:
         for conv, norm in zip(self.convs, self.norms):
-            x_new = conv(x, edge_index, edge_attr=edge_weight.unsqueeze(-1))
+            x_new = conv(x, edge_index, edge_weight=edge_weight)
             x = norm(x + x_new)
             x = F.gelu(x)
             x = self.dropout(x)
