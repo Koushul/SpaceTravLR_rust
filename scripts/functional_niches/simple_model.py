@@ -265,11 +265,17 @@ def train_simple(
     in_dim = X.size(1)
     log.info(f"  Input shape: {X.shape}  ({in_dim} features per cell)")
 
+    # L2-normalise each cell's input vector so the model learns regulatory
+    # direction and pattern, not absolute regulatory strength.
+    # Cells with high global beta magnitude vs low are otherwise hard to
+    # separate because the first Linear layer saturates on the magnitude axis.
+    X = F.normalize(X, dim=1)
+
     edge_index = dataset.edge_index.to(device)
     edge_weight = dataset.edge_weight.to(device)
-    rec_target = dataset.rec_target.to(device)      # [N, n_mods_total]
+    rec_target = dataset.rec_target.to(device)      # [N, rec_dim]
+    rec_dim = rec_target.size(1)
 
-    # For reconstruction we project back to rec_target size, not in_dim
     model = SimpleNicheModel(
         in_dim=in_dim,
         hidden_dim=hidden_dim,
@@ -277,8 +283,8 @@ def train_simple(
         gcn_layers=gcn_layers,
         dropout=dropout,
     ).to(device)
-    # Override decoder to predict rec_target (n_mods_total) rather than in_dim
-    model.decoder = nn.Linear(hidden_dim, n_mods).to(device)
+    # Decoder outputs rec_dim so it always matches rec_target exactly
+    model.decoder = nn.Linear(hidden_dim, rec_dim).to(device)
 
     contrastive = TripletSpatialLoss(hidden_dim).to(device)
     optimizer = optim.Adam(

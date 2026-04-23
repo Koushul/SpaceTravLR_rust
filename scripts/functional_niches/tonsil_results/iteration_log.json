@@ -1,0 +1,234 @@
+[
+  {
+    "tag": "A_gene_activity",
+    "ari": 0.405696639437766,
+    "nmi": 0.5835329301026628,
+    "res": 0.25,
+    "n": 12,
+    "epochs": 700,
+    "lr": 0.001,
+    "alpha": 0.05,
+    "beta_loss": 0.3,
+    "hidden_dim": 64,
+    "spatial_k": 6,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ]
+  },
+  {
+    "tag": "B_mod_signed",
+    "ari": 0.1594823428383264,
+    "nmi": 0.3133112976706109,
+    "res": 0.3,
+    "n": 10,
+    "epochs": 700,
+    "lr": 0.001,
+    "alpha": 0.05,
+    "beta_loss": 0.3,
+    "hidden_dim": 64,
+    "spatial_k": 6,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ]
+  },
+  {
+    "tag": "C_mod_abs",
+    "ari": 0.3411380026222497,
+    "nmi": 0.5044841078920101,
+    "res": 0.2,
+    "n": 9,
+    "epochs": 700,
+    "lr": 0.001,
+    "alpha": 0.05,
+    "beta_loss": 0.3,
+    "hidden_dim": 64,
+    "spatial_k": 6,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ]
+  },
+  {
+    "tag": "D_gene_plus_abs",
+    "ari": 0.24044227026359632,
+    "nmi": 0.41571953887206314,
+    "res": 0.25,
+    "n": 11,
+    "epochs": 700,
+    "lr": 0.001,
+    "alpha": 0.05,
+    "beta_loss": 0.3,
+    "hidden_dim": 64,
+    "spatial_k": 6,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ]
+  },
+  {
+    "tag": "R2_A_gene_activity_k6_a0.05_b0.3",
+    "ari": 0.4549578144501141,
+    "nmi": 0.636411148495138,
+    "res": 0.2,
+    "n": 12,
+    "epochs": 700,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ],
+    "spatial_k": 6,
+    "alpha": 0.05,
+    "beta_loss": 0.3
+  },
+  {
+    "tag": "R2_A_gene_activity_k6_a0.05_b0.5",
+    "ari": 0.4884793306675746,
+    "nmi": 0.6265839519168197,
+    "res": 0.15,
+    "n": 9,
+    "epochs": 700,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ],
+    "spatial_k": 6,
+    "alpha": 0.05,
+    "beta_loss": 0.5
+  },
+  {
+    "tag": "R2_A_gene_activity_k6_a0.1_b0.1",
+    "ari": 0.4379052752047488,
+    "nmi": 0.5844166425049427,
+    "res": 0.15,
+    "n": 10,
+    "epochs": 700,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ],
+    "spatial_k": 6,
+    "alpha": 0.1,
+    "beta_loss": 0.1
+  },
+  {
+    "tag": "R2_A_gene_activity_k15_a0.05_b0.3",
+    "ari": 0.41222591603380176,
+    "nmi": 0.5990589882469991,
+    "res": 0.15,
+    "n": 10,
+    "epochs": 700,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ],
+    "spatial_k": 15,
+    "alpha": 0.05,
+    "beta_loss": 0.3
+  },
+  {
+    "tag": "R2_A_gene_activity_k15_a0.05_b0.5",
+    "ari": 0.3769562169144044,
+    "nmi": 0.5622285000543873,
+    "res": 0.15,
+    "n": 8,
+    "epochs": 700,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ],
+    "spatial_k": 15,
+    "alpha": 0.05,
+    "beta_loss": 0.5
+  },
+  {
+    "tag": "R2_A_gene_activity_k15_a0.1_b0.1",
+    "ari": 0.3261571966291194,
+    "nmi": 0.5323289004434283,
+    "res": 0.2,
+    "n": 9,
+    "epochs": 700,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ],
+    "spatial_k": 15,
+    "alpha": 0.1,
+    "beta_loss": 0.1
+  },
+  {
+    "tag": "R3_hd128_ml3_ep1000",
+    "ari": 0.35226741938246253,
+    "nmi": 0.5421701397637384,
+    "res": 0.2,
+    "n": 10,
+    "epochs": 1000,
+    "lr": 0.001,
+    "hidden_dim": 128,
+    "mlp_layers": 3,
+    "gcn_layers": 2,
+    "alpha": 0.05,
+    "beta_loss": 0.5,
+    "spatial_k": 6,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ]
+  },
+  {
+    "tag": "R3_hd64_ml2_ep1500",
+    "ari": 0.4427870889186507,
+    "nmi": 0.6056421343567501,
+    "res": 0.25,
+    "n": 12,
+    "epochs": 1500,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "mlp_layers": 2,
+    "gcn_layers": 2,
+    "alpha": 0.05,
+    "beta_loss": 0.5,
+    "spatial_k": 6,
+    "resolutions": [
+      0.15,
+      0.2,
+      0.25,
+      0.3
+    ]
+  }
+]
