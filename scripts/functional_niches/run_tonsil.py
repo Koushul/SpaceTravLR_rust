@@ -46,7 +46,7 @@ warnings.filterwarnings("ignore")
 # ──────────────────────────────────────────────────────────────────
 FEATHER_DIR  = "/ix1/ylee/kor11/djishnu_kor11/tonsil_ablation/runs/tf_lr_tfl__full_2"
 H5AD_PATH    = "/ix1/ylee/kor11/djishnu_kor11/tonsil_ablation/snrna_human_tonsil.h5ad"
-OUT_DIR      = "/tmp/tonsil_func_31genes"
+OUT_DIR      = "/tmp/tonsil_func_signed"
 TARGET_GENES = {
     # Core GC B cell transcription factors
     "BCL6", "AICDA", "PAX5", "IRF4", "PRDM1", "FOXO1", "BACH2", "MYBL1",
@@ -101,9 +101,18 @@ def build_vocab_parallel(paths, n_workers=16):
 
 
 def load_feathers(paths, cell_ids, mod_vocab, n_workers=16):
-    """Returns gene_activity[N,G], gene_names[G]."""
-    gene_list: list[np.ndarray] = []
-    gene_names: list[str]       = []
+    """
+    Returns
+    -------
+    beta_X      : [N, G × M]  signed beta values, one block per gene
+                  (preserves both magnitude and direction of every regulator)
+    gene_activity: [N, G]     mean|β| per gene — used as rec_target
+    gene_names  : list[str]   gene order (matches columns of beta_X blocks)
+    """
+    n_cells   = len(cell_ids)
+    n_mods    = len(mod_vocab)
+    results: list[tuple[str, np.ndarray, np.ndarray]] = []
+
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futs = {ex.submit(_load_one, p, cell_ids, mod_vocab): p for p in paths}
         for fut in as_completed(futs):
@@ -111,10 +120,27 @@ def load_feathers(paths, cell_ids, mod_vocab, n_workers=16):
             if res is None:
                 continue
             gene_name, mod_idx, betas = res
-            gene_list.append(np.abs(betas).mean(axis=1))   # mean|β| per cell per gene
-            gene_names.append(gene_name)
-    gene_activity = np.stack(gene_list, axis=1).astype(np.float32)   # [N, G]
-    return gene_activity, gene_names
+            results.append((gene_name, mod_idx, betas))
+
+    # Sort by gene name for deterministic column order
+    results.sort(key=lambda x: x[0])
+    gene_names = [r[0] for r in results]
+
+    # Build signed beta blocks [N, M] per gene, then concatenate → [N, G×M]
+    blocks        = []
+    activity_cols = []
+    for gene_name, mod_idx, betas in results:
+        block = np.zeros((n_cells, n_mods), dtype=np.float32)
+        block[:, mod_idx] = betas                        # signed betas in place
+        blocks.append(block)
+        activity_cols.append(np.abs(betas).mean(axis=1)) # mean|β| scalar per gene
+
+    beta_X       = np.concatenate(blocks, axis=1)        # [N, G × M]
+    gene_activity = np.stack(activity_cols, axis=1)       # [N, G]
+
+    log.info(f"  beta_X (signed, G×M): {beta_X.shape}   "
+             f"gene_activity (|β|): {gene_activity.shape}")
+    return beta_X, gene_activity, gene_names
 
 
 # ── Evaluation ────────────────────────────────────────────────────
@@ -332,8 +358,10 @@ def main():
     log.info(f"Loading {len(feather_paths)} feathers: {found}")
 
     mod_vocab = build_vocab_parallel(feather_paths, n_workers=N_WORKERS)
-    gene_activity, gene_names = load_feathers(feather_paths, cell_ids, mod_vocab, n_workers=N_WORKERS)
-    log.info(f"  gene_activity: {gene_activity.shape}  genes: {sorted(gene_names)}")
+    beta_X, gene_activity, gene_names = load_feathers(
+        feather_paths, cell_ids, mod_vocab, n_workers=N_WORKERS
+    )
+    log.info(f"  genes: {sorted(gene_names)}")
 
     # 3. Spatial composition features
     log.info("Building spatial composition features …")
@@ -348,9 +376,9 @@ def main():
     # 5. Train
     log.info("Training SpatialFunctionalModel …")
     z = train_functional(
-        beta_X      = gene_activity,
+        beta_X      = beta_X,          # [N, G×M] signed betas — full regulatory info
         spat_X      = spat_X,
-        rec_target  = gene_activity,   # reconstruct gene-activity from z
+        rec_target  = gene_activity,   # [N, G] mean|β| per gene — reconstruction target
         tfh_dist    = tfh_dist,
         gc_mask     = gc_mask,
         edge_index  = edge_index,
