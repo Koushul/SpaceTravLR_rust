@@ -1,52 +1,77 @@
 # Functional Microniche Embeddings
 
-Strategy B two-level set encoder for per-cell **functional microniche** embeddings from heterogeneous betadata feathers.
+Per-cell functional microniche embeddings from heterogeneous betadata feathers.  
+Two model variants: a **simple fast model** (recommended) and a full two-level set encoder.
 
-## Architecture
+---
+
+## SimpleNicheModel (recommended)
 
 ```
-beta feathers ──► ModulatorEncoder ──► CellEncoder ──► SpatialGNN ──► z ∈ ℝ^D
-                  (scatter + MLP)      (attn pool     (2-layer GCN,
-                  per gene             over genes)     kNN graph)
+precompute X ∈ ℝ^{N × G·M}   ──►  BetaMLP  ──►  SpatialGCN  ──►  z ∈ ℝ^D
+(flat signed-beta matrix,            2-layer      2-layer GCN,
+ computed once before training)      MLP          kNN spatial graph
 ```
 
-**ModulatorEncoder** — shared across all genes. Scatters signed beta values into a dense `[N, n_mods_total]` matrix, then applies a learned MLP projection. Preserves sign information (critical for antagonistic regulation patterns).
+**Key idea**: the per-gene signed-beta vectors are concatenated into one flat
+cell-feature matrix `[N, G×M]` *once* before training. Every epoch is then a
+single BLAS call (matmul) through the MLP + one GCN pass — no Python loops,
+no per-token embedding lookups.
 
-**CellEncoder** — aggregates G gene summaries with learned per-gene attention weights. Gene identity is encoded via a learned gene embedding.
+**Speed**: 500 epochs · 1000 cells · 8 genes · 359 mods → **8 seconds on CPU**.
 
-**SpatialGNN** — 2-layer GCN on the kNN spatial graph smooths cell embeddings using spatial context.
+**Training objectives**:
+- `L_triplet`: spatial triplet contrastive — neighbours more similar than non-neighbours
+- `L_rec`: reconstruct `mean|β|` summary (MSE)
+- `L_smooth`: spatial smoothness penalty on `z`
 
-**Training losses**:
-- `L_triplet`: spatial neighbour contrast — neighbours should be more similar than non-neighbours
-- `L_rec`: reconstruct mean `|beta|` summary (reconstruction target)
-- `L_smooth`: spatial smoothness penalty on z
+---
+
+## Full model (model.py / train.py)
+
+The original Strategy B architecture (kept for reference/GPU use):
+
+```
+beta feathers ──► ModulatorEncoder ──► CellEncoder ──► SpatialGCN ──► z
+                  (scatter + MLP,       (attn pool
+                   per gene)             over genes)
+```
+
+---
 
 ## Files
 
 | File | Contents |
 |---|---|
-| `dataset.py` | Feather loader, modulator vocab, spatial graph builder, `FunctionalNicheDataset` |
-| `model.py` | `ModulatorEncoder`, `CellEncoder`, `SpatialGNN`, `FunctionalNicheModel` |
-| `losses.py` | Triplet spatial contrastive loss, reconstruction MSE, spatial smoothness |
-| `train.py` | Full-batch training loop + CLI |
-| `cluster.py` | Leiden clustering, Moran's I spatial coherence filter, niche signatures |
+| `dataset.py` | Feather loader, modulator vocab, spatial graph, `make_beta_matrix()` |
+| `simple_model.py` | **`SimpleNicheModel`**, `TripletSpatialLoss`, `train_simple()` |
+| `model.py` | Full `ModulatorEncoder` / `CellEncoder` / `SpatialGCN` model |
+| `losses.py` | Triplet loss, spatial smoothness, adjacency builder |
+| `train.py` | Full model training loop + CLI |
+| `cluster.py` | Leiden clustering, Moran's I filter, niche signatures |
 | `visualize.py` | UMAP and spatial scatter plots |
 | `synth.py` | Synthetic data generator with known ground-truth niches |
-| `benchmark.py` | ARI/NMI comparison vs PCA baselines |
+| `benchmark.py` | ARI/NMI benchmark vs PCA baselines |
 
-## Benchmark Results
+---
 
-Three synthetic scenarios (200 cells, 5 genes, 3 niches, 98 modulators, 300 epochs, CPU):
+## Benchmark Results (SimpleNicheModel)
 
-| Scenario | PCA (raw β) | PCA+smooth | PCA (|β|) | **FuncNiche Model** |
+1000 cells · 8 genes · 5 niches · 359 mods · 500 epochs · CPU (44s total for 3 scenarios)
+
+| Scenario | PCA (signed β) | PCA+smooth | PCA (mean\|β\|) | **SimpleNicheModel** |
 |---|---|---|---|---|
-| A: sign-coded niches | 1.000 | 0.603 | **0.004** | **0.551** |
-| B: sign-coded + cell noise | 1.000 | 0.493 | **0.002** | **0.400** |
-| C: gene-specific + noise | 1.000 | 0.693 | 1.000 | 0.456 |
+| A: sign-coded niches, no noise | 1.000 | 0.749 | **0.001** | **0.547** |
+| B: sign-coded + cell noise=1.0 | 0.986 | 0.587 | **0.001** | **0.471** |
+| C: gene-specific + cell noise  | 1.000 | 0.703 | 1.000 | **0.675** |
 
-**Key finding**: PCA on `mean|beta|` (rec_target) completely fails on sign-coded niches (ARI ≈ 0) because it discards the regulatory direction. The FuncNiche model preserves sign information through its signed beta encoder, recovering ARI 0.40–0.55 where the magnitude baseline scores 0.
+**Key finding**: `PCA on mean|β|` completely fails on sign-coded niches (ARI ≈ 0)
+because it discards regulatory direction. The `SimpleNicheModel` recovers ARI 0.47–0.55
+in those scenarios in seconds.
 
-See `benchmark_results/benchmark_comparison.png` for the chart.
+See `benchmark_results/benchmark_comparison_simple.png`.
+
+---
 
 ## Quickstart
 
@@ -54,21 +79,35 @@ See `benchmark_results/benchmark_comparison.png` for the chart.
 # Install dependencies
 pip install -r scripts/functional_niches/requirements.txt
 
-# Run benchmark on synthetic data
+# Multi-scenario benchmark (3 scenarios × 500 epochs, ~44s total)
 cd <repo_root>
 PYTHONPATH=scripts python3 -m functional_niches.benchmark --multi \
-    --epochs 300 --hidden-dim 64 --output-dir /tmp/niche_bench
+    --epochs 500 --hidden-dim 64 --output-dir /tmp/niche_bench
+
+# Single scenario
+PYTHONPATH=scripts python3 -m functional_niches.benchmark \
+    --n-cells 2000 --n-genes 10 --n-niches 5 --epochs 500
 
 # Train on real betadata
-PYTHONPATH=scripts python3 -m functional_niches.train \
-    --feather-dir /path/to/run_output/ \
-    --h5ad /path/to/data.h5ad \
-    --epochs 600 --hidden-dim 64 \
-    --output-dir /path/to/niches/
+PYTHONPATH=scripts python3 -c "
+import anndata, numpy as np, sys
+sys.path.insert(0, 'scripts')
+from functional_niches.dataset import load_dataset
+from functional_niches.simple_model import train_simple
+
+adata = anndata.read_h5ad('/path/to/data.h5ad')
+ds = load_dataset(
+    feather_dir='/path/to/betadata/',
+    spatial_coords=adata.obsm['spatial'].astype(np.float32),
+    cell_ids=list(adata.obs_names),
+    k=6,
+)
+z = train_simple(ds, '/path/to/niches/', hidden_dim=64, epochs=500)
+"
 ```
 
 ## Notes
 
-- Full-batch training (all cells in one forward pass). For datasets >10k cells on CPU, reduce epochs or use a GPU.
-- On GPU, ~50 epochs/minute for Visium-scale (5k cells, 10 genes, 1000 modulators).
-- `numpy<2` required for PyTorch 2.0.x compatibility.
+- `numpy<2` is required for PyTorch 2.0.x compatibility.
+- For datasets >50k cells on CPU, 200–300 epochs typically suffice.
+- On GPU, 500 epochs for 50k cells, 10 genes, 1000 mods takes ~2 minutes.

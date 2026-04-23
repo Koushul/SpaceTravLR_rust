@@ -33,6 +33,19 @@ class FunctionalNicheDataset:
     gene_names: list[str]
     # precomputed reconstruction target: [N, n_mods_total]
     rec_target: torch.FloatTensor
+    # precomputed flat signed-beta input: [N, G * n_mods_total]
+    # built lazily via .get_beta_matrix(); None until first call
+    _beta_matrix: "Optional[torch.FloatTensor]" = None
+
+    def get_beta_matrix(self, concat_genes: bool = True) -> torch.FloatTensor:
+        """Return (and cache) the flat signed-beta cell-feature matrix."""
+        if self._beta_matrix is None:
+            n_cells = len(self.cell_ids)
+            n_mods = len(self.mod_vocab)
+            self._beta_matrix = make_beta_matrix(
+                self.gene_betas, n_cells, n_mods, concat_genes=concat_genes
+            )
+        return self._beta_matrix
 
 
 def build_modulator_vocab(feather_dir: str) -> dict[str, int]:
@@ -128,6 +141,41 @@ def _build_rec_target(
 
     counts = counts.clamp(min=1.0)
     return accumulator / counts.unsqueeze(0)
+
+
+def make_beta_matrix(
+    gene_betas: list[GeneBetadata],
+    n_cells: int,
+    n_mods_total: int,
+    concat_genes: bool = True,
+) -> torch.FloatTensor:
+    """
+    Flatten all gene beta matrices into a single dense cell-feature matrix.
+
+    Parameters
+    ----------
+    gene_betas : list of G GeneBetadata objects
+    n_cells : N
+    n_mods_total : size of the global modulator vocabulary
+    concat_genes : if True return [N, G × n_mods_total] (one block per gene);
+                   if False return [N, n_mods_total] (signed betas summed across genes)
+
+    Returns
+    -------
+    [N, G × n_mods_total] or [N, n_mods_total] float tensor
+    """
+    if concat_genes:
+        parts = []
+        for gb in gene_betas:
+            mat = torch.zeros(n_cells, n_mods_total)
+            mat.scatter_(1, gb.mod_indices, gb.beta_values)
+            parts.append(mat)
+        return torch.cat(parts, dim=1)   # [N, G * n_mods_total]
+    else:
+        mat = torch.zeros(n_cells, n_mods_total)
+        for gb in gene_betas:
+            mat.scatter_add_(1, gb.mod_indices, gb.beta_values)
+        return mat   # [N, n_mods_total]
 
 
 def load_dataset(
