@@ -253,11 +253,15 @@ def train_simple(
     n_mods = len(dataset.mod_vocab)
     n_genes = len(dataset.gene_names)
 
-    # Precompute beta matrix ONCE — this is the key speedup
-    log.info("Precomputing beta matrix …")
-    X = make_beta_matrix(
-        dataset.gene_betas, n_cells, n_mods, concat_genes=concat_genes
-    ).to(device)   # [N, G*M] or [N, M]
+    # Use precomputed matrix if available (streaming load path), otherwise build it
+    if dataset._beta_matrix is not None:
+        log.info("Using precomputed beta matrix from dataset …")
+        X = dataset._beta_matrix.to(device)
+    else:
+        log.info("Precomputing beta matrix …")
+        X = make_beta_matrix(
+            dataset.gene_betas, n_cells, n_mods, concat_genes=concat_genes
+        ).to(device)
     in_dim = X.size(1)
     log.info(f"  Input shape: {X.shape}  ({in_dim} features per cell)")
 
