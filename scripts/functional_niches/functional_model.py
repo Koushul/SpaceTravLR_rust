@@ -384,10 +384,13 @@ def train_functional(
     tfh_t   = torch.from_numpy(tfh_dist).float().to(device)
     gc_t    = torch.from_numpy(gc_mask).bool().to(device)
 
-    # Local Tfh fraction: fraction of 30-nearest neighbours that are Tfh
-    # Extract from spat_X — Tfh is one of the 13 cell types at k=30 (block 1)
-    # Just use RBF-encoded tfh proximity as soft supervision target
-    tfh_frac = (spat_t[:, -10:].mean(dim=1, keepdim=True))  # mean of RBF Tfh features
+    # Soft supervision target for the neighbourhood composition head:
+    # Use the mean of the last anchor_rbf_cols columns of spat_t (the RBF-encoded
+    # anchor distances placed there by build_spatial_features_general).
+    # Falls back to zeros if spat_X has no anchor columns (w_nbr_comp should be 0
+    # in that case, so this value is unused).
+    anchor_rbf_cols = min(10, spat_t.size(1))
+    tfh_frac = spat_t[:, -anchor_rbf_cols:].mean(dim=1, keepdim=True)
 
     ei = edge_index.to(device)
     ew = edge_weight.to(device)
