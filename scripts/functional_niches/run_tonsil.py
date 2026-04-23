@@ -46,8 +46,26 @@ warnings.filterwarnings("ignore")
 # ──────────────────────────────────────────────────────────────────
 FEATHER_DIR  = "/ix1/ylee/kor11/djishnu_kor11/tonsil_ablation/runs/tf_lr_tfl__full_2"
 H5AD_PATH    = "/ix1/ylee/kor11/djishnu_kor11/tonsil_ablation/snrna_human_tonsil.h5ad"
-OUT_DIR      = "/tmp/tonsil_func"
-TARGET_GENES = {"BCL6", "IL21", "IL7", "IL7R", "PAX5", "AICDA", "CXCR4"}
+OUT_DIR      = "/tmp/tonsil_func_31genes"
+TARGET_GENES = {
+    # Core GC B cell transcription factors
+    "BCL6", "AICDA", "PAX5", "IRF4", "PRDM1", "FOXO1", "BACH2", "MYBL1",
+    # DZ vs LZ markers
+    "CXCR4", "CXCR5", "SELL", "CD83", "CD86",
+    # B-T interaction / Tfh signals
+    "IL21", "IL7", "IL7R", "IL4", "IL2RA", "ICOS", "PDCD1",
+    "CXCL13", "LTB", "LTB4R",
+    # Apoptosis / selection signals
+    "FAS",
+    # Cytokines / niche signals
+    "IL6", "IL6R",
+    # MHC / Ag presentation (LZ function)
+    "CD74", "HLA-DRA", "HLA-DRB1",
+    # Stromal interaction
+    "CXCL12",
+    # Plasma cell exit
+    "CD28",
+}
 N_WORKERS    = 16
 # ──────────────────────────────────────────────────────────────────
 
