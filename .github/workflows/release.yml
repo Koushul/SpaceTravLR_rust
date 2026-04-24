@@ -142,7 +142,7 @@ jobs:
             spacetravlr-*.tar.gz
             checksum-*.txt
 
-  build-linux-glibc2.28:
+  build-linux-glibc228:
     name: x86_64-unknown-linux-gnu-glibc2.28
     runs-on: ubuntu-latest
     container: debian:buster-slim
@@ -275,7 +275,7 @@ jobs:
     needs:
       - build-linux-standard
       - build-linux-compat
-      - build-linux-glibc2.28
+      - build-linux-glibc228
       - build-macos
     runs-on: ubuntu-latest
     steps:
