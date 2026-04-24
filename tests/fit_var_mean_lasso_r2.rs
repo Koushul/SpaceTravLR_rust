@@ -8,12 +8,10 @@ use burn::backend::NdArray;
 use burn::backend::ndarray::NdArrayDevice;
 use burn_autodiff::Autodiff;
 use ndarray::Array2;
-use polars::prelude::{
-    DataFrame, IpcReader, NamedFrom, ParquetWriter, SerReader, Series,
-};
+use polars::prelude::{DataFrame, IpcReader, NamedFrom, ParquetWriter, SerReader, Series};
 use spacetravlr::config::{CnnTrainingMode, SpaceshipConfig};
 use spacetravlr::spatial_estimator::{
-    SpatialCellularProgramsEstimator, dense_to_csr_f64, GENE_PERFORMANCE_FEATHER_NAME,
+    GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator, dense_to_csr_f64,
 };
 use std::path::{Path, PathBuf};
 
@@ -146,11 +144,7 @@ fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Op
 
 fn assert_gene_performance_feather(dir: &Path) {
     let perf_path = dir.join(GENE_PERFORMANCE_FEATHER_NAME);
-    assert!(
-        perf_path.is_file(),
-        "expected {}",
-        perf_path.display()
-    );
+    assert!(perf_path.is_file(), "expected {}", perf_path.display());
     let f = std::fs::File::open(&perf_path).unwrap();
     let df = IpcReader::new(f).finish().unwrap();
     let genes = df.column("gene").unwrap().str().unwrap();

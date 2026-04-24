@@ -71,11 +71,11 @@ use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
 use serde_json::json;
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::ffi::OsString;
-use std::io::Write;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -213,7 +213,7 @@ fn uv_allow_wheel_cache() -> bool {
 }
 
 /// `uv run --isolated` + `python -` reading **`stdin_script`**, with **`--with`** deps, then **`argv`** after `python -`.
-fn uv_python_stdin(
+pub(crate) fn uv_python_stdin(
     with_packages: &[&str],
     stdin_script: &str,
     argv_after_dash: &[&str],
@@ -1344,12 +1344,23 @@ pub fn resolve_magic_batch_obs_column(
 #[derive(Debug, PartialEq, Eq)]
 pub enum TrainingPrepPlan {
     Noop,
-    PatchCellType { out: PathBuf },
-    ImputeOnly { out: PathBuf },
-    PatchThenImpute { patched: PathBuf, out: PathBuf },
+    PatchCellType {
+        out: PathBuf,
+    },
+    ImputeOnly {
+        out: PathBuf,
+    },
+    PatchThenImpute {
+        patched: PathBuf,
+        out: PathBuf,
+    },
     /// Both expression layers exist; add **`obs['cell_type']`** via Leiden only (no MAGIC/UMAP).
-    LayersLeidenAnnotate { out: PathBuf },
-    FullPreprocess { out: PathBuf },
+    LayersLeidenAnnotate {
+        out: PathBuf,
+    },
+    FullPreprocess {
+        out: PathBuf,
+    },
 }
 
 pub fn plan_training_prep(
@@ -1507,14 +1518,8 @@ pub fn ensure_training_adata_ready(
             );
             let mut microns_skip = spatial_microns.clone();
             microns_skip.skip = true;
-            let (written, _) = full_preprocess_maybe_log(
-                &p,
-                &out,
-                false,
-                None,
-                microns_skip,
-                false,
-            )?;
+            let (written, _) =
+                full_preprocess_maybe_log(&p, &out, false, None, microns_skip, false)?;
             debug_assert_eq!(written, out);
             *adata_path = expand_user_path(written.to_string_lossy().as_ref());
         }
@@ -2167,7 +2172,8 @@ a.write_h5ad(p)
 
     #[test]
     fn plan_training_prep_all_branches() {
-        let tmp = std::env::temp_dir().join(format!("spacetravlr_plan_branches_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("spacetravlr_plan_branches_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let src = tmp.join("dummy_source.h5ad");
@@ -2451,7 +2457,8 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
         .expect("fixture");
 
         let dst = dir.join("out.h5ad");
-        magic_impute_and_attach_batch(&src, &dst, Some("sample"), false, true).expect("magic batch");
+        magic_impute_and_attach_batch(&src, &dst, Some("sample"), false, true)
+            .expect("magic batch");
 
         let ad = AnnData::<H5>::open(H5::open(&dst).expect("open")).expect("read");
         assert!(ad.layers().get("imputed_count").is_some());

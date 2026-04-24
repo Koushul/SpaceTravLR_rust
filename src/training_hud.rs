@@ -278,9 +278,7 @@ impl TrainingHudState {
         let mean_blended = any_finite_cnn.then(|| {
             summaries
                 .iter()
-                .map(|s| {
-                    crate::estimator::cluster_insample_r2_for_hud(s, drop_worse, margin)
-                })
+                .map(|s| crate::estimator::cluster_insample_r2_for_hud(s, drop_worse, margin))
                 .sum::<f64>()
                 / summaries.len() as f64
         });

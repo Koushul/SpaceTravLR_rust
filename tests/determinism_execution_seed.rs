@@ -1,6 +1,6 @@
+use ndarray::Array2;
 use spacetravlr::config::{ExecutionConfig, SpaceshipConfig, mix_execution_random_seed};
 use spacetravlr::lasso::{GroupLasso, GroupLassoParams};
-use ndarray::Array2;
 
 #[test]
 fn mix_execution_random_seed_is_stable() {

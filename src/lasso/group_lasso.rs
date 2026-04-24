@@ -161,11 +161,7 @@ fn gram_trace_symmetric(g: &Array2<f64>) -> f64 {
     (0..n).map(|i| g[[i, i]]).sum::<f64>()
 }
 
-pub fn largest_eigenvalue_symmetric_power_iter(
-    g: &Array2<f64>,
-    seed: u64,
-    max_iter: usize,
-) -> f64 {
+pub fn largest_eigenvalue_symmetric_power_iter(g: &Array2<f64>, seed: u64, max_iter: usize) -> f64 {
     let n = g.nrows();
     if n == 0 || g.ncols() != n {
         return 0.0;
@@ -216,11 +212,7 @@ fn build_gram_cache(x_aug: &Array2<f64>, y: &Array2<f64>) -> GramCache {
     let gram = x_aug.t().dot(x_aug) / n;
     let xty = x_aug.t().dot(y) / n;
     let y_norm = 0.5 * y.iter().map(|v| v * v).sum::<f64>() / n;
-    GramCache {
-        gram,
-        xty,
-        y_norm,
-    }
+    GramCache { gram, xty, y_norm }
 }
 
 // ── Fitted state ──────────────────────────────────────────────────────────────
@@ -720,7 +712,12 @@ impl FistaProblem for GramLassoProblem {
     fn smooth_loss(&self, w: &Array2<f64>) -> f64 {
         let gw = self.gram.dot(w);
         let quad = 0.5 * gw.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f64>();
-        let lin = self.xty.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f64>();
+        let lin = self
+            .xty
+            .iter()
+            .zip(w.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f64>();
         quad - lin + self.y_norm
     }
 
@@ -1034,7 +1031,11 @@ mod tests {
 
         let g_res = GroupLasso::mse_grad(&x_aug, &y_prep, &w);
         let g_gram = gram_p.smooth_grad(&w);
-        let diff: f64 = g_res.iter().zip(g_gram.iter()).map(|(a, b)| (a - b).abs()).sum();
+        let diff: f64 = g_res
+            .iter()
+            .zip(g_gram.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
         assert!(diff < 1e-9, "grad diff sum={diff}");
     }
 

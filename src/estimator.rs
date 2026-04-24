@@ -2,9 +2,9 @@ use crate::config::{CnnConfig, CnnLrSchedule};
 use crate::lasso::{GroupLasso, GroupLassoParams};
 use crate::model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 use burn::grad_clipping::GradientClippingConfig;
+use burn::module::AutodiffModule;
 use burn::optim::decay::WeightDecayConfig;
 use burn::optim::{AdamConfig, Optimizer};
-use burn::module::AutodiffModule;
 use burn::prelude::*;
 use burn::tensor::ElementConversion;
 use burn::tensor::backend::{AutodiffBackend, Backend};
@@ -147,7 +147,11 @@ fn lasso_pred_align_weight_epoch(cnn: &CnnConfig, epoch: usize, total_epochs: us
     }
 }
 
-fn y_lasso_vec_from_xy_cpu(x_c: &Array2<f64>, intercept: f64, lasso_coef: &Array2<f64>) -> Vec<f32> {
+fn y_lasso_vec_from_xy_cpu(
+    x_c: &Array2<f64>,
+    intercept: f64,
+    lasso_coef: &Array2<f64>,
+) -> Vec<f32> {
     let cluster_n = x_c.nrows();
     let n_mods = lasso_coef.nrows();
     let mut v = Vec::with_capacity(cluster_n);
@@ -186,11 +190,7 @@ fn cnn_training_loss<B: AutodiffBackend>(
 ) -> (Tensor<B, 1>, Tensor<B, 1>) {
     let betas = model.get_betas(sm_tensor, sf_tensor);
     let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), x_tensor);
-    let y_loss = mse_loss.forward(
-        y_pred.clone(),
-        y_tensor,
-        burn::nn::loss::Reduction::Mean,
-    );
+    let y_loss = mse_loss.forward(y_pred.clone(), y_tensor, burn::nn::loss::Reduction::Mean);
     let mut total = y_loss.clone();
     if mean_beta_lasso_prior_weight > 0.0 {
         let mean_betas = betas.mean_dim(0);
@@ -549,11 +549,7 @@ pub fn cluster_insample_r2_for_hud(
     if c.is_finite() {
         return c;
     }
-    if l.is_finite() {
-        l
-    } else {
-        f64::NAN
-    }
+    if l.is_finite() { l } else { f64::NAN }
 }
 
 struct LassoPassData {
@@ -1522,9 +1518,9 @@ pub fn create_spatial_features(
 /// Synthetic cluster CNN wall time for [`crate::run_benchmark_mock_cluster_cnn_training`] / `cnn_train_bench`.
 /// Uses `Autodiff<NdArray>` (CPU); relative before/after comparisons are meaningful on the same machine.
 pub fn run_benchmark_mock_cluster_cnn_training() -> std::time::Duration {
+    use crate::config::{CnnConfig, CnnOutputActivation};
     use burn::backend::NdArray;
     use burn_autodiff::Autodiff;
-    use crate::config::{CnnConfig, CnnOutputActivation};
 
     type B = Autodiff<NdArray<f32, i32>>;
     let device = Default::default();
@@ -1686,12 +1682,12 @@ mod tests {
 
     #[test]
     fn cnn_max_batches_per_epoch_runs_fewer_steps() {
-        use burn::backend::NdArray;
-        use burn::tensor::Tensor;
-        use burn_autodiff::Autodiff;
         use crate::config::CnnConfig;
         use crate::config::CnnOutputActivation;
         use crate::model::CellularNicheNetworkConfig;
+        use burn::backend::NdArray;
+        use burn::tensor::Tensor;
+        use burn_autodiff::Autodiff;
 
         type B = Autodiff<NdArray<f32, i32>>;
         let device = Default::default();
@@ -1708,10 +1704,8 @@ mod tests {
         let anchors: Vec<f32> = std::iter::once(0.5f32)
             .chain(std::iter::repeat_n(0.1f32, P))
             .collect();
-        let at = Tensor::<B, 1>::from_data(
-            burn::tensor::TensorData::new(anchors, [P + 1]),
-            &device,
-        );
+        let at =
+            Tensor::<B, 1>::from_data(burn::tensor::TensorData::new(anchors, [P + 1]), &device);
         let m = CellularNicheNetworkConfig {
             n_modulators: P,
             n_clusters: K,

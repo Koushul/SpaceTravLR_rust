@@ -142,6 +142,82 @@ jobs:
             spacetravlr-*.tar.gz
             checksum-*.txt
 
+  build-linux-glibc2.28:
+    name: x86_64-unknown-linux-gnu-glibc2.28
+    runs-on: ubuntu-latest
+    container: debian:buster-slim
+    env:
+      BUNDLE_ID: x86_64-unknown-linux-gnu-glibc2.28
+      TARBALL_SUFFIX: "-glibc2.28"
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+    steps:
+      - name: Container OS packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i -e 's/deb.debian.org/archive.debian.org/g' \
+                 -e 's|security.debian.org|archive.debian.org|g' \
+                 -e '/buster-updates/d' /etc/apt/sources.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config libvulkan-dev vulkan-tools zlib1g-dev
+
+      - name: Install CMake 3.28+ (buster ships 3.13; libz-sys / zlib build scripts require ≥3.18)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMAKE_VER=3.28.6
+          curl -sSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-x86_64.tar.gz" -o /tmp/cmake.tgz
+          tar -xzf /tmp/cmake.tgz -C /opt
+          echo "/opt/cmake-${CMAKE_VER}-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@v4
+
+      - name: Match tag and Cargo.toml version
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME#v}"
+          VER=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$REF" != "$VER" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match package version in Cargo.toml ($VER)"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-${{ env.BUNDLE_ID }}
+
+      - name: Build metadata for spacetravlr --version
+        shell: bash
+        run: |
+          echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Cargo build
+        run: cargo --config 'build.rustc-wrapper=""' build --release --locked --features spatial-viewer
+
+      - name: Package tarball and checksum
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          TAR="spacetravlr-${VERSION}-${TARGET}${TARBALL_SUFFIX}.tar.gz"
+          mkdir -p pack
+          cp target/release/spacetravlr target/release/spacetravlr-perturb target/release/spatial_viewer pack/
+          tar -czvf "$TAR" -C pack spacetravlr spacetravlr-perturb spatial_viewer
+          sha256sum "$TAR" | awk -v f="$(basename "$TAR")" '{print $1 "  " f}' > "checksum-${BUNDLE_ID}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ env.BUNDLE_ID }}
+          path: |
+            spacetravlr-*.tar.gz
+            checksum-*.txt
+
   build-macos:
     name: aarch64-apple-darwin
     runs-on: macos-14
@@ -199,6 +275,7 @@ jobs:
     needs:
       - build-linux-standard
       - build-linux-compat
+      - build-linux-glibc2.28
       - build-macos
     runs-on: ubuntu-latest
     steps:

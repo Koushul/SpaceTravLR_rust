@@ -1,10 +1,10 @@
-use anyhow::Context;
 use crate::adata_terminal_scatter::{
     self as adata_scatter, ratatui_color_for_cell_type_label, sorted_unique_labels_from_counts,
 };
 use crate::estimator::CnnEpochHudSlot;
 use crate::training_hud::{TrainingHud, TrainingHudState};
 use crate::tui_theme::TuiColors;
+use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{

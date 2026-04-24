@@ -25,6 +25,12 @@ setup() {
     [[ "$output" == *"spacetravlr-v9.8.7-x86_64-unknown-linux-gnu-glibc2.31.tar.gz"* ]]
 }
 
+@test "dry-run linux x86_64 compat28 tarball" {
+    run env UNAME_S=Linux UNAME_M=x86_64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v9.8.7 SPACETRAVLR_LINUX_VARIANT=compat28 sh "$INSTALL_SH"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"spacetravlr-v9.8.7-x86_64-unknown-linux-gnu-glibc2.28.tar.gz"* ]]
+}
+
 @test "linux aarch64 has no prebuilt installer path" {
     run env UNAME_S=Linux UNAME_M=aarch64 INSTALL_DRY_RUN=1 INSTALL_TEST_VERSION=v1 sh "$INSTALL_SH"
     [ "$status" -eq 1 ]

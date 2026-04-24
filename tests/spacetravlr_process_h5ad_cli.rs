@@ -44,6 +44,18 @@ fn help_lists_process_h5ad_and_impute() {
         s.contains("--magic-batch-obs"),
         "expected --magic-batch-obs in help:\n{s}"
     );
+    assert!(
+        s.contains("--map-labels"),
+        "expected --map-labels in help:\n{s}"
+    );
+    assert!(
+        s.contains("--reference") && s.contains("--query"),
+        "expected --reference and --query in help:\n{s}"
+    );
+    assert!(
+        s.contains("--map-labels-outdir"),
+        "expected --map-labels-outdir in help:\n{s}"
+    );
 }
 
 #[test]

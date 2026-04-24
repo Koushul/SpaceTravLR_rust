@@ -92,14 +92,8 @@ fn bench_gram_coefficient_parity() {
             ms_resid / ms_gram.max(1e-9)
         );
 
-        assert!(
-            max_coef < 5e-6,
-            "n={n} max_coef_diff {max_coef} too large"
-        );
-        assert!(
-            max_int < 5e-6,
-            "n={n} max_int_diff {max_int} too large"
-        );
+        assert!(max_coef < 5e-6, "n={n} max_coef_diff {max_coef} too large");
+        assert!(max_int < 5e-6, "n={n} max_int_diff {max_int} too large");
     }
 }
 
@@ -312,13 +306,12 @@ fn bench_gram_fista_scaling_large_n() {
 
 #[test]
 fn eigenvalue_power_iter_positive_on_gram() {
-    let g = ndarray::array![
-        [2.0_f64, 0.5, 0.0],
-        [0.5, 2.0, 0.1],
-        [0.0, 0.1, 1.0]
-    ];
+    let g = ndarray::array![[2.0_f64, 0.5, 0.0], [0.5, 2.0, 0.1], [0.0, 0.1, 1.0]];
     let ev = largest_eigenvalue_symmetric_power_iter(&g, 1u64, 64);
-    assert!(ev > 2.0 && ev < 3.0, "expected dominant eigen ~2.2+, got {ev}");
+    assert!(
+        ev > 2.0 && ev < 3.0,
+        "expected dominant eigen ~2.2+, got {ev}"
+    );
 }
 
 #[test]
@@ -379,21 +372,8 @@ fn bench_cnn_cap_tradeoff() {
 
         let t0 = std::time::Instant::now();
         let (_m, mse_ep, div) = train_cluster_cnn_epochs(
-            model,
-            &device,
-            &sm_c,
-            &x_c,
-            &sf_c,
-            &y_c,
-            CLUSTER_N,
-            0usize,
-            None,
-            0.01f32,
-            &cnn,
-            1e-3,
-            24usize,
-            None,
-            0,
+            model, &device, &sm_c, &x_c, &sf_c, &y_c, CLUSTER_N, 0usize, None, 0.01f32, &cnn, 1e-3,
+            24usize, None, 0,
         );
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         let final_mse = mse_ep.last().copied().unwrap_or(f32::NAN);

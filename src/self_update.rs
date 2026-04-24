@@ -19,6 +19,8 @@ pub const LINUX_GNU_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 
 pub const LINUX_GNU_COMPAT_SUFFIX: &str = "-glibc2.31";
 
+pub const LINUX_GNU_COMPAT28_SUFFIX: &str = "-glibc2.28";
+
 pub fn tarball_name(version_tag: &str, target: &str) -> String {
     format!("spacetravlr-{version_tag}-{target}.tar.gz")
 }
@@ -70,15 +72,17 @@ fn linux_x86_64_prebuilt_tarball_target() -> Result<String> {
         return match v.as_str() {
             "standard" => Ok(LINUX_GNU_TRIPLE.to_string()),
             "compat" => Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT_SUFFIX}")),
-            _ => bail!("invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard or compat"),
+            "compat28" => Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT28_SUFFIX}")),
+            _ => bail!("invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard, compat, or compat28"),
         };
     }
     let (maj, min) = host_glibc_major_minor()?;
-    let use_standard = maj > 2 || (maj == 2 && min >= 35);
-    if use_standard {
+    if maj > 2 || (maj == 2 && min >= 35) {
         Ok(LINUX_GNU_TRIPLE.to_string())
-    } else {
+    } else if maj > 2 || (maj == 2 && min >= 31) {
         Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT_SUFFIX}"))
+    } else {
+        Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT28_SUFFIX}"))
     }
 }
 

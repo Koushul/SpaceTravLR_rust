@@ -151,8 +151,7 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
         .collect();
 
     let dir = training_dir.join("lasso_coefs");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let out_path = dir.join(format!("{}_lasso_coefs.feather", gene));
     write_betadata_feather(
         out_path.to_string_lossy().as_ref(),
@@ -1912,21 +1911,14 @@ fn read_gene_performance_feather_prev(
         .with_context(|| format!("{}: missing 'gene' column", feather_path.display()))?
         .cast(&DataType::String)
         .with_context(|| format!("{}: cast gene to string", feather_path.display()))?;
-    let gca = gene_col.str().with_context(|| format!(
-        "{}: gene column not string-like",
-        feather_path.display()
-    ))?;
+    let gca = gene_col
+        .str()
+        .with_context(|| format!("{}: gene column not string-like", feather_path.display()))?;
     let lasso_ca = df
         .column("mean_lasso_r2")
-        .with_context(|| format!(
-            "{}: missing 'mean_lasso_r2'",
-            feather_path.display()
-        ))?
+        .with_context(|| format!("{}: missing 'mean_lasso_r2'", feather_path.display()))?
         .f64()
-        .with_context(|| format!(
-            "{}: mean_lasso_r2 not f64",
-            feather_path.display()
-        ))?;
+        .with_context(|| format!("{}: mean_lasso_r2 not f64", feather_path.display()))?;
     let h = df.height();
     let mut lmap: HashMap<String, f64> = HashMap::new();
     for i in 0..h {
@@ -1938,15 +1930,14 @@ fn read_gene_performance_feather_prev(
     if with_cnn {
         let cca = df
             .column("mean_cnn_r2")
-            .with_context(|| format!(
-                "{}: missing 'mean_cnn_r2' (accum tracks CNN scores)",
-                feather_path.display()
-            ))?
+            .with_context(|| {
+                format!(
+                    "{}: missing 'mean_cnn_r2' (accum tracks CNN scores)",
+                    feather_path.display()
+                )
+            })?
             .f64()
-            .with_context(|| format!(
-                "{}: mean_cnn_r2 not f64",
-                feather_path.display()
-            ))?;
+            .with_context(|| format!("{}: mean_cnn_r2 not f64", feather_path.display()))?;
         for i in 0..h {
             let key = gca.get(i).unwrap_or("").to_string();
             cmap.insert(key, cca.get(i).unwrap_or(f64::NAN));
@@ -1977,7 +1968,10 @@ fn write_gene_performance_feather_atomic(
         "gene / lasso column length mismatch"
     );
     if let Some(cc) = col_cnn {
-        anyhow::ensure!(cc.len() == genes_ordered.len(), "gene / cnn column length mismatch");
+        anyhow::ensure!(
+            cc.len() == genes_ordered.len(),
+            "gene / cnn column length mismatch"
+        );
     }
     let mut columns: Vec<Column> = vec![
         Series::new("gene".into(), genes_ordered.to_vec()).into(),
@@ -1998,13 +1992,8 @@ fn write_gene_performance_feather_atomic(
     let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
     w.finish(&mut out_df)
         .with_context(|| format!("write IPC {}", tmp.display()))?;
-    std::fs::rename(&tmp, feather_path).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            tmp.display(),
-            feather_path.display()
-        )
-    })?;
+    std::fs::rename(&tmp, feather_path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), feather_path.display()))?;
     Ok(())
 }
 
@@ -2027,8 +2016,11 @@ fn patch_gene_performance_feather_merged(
     );
     adata.close()?;
 
-    let (prev_lasso, prev_cnn_template) =
-        read_gene_performance_feather_prev(feather_path, &genes_ordered, accum.mean_cnn_r2_scores.is_some())?;
+    let (prev_lasso, prev_cnn_template) = read_gene_performance_feather_prev(
+        feather_path,
+        &genes_ordered,
+        accum.mean_cnn_r2_scores.is_some(),
+    )?;
 
     let mut col: Vec<f64> = Vec::with_capacity(n);
     for (prev, slot) in prev_lasso.iter().zip(accum.scores.iter()) {
@@ -2831,20 +2823,20 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             });
             pipeline_step_end(&hud, "precompute shared spatial feature tensors", t_sp);
 
-            let gene_mean_arc: Option<Arc<HashMap<String, f64>>> =
-                if max_ligands.is_some_and(|k| k > 0) {
-                    let t_m =
-                        pipeline_step_begin(&hud, "per-gene mean expression (full matrix pass)");
-                    let gm = compute_gene_mean_expression(
-                        setup_adata.as_ref(),
-                        layer,
-                        obs_row_subset.as_deref(),
-                    )?;
-                    pipeline_step_end(&hud, "per-gene mean expression (full matrix pass)", t_m);
-                    Some(Arc::new(gm))
-                } else {
-                    None
-                };
+            let gene_mean_arc: Option<Arc<HashMap<String, f64>>> = if max_ligands
+                .is_some_and(|k| k > 0)
+            {
+                let t_m = pipeline_step_begin(&hud, "per-gene mean expression (full matrix pass)");
+                let gm = compute_gene_mean_expression(
+                    setup_adata.as_ref(),
+                    layer,
+                    obs_row_subset.as_deref(),
+                )?;
+                pipeline_step_end(&hud, "per-gene mean expression (full matrix pass)", t_m);
+                Some(Arc::new(gm))
+            } else {
+                None
+            };
 
             let cfg_parent = config_source_path.as_deref().and_then(Path::parent);
             let (resolved_ex_mod, resolved_ex_lr) = spaceship_config
@@ -3800,14 +3792,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         let msg = if join_training {
                             format!(
                                 "gene_performance: merged {} → {} (join flock)",
-                                cols,
-                                GENE_PERFORMANCE_FEATHER_NAME
+                                cols, GENE_PERFORMANCE_FEATHER_NAME
                             )
                         } else {
                             format!(
                                 "gene_performance: wrote {} → {}",
-                                cols,
-                                GENE_PERFORMANCE_FEATHER_NAME
+                                cols, GENE_PERFORMANCE_FEATHER_NAME
                             )
                         };
                         log_line(&hud, msg);
@@ -4283,9 +4273,8 @@ mod scale_columns_tests {
 #[cfg(test)]
 mod mean_lasso_r2_patch_tests {
     use super::{
-        AnnData, AnnDataOp, ArrayData, MeanLassoR2Accum, dense_to_csr_f64,
-        patch_adata_var_mean_lasso_r2, patch_adata_var_mean_lasso_r2_locked,
-        GENE_PERFORMANCE_FEATHER_NAME,
+        AnnData, AnnDataOp, ArrayData, GENE_PERFORMANCE_FEATHER_NAME, MeanLassoR2Accum,
+        dense_to_csr_f64, patch_adata_var_mean_lasso_r2, patch_adata_var_mean_lasso_r2_locked,
     };
     use anndata_hdf5::H5;
     use ndarray::Array2;
@@ -4304,8 +4293,7 @@ mod mean_lasso_r2_patch_tests {
     static HDF5_TEST_LOCK_ENV: Once = Once::new();
 
     fn feather_path(h5ad: &std::path::Path) -> std::path::PathBuf {
-        h5ad
-            .parent()
+        h5ad.parent()
             .expect("parent")
             .join(GENE_PERFORMANCE_FEATHER_NAME)
     }
@@ -4319,9 +4307,7 @@ mod mean_lasso_r2_patch_tests {
             .collect())
     }
 
-    fn read_perf_lasso_cnn_columns(
-        h5ad: &std::path::Path,
-    ) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
+    fn read_perf_lasso_cnn_columns(h5ad: &std::path::Path) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
         let f = std::fs::File::open(feather_path(h5ad))?;
         let df = IpcReader::new(f).finish()?;
         let r2 = df.column("mean_lasso_r2")?.f64()?;

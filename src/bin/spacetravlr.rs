@@ -3,7 +3,7 @@ mod compute_backend;
 use anyhow::Context;
 use clap::builder::Styles;
 use clap::builder::styling::AnsiColor;
-use clap::{ArgAction, ColorChoice, Parser, Subcommand};
+use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum};
 use compute_backend::{
     ComputeChoice, FitAllGenesParams, compute_hardware_details, fit_all_genes_dispatch,
     select_compute_backend,
@@ -59,7 +59,8 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 
 • Load spaceship_config.toml from the repo build, install data/ next to the binary, or pass --config, then apply CLI overrides.
 • Use --plain for compact line-oriented logs instead of the full-screen dashboard (when built with `tui`).
-• Subcommand run-summary writes the HTML report without training."#;
+• Subcommand run-summary writes the HTML report without training.
+• Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run)."#;
 
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
@@ -81,6 +82,24 @@ impl From<TrainingModeArg> for CnnTrainingMode {
         match value {
             TrainingModeArg::Full => CnnTrainingMode::Full,
             TrainingModeArg::Seed => CnnTrainingMode::Seed,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MapLabelsExpressionMode {
+    #[default]
+    Auto,
+    Counts,
+    Lognorm,
+}
+
+impl MapLabelsExpressionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            MapLabelsExpressionMode::Auto => "auto",
+            MapLabelsExpressionMode::Counts => "counts",
+            MapLabelsExpressionMode::Lognorm => "lognorm",
         }
     }
 }
@@ -696,6 +715,92 @@ struct Cli {
         help = "Auto-preprocess if needed, then print terminal UMAP scatter (obsm X_umap, obs colored by cluster) and exit (requires `--h5ad`)"
     )]
     plot_umap: bool,
+
+    #[arg(
+        long = "map-labels",
+        action = ArgAction::SetTrue,
+        help_heading = "Map labels",
+        help = "MALT: transfer labels from reference .h5ad to query .h5ad (writes obs['malt_label'], plots, JSON under --map-labels-outdir; requires `uv` on PATH)."
+    )]
+    map_labels: bool,
+
+    #[arg(
+        short = 'r',
+        long = "reference",
+        value_name = "PATH",
+        help_heading = "Map labels",
+        help = "Reference AnnData .h5ad with label column in obs; use with `--map-labels`"
+    )]
+    reference: Option<PathBuf>,
+
+    #[arg(
+        short = 'q',
+        long = "query",
+        value_name = "PATH",
+        help_heading = "Map labels",
+        help = "Query AnnData .h5ad to receive predicted labels; use with `--map-labels`"
+    )]
+    query: Option<PathBuf>,
+
+    #[arg(
+        long = "map-labels-outdir",
+        value_name = "DIR",
+        default_value = "malt_out",
+        help_heading = "Map labels",
+        help = "Directory for labeled query .h5ad, marker_genes.json, run_meta.json, and figures"
+    )]
+    map_labels_outdir: PathBuf,
+
+    #[arg(
+        long = "map-labels-groupby",
+        short = 'g',
+        value_name = "OBS_COLUMN",
+        help_heading = "Map labels",
+        help = "Reference obs column for labels (default: first match among cell_type, final_annotation, …)"
+    )]
+    map_labels_groupby: Option<String>,
+
+    #[arg(
+        long = "map-labels-output-query",
+        value_name = "NAME",
+        default_value = "query_labeled.h5ad",
+        help_heading = "Map labels",
+        help = "Output filename under --map-labels-outdir for the labeled query"
+    )]
+    map_labels_output_query: String,
+
+    #[arg(
+        long = "map-labels-extra-markers",
+        value_name = "GENES",
+        help_heading = "Map labels",
+        help = "Comma-separated gene symbols appended to dotplots when present in shared genes"
+    )]
+    map_labels_extra_markers: Option<String>,
+
+    #[arg(
+        long = "map-labels-expression-mode",
+        value_enum,
+        default_value_t = MapLabelsExpressionMode::Auto,
+        help_heading = "Map labels",
+        help = "auto | counts | lognorm — how MALT resolves counts vs log-normalized expression"
+    )]
+    map_labels_expression_mode: MapLabelsExpressionMode,
+
+    #[arg(
+        long = "map-labels-counts-layer",
+        value_name = "LAYER",
+        help_heading = "Map labels",
+        help = "Use this adata.layers matrix as raw counts before normalize_total+log1p"
+    )]
+    map_labels_counts_layer: Option<String>,
+
+    #[arg(
+        long = "map-labels-prefer-raw-counts",
+        action = ArgAction::SetTrue,
+        help_heading = "Map labels",
+        help = "When resolving counts, try AnnData.raw after standard count layers"
+    )]
+    map_labels_prefer_raw_counts: bool,
 
     #[arg(
         long = "process-h5ad",
@@ -1331,6 +1436,47 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
+    let reference = cli
+        .reference
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--map-labels requires `--reference PATH` (or `-r`)"))?;
+    let query = cli
+        .query
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--map-labels requires `--query PATH` (or `-q`)"))?;
+    let reference = PathBuf::from(expand_user_path(reference.to_string_lossy().as_ref()));
+    let query = PathBuf::from(expand_user_path(query.to_string_lossy().as_ref()));
+    let outdir = PathBuf::from(expand_user_path(
+        cli.map_labels_outdir.to_string_lossy().as_ref(),
+    ));
+    std::fs::create_dir_all(&outdir)?;
+    if !reference.is_file() {
+        anyhow::bail!("Reference AnnData not found at {}.", reference.display());
+    }
+    if !query.is_file() {
+        anyhow::bail!("Query AnnData not found at {}.", query.display());
+    }
+    eprintln!(
+        "spacetravlr: map-labels (MALT) via uv; writing under {}",
+        outdir.display()
+    );
+    spacetravlr::malt_label_transfer::run_map_labels(
+        spacetravlr::malt_label_transfer::MapLabelsParams {
+            reference: &reference,
+            query: &query,
+            outdir: &outdir,
+            groupby: cli.map_labels_groupby.as_deref(),
+            output_query: &cli.map_labels_output_query,
+            extra_markers: cli.map_labels_extra_markers.as_deref(),
+            expression_mode: cli.map_labels_expression_mode.as_str(),
+            counts_layer: cli.map_labels_counts_layer.as_deref(),
+            prefer_raw_counts: cli.map_labels_prefer_raw_counts,
+        },
+    )?;
+    Ok(())
+}
+
 fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let h5ad = cli
         .h5ad
@@ -1825,6 +1971,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         return Ok(());
+    }
+
+    if cli.map_labels {
+        return run_map_labels(&cli);
     }
 
     if cli.process_h5ad {

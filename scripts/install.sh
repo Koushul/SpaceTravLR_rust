@@ -178,6 +178,7 @@ get_target() {
 
 linux_gnu_triple="x86_64-unknown-linux-gnu"
 linux_gnu_compat_suffix="-glibc2.31"
+linux_gnu_compat28_suffix="-glibc2.28"
 
 linux_set_tarball_target_for_glibc() {
     [ "$OS" = linux ] && [ "$ARCH" = x86_64 ] || return 0
@@ -186,12 +187,13 @@ linux_set_tarball_target_for_glibc() {
         case "$SPACETRAVLR_LINUX_VARIANT" in
             standard) TARGET="$base" ;;
             compat) TARGET="${base}${linux_gnu_compat_suffix}" ;;
-            *) error "Invalid SPACETRAVLR_LINUX_VARIANT; use standard or compat" ;;
+            compat28) TARGET="${base}${linux_gnu_compat28_suffix}" ;;
+            *) error "Invalid SPACETRAVLR_LINUX_VARIANT; use standard, compat, or compat28" ;;
         esac
         return 0
     fi
     if ! command -v ldd >/dev/null 2>&1; then
-        error "ldd not found (need GNU libc). Set SPACETRAVLR_LINUX_VARIANT=standard or compat to skip detection."
+        error "ldd not found (need GNU libc). Set SPACETRAVLR_LINUX_VARIANT=standard, compat, or compat28 to skip detection."
     fi
     _line="$(ldd --version 2>/dev/null | head -1)" || error "ldd --version failed"
     _ver="$(printf '%s' "$_line" | awk '{
@@ -201,15 +203,17 @@ linux_set_tarball_target_for_glibc() {
         print v
     }')"
     if [ -z "$_ver" ]; then
-        error "Could not parse glibc from: $_line — set SPACETRAVLR_LINUX_VARIANT=standard or compat"
+        error "Could not parse glibc from: $_line — set SPACETRAVLR_LINUX_VARIANT=standard, compat, or compat28"
     fi
     _maj="${_ver%%.*}"
     _rest="${_ver#*.}"
     _min="${_rest%%[^0-9]*}"
     if [ "$_maj" -gt 2 ] 2>/dev/null || { [ "$_maj" -eq 2 ] && [ "${_min:-0}" -ge 35 ] 2>/dev/null; }; then
         TARGET="$base"
-    else
+    elif [ "$_maj" -gt 2 ] 2>/dev/null || { [ "$_maj" -eq 2 ] && [ "${_min:-0}" -ge 31 ] 2>/dev/null; }; then
         TARGET="${base}${linux_gnu_compat_suffix}"
+    else
+        TARGET="${base}${linux_gnu_compat28_suffix}"
     fi
 }
 
@@ -489,7 +493,7 @@ show_help() {
     _row "INSTALL_VERIFY_CHECKSUM=0" "Skip SHA256 verification (unsafe)"
     _row "INSTALL_SKIP_GRN_DATA=1" "Skip downloading human_network.parquet / mouse_network.parquet"
     _row "INSTALL_REFRESH_GRN_DATA=1" "Re-download GRN parquet and spaceship_config.toml even if already present"
-    _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat (Linux x86_64; overrides glibc probe)"
+    _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat | compat28 (Linux x86_64; overrides glibc probe)"
     _row "SPACETRAVLR_INSTALL_COLOR=1" "Enable ANSI colors (default off; use with --color)"
     _row "NO_COLOR" "Set (any value) to disable colors per no-color.org"
     _row "UNAME_S / UNAME_M" "Override platform detection (tests)"

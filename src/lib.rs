@@ -28,6 +28,7 @@ pub mod foyer_perturb_cache;
 pub mod grn_extra;
 pub mod lasso;
 pub mod ligand;
+pub mod malt_label_transfer;
 pub mod model;
 mod modulator_scale;
 pub mod network;
@@ -57,8 +58,8 @@ pub use betadata::{
     write_betadata_feather_to_writer,
 };
 pub use config::{
-    CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode,
-    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
+    CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME,
+    SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
     default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
     mix_execution_random_seed, normalize_ui_path, resolve_spaceship_config_toml_path,
     resolve_training_target_genes,
@@ -71,8 +72,8 @@ pub use estimator::{
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
-    GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator,
-    gene_performance_feather_path, materialize_canonical_training_adata,
-    read_h5ad_expression_dense_f64, read_h5ad_obs_column_str, read_h5ad_var_names,
+    GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator, gene_performance_feather_path,
+    materialize_canonical_training_adata, read_h5ad_expression_dense_f64, read_h5ad_obs_column_str,
+    read_h5ad_var_names,
 };
 pub use training_hud::RunConfigSummary;
