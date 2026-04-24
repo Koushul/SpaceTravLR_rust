@@ -1,5 +1,5 @@
 //! Opt-in self-update: only used when the user runs `spacetravlr --update`.
-//! Naming matches `scripts/install.sh` (see `GITHUB_REPO`, `tarball_name`, `prebuilt_tarball_target`).
+//! Naming matches `scripts/install.sh` (see `GITHUB_REPO`, `tarball_name`, `prebuilt_tarball_target`, raw `data/` + `scripts/malt_label_transfer.py` sync).
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -212,6 +212,46 @@ fn github_repo_slug() -> String {
         .unwrap_or_else(|| GITHUB_REPO.to_string())
 }
 
+/// Writes `install_dir/data/malt_label_transfer.py` from raw GitHub, matching `install_malt_label_transfer_py` in `scripts/install.sh` (release tag, then `main`).
+fn sync_malt_label_transfer_py(install_dir: &Path, version_tag: &str) {
+    let repo = github_repo_slug();
+    let data_dir = install_dir.join("data");
+    let dest = data_dir.join("malt_label_transfer.py");
+    let part = data_dir.join("malt_label_transfer.py.part");
+
+    let res = (|| -> Result<()> {
+        fs::create_dir_all(&data_dir).with_context(|| format!("mkdir {}", data_dir.display()))?;
+        let tag = version_tag.trim();
+        let mut last_err: Option<anyhow::Error> = None;
+        for ref_name in [tag, "main"] {
+            let url = format!(
+                "https://raw.githubusercontent.com/{repo}/{ref_name}/scripts/malt_label_transfer.py"
+            );
+            if part.exists() {
+                fs::remove_file(&part).ok();
+            }
+            match download_to_path(&url, &part) {
+                Ok(()) => {
+                    fs::rename(&part, &dest)
+                        .with_context(|| format!("install {}", dest.display()))?;
+                    eprintln!("Updated {}", dest.display());
+                    return Ok(());
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no download attempts")))
+    })();
+
+    if let Err(e) = res {
+        eprintln!(
+            "Warning: could not refresh malt_label_transfer.py (tried tag {version_tag:?} and main): {e}\n\
+             Copy scripts/malt_label_transfer.py into {} or use a checkout; map-labels falls back to the embedded script if missing.",
+            data_dir.display()
+        );
+    }
+}
+
 /// Writes `install_dir/data/spaceship_config.toml` from raw GitHub, matching `install_spaceship_config_toml` in `scripts/install.sh` (release tag, then `main`).
 fn sync_spaceship_config_toml(install_dir: &Path, version_tag: &str) {
     let repo = github_repo_slug();
@@ -374,6 +414,7 @@ pub fn run(update_version: Option<&str>) -> Result<()> {
     }
 
     sync_spaceship_config_toml(&install_dir, remote_tag);
+    sync_malt_label_transfer_py(&install_dir, remote_tag);
 
     fs::remove_dir_all(&tmp_root).ok();
 

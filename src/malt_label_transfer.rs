@@ -1,7 +1,11 @@
 //! Marker-aware label transfer (MALT): runs [`scripts/malt_label_transfer.py`] in an isolated **`uv`** env.
+//! Prefers on-disk `malt_label_transfer.py` from [`crate::config::resolve_malt_label_transfer_py_path`]
+//! (e.g. `data/` next to the binary after `install.sh`); falls back to the copy embedded at build time.
 
+use crate::config::resolve_malt_label_transfer_py_path;
 use crate::scanpy_preprocess::uv_python_stdin;
 use anyhow::Context;
+use std::fs;
 use std::path::Path;
 
 const MALT_SCRIPT: &str = include_str!(concat!(
@@ -81,9 +85,14 @@ pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
     }
 
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let script = if let Some(p) = resolve_malt_label_transfer_py_path() {
+        fs::read_to_string(&p).with_context(|| format!("read MALT script {}", p.display()))?
+    } else {
+        MALT_SCRIPT.to_string()
+    };
     uv_python_stdin(
         UV_WITH_MAP_LABELS,
-        MALT_SCRIPT,
+        &script,
         &argv_refs,
         false,
         "map-labels (MALT)",

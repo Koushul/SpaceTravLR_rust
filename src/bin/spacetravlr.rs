@@ -216,7 +216,7 @@ struct Cli {
         long,
         action = ArgAction::SetTrue,
         help_heading = "Install",
-        help = "Download the latest release and replace spacetravlr, spacetravlr-perturb, and spatial_viewer next to this executable; also refreshes data/spaceship_config.toml from GitHub (same layout as install.sh). Opt-in; uses the network only when you pass this flag. Requires build with `self-update`."
+        help = "Download the latest release and replace spacetravlr, spacetravlr-perturb, and spatial_viewer next to this executable; also refreshes data/spaceship_config.toml and data/malt_label_transfer.py from GitHub (same layout as install.sh). Opt-in; uses the network only when you pass this flag. Requires build with `self-update`."
     )]
     update: bool,
 

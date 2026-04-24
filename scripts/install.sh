@@ -2,7 +2,8 @@
 # SpaceTravLR CLI installer — keep tarball names in sync with src/self_update.rs
 # (GITHUB_REPO, tarball_name, LINUX_GNU_*, prebuilt_tarball_target).
 # After binaries: downloads human_network.parquet + mouse_network.parquet + spaceship_config.toml
-# into INSTALL_DIR/data/ from raw.githubusercontent.com (release tag, then main).
+# + scripts/malt_label_transfer.py (as data/malt_label_transfer.py) into INSTALL_DIR/data/ from
+# raw.githubusercontent.com (release tag, then main).
 # curl -fsSL …/install.sh | sh
 set -e
 
@@ -314,7 +315,7 @@ install_release() {
 }
 
 # GRN parquet files for training (same search path as spacetravlr: install_dir/data/).
-# Keep raw URL logic in sync with `src/self_update.rs` (`sync_spaceship_config_toml` runs on `spacetravlr --update`).
+# Keep raw URL logic in sync with `src/self_update.rs` (`sync_*` runs on `spacetravlr --update`).
 install_spaceship_config_toml() {
     DATA_DIR="${INSTALL_DIR}/data"
     mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
@@ -340,6 +341,31 @@ install_spaceship_config_toml() {
     fi
 }
 
+install_malt_label_transfer_py() {
+    DATA_DIR="${INSTALL_DIR}/data"
+    mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
+    _dest="${DATA_DIR}/malt_label_transfer.py"
+    if [ -f "$_dest" ]; then
+        _sz=$(wc -c < "$_dest" 2>/dev/null | tr -d '[:space:]' || echo 0)
+        if [ "${INSTALL_REFRESH_GRN_DATA:-0}" != "1" ] && [ "${_sz:-0}" -gt 8000 ] 2>/dev/null; then
+            return 0
+        fi
+    fi
+    _ok=0
+    for ref in "$VERSION" main; do
+        _url="https://raw.githubusercontent.com/${REPO}/${ref}/scripts/malt_label_transfer.py"
+        if curl -fsSL "$_url" -o "${_dest}.part" 2>/dev/null; then
+            mv "${_dest}.part" "$_dest"
+            _ok=1
+            break
+        fi
+        rm -f "${_dest}.part"
+    done
+    if [ "$_ok" != "1" ]; then
+        warn "Could not download malt_label_transfer.py from GitHub (tried tag ${VERSION} and main). map-labels uses the embedded script; copy scripts/malt_label_transfer.py into ${DATA_DIR}/ to override."
+    fi
+}
+
 install_grn_data() {
     DATA_DIR="${INSTALL_DIR}/data"
     mkdir -p "$DATA_DIR" || error "Could not create ${DATA_DIR}"
@@ -350,6 +376,12 @@ install_grn_data() {
         progress_line 91 "spaceship_config.toml at ${DATA_DIR}/"
     fi
 
+    progress_line 92 "Downloading malt_label_transfer.py (map-labels)…"
+    install_malt_label_transfer_py
+    if [ -f "${DATA_DIR}/malt_label_transfer.py" ]; then
+        progress_line 93 "malt_label_transfer.py at ${DATA_DIR}/"
+    fi
+
     if [ "${INSTALL_SKIP_GRN_DATA:-0}" = "1" ]; then
         progress_line 95 "Skipping GRN parquet download (INSTALL_SKIP_GRN_DATA=1)"
         [ "$QUIET" -eq 0 ] && info "  Skipping human_network.parquet / mouse_network.parquet (set SPACETRAVLR_DATA_DIR or copy data/ yourself)"
@@ -357,7 +389,7 @@ install_grn_data() {
         return 0
     fi
 
-    progress_line 92 "Downloading GRN parquet (human_network, mouse_network) from GitHub…"
+    progress_line 94 "Downloading GRN parquet (human_network, mouse_network) from GitHub…"
     _failed=0
     for f in human_network.parquet mouse_network.parquet; do
         _dest="${DATA_DIR}/${f}"
@@ -384,7 +416,7 @@ install_grn_data() {
     done
 
     if [ "$_failed" -eq 0 ]; then
-        progress_line 97 "Bundle ready at ${DATA_DIR} (GRN parquets + spaceship_config.toml next to the binary)"
+        progress_line 97 "Bundle ready at ${DATA_DIR} (GRN parquets + spaceship_config.toml + malt_label_transfer.py next to the binary)"
     else
         progress_line 97 "Install finished (GRN files incomplete — see warning above)"
     fi
@@ -431,7 +463,7 @@ dry_run() {
     progress_line 100 "Dry run"
     printf '  REPO=%s\n  VERSION=%s\n  TARGET=%s\n  TAR=%s\n  INSTALL_DIR=%s\n' \
         "$REPO" "$VERSION" "$TARGET" "$(tarball_basename)" "$INSTALL_DIR"
-    printf '  Bundle → %s/data/ (spaceship_config.toml + human_network.parquet + mouse_network.parquet from GitHub raw, tag then main)\n' \
+    printf '  Bundle → %s/data/ (spaceship_config.toml + malt_label_transfer.py + human_network.parquet + mouse_network.parquet from GitHub raw, tag then main)\n' \
         "$INSTALL_DIR"
     info "Unset INSTALL_DRY_RUN to install."
 }
@@ -492,7 +524,7 @@ show_help() {
     _row "INSTALL_TEST_VERSION=v..." "Pin release tag (e.g. tests)"
     _row "INSTALL_VERIFY_CHECKSUM=0" "Skip SHA256 verification (unsafe)"
     _row "INSTALL_SKIP_GRN_DATA=1" "Skip downloading human_network.parquet / mouse_network.parquet"
-    _row "INSTALL_REFRESH_GRN_DATA=1" "Re-download GRN parquet and spaceship_config.toml even if already present"
+    _row "INSTALL_REFRESH_GRN_DATA=1" "Re-download GRN parquet, spaceship_config.toml, and malt_label_transfer.py even if already present"
     _row "SPACETRAVLR_LINUX_VARIANT" "standard | compat | compat28 (Linux x86_64; overrides glibc probe)"
     _row "SPACETRAVLR_INSTALL_COLOR=1" "Enable ANSI colors (default off; use with --color)"
     _row "NO_COLOR" "Set (any value) to disable colors per no-color.org"
