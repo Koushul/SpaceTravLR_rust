@@ -15,6 +15,7 @@ const MALT_SCRIPT: &str = include_str!(concat!(
 
 pub const UV_WITH_MAP_LABELS: &[&str] = &[
     "numpy<2",
+    "pandas",
     "anndata>=0.11",
     "scipy",
     "scanpy",
@@ -30,7 +31,7 @@ pub struct MapLabelsParams<'a> {
     pub reference: &'a Path,
     pub query: &'a Path,
     pub outdir: &'a Path,
-    pub groupby: Option<&'a str>,
+    pub groupby: &'a [String],
     pub output_query: &'a str,
     pub extra_markers: Option<&'a str>,
     pub expression_mode: &'a str,
@@ -66,9 +67,9 @@ pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
         "--expression-mode".into(),
         params.expression_mode.into(),
     ];
-    if let Some(g) = params.groupby {
+    for g in params.groupby {
         argv.push("--groupby".into());
-        argv.push(g.into());
+        argv.push(g.clone());
     }
     if let Some(ex) = params.extra_markers {
         if !ex.trim().is_empty() {

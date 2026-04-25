@@ -143,6 +143,14 @@ q.write_h5ad(sys.argv[2])
 
     let labeled = outdir.join("query_labeled.h5ad");
     assert!(labeled.is_file(), "missing {}", labeled.display());
+    let labels_csv = outdir.join("malt_labels.csv");
+    assert!(labels_csv.is_file(), "missing {}", labels_csv.display());
+    let csv_head = std::fs::read_to_string(&labels_csv).expect("read malt_labels.csv");
+    assert!(
+        csv_head.starts_with("obs_name,"),
+        "expected obs_name index column in csv header, got: {:?}",
+        csv_head.lines().next()
+    );
     let marker_json = outdir.join("marker_genes.json");
     assert!(marker_json.is_file());
 

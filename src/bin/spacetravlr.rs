@@ -720,7 +720,7 @@ struct Cli {
         long = "map-labels",
         action = ArgAction::SetTrue,
         help_heading = "Map labels",
-        help = "MALT: transfer labels from reference .h5ad to query .h5ad (writes obs['malt_label'], plots, JSON under --map-labels-outdir; requires `uv` on PATH)."
+        help = "MALT: transfer labels from reference .h5ad to query .h5ad (writes obs['malt_label'], malt_labels.csv indexed by obs_name, plots, JSON under --map-labels-outdir; requires `uv` on PATH)."
     )]
     map_labels: bool,
 
@@ -755,10 +755,11 @@ struct Cli {
         long = "map-labels-groupby",
         short = 'g',
         value_name = "OBS_COLUMN",
+        action = ArgAction::Append,
         help_heading = "Map labels",
-        help = "Reference obs column for labels (default: first match among cell_type, final_annotation, …)"
+        help = "Reference obs column(s) for labels; comma-separated in one flag (e.g. -g cell_type,cell_type_fine) and/or repeat -g for multiple independent MALT runs (suffixed obs + CSV when >1 column). Omit for a single inferred column (cell_type, final_annotation, …)"
     )]
-    map_labels_groupby: Option<String>,
+    map_labels_groupby: Vec<String>,
 
     #[arg(
         long = "map-labels-output-query",
@@ -1436,6 +1437,17 @@ fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn expand_map_labels_groupby_columns(columns: &[String]) -> Vec<String> {
+    columns
+        .iter()
+        .flat_map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+        })
+        .collect()
+}
+
 fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
     let reference = cli
         .reference
@@ -1461,12 +1473,13 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
         "spacetravlr: map-labels (MALT) via uv; writing under {}",
         outdir.display()
     );
+    let groupby_expanded = expand_map_labels_groupby_columns(&cli.map_labels_groupby);
     spacetravlr::malt_label_transfer::run_map_labels(
         spacetravlr::malt_label_transfer::MapLabelsParams {
             reference: &reference,
             query: &query,
             outdir: &outdir,
-            groupby: cli.map_labels_groupby.as_deref(),
+            groupby: &groupby_expanded,
             output_query: &cli.map_labels_output_query,
             extra_markers: cli.map_labels_extra_markers.as_deref(),
             expression_mode: cli.map_labels_expression_mode.as_str(),
