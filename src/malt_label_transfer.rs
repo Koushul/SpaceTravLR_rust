@@ -16,6 +16,7 @@ const MALT_SCRIPT: &str = include_str!(concat!(
 pub const UV_WITH_MAP_LABELS: &[&str] = &[
     "numpy<2",
     "pandas",
+    "pyarrow",
     "anndata>=0.11",
     "scipy",
     "scanpy",
@@ -37,6 +38,10 @@ pub struct MapLabelsParams<'a> {
     pub expression_mode: &'a str,
     pub counts_layer: Option<&'a str>,
     pub prefer_raw_counts: bool,
+    pub ref_betadata_dir: Option<&'a Path>,
+    pub query_betadata_dir: Option<&'a Path>,
+    pub query_grn_cluster_obs: Option<&'a str>,
+    pub grn_loss_weight: f64,
 }
 
 pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
@@ -83,6 +88,26 @@ pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
     }
     if params.prefer_raw_counts {
         argv.push("--prefer-raw-counts".into());
+    }
+    if let Some(p) = params.ref_betadata_dir {
+        let s = p.to_str().with_context(|| format!("ref betadata path UTF-8: {}", p.display()))?;
+        argv.push("--ref-betadata-dir".into());
+        argv.push(s.into());
+    }
+    if let Some(p) = params.query_betadata_dir {
+        let s = p.to_str().with_context(|| format!("query betadata path UTF-8: {}", p.display()))?;
+        argv.push("--query-betadata-dir".into());
+        argv.push(s.into());
+    }
+    if params.ref_betadata_dir.is_some() && params.query_betadata_dir.is_some() {
+        argv.push("--grn-loss-weight".into());
+        argv.push(params.grn_loss_weight.to_string());
+    }
+    if let Some(col) = params.query_grn_cluster_obs {
+        if !col.trim().is_empty() {
+            argv.push("--query-grn-cluster-obs".into());
+            argv.push(col.into());
+        }
     }
 
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();

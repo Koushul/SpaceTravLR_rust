@@ -804,6 +804,39 @@ struct Cli {
     map_labels_prefer_raw_counts: bool,
 
     #[arg(
+        long = "map-labels-ref-betadata-dir",
+        value_name = "DIR",
+        help_heading = "Map labels",
+        help = "Reference training output dir with *_betadata.feather (seed-only); with query dir + cluster obs + --map-labels-grn-weight > 0, MALT adds a TF-beta profile alignment term"
+    )]
+    map_labels_ref_betadata_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "map-labels-query-betadata-dir",
+        value_name = "DIR",
+        help_heading = "Map labels",
+        help = "Query training output dir with *_betadata.feather for the same marker targets as MALT"
+    )]
+    map_labels_query_betadata_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "map-labels-query-grn-cluster-obs",
+        value_name = "OBS_COLUMN",
+        help_heading = "Map labels",
+        help = "Query obs column matching betadata Cluster keys (e.g. leiden used when training the query run)"
+    )]
+    map_labels_query_grn_cluster_obs: Option<String>,
+
+    #[arg(
+        long = "map-labels-grn-weight",
+        value_name = "FLOAT",
+        default_value_t = 0.0_f64,
+        help_heading = "Map labels",
+        help = "Weight on GRN (TF beta) profile MSE in MALT (0 disables). Requires ref + query betadata dirs and --map-labels-query-grn-cluster-obs"
+    )]
+    map_labels_grn_weight: f64,
+
+    #[arg(
         long = "process-h5ad",
         alias = "process_h5ad",
         action = ArgAction::SetTrue,
@@ -1469,11 +1502,38 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
     if !query.is_file() {
         anyhow::bail!("Query AnnData not found at {}.", query.display());
     }
+    if cli.map_labels_grn_weight > 0.0 {
+        if cli.map_labels_ref_betadata_dir.is_none()
+            || cli.map_labels_query_betadata_dir.is_none()
+        {
+            anyhow::bail!(
+                "--map-labels-grn-weight > 0 requires --map-labels-ref-betadata-dir and --map-labels-query-betadata-dir"
+            );
+        }
+        let obs_ok = cli
+            .map_labels_query_grn_cluster_obs
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !obs_ok {
+            anyhow::bail!(
+                "--map-labels-grn-weight > 0 requires --map-labels-query-grn-cluster-obs (query obs column matching betadata Cluster keys)"
+            );
+        }
+    }
     eprintln!(
         "spacetravlr: map-labels (MALT) via uv; writing under {}",
         outdir.display()
     );
     let groupby_expanded = expand_map_labels_groupby_columns(&cli.map_labels_groupby);
+    let ref_bd = cli
+        .map_labels_ref_betadata_dir
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
+    let q_bd = cli
+        .map_labels_query_betadata_dir
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
     spacetravlr::malt_label_transfer::run_map_labels(
         spacetravlr::malt_label_transfer::MapLabelsParams {
             reference: &reference,
@@ -1485,6 +1545,10 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
             expression_mode: cli.map_labels_expression_mode.as_str(),
             counts_layer: cli.map_labels_counts_layer.as_deref(),
             prefer_raw_counts: cli.map_labels_prefer_raw_counts,
+            ref_betadata_dir: ref_bd.as_deref(),
+            query_betadata_dir: q_bd.as_deref(),
+            query_grn_cluster_obs: cli.map_labels_query_grn_cluster_obs.as_deref(),
+            grn_loss_weight: cli.map_labels_grn_weight,
         },
     )?;
     Ok(())

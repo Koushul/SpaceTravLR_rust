@@ -56,6 +56,14 @@ fn help_lists_process_h5ad_and_impute() {
         s.contains("--map-labels-outdir"),
         "expected --map-labels-outdir in help:\n{s}"
     );
+    assert!(
+        s.contains("--map-labels-ref-betadata-dir"),
+        "expected --map-labels-ref-betadata-dir in help:\n{s}"
+    );
+    assert!(
+        s.contains("--map-labels-grn-weight"),
+        "expected --map-labels-grn-weight in help:\n{s}"
+    );
 }
 
 #[test]

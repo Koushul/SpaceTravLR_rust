@@ -31,11 +31,19 @@ CLI:
   all MALT output columns for every grouping in one file.
 
   Optional expression handling (see --expression-mode, --counts-layer, --prefer-raw-counts).
+
+  Optional GRN / regulatory alignment: pass seed-only training dirs with ``*_betadata.feather``
+  from reference and query (``--ref-betadata-dir``, ``--query-betadata-dir``), the query obs column
+  whose values match betadata ``Cluster`` rows (``--query-grn-cluster-obs``), and
+  ``--grn-loss-weight`` > 0. MALT then adds an MSE term between predicted cell-type TF-beta profiles
+  and per-cell query TF-beta profiles (TF-only columns ``beta_<TF>``). ``run_meta.json`` includes
+  a cosine similarity matrix between reference types' mean TF profiles (hypothesis diagnostic).
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -53,6 +61,7 @@ import scanpy as sc
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
+import pyarrow.feather as pf
 from scipy.stats import pearsonr
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
@@ -370,6 +379,183 @@ def prepare_expression_inplace(
     return meta
 
 
+def _betadata_label_column(col_names: list[str]) -> str | None:
+    for key in ("Cluster", "CellID"):
+        if key in col_names:
+            return key
+    return None
+
+
+def _beta_tf_column_pairs(col_names: list[str]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for n in col_names:
+        if not n.startswith("beta_") or n in ("beta0", "beta_0"):
+            continue
+        plain = n[len("beta_") :]
+        if "$" in plain:
+            continue
+        pairs.append((n, plain))
+    return pairs
+
+
+def _accum_tf_union_from_dir(
+    betadata_dir: str, target_genes: set[str]
+) -> tuple[list[str], list[str]]:
+    """Return (ordered_tf_names, skip_reasons) by scanning all matching feathers once."""
+    paths = sorted(glob.glob(os.path.join(betadata_dir, "*_betadata.feather")))
+    tf_set: set[str] = set()
+    skipped: list[str] = []
+    for fp in paths:
+        gene = os.path.basename(fp)[: -len("_betadata.feather")]
+        if gene not in target_genes:
+            continue
+        try:
+            t = pf.read_table(fp)
+        except Exception as e:
+            skipped.append(f"{gene}: read {e}")
+            continue
+        pairs = _beta_tf_column_pairs(t.column_names)
+        if not pairs:
+            skipped.append(f"{gene}: no beta_TF columns")
+            continue
+        for _, tf in pairs:
+            tf_set.add(tf)
+    tf_union = sorted(tf_set)
+    return tf_union, skipped
+
+
+def _read_gene_tf_block(
+    betadata_dir: str,
+    gene: str,
+    tf_union: list[str],
+) -> tuple[dict[str, np.ndarray], list[str]]:
+    """
+    Read one feather; return map cluster_key -> beta vector aligned to tf_union (zeros if TF absent).
+    """
+    fp = os.path.join(betadata_dir, f"{gene}_betadata.feather")
+    if not os.path.isfile(fp):
+        return {}, [f"{gene}: missing file"]
+    t = pf.read_table(fp)
+    names = t.column_names
+    label_col = _betadata_label_column(names)
+    if label_col is None:
+        return {}, [f"{gene}: no Cluster/CellID"]
+    pairs = _beta_tf_column_pairs(names)
+    if not pairs:
+        return {}, [f"{gene}: no beta_TF columns"]
+    data_cols = [p[0] for p in pairs]
+    tfs_here = [p[1] for p in pairs]
+    sub = t.select([label_col] + data_cols).to_pandas()
+    labels = sub[label_col].astype(str).str.strip().values
+    beta = sub[data_cols].to_numpy(dtype=np.float64)
+    tf_i_local = {tf: j for j, tf in enumerate(tfs_here)}
+    n_tf = len(tf_union)
+    tf_idx = {tf: j for j, tf in enumerate(tf_union)}
+    out: dict[str, np.ndarray] = {}
+    for ri in range(len(labels)):
+        key = str(labels[ri])
+        vec = np.zeros(n_tf, dtype=np.float32)
+        row = beta[ri]
+        for j, tf in enumerate(tfs_here):
+            vec[tf_idx[tf]] = float(row[j])
+        out[key] = vec
+    return out, []
+
+
+def build_ref_grn_profiles(
+    betadata_dir: str,
+    cell_types: list[str],
+    target_genes: list[str],
+) -> tuple[np.ndarray, list[str], dict]:
+    """
+    Mean TF-beta vector per reference cell type: average over target genes of the Cluster row
+    matching that type (string match on Cluster column in each *_betadata.feather).
+    """
+    want = set(target_genes)
+    tf_union, skipped = _accum_tf_union_from_dir(betadata_dir, want)
+    if not tf_union:
+        raise RuntimeError(
+            f"No TF beta columns under {betadata_dir!r} for given targets. Skips: {skipped[:12]}"
+        )
+    n_ct = len(cell_types)
+    n_tf = len(tf_union)
+    acc = np.zeros((n_ct, n_tf), dtype=np.float64)
+    counts = np.zeros(n_ct, dtype=np.int64)
+    per_gene_skips: list[str] = []
+    for g in target_genes:
+        if g not in want:
+            continue
+        by_cluster, sk = _read_gene_tf_block(betadata_dir, g, tf_union)
+        per_gene_skips.extend(sk)
+        if not by_cluster:
+            continue
+        for ci, ct in enumerate(cell_types):
+            k = str(ct)
+            if k in by_cluster:
+                acc[ci] += by_cluster[k]
+                counts[ci] += 1
+            else:
+                for alt, vec in by_cluster.items():
+                    if alt == k or alt.lower() == k.lower():
+                        acc[ci] += vec
+                        counts[ci] += 1
+                        break
+    prof = np.zeros_like(acc, dtype=np.float32)
+    hit = counts > 0
+    prof[hit] = (acc[hit] / counts[hit, None]).astype(np.float32)
+    meta = {
+        "betadata_dir": betadata_dir,
+        "n_tf_modulators": n_tf,
+        "genes_with_hits": int((counts > 0).sum()),
+        "skipped": (skipped + per_gene_skips)[:30],
+    }
+    return prof, tf_union, meta
+
+
+def build_query_grn_profiles(
+    betadata_dir: str,
+    query_cluster_labels: np.ndarray,
+    target_genes: list[str],
+    tf_union: list[str],
+) -> tuple[np.ndarray, dict]:
+    """
+    Per query cell: mean over target genes of TF betas for the row whose Cluster matches
+    that cell's cluster label (from training / obs column).
+    """
+    want = set(target_genes)
+    n_q = len(query_cluster_labels)
+    n_tf = len(tf_union)
+    acc = np.zeros((n_q, n_tf), dtype=np.float64)
+    counts = np.zeros(n_q, dtype=np.int64)
+    per_gene_skips: list[str] = []
+    for g in target_genes:
+        if g not in want:
+            continue
+        by_cluster, sk = _read_gene_tf_block(betadata_dir, g, tf_union)
+        per_gene_skips.extend(sk)
+        if not by_cluster:
+            continue
+        for i in range(n_q):
+            k = str(query_cluster_labels[i]).strip()
+            if k in by_cluster:
+                acc[i] += by_cluster[k]
+                counts[i] += 1
+            else:
+                for alt, vec in by_cluster.items():
+                    if alt == k or alt.lower() == k.lower():
+                        acc[i] += vec
+                        counts[i] += 1
+                        break
+    prof = np.zeros_like(acc, dtype=np.float32)
+    hit = counts > 0
+    prof[hit] = (acc[hit] / counts[hit, None]).astype(np.float32)
+    meta = {
+        "cells_with_zero_genes": int((counts == 0).sum()),
+        "skipped": per_gene_skips[:20],
+    }
+    return prof, meta
+
+
 def run_malt(
     reference_path: str,
     query_path: str,
@@ -380,6 +566,10 @@ def run_malt(
     expression_mode: str = "auto",
     counts_layer: str | None = None,
     prefer_raw_counts: bool = False,
+    ref_betadata_dir: str | None = None,
+    query_betadata_dir: str | None = None,
+    query_grn_cluster_obs: str | None = None,
+    grn_loss_weight: float = 0.0,
 ) -> None:
     os.makedirs(outdir, exist_ok=True)
     extra_dotplot_markers = extra_dotplot_markers or []
@@ -473,6 +663,33 @@ def run_malt(
     print(f"  Genes: {len(shared)} | Ref: {ref.shape[0]} | Query: {n_q}")
     print(f"  Groupby runs ({len(gb_loop)}): {[_resolve_groupby(ref, g) for g in gb_loop]}")
 
+    use_grn = (
+        bool(ref_betadata_dir)
+        and bool(query_betadata_dir)
+        and bool(query_grn_cluster_obs)
+        and grn_loss_weight != 0.0
+        and os.path.isdir(str(ref_betadata_dir))
+        and os.path.isdir(str(query_betadata_dir))
+    )
+    if ref_betadata_dir or query_betadata_dir:
+        if not use_grn:
+            print(
+                "  [GRN] Skipping: need --ref-betadata-dir, --query-betadata-dir, "
+                "--query-grn-cluster-obs, and non-zero --grn-loss-weight."
+            )
+    if use_grn:
+        assert ref_betadata_dir and query_betadata_dir and query_grn_cluster_obs
+        if query_grn_cluster_obs not in query.obs.columns:
+            raise KeyError(
+                f"--query-grn-cluster-obs {query_grn_cluster_obs!r} not in query.obs"
+            )
+        print(
+            f"  [GRN] Aligning seed-only TF betas from:\n"
+            f"        ref:   {ref_betadata_dir}\n"
+            f"        query: {query_betadata_dir}\n"
+            f"        loss weight={grn_loss_weight}, query cluster col={query_grn_cluster_obs!r}"
+        )
+
     def calc_r2(adata, col, ref_ln_arr, ref_lab, mgenes, amk, midx):
         res, vals = {}, []
         pred = adata.obs[col].astype(str).values
@@ -565,6 +782,48 @@ def run_malt(
 
         print(f"\n  Unique markers: {len(all_mk)}, mask pairs: {int(mk_mask.sum())}")
 
+        ref_rel_g = None
+        q_rel_g = None
+        alpha_g = 0.0
+        grn_bundle: dict | None = None
+        if use_grn and all_mk:
+            ref_grn_mu, tf_names, grn_meta_ref = build_ref_grn_profiles(
+                str(ref_betadata_dir), cell_types, all_mk
+            )
+            q_lab = query.obs[str(query_grn_cluster_obs)].astype(str).values
+            q_grn_mu, grn_meta_q = build_query_grn_profiles(
+                str(query_betadata_dir), q_lab, all_mk, tf_names
+            )
+            g_mean = ref_grn_mu.mean(axis=0, keepdims=True)
+            g_std = ref_grn_mu.std(axis=0, keepdims=True) + 1e-6
+            ref_rel_g = ((ref_grn_mu - g_mean) / g_std).astype(np.float32)
+            q_rel_g = ((q_grn_mu - g_mean) / g_std).astype(np.float32)
+            alpha_g = float(grn_loss_weight)
+            grn_bundle = {
+                "tf_columns_n": len(tf_names),
+                "reference": grn_meta_ref,
+                "query": grn_meta_q,
+            }
+            n_tf = ref_rel_g.shape[1]
+            sim = np.eye(n_ct, dtype=np.float32)
+            for i in range(n_ct):
+                for j in range(i + 1, n_ct):
+                    a = ref_grn_mu[i]
+                    b = ref_grn_mu[j]
+                    na = float(np.linalg.norm(a) + 1e-8)
+                    nb = float(np.linalg.norm(b) + 1e-8)
+                    c = float(np.dot(a, b) / (na * nb))
+                    sim[i, j] = c
+                    sim[j, i] = c
+            grn_bundle["type_cosine_similarity"] = {
+                "cell_types": cell_types,
+                "matrix": sim.tolist(),
+            }
+            print(
+                f"  [GRN] TF modulator columns={len(tf_names)} | "
+                f"types with ≥1 gene betadata: {grn_meta_ref.get('genes_with_hits', 0)}"
+            )
+
         print("\n" + "=" * 60)
         print("STEP 3: PCA + KNN")
         print("=" * 60)
@@ -651,6 +910,16 @@ def run_malt(
         mmask_t = torch.tensor(mk_mask, dtype=torch.float32, device=dev)
         knn_t = torch.tensor(knn_p, dtype=torch.float32, device=dev)
         cll_t = torch.tensor(cell_ll, dtype=torch.float32, device=dev)
+        ref_rel_g_t = (
+            torch.tensor(ref_rel_g, dtype=torch.float32, device=dev)
+            if ref_rel_g is not None
+            else None
+        )
+        q_rel_g_t = (
+            torch.tensor(q_rel_g, dtype=torch.float32, device=dev)
+            if q_rel_g is not None
+            else None
+        )
 
         logits = torch.tensor(
             np.log(init_p + 1e-8), dtype=torch.float32, device=dev, requires_grad=True
@@ -668,16 +937,22 @@ def run_malt(
 
         n_mp = float(mmask_t.sum().item())
         n_mp = max(n_mp, 1.0)
-        hist = {k: [] for k in ["total", "profile", "cell", "knn", "entropy"]}
+        hist_keys = ["total", "profile", "cell", "knn", "entropy"]
+        if ref_rel_g_t is not None:
+            hist_keys.append("grn")
+        hist = {k: [] for k in hist_keys}
         best_l, best_lg = float("inf"), None
         pat, pat_ctr = 60, 0
 
         q_global_mean_t = q_mk_t.mean(0)
         q_global_std_t = q_mk_t.std(0) + 1e-6
 
-        print(
-            f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, entropy={alpha_e}\n"
+        wstr = (
+            f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, entropy={alpha_e}"
         )
+        if alpha_g > 0.0:
+            wstr += f", grn={alpha_g}"
+        print(wstr + "\n")
 
         for ep in range(800):
             opt.zero_grad()
@@ -697,6 +972,13 @@ def run_malt(
             Le = -(p * lp).sum(1).mean()
 
             loss = alpha_p * Lp + alpha_c * Lc + alpha_k * Lk + alpha_e * Le
+            Lg_item = 0.0
+            if ref_rel_g_t is not None and q_rel_g_t is not None and alpha_g > 0.0:
+                qprof_g = (p.T @ q_rel_g_t) / tw.unsqueeze(1)
+                Lg = ((qprof_g - ref_rel_g_t) ** 2).mean()
+                loss = loss + alpha_g * Lg
+                Lg_item = Lg.item()
+
             loss.backward()
             opt.step()
             sched.step()
@@ -707,6 +989,8 @@ def run_malt(
             hist["cell"].append(Lc.item())
             hist["knn"].append(Lk.item())
             hist["entropy"].append(Le.item())
+            if "grn" in hist:
+                hist["grn"].append(Lg_item)
 
             if lv < best_l - 1e-5:
                 best_l, best_lg, pat_ctr = lv, logits.detach().clone(), 0
@@ -719,9 +1003,10 @@ def run_malt(
                 tstr = ", ".join(
                     f"{u}:{n}" for u, n in sorted(zip(uq, uqn), key=lambda x: -x[1])[:6]
                 )
+                grn_s = f" grn={Lg_item:.4f}" if "grn" in hist else ""
                 print(
                     f"  E{ep:4d} | L={lv:7.2f} | prof={Lp.item():.3f} cell={Lc.item():.3f} "
-                    f"knn={Lk.item():.3f} ent={Le.item():.3f} | {tstr}"
+                    f"knn={Lk.item():.3f} ent={Le.item():.3f}{grn_s} | {tstr}"
                 )
 
             if pat_ctr >= pat and ep > 200:
@@ -816,7 +1101,9 @@ def run_malt(
         axes[0].plot(hist["total"], lw=1.5)
         axes[0].set(xlabel="Epoch", ylabel="Loss", title="Total Loss")
         axes[0].grid(alpha=0.3)
-        for k in ["profile", "cell", "knn", "entropy"]:
+        for k in sorted(hist.keys()):
+            if k == "total":
+                continue
             axes[1].plot(hist[k], lw=1.2, label=k)
         axes[1].set(xlabel="Epoch", ylabel="Value", title="Loss Components")
         axes[1].legend()
@@ -875,14 +1162,15 @@ def run_malt(
             print(f"  KNN dotplot saved (dotplot_knn{plot_suffix}.png)")
 
         all_markers_by_group[groupby_col] = mk_per_ct
-        per_group_metrics.append(
-            {
-                "groupby": groupby_col,
-                "malt_label_column": malt_c,
-                "malt_mean_r2": float(malt_r2),
-                "knn_mean_r2": float(knn_r2),
-            }
-        )
+        m_entry = {
+            "groupby": groupby_col,
+            "malt_label_column": malt_c,
+            "malt_mean_r2": float(malt_r2),
+            "knn_mean_r2": float(knn_r2),
+        }
+        if grn_bundle is not None:
+            m_entry["grn"] = grn_bundle
+        per_group_metrics.append(m_entry)
         csv_label_columns.extend([malt_c, conf_c, knn_c])
 
     out_h5ad = os.path.join(outdir, output_query_name)
@@ -913,6 +1201,12 @@ def run_malt(
         "prefer_raw_counts": prefer_raw_counts,
         "reference_expression": ref_meta,
         "query_expression": query_meta,
+        "grn_options": {
+            "ref_betadata_dir": ref_betadata_dir,
+            "query_betadata_dir": query_betadata_dir,
+            "query_grn_cluster_obs": query_grn_cluster_obs,
+            "grn_loss_weight": grn_loss_weight,
+        },
     }
     with open(os.path.join(outdir, "run_meta.json"), "w") as f:
         json.dump(_json_sanitize(meta), f, indent=2)
@@ -1003,6 +1297,27 @@ def main() -> None:
         action="store_true",
         help="In auto/counts mode, try AnnData.raw.X (genes aligned to var_names) after standard layer names.",
     )
+    p.add_argument(
+        "--ref-betadata-dir",
+        default=None,
+        help="Directory with reference run *_betadata.feather (seed-only TF columns). Enables GRN loss when combined with query dir + cluster obs.",
+    )
+    p.add_argument(
+        "--query-betadata-dir",
+        default=None,
+        help="Directory with query run *_betadata.feather (same target genes as MALT markers).",
+    )
+    p.add_argument(
+        "--query-grn-cluster-obs",
+        default=None,
+        help="Query obs column whose values match betadata Cluster rows (e.g. leiden or cell_type used in query training).",
+    )
+    p.add_argument(
+        "--grn-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight on MSE between predicted-type and query TF-beta profiles (0 = off).",
+    )
     args = p.parse_args()
 
     extra = [x for x in args.extra_markers.split(",") if x.strip()]
@@ -1017,6 +1332,10 @@ def main() -> None:
         expression_mode=args.expression_mode,
         counts_layer=args.counts_layer,
         prefer_raw_counts=args.prefer_raw_counts,
+        ref_betadata_dir=args.ref_betadata_dir,
+        query_betadata_dir=args.query_betadata_dir,
+        query_grn_cluster_obs=args.query_grn_cluster_obs,
+        grn_loss_weight=args.grn_loss_weight,
     )
 
 
