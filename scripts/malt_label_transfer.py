@@ -457,7 +457,9 @@ def _read_gene_tf_block(
         vec = np.zeros(n_tf, dtype=np.float32)
         row = beta[ri]
         for j, tf in enumerate(tfs_here):
-            vec[tf_idx[tf]] = float(row[j])
+            ti = tf_idx.get(tf)
+            if ti is not None:
+                vec[ti] = float(row[j])
         out[key] = vec
     return out, []
 
