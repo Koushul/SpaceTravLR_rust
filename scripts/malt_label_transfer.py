@@ -35,9 +35,9 @@ CLI:
   Optional GRN / regulatory alignment: pass seed-only training dirs with ``*_betadata.feather``
   from reference and query (``--ref-betadata-dir``, ``--query-betadata-dir``), the query obs column
   whose values match betadata ``Cluster`` rows (``--query-grn-cluster-obs``), and
-  ``--grn-loss-weight`` > 0. MALT then adds an MSE term between predicted cell-type TF-beta profiles
-  and per-cell query TF-beta profiles (TF-only columns ``beta_<TF>``). ``run_meta.json`` includes
-  a cosine similarity matrix between reference types' mean TF profiles (hypothesis diagnostic).
+  ``--grn-loss-weight`` > 0. MALT then adds a **per-cell** MSE: for each cell, the predicted type's
+  reference mean TF-beta vector (z-scored) vs that cell's query TF-beta vector (same z-score).
+  ``run_meta.json`` includes a cosine similarity matrix between reference types' mean TF profiles.
 """
 
 from __future__ import annotations
@@ -974,8 +974,8 @@ def run_malt(
             loss = alpha_p * Lp + alpha_c * Lc + alpha_k * Lk + alpha_e * Le
             Lg_item = 0.0
             if ref_rel_g_t is not None and q_rel_g_t is not None and alpha_g > 0.0:
-                qprof_g = (p.T @ q_rel_g_t) / tw.unsqueeze(1)
-                Lg = ((qprof_g - ref_rel_g_t) ** 2).mean()
+                pred_g = p @ ref_rel_g_t
+                Lg = ((pred_g - q_rel_g_t) ** 2).mean()
                 loss = loss + alpha_g * Lg
                 Lg_item = Lg.item()
 
@@ -1316,7 +1316,7 @@ def main() -> None:
         "--grn-loss-weight",
         type=float,
         default=0.0,
-        help="Weight on MSE between predicted-type and query TF-beta profiles (0 = off).",
+        help="Weight on per-cell MSE between ref TF profile of predicted type and query TF profile (0 = off).",
     )
     args = p.parse_args()
 
