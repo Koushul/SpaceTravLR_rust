@@ -370,6 +370,25 @@ def prepare_expression_inplace(
     return meta
 
 
+def _spatial_smooth_probs(
+    expr_p: np.ndarray,
+    coords: np.ndarray,
+    n_neighbors: int,
+) -> np.ndarray:
+    """Smooth each row's type distribution over spatially adjacent query spots."""
+    n_q, n_ct = expr_p.shape
+    k = int(min(max(1, n_neighbors), max(1, n_q)))
+    nn = NearestNeighbors(n_neighbors=k, metric="euclidean", n_jobs=-1)
+    nn.fit(coords)
+    dists, idxs = nn.kneighbors(coords)
+    w = 1.0 / (dists + 1e-6)
+    w /= w.sum(1, keepdims=True)
+    neigh = expr_p[idxs]
+    out = (w[..., None] * neigh).sum(axis=1).astype(np.float32)
+    out /= out.sum(1, keepdims=True)
+    return out
+
+
 def run_malt(
     reference_path: str,
     query_path: str,
@@ -380,6 +399,11 @@ def run_malt(
     expression_mode: str = "auto",
     counts_layer: str | None = None,
     prefer_raw_counts: bool = False,
+    spatial_key: str | None = None,
+    spatial_knn_weight: float = 0.0,
+    spatial_k_neighbors: int = 8,
+    alpha_k: float = 0.3,
+    init_knn_mix: float = 0.6,
 ) -> None:
     os.makedirs(outdir, exist_ok=True)
     extra_dotplot_markers = extra_dotplot_markers or []
@@ -592,8 +616,35 @@ def run_malt(
                 knn_p[i, ref_li[idxs[i, j]]] += w[i, j]
         knn_p /= knn_p.sum(1, keepdims=True)
 
+        expr_knn_p = knn_p
+        spatial_blend_note = ""
+        if (
+            spatial_knn_weight > 0.0
+            and spatial_key
+            and spatial_key in query.obsm
+        ):
+            xy = np.asarray(query.obsm[spatial_key], dtype=np.float64)
+            if xy.ndim == 2 and xy.shape[0] == n_q and xy.shape[1] >= 2:
+                coords = np.ascontiguousarray(xy[:, :2], dtype=np.float64)
+                coords = coords / (np.std(coords, axis=0, keepdims=True) + 1e-6)
+                sp_p = _spatial_smooth_probs(
+                    expr_knn_p.astype(np.float32),
+                    coords,
+                    spatial_k_neighbors,
+                )
+                w_sp = float(np.clip(spatial_knn_weight, 0.0, 1.0))
+                knn_p = (1.0 - w_sp) * expr_knn_p + w_sp * sp_p
+                knn_p /= knn_p.sum(1, keepdims=True)
+                spatial_blend_note = (
+                    f" (expression kNN + spatial smoothing of prior, w_spatial={w_sp})"
+                )
+                print(
+                    f"  Spatial prior: key={spatial_key!r}, k={spatial_k_neighbors}, "
+                    f"weight={w_sp}"
+                )
+
         knn_labels = np.array(cell_types)[knn_p.argmax(1)]
-        print("  KNN distribution:")
+        print("  KNN distribution:" + spatial_blend_note)
         for c, n in sorted(
             zip(*np.unique(knn_labels, return_counts=True)), key=lambda x: -x[1]
         ):
@@ -631,7 +682,8 @@ def run_malt(
         mk_p = np.exp(cell_ll / tau)
         mk_p /= mk_p.sum(1, keepdims=True)
 
-        init_p = 0.6 * knn_p + 0.4 * mk_p
+        w_k = float(np.clip(init_knn_mix, 0.0, 1.0))
+        init_p = w_k * knn_p + (1.0 - w_k) * mk_p
         init_p /= init_p.sum(1, keepdims=True)
 
         init_lbl = np.array(cell_types)[init_p.argmax(1)]
@@ -658,7 +710,7 @@ def run_malt(
 
         alpha_p = 15.0
         alpha_c = 3.0
-        alpha_k = 0.3
+        alpha_k_val = float(max(0.0, alpha_k))
         alpha_e = 0.5
 
         opt = torch.optim.Adam([logits], lr=0.05)
@@ -676,7 +728,7 @@ def run_malt(
         q_global_std_t = q_mk_t.std(0) + 1e-6
 
         print(
-            f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, entropy={alpha_e}\n"
+            f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k_val}, entropy={alpha_e}\n"
         )
 
         for ep in range(800):
@@ -696,7 +748,7 @@ def run_malt(
 
             Le = -(p * lp).sum(1).mean()
 
-            loss = alpha_p * Lp + alpha_c * Lc + alpha_k * Lk + alpha_e * Le
+            loss = alpha_p * Lp + alpha_c * Lc + alpha_k_val * Lk + alpha_e * Le
             loss.backward()
             opt.step()
             sched.step()
@@ -769,7 +821,11 @@ def run_malt(
             query.obs[knn_c].value_counts().items(), key=lambda x: -x[1]
         ):
             print(f"    {c}: {n}")
-        print(f"\n  Agreement: {(opt_lbl == knn_labels).mean():.3f}")
+        print(
+            f"\n  Agreement: {(opt_lbl == knn_labels).mean():.3f} "
+            f"(KNN init vs expression-only: "
+            f"{(np.array(cell_types)[expr_knn_p.argmax(1)] == knn_labels).mean():.3f})"
+        )
 
         malt_r, malt_r2 = calc_r2(
             query, malt_c, ref_ln, ref_labels, mk_per_ct, all_mk, mk_idx
@@ -911,6 +967,11 @@ def run_malt(
         "expression_mode": expression_mode,
         "counts_layer": counts_layer,
         "prefer_raw_counts": prefer_raw_counts,
+        "spatial_key": spatial_key,
+        "spatial_knn_weight": spatial_knn_weight,
+        "spatial_k_neighbors": spatial_k_neighbors,
+        "alpha_k": alpha_k,
+        "init_knn_mix": init_knn_mix,
         "reference_expression": ref_meta,
         "query_expression": query_meta,
     }
@@ -1003,6 +1064,36 @@ def main() -> None:
         action="store_true",
         help="In auto/counts mode, try AnnData.raw.X (genes aligned to var_names) after standard layer names.",
     )
+    p.add_argument(
+        "--spatial-key",
+        default=None,
+        help="If set and present in query.obsm (e.g. 'spatial'), blend in a spatially smoothed copy of the "
+        "expression kNN prior (neighbor spots in image space). Use for Visium when obsm holds spot coordinates.",
+    )
+    p.add_argument(
+        "--spatial-knn-weight",
+        type=float,
+        default=0.0,
+        help="Blend weight w in (1-w)*expression_kNN + w*spatial_kNN for the KNN prior (0 = off).",
+    )
+    p.add_argument(
+        "--spatial-k-neighbors",
+        type=int,
+        default=8,
+        help="Spatial k for NearestNeighbors on query.obsm[--spatial-key] (default 8).",
+    )
+    p.add_argument(
+        "--alpha-k",
+        type=float,
+        default=0.3,
+        help="Weight on KL(query || knn_prior) in the loss (default 0.3).",
+    )
+    p.add_argument(
+        "--init-knn-mix",
+        type=float,
+        default=0.6,
+        help="Blend w*knn_prior + (1-w)*marker_softmax for optimization init (default 0.6).",
+    )
     args = p.parse_args()
 
     extra = [x for x in args.extra_markers.split(",") if x.strip()]
@@ -1017,6 +1108,11 @@ def main() -> None:
         expression_mode=args.expression_mode,
         counts_layer=args.counts_layer,
         prefer_raw_counts=args.prefer_raw_counts,
+        spatial_key=args.spatial_key,
+        spatial_knn_weight=args.spatial_knn_weight,
+        spatial_k_neighbors=args.spatial_k_neighbors,
+        alpha_k=args.alpha_k,
+        init_knn_mix=args.init_knn_mix,
     )
 
 

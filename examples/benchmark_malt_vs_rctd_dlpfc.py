@@ -26,6 +26,10 @@ Example:
     --with pandas --with h5py --with rdata --with torch --with igraph --with leidenalg \\
     examples/benchmark_malt_vs_rctd_dlpfc.py --outdir /tmp/dlpfc_malt_rctd \\
     --spacetravlr-bin spacetravlr --max-spots 1200 --max-ref-cells 8000
+
+MALT uses Visium spot coordinates (merged from tissue_positions when using load_images=false)
+and by default blends a spatially smoothed kNN prior; tune with --malt-spatial-knn-weight
+and --malt-spatial-k-neighbors, or pass --malt-spatial-knn-weight 0 to disable.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ import subprocess
 import sys
 import urllib.request
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -80,6 +85,41 @@ def _extract_sce(zip_path: str, dest_root: str) -> tuple[str, str]:
         return os.path.join(dest_root, rds), os.path.join(dest_root, h5n)
 
 
+def _attach_visium_spatial_coords(ad: sc.AnnData, visium_root: str) -> None:
+    """
+    Squidpy's read_visium(..., load_images=False) returns before merging tissue positions,
+    so obsm['spatial'] is missing. Layer transfer needs spot coordinates for a spatial prior.
+    """
+    root = Path(visium_root)
+    tp = root / "spatial" / "tissue_positions.csv"
+    if not tp.is_file():
+        tp = root / "spatial" / "tissue_positions_list.csv"
+    if not tp.is_file():
+        return
+    with open(tp) as f:
+        first_cell = f.readline().split(",")[0].strip()
+    has_header = first_cell.lower() == "barcode"
+    coords = pd.read_csv(tp, header=0 if has_header else None, index_col=0)
+    coords.columns = [
+        "in_tissue",
+        "array_row",
+        "array_col",
+        "pxl_col_in_fullres",
+        "pxl_row_in_fullres",
+    ]
+    coords.set_index(coords.index.astype(ad.obs.index.dtype), inplace=True)
+    ad.obs = pd.merge(ad.obs, coords, how="left", left_index=True, right_index=True)
+    ad.obsm["spatial"] = np.asarray(
+        ad.obs[["pxl_row_in_fullres", "pxl_col_in_fullres"]].values,
+        dtype=np.float64,
+    )
+    ad.obs.drop(
+        columns=["pxl_row_in_fullres", "pxl_col_in_fullres"],
+        inplace=True,
+        errors="ignore",
+    )
+
+
 def _load_visium_dlpfc(sample_id: str, work: str) -> sc.AnnData:
     h5_name = f"{sample_id}_filtered_feature_bc_matrix.h5"
     h5_url = f"https://spatial-dlpfc.s3.us-east-2.amazonaws.com/h5/{h5_name}"
@@ -95,6 +135,7 @@ def _load_visium_dlpfc(sample_id: str, work: str) -> sc.AnnData:
     if not os.path.isfile(tp_dst):
         shutil.copy2(tp_src, tp_dst)
     ad = sq.read.visium(work, counts_file=h5_name, load_images=False)
+    _attach_visium_spatial_coords(ad, work)
     ad.var_names_make_unique()
     return ad
 
@@ -223,6 +264,36 @@ def _accuracy(pred: np.ndarray, true: np.ndarray) -> float:
     return float((p[m.values] == t[m.values]).mean())
 
 
+def _layer_token_set(s: str) -> set[str]:
+    s = str(s).strip().replace("*", "")
+    if not s or s.lower() in ("nan", "none", "<na>"):
+        return set()
+    parts = [x.strip() for x in s.split("/") if x.strip()]
+    return set(parts) if parts else {s}
+
+
+def _accuracy_layer_overlap(pred: np.ndarray, true: np.ndarray) -> float:
+    """
+    True if manual layer token(s) overlap reference-style composite labels, e.g.
+    truth L3 vs pred L3/4 or L3/4* counts as correct.
+    """
+    p = np.asarray(pred).astype(str)
+    t = np.asarray(true).astype(str)
+    m = ~(pd.Series(t).isin(["nan", "NaN", "None", ""]) | pd.Series(t).isna())
+    if not m.any():
+        return float("nan")
+    ok = 0
+    tot = int(m.sum())
+    for pi, ti in zip(p[m.values], t[m.values]):
+        if pi == ti:
+            ok += 1
+            continue
+        a, b = _layer_token_set(ti), _layer_token_set(pi)
+        if a and b and (a & b):
+            ok += 1
+    return float(ok / tot)
+
+
 def _read_rctd_weights_csv(path: str) -> tuple[np.ndarray, list[str]]:
     with open(path, newline="") as f:
         r = csv.DictReader(f)
@@ -265,6 +336,35 @@ def main() -> None:
     ap.add_argument("--rctd-batch-size", type=int, default=256)
     ap.add_argument("--skip-malt", action="store_true")
     ap.add_argument("--skip-rctd", action="store_true")
+    ap.add_argument(
+        "--malt-spatial-key",
+        default="spatial",
+        help="query.obsm key for Visium pixel coords (default spatial). Empty string disables.",
+    )
+    ap.add_argument(
+        "--malt-spatial-knn-weight",
+        type=float,
+        default=0.78,
+        help="Blend spatial smoothing into MALT's kNN prior; 0 disables (default 0.78 for cortical layers).",
+    )
+    ap.add_argument(
+        "--malt-spatial-k-neighbors",
+        type=int,
+        default=18,
+        help="Spatial neighbors for smoothing the expression kNN prior (default 18).",
+    )
+    ap.add_argument(
+        "--malt-alpha-k",
+        type=float,
+        default=1.4,
+        help="MALT KL weight toward the (spatially smoothed) kNN prior (default 1.4).",
+    )
+    ap.add_argument(
+        "--malt-init-knn-mix",
+        type=float,
+        default=0.88,
+        help="Init blend toward kNN prior vs marker softmax (default 0.88).",
+    )
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -356,13 +456,37 @@ def main() -> None:
             "--expression-mode",
             "auto",
         ]
+        sk = (args.malt_spatial_key or "").strip()
+        if sk and args.malt_spatial_knn_weight > 0.0:
+            cmd.extend(
+                [
+                    "--spatial-key",
+                    sk,
+                    "--spatial-knn-weight",
+                    str(args.malt_spatial_knn_weight),
+                    "--spatial-k-neighbors",
+                    str(args.malt_spatial_k_neighbors),
+                ]
+            )
+        cmd.extend(
+            [
+                "--alpha-k",
+                str(args.malt_alpha_k),
+                "--init-knn-mix",
+                str(args.malt_init_knn_mix),
+            ]
+        )
         print("Running MALT…")
         subprocess.run(cmd, check=True)
         ql = sc.read_h5ad(os.path.join(malt_out, "query_labeled.h5ad"))
         pred_m = ql.obs["malt_label"].astype(str).values
         results["accuracy_malt_vs_manual_layer"] = _accuracy(pred_m, true_layers)
+        results["accuracy_malt_vs_manual_layer_overlap"] = _accuracy_layer_overlap(
+            pred_m, true_layers
+        )
     else:
         results["accuracy_malt_vs_manual_layer"] = None
+        results["accuracy_malt_vs_manual_layer_overlap"] = None
 
     if not args.skip_rctd:
         rctd_prefix = os.path.join(args.outdir, "rctd_out")
@@ -395,8 +519,12 @@ def main() -> None:
                 f"RCTD rows {len(pred_r)} != query rows {len(true_layers)}"
             )
         results["accuracy_rctd_vs_manual_layer"] = _accuracy(pred_r, true_layers)
+        results["accuracy_rctd_vs_manual_layer_overlap"] = _accuracy_layer_overlap(
+            pred_r, true_layers
+        )
     else:
         results["accuracy_rctd_vs_manual_layer"] = None
+        results["accuracy_rctd_vs_manual_layer_overlap"] = None
 
     out_json = os.path.join(args.outdir, "benchmark_results.json")
     with open(out_json, "w") as f:
