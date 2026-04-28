@@ -26,6 +26,7 @@ pub mod estimator;
 #[cfg(feature = "spatial-viewer")]
 pub mod foyer_perturb_cache;
 pub mod grn_extra;
+pub mod h5ad_peek;
 pub mod lasso;
 pub mod ligand;
 pub mod malt_label_transfer;
@@ -70,6 +71,7 @@ pub use estimator::{
     run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs,
 };
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
+pub use h5ad_peek::print_h5ad_peek;
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
     GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator, gene_performance_feather_path,

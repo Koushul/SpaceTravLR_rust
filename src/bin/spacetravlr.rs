@@ -60,7 +60,8 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Load spaceship_config.toml from the repo build, install data/ next to the binary, or pass --config, then apply CLI overrides.
 • Use --plain for compact line-oriented logs instead of the full-screen dashboard (when built with `tui`).
 • Subcommand run-summary writes the HTML report without training.
-• Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run)."#;
+• Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
+• Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData."#;
 
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
@@ -244,6 +245,23 @@ struct Cli {
         help = "Spatial AnnData .h5ad — overrides [data].adata_path"
     )]
     h5ad: Option<PathBuf>,
+
+    #[arg(
+        long = "peek",
+        visible_alias = "peak",
+        value_name = "PATH",
+        help_heading = "Input",
+        help = "Peek: path/size/shape (wrapped); obs & var column names in a grid; other keys wrapped. --obs COL adds value_counts. HDF5 metadata only"
+    )]
+    peek: Option<PathBuf>,
+
+    #[arg(
+        long = "obs",
+        value_name = "COLUMN",
+        help_heading = "Input",
+        help = "With --peek: load only this obs column and print value_counts (rank, count, %, category)"
+    )]
+    obs: Option<String>,
 
     #[arg(
         long = "skip-auto-adata-prep",
@@ -720,7 +738,7 @@ struct Cli {
         long = "map-labels",
         action = ArgAction::SetTrue,
         help_heading = "Map labels",
-        help = "MALT: transfer labels from reference .h5ad to query .h5ad (writes obs['malt_label'], malt_labels.csv indexed by obs_name, plots, JSON under --map-labels-outdir; requires `uv` on PATH)."
+        help = "MALT: transfer labels from reference .h5ad to query .h5ad (writes obs['malt_label'], optional obs['leiden']/obs['leiden_celltype'], malt_labels.csv indexed by obs_name, plots, JSON under --map-labels-outdir; requires `uv` on PATH)."
     )]
     map_labels: bool,
 
@@ -802,6 +820,22 @@ struct Cli {
         help = "When resolving counts, try AnnData.raw after standard count layers"
     )]
     map_labels_prefer_raw_counts: bool,
+
+    #[arg(
+        long = "map-labels-no-leiden",
+        action = ArgAction::SetTrue,
+        help_heading = "Map labels",
+        help = "Skip adaptive Leiden + leiden_celltype mapping after MALT (passes --no-leiden-map to the script)"
+    )]
+    map_labels_no_leiden: bool,
+
+    #[arg(
+        long = "map-labels-reference-gene-list",
+        value_name = "PATH",
+        help_heading = "Map labels",
+        help = "One gene symbol per line (count = reference n_vars); passed as --reference-gene-list to MALT when reference var_names are placeholders"
+    )]
+    map_labels_reference_gene_list: Option<PathBuf>,
 
     #[arg(
         long = "process-h5ad",
@@ -1485,6 +1519,8 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
             expression_mode: cli.map_labels_expression_mode.as_str(),
             counts_layer: cli.map_labels_counts_layer.as_deref(),
             prefer_raw_counts: cli.map_labels_prefer_raw_counts,
+            leiden_map: !cli.map_labels_no_leiden,
+            reference_gene_list: cli.map_labels_reference_gene_list.as_deref(),
         },
     )?;
     Ok(())
@@ -1939,6 +1975,23 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(Commands::RunSummary(rs)) = &cli.command {
         return run_run_summary(&cli, rs);
+    }
+
+    if cli.obs.is_some() && cli.peek.is_none() {
+        anyhow::bail!("--obs requires --peek PATH (or --peak PATH)");
+    }
+
+    if let Some(peek_path) = &cli.peek {
+        if let Some(s) = &cli.obs {
+            if s.trim().is_empty() {
+                anyhow::bail!("--obs must be a non-empty column name");
+            }
+        }
+        let p = PathBuf::from(expand_user_path(peek_path.to_string_lossy().as_ref()));
+        if !p.is_file() {
+            anyhow::bail!("--peek: not a file: {}", p.display());
+        }
+        return spacetravlr::print_h5ad_peek(p.as_path(), cli.obs.as_deref().map(str::trim));
     }
 
     if cli.demo {

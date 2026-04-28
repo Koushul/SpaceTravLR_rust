@@ -5,11 +5,14 @@ Optimized label transfer from reference scRNA-seq to query that minimizes
 the difference in marker/DEG expression between reference and predicted labels.
 
 Loss = alpha_p * L_profile + alpha_c * L_cell + alpha_k * L_knn + alpha_e * L_entropy
+        + alpha_m * L_manifold
 
 - L_profile: MSE between per-type marker profiles in ref vs query
 - L_cell: per-cell negative log-likelihood under type-specific marker distributions
 - L_knn: KL divergence from initial KNN (embedding structure prior)
 - L_entropy: encourages confident single-type assignments
+- L_manifold: weighted match of inter-type distances in ref vs soft query centroids
+  (``X_umap`` on both sides when dims match, else aligned PCA used for KNN)
 
 CLI:
 
@@ -31,6 +34,14 @@ CLI:
   all MALT output columns for every grouping in one file.
 
   Optional expression handling (see --expression-mode, --counts-layer, --prefer-raw-counts).
+
+  After MALT, by default runs adaptive Leiden on the query (``obs['leiden']``) guided by
+  ``malt_label`` purity, then ``obs['leiden_celltype']`` from optimizing cluster→type mapping
+  vs reference dotplots. Pass ``--no-leiden-map`` to skip.
+
+  AnnData read quirks: ``uns['log1p']`` entries with legacy ``encoding-type=null`` are stripped
+  when needed. If reference ``var_names`` are numeric placeholders (no overlap with the query),
+  pass ``--reference-gene-list`` (one symbol per line, length = reference ``n_vars``).
 """
 
 from __future__ import annotations
@@ -80,47 +91,119 @@ def _resolve_h5ad_path(path: str) -> str:
     raise FileNotFoundError(f"No such h5ad file (tried {tried})")
 
 
-def read_h5ad_compat(path: str) -> sc.AnnData:
-    path = os.path.abspath(path)
+def _h5ad_attr_str(val) -> str:
+    if isinstance(val, (bytes, bytearray)):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
+def _h5ad_needs_compat_patch(path: str) -> tuple[bool, bool]:
     with h5py.File(path, "r") as f:
         legacy_var = "var" in f and isinstance(f["var"], h5py.Dataset)
-    if not legacy_var:
+        bad_log1p = False
+        if "uns" in f and "log1p" in f["uns"]:
+            lg = f["uns"]["log1p"]
+            if isinstance(lg, h5py.Group):
+                for key in lg.keys():
+                    ds = lg[key]
+                    if not isinstance(ds, h5py.Dataset):
+                        continue
+                    et = _h5ad_attr_str(ds.attrs.get("encoding-type", "")).lower()
+                    if et == "null":
+                        bad_log1p = True
+                        break
+        return legacy_var, bad_log1p
+
+
+def read_h5ad_compat(path: str) -> sc.AnnData:
+    path = os.path.abspath(path)
+    legacy_var, bad_log1p = _h5ad_needs_compat_patch(path)
+    if not legacy_var and not bad_log1p:
         return sc.read_h5ad(path)
-    print(
-        f"  [read_h5ad_compat] legacy var layout in {os.path.basename(path)}; "
-        "repacked var as dataframe (var/_index) for anndata reader."
-    )
+
+    if legacy_var:
+        print(
+            f"  [read_h5ad_compat] legacy var layout in {os.path.basename(path)}; "
+            "repacked var as dataframe (var/_index) for anndata reader."
+        )
+    if bad_log1p:
+        print(
+            f"  [read_h5ad_compat] stripping uns['log1p'] with null-encoded fields in "
+            f"{os.path.basename(path)} (incompatible with this anndata reader)."
+        )
+
     str_dt = h5py.string_dtype(encoding="utf-8")
     with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp:
         tmp_path = tmp.name
     shutil.copy2(path, tmp_path)
     try:
         with h5py.File(tmp_path, "r+") as f:
-            raw = f["var"][()]
-            decoded = np.array(
-                [
-                    x.decode("utf-8")
-                    if isinstance(x, (bytes, bytearray))
-                    else str(x)
-                    for x in raw
-                ],
-                dtype=object,
-            )
-            del f["var"]
-            vg = f.create_group("var")
-            idx = vg.create_dataset("_index", data=np.asarray(decoded, dtype=str_dt))
-            vg.attrs.create("column-order", data=np.array([], dtype=str_dt))
-            vg.attrs["_index"] = "_index"
-            vg.attrs["encoding-type"] = "dataframe"
-            vg.attrs["encoding-version"] = "0.2.0"
-            idx.attrs["encoding-type"] = "string-array"
-            idx.attrs["encoding-version"] = "0.2.0"
+            if bad_log1p and "uns" in f and "log1p" in f["uns"]:
+                del f["uns"]["log1p"]
+            if legacy_var:
+                raw = f["var"][()]
+                decoded = np.array(
+                    [
+                        x.decode("utf-8")
+                        if isinstance(x, (bytes, bytearray))
+                        else str(x)
+                        for x in raw
+                    ],
+                    dtype=object,
+                )
+                del f["var"]
+                vg = f.create_group("var")
+                idx = vg.create_dataset("_index", data=np.asarray(decoded, dtype=str_dt))
+                vg.attrs.create("column-order", data=np.array([], dtype=str_dt))
+                vg.attrs["_index"] = "_index"
+                vg.attrs["encoding-type"] = "dataframe"
+                vg.attrs["encoding-version"] = "0.2.0"
+                idx.attrs["encoding-type"] = "string-array"
+                idx.attrs["encoding-version"] = "0.2.0"
         return sc.read_h5ad(tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def _placeholder_var_names_ratio(var_names) -> float:
+    n = int(len(var_names))
+    if n == 0:
+        return 0.0
+    k = sum(1 for x in var_names if str(x).isdigit())
+    return float(k) / float(n)
+
+
+def _read_gene_symbols_one_per_line(list_path: str) -> list[str]:
+    list_path = os.path.abspath(list_path)
+    lines: list[str] = []
+    with open(list_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            t = line.strip()
+            if not t or t.startswith("#"):
+                continue
+            lines.append(t.split()[0])
+    return lines
+
+
+def _apply_reference_gene_list_inplace(adata: sc.AnnData, list_path: str) -> None:
+    lines = _read_gene_symbols_one_per_line(list_path)
+    n_var = int(adata.shape[1])
+    if len(lines) != n_var:
+        raise ValueError(
+            f"--reference-gene-list {list_path!r}: expected {n_var} lines, got {len(lines)}"
+        )
+    if len(set(lines)) != len(lines):
+        raise ValueError(
+            f"--reference-gene-list {list_path!r}: duplicate symbols are not allowed "
+            f"({len(lines)} lines, {len(set(lines))} unique)"
+        )
+    adata.var_names = lines
+    print(
+        f"  [--reference-gene-list] set reference var_names from {os.path.basename(list_path)!r}"
+    )
 
 
 def _resolve_groupby(ref: sc.AnnData, groupby: str | None) -> str:
@@ -167,6 +250,389 @@ def _dotplot_set_title(dp, title: str) -> None:
         fig.suptitle(title, y=1.02, fontsize=12)
     else:
         plt.gcf().suptitle(title, y=1.02, fontsize=12)
+
+
+def _is_categorical_series(s: pd.Series) -> bool:
+    return isinstance(s.dtype, pd.CategoricalDtype)
+
+
+def _leiden_label_sort_key(x: str) -> tuple:
+    xs = str(x)
+    if "_u" in xs:
+        base, rest = xs.split("_u", 1)
+        try:
+            return (int(base), int(rest))
+        except ValueError:
+            return (0, 0)
+    try:
+        return (int(xs), 0)
+    except ValueError:
+        return (10**9, hash(xs) % (10**6))
+
+
+def clean_leiden(
+    adata: sc.AnnData,
+    old_col: str = "leiden_R",
+    new_col: str = "leiden",
+    key: str = "leiden",
+) -> None:
+    if old_col in adata.obs.columns:
+        adata.obs[new_col] = adata.obs[old_col].copy()
+        adata.obs.drop(columns=[old_col], inplace=True)
+    if not _is_categorical_series(adata.obs[key]):
+        adata.obs[key] = adata.obs[key].astype(str)
+    cats = sorted(adata.obs[key].astype(str).unique(), key=_leiden_label_sort_key)
+    adata.obs[key] = pd.Categorical(adata.obs[key].astype(str), categories=cats)
+    new_cats = [str(i) for i in range(len(cats))]
+    adata.obs[key] = adata.obs[key].cat.rename_categories(
+        dict(zip(cats, new_cats))
+    ).astype("category")
+    for color_key in (f"{key}_colors",):
+        adata.uns.pop(color_key, None)
+
+
+def _leiden_n_unique(adata: sc.AnnData, col: str) -> int:
+    return int(adata.obs[col].astype(str).nunique())
+
+
+def _leiden_at_resolution(
+    adata: sc.AnnData, resolution: float, key_added: str
+) -> int:
+    try:
+        sc.tl.leiden(
+            adata,
+            resolution=resolution,
+            key_added=key_added,
+            flavor="igraph",
+            n_iterations=2,
+        )
+    except Exception:
+        sc.tl.leiden(adata, resolution=resolution, key_added=key_added)
+    return _leiden_n_unique(adata, key_added)
+
+
+def _binary_search_leiden_resolution(
+    adata: sc.AnnData,
+    target_clusters: int,
+    key_tmp: str = "leiden_R",
+    lo: float = 0.05,
+    hi: float = 8.0,
+    max_iter: int = 22,
+) -> float:
+    target_clusters = max(2, int(target_clusters))
+    best_r, best_dist = 0.5, 10**9
+    lo, hi = float(lo), float(hi)
+    for _ in range(max_iter):
+        mid = (lo + hi) * 0.5
+        n = _leiden_at_resolution(adata, mid, key_tmp)
+        dist = abs(n - target_clusters)
+        if dist < best_dist:
+            best_dist, best_r = dist, mid
+        if n < target_clusters:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-4:
+            break
+    _leiden_at_resolution(adata, best_r, key_tmp)
+    return best_r
+
+
+def _strip_diffmap_before_fresh_neighbors(adata: sc.AnnData) -> None:
+    if "X_diffmap" in adata.obsm:
+        adata.obsm.pop("X_diffmap", None)
+    if "X_diffmap0" in adata.obs.columns:
+        adata.obs.drop(columns=["X_diffmap0"], inplace=True)
+    adata.uns.pop("diffmap_evals", None)
+    adata.uns.pop("diffmap_params", None)
+
+
+def _ensure_query_embedding_neighbors(
+    adata: sc.AnnData,
+    *,
+    n_top_genes: int = 800,
+    n_pcs: int = 40,
+    n_neighbors: int = 15,
+    random_state: int = 42,
+) -> None:
+    _strip_diffmap_before_fresh_neighbors(adata)
+    n_var = int(adata.shape[1])
+    sc.pp.highly_variable_genes(
+        adata, n_top_genes=min(n_top_genes, n_var), subset=False
+    )
+    nhvg = int(adata.var["highly_variable"].sum())
+    if nhvg < 3:
+        nhvg = min(n_var, n_top_genes)
+    n_pcs_use = min(n_pcs, nhvg - 1, adata.n_obs - 1)
+    n_pcs_use = max(2, n_pcs_use)
+    sc.tl.pca(adata, n_comps=n_pcs_use, svd_solver="arpack", random_state=random_state)
+    sc.pp.neighbors(
+        adata,
+        n_neighbors=min(n_neighbors, max(5, adata.n_obs - 1)),
+        n_pcs=n_pcs_use,
+        random_state=random_state,
+    )
+
+
+def _malt_types_above_min(
+    malt: np.ndarray, cell_types: list[str], min_cells: int
+) -> list[str]:
+    vc = pd.Series(malt).astype(str).value_counts()
+    out = [c for c in cell_types if vc.get(str(c), 0) >= min_cells]
+    return out
+
+
+def _impure_clusters(
+    leiden: np.ndarray,
+    malt: np.ndarray,
+    *,
+    purity_threshold: float,
+    min_cells: int,
+) -> list[str]:
+    leid_s = np.asarray(leiden).astype(str)
+    malt_s = np.asarray(malt).astype(str)
+    impure: list[str] = []
+    for cid in np.unique(leid_s):
+        m = leid_s == cid
+        if m.sum() < min_cells * 2:
+            continue
+        sub = malt_s[m]
+        vc = pd.Series(sub).value_counts()
+        major = int(vc.iloc[0]) if len(vc) else 0
+        purity = float(major) / float(m.sum()) if m.sum() else 0.0
+        n_sig = int((vc >= min_cells).sum())
+        if purity < purity_threshold and n_sig >= 2:
+            impure.append(str(cid))
+    return impure
+
+
+def adaptive_leiden_clustering(
+    adata: sc.AnnData,
+    malt_col: str,
+    *,
+    leiden_key: str = "leiden",
+    work_col: str = "leiden_R",
+    purity_threshold: float = 0.65,
+    min_cells: int = 10,
+    max_rounds: int = 3,
+    n_neighbors: int = 15,
+    n_pcs: int = 40,
+    random_state: int = 42,
+) -> dict:
+    malt = adata.obs[malt_col].astype(str).values
+    all_types = sorted(np.unique(malt).tolist())
+    types_ok = _malt_types_above_min(malt, all_types, min_cells)
+    n_target = max(2, len(types_ok))
+    target_coarse = max(2, n_target // 2)
+
+    print(f"  [leiden] MALT types with n>={min_cells}: {n_target} -> target coarse clusters ~{target_coarse}")
+
+    _ensure_query_embedding_neighbors(
+        adata,
+        n_neighbors=n_neighbors,
+        n_pcs=n_pcs,
+        random_state=random_state,
+    )
+
+    _binary_search_leiden_resolution(adata, target_coarse, key_tmp=work_col)
+
+    def _to_u0(x: str) -> str:
+        xs = str(x)
+        if "_u" in xs:
+            return xs
+        try:
+            return f"{int(float(xs))}_u0"
+        except ValueError:
+            return f"{xs}_u0"
+
+    adata.obs[work_col] = adata.obs[work_col].astype(str).map(_to_u0)
+    clean_leiden(adata, old_col=work_col, new_col=leiden_key, key=leiden_key)
+
+    round_info: list[dict] = []
+    for rnd in range(max_rounds):
+        leid = adata.obs[leiden_key].astype(str).values
+        impure = _impure_clusters(
+            leid, malt, purity_threshold=purity_threshold, min_cells=min_cells
+        )
+        round_info.append(
+            {
+                "round": rnd,
+                "n_clusters": int(np.unique(leid).size),
+                "impure": list(impure),
+            }
+        )
+        print(
+            f"  [leiden] round {rnd}: {_leiden_n_unique(adata, leiden_key)} clusters, "
+            f"impure={len(impure)}"
+        )
+        if not impure:
+            break
+
+        labels = np.asarray(leid, dtype=object).copy()
+        split_any = False
+        for cid in sorted(impure, key=_leiden_label_sort_key):
+            mask = labels == cid
+            n_sub = int(mask.sum())
+            if n_sub < 2 * min_cells:
+                continue
+            sub_malt = malt[mask]
+            vc = pd.Series(sub_malt).astype(str).value_counts()
+            n_types = int((vc >= min_cells).sum())
+            if n_types < 2:
+                continue
+            k_aim = min(n_types, max(2, n_sub // max(8, min_cells)))
+            sub = adata[mask].copy()
+            if sub.n_obs < 10:
+                continue
+            _ensure_query_embedding_neighbors(
+                sub,
+                n_neighbors=min(n_neighbors, max(5, sub.n_obs - 1)),
+                n_pcs=min(n_pcs, sub.n_obs - 2),
+                random_state=random_state + rnd + hash(cid) % 997,
+            )
+            _binary_search_leiden_resolution(
+                sub, k_aim, key_tmp=work_col, lo=0.05, hi=6.0
+            )
+            local = sub.obs[work_col].astype(str).values
+            uniq_local = sorted(np.unique(local).tolist(), key=_leiden_label_sort_key)
+            if len(uniq_local) < 2:
+                continue
+            parent_base = cid.split("_u")[0] if "_u" in cid else cid
+            new_labels = np.asarray(labels, dtype=object)
+            idxs = np.flatnonzero(mask)
+            for li, lv in enumerate(local):
+                gidx = idxs[li]
+                new_labels[gidx] = f"{parent_base}_u{uniq_local.index(lv)}"
+            labels = new_labels.astype(str)
+            split_any = True
+
+        if not split_any:
+            print("  [leiden] no successful subclusters; stopping.")
+            break
+
+        adata.obs[work_col] = pd.Series(labels, index=adata.obs_names).astype(str)
+        clean_leiden(adata, old_col=work_col, new_col=leiden_key, key=leiden_key)
+
+    return {
+        "n_target_malt_types": n_target,
+        "target_coarse": target_coarse,
+        "rounds": round_info,
+        "final_n_clusters": _leiden_n_unique(adata, leiden_key),
+    }
+
+
+def optimize_cluster_mapping(
+    adata: sc.AnnData,
+    leiden_key: str,
+    malt_col: str,
+    cell_types: list[str],
+    all_mk: list[str],
+    mk_idx: np.ndarray,
+    ref_rel: np.ndarray,
+    mk_mask: np.ndarray,
+    *,
+    n_epochs: int = 300,
+    lr: float = 0.08,
+    alpha_dp: float = 15.0,
+    alpha_malt: float = 0.5,
+    alpha_sparse: float = 0.25,
+    random_state: int = 42,
+) -> dict:
+    dev = torch.device("cpu")
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    leid = adata.obs[leiden_key].astype(str).values
+    malt = adata.obs[malt_col].astype(str).values
+    q_mk = np.asarray(adata.layers["ln"][:, mk_idx], dtype=np.float32)
+    if sp.issparse(q_mk):
+        q_mk = q_mk.toarray()
+
+    cluster_ids = sorted(np.unique(leid).tolist(), key=_leiden_label_sort_key)
+    n_c = len(cluster_ids)
+    n_ct = len(cell_types)
+    c2i = {c: i for i, c in enumerate(cell_types)}
+    k2i = {k: i for i, k in enumerate(cluster_ids)}
+
+    counts = np.zeros(n_c, dtype=np.float32)
+    cluster_mean = np.zeros((n_c, q_mk.shape[1]), dtype=np.float32)
+    emp = np.zeros((n_c, n_ct), dtype=np.float32) + 1e-6
+
+    for k, cid in enumerate(cluster_ids):
+        m = leid == cid
+        counts[k] = float(m.sum())
+        if m.sum() == 0:
+            continue
+        cluster_mean[k] = q_mk[m].mean(0)
+        for t, val in zip(*np.unique(malt[m], return_counts=True)):
+            ti = c2i.get(str(t))
+            if ti is not None:
+                emp[k, ti] += float(val)
+        emp[k] /= emp[k].sum()
+
+    cluster_mean_t = torch.tensor(cluster_mean, dtype=torch.float32, device=dev)
+    counts_t = torch.tensor(counts, dtype=torch.float32, device=dev).unsqueeze(1)
+    emp_t = torch.tensor(emp, dtype=torch.float32, device=dev)
+    ref_rel_t = torch.tensor(ref_rel, dtype=torch.float32, device=dev)
+    mmask_t = torch.tensor(mk_mask, dtype=torch.float32, device=dev)
+
+    q_global_mean_t = torch.tensor(q_mk.mean(0), dtype=torch.float32, device=dev)
+    q_global_std_t = torch.tensor(q_mk.std(0) + 1e-6, dtype=torch.float32, device=dev)
+    n_mp = float(mmask_t.sum().item())
+    n_mp = max(n_mp, 1.0)
+
+    W = torch.log(emp_t.clamp_min(1e-6)).clone().detach().requires_grad_(True)
+    opt = torch.optim.Adam([W], lr=lr)
+    best_loss, best_W = float("inf"), None
+
+    for ep in range(n_epochs):
+        opt.zero_grad()
+        P = F.softmax(W, dim=1)
+        log_p = F.log_softmax(W, dim=1)
+        Wc = P * counts_t
+        den = Wc.sum(dim=0, keepdim=True).clamp_min(1e-6)
+        qprof_raw = (Wc.T @ cluster_mean_t) / den.T
+        qprof_rel = (qprof_raw - q_global_mean_t) / q_global_std_t
+        Ldp = (((qprof_rel - ref_rel_t) ** 2) * mmask_t).sum() / n_mp
+        Lmalt = (emp_t * (emp_t.clamp_min(1e-6).log() - log_p)).sum(dim=1).mean()
+        row_ent = -(P * (P.clamp_min(1e-8).log())).sum(dim=1).mean()
+        loss = alpha_dp * Ldp + alpha_malt * Lmalt + alpha_sparse * row_ent
+        loss.backward()
+        opt.step()
+        lv = loss.item()
+        if lv < best_loss:
+            best_loss, best_W = lv, W.detach().clone()
+        if ep % 80 == 0 or ep == n_epochs - 1:
+            print(
+                f"  [leiden-map] E{ep:3d} L={lv:.4f} dp={Ldp.item():.4f} "
+                f"malt={Lmalt.item():.4f} ent={row_ent.item():.4f}"
+            )
+
+    P_final = F.softmax(best_W, dim=1).cpu().numpy()
+    hard = P_final.argmax(axis=1)
+    cluster_to_type = {cluster_ids[i]: cell_types[hard[i]] for i in range(n_c)}
+    leiden_celltype = np.array([cluster_to_type[str(x)] for x in leid], dtype=object)
+    adata.obs["leiden_celltype"] = pd.Series(
+        leiden_celltype, index=adata.obs_names, dtype=str
+    ).astype("category")
+
+    rows = []
+    for i, cid in enumerate(cluster_ids):
+        rows.append(
+            {
+                "leiden_cluster": cid,
+                "cell_type": cell_types[hard[i]],
+                "n_cells": int(counts[i]),
+                "soft_probs": {cell_types[t]: float(P_final[i, t]) for t in range(n_ct)},
+            }
+        )
+
+    return {
+        "best_loss": float(best_loss),
+        "cluster_to_type": cluster_to_type,
+        "mapping_rows": rows,
+        "P_final": P_final,
+    }
 
 
 _PREFERRED_COUNT_LAYERS = (
@@ -370,6 +836,60 @@ def prepare_expression_inplace(
     return meta
 
 
+def _malt_manifold_loss_tensors(
+    ref_i: sc.AnnData,
+    query: sc.AnnData,
+    ref_li: np.ndarray,
+    n_ct: int,
+    rp: np.ndarray,
+    qp: np.ndarray,
+    device: torch.device,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, str]:
+    if n_ct < 2:
+        return None, None, None, "skip"
+    ru = ref_i.obsm.get("X_umap")
+    qu = query.obsm.get("X_umap")
+    src = "pca"
+    U_ref = np.asarray(rp, dtype=np.float32)
+    U_q = np.asarray(qp, dtype=np.float32)
+    if ru is not None and qu is not None:
+        ru = np.asarray(ru, dtype=np.float32)
+        qu = np.asarray(qu, dtype=np.float32)
+        if (
+            ru.shape[0] == ref_i.n_obs
+            and qu.shape[0] == query.n_obs
+            and ru.shape[1] == qu.shape[1]
+            and ru.shape[1] >= 2
+        ):
+            U_ref, U_q = ru, qu
+            src = "umap"
+    d = int(U_ref.shape[1])
+    C_ref = np.zeros((n_ct, d), dtype=np.float64)
+    cnt = np.zeros(n_ct, dtype=np.float64)
+    for i in range(int(ref_li.shape[0])):
+        t = int(ref_li[i])
+        if 0 <= t < n_ct:
+            C_ref[t] += U_ref[i]
+            cnt[t] += 1.0
+    cnt = np.maximum(cnt, 1.0)
+    C_ref = (C_ref / cnt[:, None]).astype(np.float32)
+    diff = C_ref[:, np.newaxis, :] - C_ref[np.newaxis, :, :]
+    dmat = np.sqrt(np.maximum((diff**2).sum(-1), 0.0) + 1e-16).astype(np.float32)
+    tri_i, tri_j = np.triu_indices(n_ct, k=1)
+    sub = dmat[tri_i, tri_j]
+    if sub.size == 0:
+        return None, None, None, "skip"
+    sig = float(np.median(sub)) + 1e-4
+    W = np.exp(-(dmat**2) / (2.0 * sig * sig)).astype(np.float32)
+    np.fill_diagonal(W, 0.0)
+    return (
+        torch.tensor(C_ref, dtype=torch.float32, device=device),
+        torch.tensor(W, dtype=torch.float32, device=device),
+        torch.tensor(U_q, dtype=torch.float32, device=device),
+        src,
+    )
+
+
 def run_malt(
     reference_path: str,
     query_path: str,
@@ -380,6 +900,8 @@ def run_malt(
     expression_mode: str = "auto",
     counts_layer: str | None = None,
     prefer_raw_counts: bool = False,
+    leiden_map: bool = True,
+    reference_gene_list: str | None = None,
 ) -> None:
     os.makedirs(outdir, exist_ok=True)
     extra_dotplot_markers = extra_dotplot_markers or []
@@ -415,9 +937,20 @@ def run_malt(
     ref = read_h5ad_compat(ref_path)
     query = read_h5ad_compat(query_path_res)
 
+    if reference_gene_list:
+        _apply_reference_gene_list_inplace(ref, reference_gene_list)
+
     shared = sorted(set(ref.var_names) & set(query.var_names))
     if not shared:
-        raise ValueError("No overlapping genes between reference and query.")
+        ph = _placeholder_var_names_ratio(ref.var_names)
+        msg = "No overlapping genes between reference and query."
+        if ph >= 0.9:
+            msg += (
+                "\n  Reference var_names look like numeric placeholders (e.g. '0'..'n'); "
+                "they must match query gene symbols, or pass --reference-gene-list PATH "
+                f"with exactly {ref.shape[1]} lines (one symbol per line, same order as ref.X columns)."
+            )
+        raise ValueError(msg)
 
     ref = ref[:, shared].copy()
     query = query[:, shared].copy()
@@ -498,6 +1031,7 @@ def run_malt(
     all_markers_by_group: dict[str, dict] = {}
     per_group_metrics: list[dict] = []
     csv_label_columns: list[str] = []
+    last_snapshot: dict | None = None
 
     for run_i, gb_spec in enumerate(gb_loop):
         groupby_col = _resolve_groupby(ref, gb_spec)
@@ -660,6 +1194,16 @@ def run_malt(
         alpha_c = 3.0
         alpha_k = 0.3
         alpha_e = 0.5
+        alpha_m = 0.12
+
+        C_ref_m, W_m, U_q_m, manifold_src = _malt_manifold_loss_tensors(
+            ref_i, query, ref_li, n_ct, rp, qp, dev
+        )
+        use_manifold = C_ref_m is not None and W_m is not None and U_q_m is not None
+        if use_manifold:
+            tri_m = torch.triu(torch.ones(n_ct, n_ct, device=dev), diagonal=1)
+        else:
+            tri_m = None
 
         opt = torch.optim.Adam([logits], lr=0.05)
         sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -668,16 +1212,26 @@ def run_malt(
 
         n_mp = float(mmask_t.sum().item())
         n_mp = max(n_mp, 1.0)
-        hist = {k: [] for k in ["total", "profile", "cell", "knn", "entropy"]}
+        hist = {
+            k: []
+            for k in ["total", "profile", "cell", "knn", "entropy", "manifold"]
+        }
         best_l, best_lg = float("inf"), None
         pat, pat_ctr = 60, 0
 
         q_global_mean_t = q_mk_t.mean(0)
         q_global_std_t = q_mk_t.std(0) + 1e-6
 
-        print(
-            f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, entropy={alpha_e}\n"
-        )
+        if use_manifold:
+            print(
+                f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, "
+                f"entropy={alpha_e}, manifold={alpha_m} ({manifold_src})\n"
+            )
+        else:
+            print(
+                f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, "
+                f"entropy={alpha_e} (manifold skipped)\n"
+            )
 
         for ep in range(800):
             opt.zero_grad()
@@ -696,7 +1250,24 @@ def run_malt(
 
             Le = -(p * lp).sum(1).mean()
 
+            if use_manifold and tri_m is not None:
+                den_b = p.sum(0).clamp(min=1e-6).unsqueeze(1)
+                C_q = (p.T @ U_q_m) / den_b
+                D_ref = torch.cdist(C_ref_m, C_ref_m, p=2).clamp_min(1e-8)
+                D_q = torch.cdist(C_q, C_q, p=2).clamp_min(1e-8)
+                Wmt = W_m * tri_m
+                wsum = Wmt.sum() + 1e-8
+                wr = (Wmt * D_ref).sum() / wsum
+                wq = (Wmt * D_q).sum() / wsum
+                N_ref = D_ref / wr.clamp_min(1e-8)
+                N_q = D_q / wq.clamp_min(1e-8)
+                Lm = ((Wmt * (N_ref - N_q) ** 2)).sum() / wsum
+            else:
+                Lm = torch.zeros((), device=dev)
+
             loss = alpha_p * Lp + alpha_c * Lc + alpha_k * Lk + alpha_e * Le
+            if use_manifold:
+                loss = loss + alpha_m * Lm
             loss.backward()
             opt.step()
             sched.step()
@@ -707,6 +1278,7 @@ def run_malt(
             hist["cell"].append(Lc.item())
             hist["knn"].append(Lk.item())
             hist["entropy"].append(Le.item())
+            hist["manifold"].append(float(Lm.item()))
 
             if lv < best_l - 1e-5:
                 best_l, best_lg, pat_ctr = lv, logits.detach().clone(), 0
@@ -721,7 +1293,7 @@ def run_malt(
                 )
                 print(
                     f"  E{ep:4d} | L={lv:7.2f} | prof={Lp.item():.3f} cell={Lc.item():.3f} "
-                    f"knn={Lk.item():.3f} ent={Le.item():.3f} | {tstr}"
+                    f"knn={Lk.item():.3f} ent={Le.item():.3f} man={Lm.item():.3f} | {tstr}"
                 )
 
             if pat_ctr >= pat and ep > 200:
@@ -816,7 +1388,7 @@ def run_malt(
         axes[0].plot(hist["total"], lw=1.5)
         axes[0].set(xlabel="Epoch", ylabel="Loss", title="Total Loss")
         axes[0].grid(alpha=0.3)
-        for k in ["profile", "cell", "knn", "entropy"]:
+        for k in ["profile", "cell", "knn", "entropy", "manifold"]:
             axes[1].plot(hist[k], lw=1.2, label=k)
         axes[1].set(xlabel="Epoch", ylabel="Value", title="Loss Components")
         axes[1].legend()
@@ -885,6 +1457,111 @@ def run_malt(
         )
         csv_label_columns.extend([malt_c, conf_c, knn_c])
 
+        _rl = ref_ln
+        if sp.issparse(_rl):
+            _rl = _rl.toarray()
+        last_snapshot = {
+            "groupby_col": groupby_col,
+            "malt_c": malt_c,
+            "cell_types": list(cell_types),
+            "mk_per_ct": mk_per_ct,
+            "all_mk": list(all_mk),
+            "mk_idx": np.asarray(mk_idx).copy(),
+            "ref_rel": np.asarray(ref_rel, dtype=np.float32).copy(),
+            "mk_mask": np.asarray(mk_mask, dtype=np.float32).copy(),
+            "ref_ln": np.asarray(_rl, dtype=np.float32),
+            "ref_labels": np.asarray(ref_i.obs[groupby_col].astype(str)),
+            "flat_mk": list(flat_mk),
+            "malt_cts": list(malt_cts),
+            "plot_suffix": plot_suffix,
+        }
+
+    leiden_section: dict | None = None
+    if leiden_map and last_snapshot is not None:
+        print("\n" + "=" * 60)
+        print("STEP 8: MALT-guided adaptive Leiden")
+        print("=" * 60)
+        snap = last_snapshot
+        leiden_info = adaptive_leiden_clustering(
+            query,
+            snap["malt_c"],
+            leiden_key="leiden",
+            work_col="leiden_R",
+        )
+        print("\n" + "=" * 60)
+        print("STEP 9: Leiden cluster → cell type (dotplot loss)")
+        print("=" * 60)
+        map_info = optimize_cluster_mapping(
+            query,
+            "leiden",
+            snap["malt_c"],
+            snap["cell_types"],
+            snap["all_mk"],
+            snap["mk_idx"],
+            snap["ref_rel"],
+            snap["mk_mask"],
+        )
+        leiden_section = {
+            "adaptive_leiden": leiden_info,
+            "mapping": {
+                "best_loss": map_info["best_loss"],
+                "cluster_to_type": map_info["cluster_to_type"],
+            },
+            "leiden_mapping_json": os.path.join(outdir, "leiden_mapping.json"),
+        }
+        with open(os.path.join(outdir, "leiden_mapping.json"), "w") as f:
+            json.dump(_json_sanitize(map_info["mapping_rows"]), f, indent=2)
+        print(f"  leiden_mapping.json written ({len(map_info['mapping_rows'])} clusters)")
+
+        dp_kw = dict(
+            var_names=snap["flat_mk"],
+            standard_scale="var",
+            show=False,
+            return_fig=True,
+        )
+        ref_i_vis = ref.copy()
+        ref_i_vis.obs[snap["groupby_col"]] = ref_i_vis.obs[snap["groupby_col"]].astype(
+            str
+        )
+        ref_sub = ref_i_vis[
+            ref_i_vis.obs[snap["groupby_col"]].isin(snap["malt_cts"])
+        ].copy()
+        ref_sub.obs[snap["groupby_col"]] = ref_sub.obs[
+            snap["groupby_col"]
+        ].astype("category")
+        ref_sub.obs[snap["groupby_col"]] = ref_sub.obs[
+            snap["groupby_col"]
+        ].cat.remove_unused_categories()
+        dp = sc.pl.dotplot(ref_sub, groupby=snap["groupby_col"], **dp_kw)
+        _dotplot_set_title(dp, "reference")
+        dp.savefig(
+            os.path.join(outdir, f"dotplot_reference_leiden{snap['plot_suffix']}.png"),
+            dpi=150,
+            bbox_inches="tight",
+        )
+        plt.close("all")
+
+        lc = query.obs["leiden_celltype"].astype(str).value_counts()
+        leiden_cts = [c for c in snap["cell_types"] if c in lc.index and lc[c] >= 5]
+        if leiden_cts:
+            q_ld = query[query.obs["leiden_celltype"].isin(leiden_cts)].copy()
+            q_ld.obs["leiden_celltype"] = q_ld.obs[
+                "leiden_celltype"
+            ].cat.remove_unused_categories()
+            dp = sc.pl.dotplot(q_ld, groupby="leiden_celltype", **dp_kw)
+            _dotplot_set_title(dp, "query leiden_celltype")
+            dp.savefig(
+                os.path.join(outdir, f"dotplot_leiden{snap['plot_suffix']}.png"),
+                dpi=150,
+                bbox_inches="tight",
+            )
+            plt.close("all")
+            print(
+                f"  dotplot_leiden{snap['plot_suffix']}.png saved "
+                f"({len(leiden_cts)} types)"
+            )
+        csv_label_columns.extend(["leiden", "leiden_celltype"])
+
     out_h5ad = os.path.join(outdir, output_query_name)
     query.write_h5ad(out_h5ad)
 
@@ -892,7 +1569,11 @@ def run_malt(
     labels_df = query.obs.loc[:, csv_label_columns].copy()
     labels_df.index = pd.Index(query.obs_names.astype(str), name="obs_name")
     for c in labels_df.columns:
-        if c.startswith("malt_label") or c.startswith("knn_label"):
+        if (
+            c.startswith("malt_label")
+            or c.startswith("knn_label")
+            or c in ("leiden", "leiden_celltype")
+        ):
             labels_df[c] = labels_df[c].astype(str)
     labels_df.to_csv(labels_csv, index=True)
     print(f"  Labels CSV saved ({labels_csv})")
@@ -911,8 +1592,11 @@ def run_malt(
         "expression_mode": expression_mode,
         "counts_layer": counts_layer,
         "prefer_raw_counts": prefer_raw_counts,
+        "reference_gene_list": reference_gene_list,
         "reference_expression": ref_meta,
         "query_expression": query_meta,
+        "leiden_map": bool(leiden_map),
+        "leiden": leiden_section,
     }
     with open(os.path.join(outdir, "run_meta.json"), "w") as f:
         json.dump(_json_sanitize(meta), f, indent=2)
@@ -1003,6 +1687,19 @@ def main() -> None:
         action="store_true",
         help="In auto/counts mode, try AnnData.raw.X (genes aligned to var_names) after standard layer names.",
     )
+    p.add_argument(
+        "--no-leiden-map",
+        action="store_true",
+        help="Skip Steps 8–9 (adaptive Leiden + cluster→type mapping). Default: run after MALT.",
+    )
+    p.add_argument(
+        "--reference-gene-list",
+        default=None,
+        metavar="PATH",
+        help="Text file: one gene symbol per line (and/or # comments, blank lines skipped). "
+        "Line count must equal reference n_vars. Replaces reference var_names before intersecting "
+        "with the query (for .h5ad files whose var_names are numeric placeholders).",
+    )
     args = p.parse_args()
 
     extra = [x for x in args.extra_markers.split(",") if x.strip()]
@@ -1017,6 +1714,8 @@ def main() -> None:
         expression_mode=args.expression_mode,
         counts_layer=args.counts_layer,
         prefer_raw_counts=args.prefer_raw_counts,
+        leiden_map=not args.no_leiden_map,
+        reference_gene_list=args.reference_gene_list,
     )
 
 

@@ -182,6 +182,11 @@ fn h5ad_obs_labels(obs: &Group, col: &str) -> anyhow::Result<Vec<String>> {
     }
 }
 
+/// One `obs` column as per-cell strings (1d dataset or categorical HDF5 group).
+pub fn read_h5ad_obs_column_str_h5(obs: &Group, col: &str) -> anyhow::Result<Vec<String>> {
+    h5ad_obs_labels(obs, col)
+}
+
 fn h5ad_read_obsm_xy_two_cols(ds: &H5Dataset) -> anyhow::Result<Array2<f64>> {
     let sh = ds.shape();
     anyhow::ensure!(sh.len() == 2, "expected 2d obsm matrix, got shape {:?}", sh);

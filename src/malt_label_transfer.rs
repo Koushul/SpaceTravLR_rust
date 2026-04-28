@@ -37,6 +37,8 @@ pub struct MapLabelsParams<'a> {
     pub expression_mode: &'a str,
     pub counts_layer: Option<&'a str>,
     pub prefer_raw_counts: bool,
+    pub leiden_map: bool,
+    pub reference_gene_list: Option<&'a Path>,
 }
 
 pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
@@ -83,6 +85,19 @@ pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
     }
     if params.prefer_raw_counts {
         argv.push("--prefer-raw-counts".into());
+    }
+    if !params.leiden_map {
+        argv.push("--no-leiden-map".into());
+    }
+    if let Some(p) = params.reference_gene_list {
+        let s = p.to_str().with_context(|| {
+            format!(
+                "reference gene list path must be UTF-8: {}",
+                p.display()
+            )
+        })?;
+        argv.push("--reference-gene-list".into());
+        argv.push(s.into());
     }
 
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
