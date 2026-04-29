@@ -841,7 +841,7 @@ struct Cli {
         long = "rust-process-h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Rust preprocessing (QC → normalize → HVG → PCA → HNSW KNN → UMAP) → `<stem>_rust_processed.h5ad` (requires `--h5ad`). Skips Leiden/MAGIC."
+        help = "Rust preprocessing (QC → normalize → HVG → PCA → HNSW KNN → UMAP → leiden-rs if labels are missing → clusterwise MAGIC if imputed_count is missing) → `<stem>_rust_processed.h5ad` (requires `--h5ad`)."
     )]
     rust_process_h5ad: bool,
 
