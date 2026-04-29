@@ -599,10 +599,64 @@ fn clear_uns_for_hdf5_export(adata: &IMAnnData) -> Result<()> {
     Ok(())
 }
 
+fn polars_series_dtype_ann_dataframe_hdf5(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Boolean
+            | DataType::String
+    )
+}
+
+fn strip_supplemental_axis_arrays_for_h5_export(adata: &IMAnnData) -> Result<()> {
+    const KEEP_OBSM: &[&str] = &["X_pca", "X_umap"];
+    let obsm = adata.obsm();
+    for k in obsm.keys() {
+        if !KEEP_OBSM.contains(&k.as_str()) {
+            obsm.remove_array(&k)?;
+        }
+    }
+    for ax in [adata.obsp(), adata.varm(), adata.varp()] {
+        for k in ax.keys() {
+            ax.remove_array(&k)?;
+        }
+    }
+    Ok(())
+}
+
+fn temp_h5ad_path(output: &Path) -> Result<PathBuf> {
+    let dir = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let name = output
+        .file_name()
+        .ok_or_else(|| anyhow!("output path has no file name"))?;
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(dir.join(format!(
+        ".{}.{t}.part.h5ad",
+        name.to_string_lossy()
+    )))
+}
+
 fn dataframe_hdf5_safe(df: DataFrame) -> Result<DataFrame> {
     let mut cols: Vec<Column> = Vec::new();
     for s in df.iter() {
-        let column = match s.dtype() {
+        let dt = s.dtype();
+        let column = match dt {
             DataType::List(_) | DataType::Array(_, _) | DataType::Struct(_) => continue,
             DataType::Categorical(_, _) | DataType::Enum(_, _) => {
                 let s2 = s
@@ -611,9 +665,23 @@ fn dataframe_hdf5_safe(df: DataFrame) -> Result<DataFrame> {
                     .with_context(|| format!("cast obs/var column {} to String", s.name()))?;
                 Column::from(s2)
             }
-            _ => Column::from(s.clone()),
+            dt if polars_series_dtype_ann_dataframe_hdf5(dt) => Column::from(s.clone()),
+            _ => {
+                let s2 = s.clone().cast(&DataType::String).with_context(|| {
+                    format!(
+                        "cast obs/var column {} from {dt:?} to String for HDF5 export",
+                        s.name()
+                    )
+                })?;
+                Column::from(s2)
+            }
         };
         cols.push(column);
+    }
+    if cols.is_empty() {
+        bail!(
+            "after HDF5 sanitization, obs/var has no exportable columns (all dropped or failed cast)"
+        );
     }
     DataFrame::new(cols).map_err(|e| anyhow!("{e}"))
 }
@@ -823,6 +891,8 @@ pub fn rust_preprocess_h5ad(
             anyhow!("cannot remove existing output {}: {e}", output.display())
         })?;
     }
+    strip_supplemental_axis_arrays_for_h5_export(&adata)
+        .context("strip obsp/varm/varp and non-embedding obsm for HDF5 export")?;
     let obs_safe = dataframe_hdf5_safe(adata.obs().get_data()).context("sanitize obs for HDF5")?;
     adata
         .obs()
@@ -834,8 +904,32 @@ pub fn rust_preprocess_h5ad(
         .set_data(var_safe)
         .context("var.set_data after sanitize")?;
     clear_uns_for_hdf5_export(&adata).context("clear uns for HDF5")?;
-    let written = convert_to_new_backed_h5(&adata, output).context("convert_to_new_backed_h5")?;
-    written.close().context("close AnnData H5")?;
+
+    let tmp = temp_h5ad_path(output).context("temp output path for HDF5")?;
+    if tmp.exists() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    let write_result = (|| -> Result<()> {
+        let written =
+            convert_to_new_backed_h5(&adata, &tmp).context("convert_to_new_backed_h5 (write)")?;
+        written
+            .close()
+            .context("close AnnData H5 (HDF5 finalize)")?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result.context(
+        "rust_preprocess: HDF5 export failed; partial temp file was removed if present",
+    )?;
+    std::fs::rename(&tmp, output).with_context(|| {
+        format!(
+            "rename temp HDF5 {:?} -> {:?}",
+            tmp.display(),
+            output.display()
+        )
+    })?;
     eprintln!("<<< write_h5ad: {:.2} s", t.elapsed().as_secs_f64());
     log.push(("write_h5ad".to_string(), t.elapsed().as_secs_f64()));
 
