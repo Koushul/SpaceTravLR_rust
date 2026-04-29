@@ -838,6 +838,30 @@ struct Cli {
     map_labels_reference_gene_list: Option<PathBuf>,
 
     #[arg(
+        long = "rust-process-h5ad",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Rust preprocessing (QC → normalize → HVG → PCA → HNSW KNN → UMAP) → `<stem>_rust_processed.h5ad` (requires `--h5ad`). Skips Leiden/MAGIC."
+    )]
+    rust_process_h5ad: bool,
+
+    #[arg(
+        long = "rust-n-top-hvg",
+        value_name = "N",
+        help_heading = "Utility",
+        help = "With `--rust-process-h5ad`: number of highly variable genes (default 2000)."
+    )]
+    rust_n_top_hvg: Option<usize>,
+
+    #[arg(
+        long = "rust-n-neighbors",
+        value_name = "N",
+        help_heading = "Utility",
+        help = "With `--rust-process-h5ad`: UMAP / KNN n_neighbors (default 15)."
+    )]
+    rust_n_neighbors: Option<usize>,
+
+    #[arg(
         long = "process-h5ad",
         alias = "process_h5ad",
         action = ArgAction::SetTrue,
@@ -1526,6 +1550,36 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_rust_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
+    let h5ad = cli
+        .h5ad
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--rust-process-h5ad requires `--h5ad PATH`"))?;
+    let h5ad = PathBuf::from(expand_user_path(h5ad.to_string_lossy().as_ref()));
+    if !h5ad.is_file() {
+        anyhow::bail!("AnnData not found at {}.", h5ad.display());
+    }
+    let out_dir = match &cli.process_output_dir {
+        Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
+        None => std::env::current_dir().context("process-output-dir default (cwd)")?,
+    };
+    std::fs::create_dir_all(&out_dir)?;
+    let stem = canonical_training_prep_stem(&h5ad);
+    let dest = out_dir.join(format!("{stem}_rust_processed.h5ad"));
+
+    let mut params = spacetravlr::rust_preprocess::RustPreprocessParams::default();
+    if let Some(n) = cli.rust_n_top_hvg {
+        params.n_top_hvg = n;
+    }
+    if let Some(n) = cli.rust_n_neighbors {
+        params.n_neighbors = n;
+    }
+
+    spacetravlr::rust_preprocess::rust_preprocess_h5ad(&h5ad, &dest, &params)?;
+    eprintln!("spacetravlr: wrote {}", dest.display());
+    Ok(())
+}
+
 fn run_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let h5ad = cli
         .h5ad
@@ -2041,6 +2095,10 @@ fn main() -> anyhow::Result<()> {
 
     if cli.map_labels {
         return run_map_labels(&cli);
+    }
+
+    if cli.rust_process_h5ad {
+        return run_rust_process_h5ad(&cli);
     }
 
     if cli.process_h5ad {

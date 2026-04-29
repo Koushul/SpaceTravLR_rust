@@ -127,6 +127,7 @@ polars = { version = "0.51", default-features = false, features = [
     "temporal",
     "fmt",
     "zip_with",
+    "dtype-categorical",
 ] }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["color", "derive", "wrap_help"] }
@@ -148,6 +149,14 @@ flate2 = "1"
 nalgebra = { version = "0.33", default-features = false, features = ["std"] }
 nalgebra-sparse = "0.11"
 kiddo = ">=5.2, <5.3"
+single_rust = "0.5.8"
+single_algebra = "0.9"
+single-utilities = { version = "0.9", features = ["convert"] }
+anndata-memory = "1.0"
+umap-rs = "0.4.5"
+instant-distance = "0.6.1"
+sprs = "0.11.4"
+ndarray_umap = { package = "ndarray", version = "0.17", features = ["rayon"] }
 axum = { version = "0.8", optional = true, default-features = false, features = [
     "json",
     "query",
@@ -205,3 +214,5 @@ statrs = "0.18"
 # h5py/Scanpy on arm64 can read our .h5ad without a Blosc HDF5 plugin.
 [patch.crates-io]
 anndata = { path = "vendor/anndata" }
+umap-rs = { path = "patches/umap-rs" }
+linfa = { path = "patches/linfa" }

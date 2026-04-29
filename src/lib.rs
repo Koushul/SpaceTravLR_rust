@@ -41,6 +41,7 @@ pub mod perturb_mode;
 pub mod perturb_tui;
 pub mod run_summary_html;
 pub mod scanpy_preprocess;
+pub mod rust_preprocess;
 #[cfg(feature = "self-update")]
 pub mod self_update;
 pub mod spatial_estimator;
