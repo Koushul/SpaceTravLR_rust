@@ -165,11 +165,19 @@ fn peek_terminal_width() -> usize {
         .clamp(48, 200)
 }
 
+fn floor_char_boundary_stable(s: &str, i: usize) -> usize {
+    let mut j = i.min(s.len());
+    while j > 0 && !s.is_char_boundary(j) {
+        j -= 1;
+    }
+    j
+}
+
 fn byte_index_at_char_count(s: &str, max_chars: usize) -> usize {
     let mut n = 0usize;
     for (i, _) in s.char_indices() {
         if n >= max_chars {
-            return s.floor_char_boundary(i);
+            return floor_char_boundary_stable(s, i);
         }
         n += 1;
     }
@@ -190,7 +198,7 @@ fn wrap_fill_lines(text: &str, width: usize) -> Vec<String> {
         let mut cut = byte_index_at_char_count(rest, width);
         if let Some(sp) = rest[..cut].rfind(' ') {
             if sp > width / 4 {
-                cut = rest.floor_char_boundary(sp + 1);
+                cut = floor_char_boundary_stable(rest, sp + 1);
             }
         }
         let (line, tail) = rest.split_at(cut);
