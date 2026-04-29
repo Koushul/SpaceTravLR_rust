@@ -1,6 +1,7 @@
 /target
 lcov.info
 tmp_dir/
+tmp/
 __pycache__/
 scripts/__pycache__/
 .venv-bench/
@@ -8,7 +9,6 @@ scripts/__pycache__/
 .cache/
 .claude/
 .DS_Store
-benchmarks/
 web/spatial_viewer/node_modules/
 web/spatial_viewer/dist/
 

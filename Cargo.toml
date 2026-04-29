@@ -102,6 +102,10 @@ required-features = ["spatial-viewer"]
 name = "cnn_train_bench"
 path = "src/bin/cnn_train_bench.rs"
 
+[[bin]]
+name = "bench_steps"
+path = "src/bin/bench_steps.rs"
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }
