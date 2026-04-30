@@ -595,6 +595,93 @@ fn clear_uns_for_hdf5_export(adata: &IMAnnData) -> Result<()> {
     Ok(())
 }
 
+fn polars_series_dtype_ann_dataframe_hdf5(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Boolean
+            | DataType::String
+    )
+}
+
+fn strip_supplemental_axis_arrays_for_h5_export(adata: &IMAnnData) -> Result<()> {
+    const KEEP_OBSM: &[&str] = &["X_pca", "X_umap"];
+    let obsm = adata.obsm();
+    for k in obsm.keys() {
+        if !KEEP_OBSM.contains(&k.as_str()) {
+            obsm.remove_array(&k)?;
+        }
+    }
+    for ax in [adata.obsp(), adata.varm(), adata.varp()] {
+        for k in ax.keys() {
+            ax.remove_array(&k)?;
+        }
+    }
+    Ok(())
+}
+
+fn temp_h5ad_path(output: &Path) -> Result<PathBuf> {
+    let dir = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let name = output
+        .file_name()
+        .ok_or_else(|| anyhow!("output path has no file name"))?;
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(dir.join(format!(
+        ".{}.{t}.part.h5ad",
+        name.to_string_lossy()
+    )))
+}
+
+fn dataframe_hdf5_safe(df: DataFrame) -> Result<DataFrame> {
+    let mut cols: Vec<Column> = Vec::new();
+    for s in df.iter() {
+        let dt = s.dtype();
+        let column = match dt {
+            DataType::List(_) | DataType::Array(_, _) | DataType::Struct(_) => continue,
+            DataType::Categorical(_, _) | DataType::Enum(_, _) => {
+                let s2 = s
+                    .clone()
+                    .cast(&DataType::String)
+                    .with_context(|| format!("cast obs/var column {} to String", s.name()))?;
+                Column::from(s2)
+            }
+            dt if polars_series_dtype_ann_dataframe_hdf5(dt) => Column::from(s.clone()),
+            _ => {
+                let s2 = s.clone().cast(&DataType::String).with_context(|| {
+                    format!(
+                        "cast obs/var column {} from {dt:?} to String for HDF5 export",
+                        s.name()
+                    )
+                })?;
+                Column::from(s2)
+            }
+        };
+        cols.push(column);
+    }
+    if cols.is_empty() {
+        bail!(
+            "after HDF5 sanitization, obs/var has no exportable columns (all dropped or failed cast)"
+        );
+    }
+    DataFrame::new(cols).map_err(|e| anyhow!("{e}"))
+}
+
 fn read_var_hvg_mask(adata: &IMAnnData) -> Result<Vec<bool>> {
     let column = adata
         .var()
@@ -1006,13 +1093,9 @@ pub fn rust_preprocess_h5ad(
         std::fs::remove_file(output)
             .map_err(|e| anyhow!("cannot remove existing output {}: {e}", output.display()))?;
     }
-    let obs_names = adata.obs_names();
-    let obs_safe = DataFrame::new(vec![
-        Series::new("_index".into(), obs_names).into(),
-        Series::new("cell_type".into(), labels.clone()).into(),
-        Series::new("leiden".into(), labels.clone()).into(),
-    ])
-    .context("minimal obs dataframe")?;
+    strip_supplemental_axis_arrays_for_h5_export(&adata)
+        .context("strip obsp/varm/varp and non-embedding obsm for HDF5 export")?;
+    let obs_safe = dataframe_hdf5_safe(adata.obs().get_data()).context("sanitize obs for HDF5")?;
     adata
         .obs()
         .set_data(obs_safe)
@@ -1026,43 +1109,32 @@ pub fn rust_preprocess_h5ad(
         .set_both(var_df, var_index)
         .context("var.set_both minimal before HDF5 export")?;
     clear_uns_for_hdf5_export(&adata).context("clear uns for HDF5")?;
-    let written = AnnData::<H5>::new(output).context("create output h5ad")?;
-    written
-        .set_x(adata.x().get_data().context("read X for export")?)
-        .context("write X")?;
-    written
-        .set_obs_names(anndata::data::DataFrameIndex::from(adata.obs_names()))
-        .context("write obs_names")?;
-    written
-        .set_var_names(anndata::data::DataFrameIndex::from(adata.var_names()))
-        .context("write var_names")?;
-    written
-        .set_obs(adata.obs().get_data())
-        .context("write obs")?;
-    written
-        .set_var(adata.var().get_data())
-        .context("write var")?;
-    for key in adata.obsm().keys() {
-        let elem = adata
-            .obsm()
-            .get_array(&key)
-            .with_context(|| format!("read obsm[{key}]"))?;
-        written
-            .obsm()
-            .add(&key, elem.get_data()?)
-            .with_context(|| format!("write obsm[{key}]"))?;
+
+    let tmp = temp_h5ad_path(output).context("temp output path for HDF5")?;
+    if tmp.exists() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    for key in adata.layers().keys() {
-        let elem = adata
-            .layers()
-            .get_array(&key)
-            .with_context(|| format!("read layers[{key}]"))?;
+    let write_result = (|| -> Result<()> {
+        let written =
+            convert_to_new_backed_h5(&adata, &tmp).context("convert_to_new_backed_h5 (write)")?;
         written
-            .layers()
-            .add(&key, elem.get_data()?)
-            .with_context(|| format!("write layers[{key}]"))?;
+            .close()
+            .context("close AnnData H5 (HDF5 finalize)")?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    written.close().context("close AnnData H5")?;
+    write_result.context(
+        "rust_preprocess: HDF5 export failed; partial temp file was removed if present",
+    )?;
+    std::fs::rename(&tmp, output).with_context(|| {
+        format!(
+            "rename temp HDF5 {:?} -> {:?}",
+            tmp.display(),
+            output.display()
+        )
+    })?;
     eprintln!("<<< write_h5ad: {:.2} s", t.elapsed().as_secs_f64());
     log.push(("write_h5ad".to_string(), t.elapsed().as_secs_f64()));
 
