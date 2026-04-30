@@ -1905,7 +1905,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let stale_w = cell.2 != perf_inner;
                 let stale_theme = cell.3 != theme_slot;
                 if stale_gen || stale_t || stale_w || stale_theme {
-                    cell.4 = build_perf_panel_lines(&st, perf_inner, pal);
+                    cell.4 = build_perf_panel_lines(st, perf_inner, pal);
                     cell.0 = st.perf_stats_generation;
                     cell.1 = now;
                     cell.2 = perf_inner;

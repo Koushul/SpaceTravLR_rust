@@ -3382,6 +3382,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "gemm"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4737,6 +4746,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
+name = "leiden"
+version = "0.1.0"
+source = "git+https://github.com/Koushul/MAGIC?rev=07d13a3c02345a03da2d6f0a0acd93834179c567#07d13a3c02345a03da2d6f0a0acd93834179c567"
+dependencies = [
+ "fxhash",
+ "num-traits",
+ "rand 0.9.2",
+ "rayon",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4965,6 +4985,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "magic-impute"
+version = "0.1.0"
+source = "git+https://github.com/Koushul/MAGIC?rev=07d13a3c02345a03da2d6f0a0acd93834179c567#07d13a3c02345a03da2d6f0a0acd93834179c567"
+dependencies = [
+ "ndarray 0.16.1",
+ "ndarray-npy",
+ "rayon",
 ]
 
 [[package]]
@@ -8092,6 +8122,8 @@ dependencies = [
  "indicatif 0.17.11",
  "instant-distance",
  "kiddo",
+ "leiden",
+ "magic-impute",
  "nalgebra 0.33.3",
  "nalgebra-sparse",
  "ndarray 0.16.1",

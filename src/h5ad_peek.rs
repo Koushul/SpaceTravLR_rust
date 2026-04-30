@@ -174,12 +174,10 @@ fn floor_char_boundary_stable(s: &str, i: usize) -> usize {
 }
 
 fn byte_index_at_char_count(s: &str, max_chars: usize) -> usize {
-    let mut n = 0usize;
-    for (i, _) in s.char_indices() {
-        if n >= max_chars {
+    for (count, (i, _)) in s.char_indices().enumerate() {
+        if count >= max_chars {
             return floor_char_boundary_stable(s, i);
         }
-        n += 1;
     }
     s.len()
 }
@@ -247,7 +245,7 @@ fn format_name_grid(names: &[String], term_w: usize) -> String {
         .min(40);
     let gutter = 2usize;
     let col_w = (max_name + gutter).clamp(6, usable);
-    let ncols = (usable / col_w).max(1).min(12);
+    let ncols = (usable / col_w).clamp(1, 12);
     let col_w = usable / ncols;
 
     let mut lines = Vec::new();
@@ -359,8 +357,8 @@ fn x_n_obs_n_vars(root: &Group) -> anyhow::Result<Option<(usize, usize)>> {
         LocationType::Dataset => {
             let sh = root.dataset("X")?.shape();
             match sh.len() {
-                2 => return Ok(Some((sh[0], sh[1]))),
-                1 => return Ok(Some((sh[0], 1))),
+                2 => Ok(Some((sh[0], sh[1]))),
+                1 => Ok(Some((sh[0], 1))),
                 _ => anyhow::bail!("X dataset has unexpected rank {}", sh.len()),
             }
         }
@@ -665,7 +663,10 @@ fn value_counts_block(
         } else {
             0.0
         };
-        let safe = label.replace('\t', " ").replace('\n', " ");
+        let safe: String = label
+            .chars()
+            .map(|c| if matches!(c, '\t' | '\n') { ' ' } else { c })
+            .collect();
         let pct_s = format!("{:.1}", pct);
         let row0 = if peek_color_enabled() {
             format!(
