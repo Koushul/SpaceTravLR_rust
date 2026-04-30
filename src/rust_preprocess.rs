@@ -6,13 +6,12 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anndata::ArrayData;
 use anndata::data::array::DynArray;
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::data::{DynCscMatrix, DynCsrMatrix};
-use anndata_memory::{
-    IMAnnData, IMArrayElement, IMAxisArrays, convert_to_new_backed_h5, load_h5ad_fast,
-};
+use anndata::{AnnData, AnnDataOp, ArrayData, AxisArraysOp};
+use anndata_hdf5::H5;
+use anndata_memory::{IMAnnData, IMArrayElement, IMAxisArrays, load_h5ad_fast};
 use anyhow::{Context, Result, anyhow, bail};
 use instant_distance::{Builder, Hnsw, Search};
 use leiden::leiden::Leiden;
@@ -22,7 +21,7 @@ use nalgebra::{DMatrix, SymmetricEigen};
 use nalgebra_sparse::{CscMatrix, CsrMatrix};
 use ndarray::Array2;
 use ndarray_umap::Array2 as Array2Umap;
-use polars::prelude::{Column, DataFrame, DataType, NamedFrom, Series};
+use polars::prelude::{DataFrame, NamedFrom, Series};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -596,25 +595,6 @@ fn clear_uns_for_hdf5_export(adata: &IMAnnData) -> Result<()> {
     Ok(())
 }
 
-fn dataframe_hdf5_safe(df: DataFrame) -> Result<DataFrame> {
-    let mut cols: Vec<Column> = Vec::new();
-    for s in df.iter() {
-        let column = match s.dtype() {
-            DataType::List(_) | DataType::Array(_, _) | DataType::Struct(_) => continue,
-            DataType::Categorical(_, _) | DataType::Enum(_, _) => {
-                let s2 = s
-                    .clone()
-                    .cast(&DataType::String)
-                    .with_context(|| format!("cast obs/var column {} to String", s.name()))?;
-                Column::from(s2)
-            }
-            _ => Column::from(s.clone()),
-        };
-        cols.push(column);
-    }
-    DataFrame::new(cols).map_err(|e| anyhow!("{e}"))
-}
-
 fn read_var_hvg_mask(adata: &IMAnnData) -> Result<Vec<bool>> {
     let column = adata
         .var()
@@ -1026,18 +1006,62 @@ pub fn rust_preprocess_h5ad(
         std::fs::remove_file(output)
             .map_err(|e| anyhow!("cannot remove existing output {}: {e}", output.display()))?;
     }
-    let obs_safe = dataframe_hdf5_safe(adata.obs().get_data()).context("sanitize obs for HDF5")?;
+    let obs_names = adata.obs_names();
+    let obs_safe = DataFrame::new(vec![
+        Series::new("_index".into(), obs_names).into(),
+        Series::new("cell_type".into(), labels.clone()).into(),
+        Series::new("leiden".into(), labels.clone()).into(),
+    ])
+    .context("minimal obs dataframe")?;
     adata
         .obs()
         .set_data(obs_safe)
         .context("obs.set_data after sanitize")?;
-    let var_safe = dataframe_hdf5_safe(adata.var().get_data()).context("sanitize var for HDF5")?;
+    let var_names = adata.var_names();
+    let var_df = DataFrame::new(vec![Series::new("_index".into(), var_names.clone()).into()])
+        .context("minimal var dataframe")?;
+    let var_index = anndata::data::DataFrameIndex::from(var_names);
     adata
         .var()
-        .set_data(var_safe)
-        .context("var.set_data after sanitize")?;
+        .set_both(var_df, var_index)
+        .context("var.set_both minimal before HDF5 export")?;
     clear_uns_for_hdf5_export(&adata).context("clear uns for HDF5")?;
-    let written = convert_to_new_backed_h5(&adata, output).context("convert_to_new_backed_h5")?;
+    let written = AnnData::<H5>::new(output).context("create output h5ad")?;
+    written
+        .set_x(adata.x().get_data().context("read X for export")?)
+        .context("write X")?;
+    written
+        .set_obs_names(anndata::data::DataFrameIndex::from(adata.obs_names()))
+        .context("write obs_names")?;
+    written
+        .set_var_names(anndata::data::DataFrameIndex::from(adata.var_names()))
+        .context("write var_names")?;
+    written
+        .set_obs(adata.obs().get_data())
+        .context("write obs")?;
+    written
+        .set_var(adata.var().get_data())
+        .context("write var")?;
+    for key in adata.obsm().keys() {
+        let elem = adata
+            .obsm()
+            .get_array(&key)
+            .with_context(|| format!("read obsm[{key}]"))?;
+        written
+            .obsm()
+            .add(&key, elem.get_data()?)
+            .with_context(|| format!("write obsm[{key}]"))?;
+    }
+    for key in adata.layers().keys() {
+        let elem = adata
+            .layers()
+            .get_array(&key)
+            .with_context(|| format!("read layers[{key}]"))?;
+        written
+            .layers()
+            .add(&key, elem.get_data()?)
+            .with_context(|| format!("write layers[{key}]"))?;
+    }
     written.close().context("close AnnData H5")?;
     eprintln!("<<< write_h5ad: {:.2} s", t.elapsed().as_secs_f64());
     log.push(("write_h5ad".to_string(), t.elapsed().as_secs_f64()));
