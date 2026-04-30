@@ -35,6 +35,14 @@ fn help_lists_process_h5ad_and_impute() {
         s.contains("--process-h5ad"),
         "expected --process-h5ad in help:\n{s}"
     );
+    assert!(
+        s.contains("--rust-process-h5ad"),
+        "expected --rust-process-h5ad in help:\n{s}"
+    );
+    assert!(
+        s.contains("Leiden") && s.contains("MAGIC"),
+        "expected Rust process help to mention Leiden/MAGIC:\n{s}"
+    );
     assert!(s.contains("--impute"), "expected --impute in help:\n{s}");
     assert!(
         s.contains("--process-output-dir"),

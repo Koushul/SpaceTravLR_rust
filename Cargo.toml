@@ -157,6 +157,8 @@ umap-rs = "0.4.5"
 instant-distance = "0.6.1"
 sprs = "0.11.4"
 ndarray_umap = { package = "ndarray", version = "0.17", features = ["rayon"] }
+magic-impute = { git = "https://github.com/Koushul/MAGIC", package = "magic-impute", rev = "07d13a3c02345a03da2d6f0a0acd93834179c567" }
+leiden = { git = "https://github.com/Koushul/MAGIC", package = "leiden", rev = "07d13a3c02345a03da2d6f0a0acd93834179c567" }
 axum = { version = "0.8", optional = true, default-features = false, features = [
     "json",
     "query",
