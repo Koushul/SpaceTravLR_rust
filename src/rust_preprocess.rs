@@ -1,6 +1,6 @@
 //! Rust-native Scanpy-style preprocessing: filter → normalize → log1p → HVG → PCA →
 //! HNSW KNN → UMAP → Leiden fallback → clusterwise MAGIC. Writes `.h5ad` via
-//! `anndata-memory` + `convert_to_new_backed_h5`.
+//! `anndata-memory` + `AnnData::<H5>`.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use nalgebra::{DMatrix, SymmetricEigen};
 use nalgebra_sparse::{CscMatrix, CsrMatrix};
 use ndarray::Array2;
 use ndarray_umap::Array2 as Array2Umap;
-use polars::prelude::{DataFrame, NamedFrom, Series};
+use polars::prelude::{Column, DataFrame, DataType, NamedFrom, Series};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -226,7 +226,7 @@ fn bridge_knn_components(
                 });
                 for (q_orig, d) in results {
                     if comp[q_orig as usize] == main_id {
-                        if best.map_or(true, |(_, _, bd)| d < bd) {
+                        if best.as_ref().is_none_or(|(_, _, bd)| d < *bd) {
                             best = Some((p, q_orig as usize, d));
                         }
                         break 'outer;
@@ -500,7 +500,7 @@ fn run_umap(
 
     let n_epochs = params
         .n_epochs
-        .unwrap_or_else(|| if n <= 10_000 { 500 } else { 200 });
+        .unwrap_or(if n <= 10_000 { 500 } else { 200 });
 
     let config = UmapConfig {
         n_components: 2,
@@ -712,7 +712,7 @@ fn layer_replace_if_present(adata: &IMAnnData, key: &str, data: ArrayData) -> Re
 
 fn array_data_to_dense_f64(data: ArrayData) -> Result<Array2<f64>> {
     match data {
-        ArrayData::Array(d) => d.try_convert().map_err(Into::into),
+        ArrayData::Array(d) => d.try_convert(),
         ArrayData::CsrMatrix(csr) => {
             let csr_f64: CsrMatrix<f64> = csr.try_convert()?;
             let mut out = Array2::<f64>::zeros((csr_f64.nrows(), csr_f64.ncols()));
@@ -1093,13 +1093,6 @@ pub fn rust_preprocess_h5ad(
         std::fs::remove_file(output)
             .map_err(|e| anyhow!("cannot remove existing output {}: {e}", output.display()))?;
     }
-    let obs_names = adata.obs_names();
-    let obs_safe = DataFrame::new(vec![
-        Series::new("_index".into(), obs_names).into(),
-        Series::new("cell_type".into(), labels.clone()).into(),
-        Series::new("leiden".into(), labels.clone()).into(),
-    ])
-    .context("minimal obs dataframe")?;
     strip_supplemental_axis_arrays_for_h5_export(&adata)
         .context("strip obsp/varm/varp and non-embedding obsm for HDF5 export")?;
     let obs_safe = dataframe_hdf5_safe(adata.obs().get_data()).context("sanitize obs for HDF5")?;
@@ -1116,54 +1109,49 @@ pub fn rust_preprocess_h5ad(
         .set_both(var_df, var_index)
         .context("var.set_both minimal before HDF5 export")?;
     clear_uns_for_hdf5_export(&adata).context("clear uns for HDF5")?;
-    let written = AnnData::<H5>::new(output).context("create output h5ad")?;
-    written
-        .set_x(adata.x().get_data().context("read X for export")?)
-        .context("write X")?;
-    written
-        .set_obs_names(anndata::data::DataFrameIndex::from(adata.obs_names()))
-        .context("write obs_names")?;
-    written
-        .set_var_names(anndata::data::DataFrameIndex::from(adata.var_names()))
-        .context("write var_names")?;
-    written
-        .set_obs(adata.obs().get_data())
-        .context("write obs")?;
-    written
-        .set_var(adata.var().get_data())
-        .context("write var")?;
-    for key in adata.obsm().keys() {
-        let elem = adata
-            .obsm()
-            .get_array(&key)
-            .with_context(|| format!("read obsm[{key}]"))?;
-        written
-            .obsm()
-            .add(&key, elem.get_data()?)
-            .with_context(|| format!("write obsm[{key}]"))?;
-    }
-    for key in adata.layers().keys() {
-        let elem = adata
-            .layers()
-            .get_array(&key)
-            .with_context(|| format!("read layers[{key}]"))?;
-        written
-            .layers()
-            .add(&key, elem.get_data()?)
-            .with_context(|| format!("write layers[{key}]"))?;
-    }
-    written.close().context("close AnnData H5")?;
 
     let tmp = temp_h5ad_path(output).context("temp output path for HDF5")?;
     if tmp.exists() {
         let _ = std::fs::remove_file(&tmp);
     }
     let write_result = (|| -> Result<()> {
-        let written =
-            convert_to_new_backed_h5(&adata, &tmp).context("convert_to_new_backed_h5 (write)")?;
+        let written = AnnData::<H5>::new(&tmp).context("create temp h5ad")?;
         written
-            .close()
-            .context("close AnnData H5 (HDF5 finalize)")?;
+            .set_x(adata.x().get_data().context("read X for export")?)
+            .context("write X")?;
+        written
+            .set_obs_names(anndata::data::DataFrameIndex::from(adata.obs_names()))
+            .context("write obs_names")?;
+        written
+            .set_var_names(anndata::data::DataFrameIndex::from(adata.var_names()))
+            .context("write var_names")?;
+        written
+            .set_obs(adata.obs().get_data())
+            .context("write obs")?;
+        written
+            .set_var(adata.var().get_data())
+            .context("write var")?;
+        for key in adata.obsm().keys() {
+            let elem = adata
+                .obsm()
+                .get_array(&key)
+                .with_context(|| format!("read obsm[{key}]"))?;
+            written
+                .obsm()
+                .add(&key, elem.get_data()?)
+                .with_context(|| format!("write obsm[{key}]"))?;
+        }
+        for key in adata.layers().keys() {
+            let elem = adata
+                .layers()
+                .get_array(&key)
+                .with_context(|| format!("read layers[{key}]"))?;
+            written
+                .layers()
+                .add(&key, elem.get_data()?)
+                .with_context(|| format!("write layers[{key}]"))?;
+        }
+        written.close().context("close AnnData H5")?;
         Ok(())
     })();
     if write_result.is_err() {

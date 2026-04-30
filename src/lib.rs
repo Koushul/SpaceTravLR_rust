@@ -68,8 +68,8 @@ pub use config::{
 };
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
-    ClusteredGcnNwrFitInputs, CnnEpochHudSlot, FittedClusterResult,
-    run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs,
+    ClusteredGcnNwrFitInputs, CnnEpochHudSlot, FittedClusterResult, PredictBetasInput,
+    run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs, TrainClusterCnnEpochsInput,
 };
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use h5ad_peek::print_h5ad_peek;

@@ -7,7 +7,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use spacetravlr::config::{CnnConfig, CnnOutputActivation};
-use spacetravlr::estimator::train_cluster_cnn_epochs;
+use spacetravlr::estimator::{train_cluster_cnn_epochs, TrainClusterCnnEpochsInput};
 use spacetravlr::lasso::{
     ClusteredGroupLasso, GroupLassoParams, largest_eigenvalue_symmetric_power_iter,
 };
@@ -363,22 +363,37 @@ fn bench_cnn_cap_tradeoff() {
             anchors_tensor.clone(),
             CnnOutputActivation::Sigmoid,
         );
-        let mut cnn = CnnConfig::default();
-        cnn.lasso_pred_align_weight = 0.0;
-        cnn.cnn_minibatch_size = 64;
-        cnn.cnn_max_batches_per_epoch = max_b;
-        cnn.cnn_max_cells_per_epoch = None;
-        cnn.cnn_early_stop_patience = 0;
+        let cnn = CnnConfig {
+            lasso_pred_align_weight: 0.0,
+            cnn_minibatch_size: 64,
+            cnn_max_batches_per_epoch: max_b,
+            cnn_max_cells_per_epoch: None,
+            cnn_early_stop_patience: 0,
+            ..Default::default()
+        };
 
         let t0 = std::time::Instant::now();
-        let (_m, mse_ep, div) = train_cluster_cnn_epochs(
-            model, &device, &sm_c, &x_c, &sf_c, &y_c, CLUSTER_N, 0usize, None, 0.01f32, &cnn, 1e-3,
-            24usize, None, 0,
-        );
+        let (_m, mse_ep, div) = train_cluster_cnn_epochs(TrainClusterCnnEpochsInput {
+            model,
+            device: &device,
+            sm_c: &sm_c,
+            x_c: &x_c,
+            sf_c: &sf_c,
+            y_c: &y_c,
+            cluster_n: CLUSTER_N,
+            cluster_id: 0usize,
+            y_lasso_cpu: None,
+            beta_prior_w: 0.01f32,
+            cnn: &cnn,
+            learning_rate: 1e-3,
+            epochs: 24usize,
+            cnn_epoch_slot: None,
+            shuffle_seed: 0,
+        });
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         let final_mse = mse_ep.last().copied().unwrap_or(f32::NAN);
-        let bs = cnn.cnn_minibatch_size.min(CLUSTER_N).max(1);
-        let steps_ep = max_b.unwrap_or((CLUSTER_N + bs - 1) / bs);
+        let bs = cnn.cnn_minibatch_size.clamp(1, CLUSTER_N);
+        let steps_ep = max_b.unwrap_or(CLUSTER_N.div_ceil(bs));
         let total_steps = steps_ep * 24;
 
         println!(

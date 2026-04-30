@@ -7,7 +7,7 @@ use crate::config::{
 };
 use crate::estimator::{
     CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrFitInputs, CnnEpochHudSlot,
-    finite_or_zero_f64,
+    PredictBetasInput, finite_or_zero_f64,
 };
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -3197,7 +3197,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             }
 
-                            let mut on_lasso_progress = |done: usize, total: usize| {
+                            let on_lasso_progress = |done: usize, total: usize| {
                                 if let Some(hh) = hud.as_ref() {
                                     if let Ok(mut g) = hh.lock() {
                                         g.set_gene_lasso_cluster_progress(&gene, done, total);
@@ -3234,7 +3234,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     Some(cached_spatial.as_ref()),
                                     cnn_epoch_slot_fit,
                                     random_seed_w,
-                                    &mut on_lasso_progress,
+                                    on_lasso_progress,
                                 )
                                 .is_ok();
                             if !fit_ok {
@@ -3344,13 +3344,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     if export_per_cell {
                                         let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
                                         let mut all_betas = est_inner.predict_betas(
-                                            &x_mock,
-                                            &xy,
-                                            &clusters,
-                                            num_clusters,
-                                            &device,
-                                            Some(cached_spatial.as_ref()),
-                                            cnn_w.cnn_inference_batch_size,
+                                            PredictBetasInput {
+                                                x: &x_mock,
+                                                xy: &xy,
+                                                clusters: &clusters,
+                                                num_clusters,
+                                                device: &device,
+                                                cached_spatial: Some(cached_spatial.as_ref()),
+                                                inference_batch_size: cnn_w.cnn_inference_batch_size,
+                                            },
                                         );
                                         if !bad_betadata_clusters.is_empty() {
                                             for i in 0..all_betas.nrows() {

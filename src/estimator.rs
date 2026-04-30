@@ -177,8 +177,8 @@ fn y_lasso_batch_tensor_from_cpu<B: AutodiffBackend>(
 const CNN_MSE_FINITE_PROBE_EVERY: usize = 8;
 const CNN_BEST_MODEL_MIN_REL_IMPROVE: f32 = 1e-4;
 
-fn cnn_training_loss<B: AutodiffBackend>(
-    model: &CellularNicheNetwork<B>,
+struct CnnTrainingLossBatch<'a, B: AutodiffBackend> {
+    model: &'a CellularNicheNetwork<B>,
     sm_tensor: Tensor<B, 4>,
     x_tensor: Tensor<B, 2>,
     sf_tensor: Tensor<B, 2>,
@@ -186,22 +186,30 @@ fn cnn_training_loss<B: AutodiffBackend>(
     mean_beta_lasso_prior_weight: f32,
     y_lasso_tensor: Option<Tensor<B, 1>>,
     lasso_pred_align_weight: f32,
-    mse_loss: &burn::nn::loss::MseLoss,
-) -> (Tensor<B, 1>, Tensor<B, 1>) {
-    let betas = model.get_betas(sm_tensor, sf_tensor);
-    let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), x_tensor);
-    let y_loss = mse_loss.forward(y_pred.clone(), y_tensor, burn::nn::loss::Reduction::Mean);
+    mse_loss: &'a burn::nn::loss::MseLoss,
+}
+
+fn cnn_training_loss<B: AutodiffBackend>(b: CnnTrainingLossBatch<'_, B>) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    let betas = b.model.get_betas(b.sm_tensor, b.sf_tensor);
+    let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), b.x_tensor);
+    let y_loss = b
+        .mse_loss
+        .forward(y_pred.clone(), b.y_tensor, burn::nn::loss::Reduction::Mean);
     let mut total = y_loss.clone();
-    if mean_beta_lasso_prior_weight > 0.0 {
+    if b.mean_beta_lasso_prior_weight > 0.0 {
         let mean_betas = betas.mean_dim(0);
-        let lasso_row = model.anchors_row.clone();
-        let prior = mse_loss.forward(mean_betas, lasso_row, burn::nn::loss::Reduction::Mean);
-        total = total + prior.mul_scalar(mean_beta_lasso_prior_weight);
+        let lasso_row = b.model.anchors_row.clone();
+        let prior = b
+            .mse_loss
+            .forward(mean_betas, lasso_row, burn::nn::loss::Reduction::Mean);
+        total = total + prior.mul_scalar(b.mean_beta_lasso_prior_weight);
     }
-    if lasso_pred_align_weight > 0.0 {
-        if let Some(yl) = y_lasso_tensor {
-            let align = mse_loss.forward(y_pred, yl, burn::nn::loss::Reduction::Mean);
-            total = total + align.mul_scalar(lasso_pred_align_weight);
+    if b.lasso_pred_align_weight > 0.0 {
+        if let Some(yl) = b.y_lasso_tensor {
+            let align = b
+                .mse_loss
+                .forward(y_pred, yl, burn::nn::loss::Reduction::Mean);
+            total = total + align.mul_scalar(b.lasso_pred_align_weight);
         }
     }
     (total, y_loss)
@@ -324,23 +332,44 @@ fn tensor_from_y<B: Backend>(a: &Array1<f64>, device: &B::Device) -> Tensor<B, 1
     )
 }
 
+pub struct TrainClusterCnnEpochsInput<'a, B: AutodiffBackend> {
+    pub model: CellularNicheNetwork<B>,
+    pub device: &'a B::Device,
+    pub sm_c: &'a Array4<f32>,
+    pub x_c: &'a Array2<f64>,
+    pub sf_c: &'a Array2<f64>,
+    pub y_c: &'a Array1<f64>,
+    pub cluster_n: usize,
+    pub cluster_id: usize,
+    pub y_lasso_cpu: Option<&'a [f32]>,
+    pub beta_prior_w: f32,
+    pub cnn: &'a CnnConfig,
+    pub learning_rate: f64,
+    pub epochs: usize,
+    pub cnn_epoch_slot: Option<&'a Arc<CnnEpochHudSlot>>,
+    pub shuffle_seed: u64,
+}
+
 pub fn train_cluster_cnn_epochs<B: AutodiffBackend>(
-    mut model: CellularNicheNetwork<B>,
-    device: &B::Device,
-    sm_c: &Array4<f32>,
-    x_c: &Array2<f64>,
-    sf_c: &Array2<f64>,
-    y_c: &Array1<f64>,
-    cluster_n: usize,
-    cluster_id: usize,
-    y_lasso_cpu: Option<&[f32]>,
-    beta_prior_w: f32,
-    cnn: &CnnConfig,
-    learning_rate: f64,
-    epochs: usize,
-    cnn_epoch_slot: Option<&Arc<CnnEpochHudSlot>>,
-    shuffle_seed: u64,
+    input: TrainClusterCnnEpochsInput<'_, B>,
 ) -> (CellularNicheNetwork<B>, Vec<f32>, bool) {
+    let TrainClusterCnnEpochsInput {
+        mut model,
+        device,
+        sm_c,
+        x_c,
+        sf_c,
+        y_c,
+        cluster_n,
+        cluster_id,
+        y_lasso_cpu,
+        beta_prior_w,
+        cnn,
+        learning_rate,
+        epochs,
+        cnn_epoch_slot,
+        shuffle_seed,
+    } = input;
     let mut adam = AdamConfig::new()
         .with_beta_1(cnn.adam_beta_1 as f32)
         .with_beta_2(cnn.adam_beta_2 as f32)
@@ -382,7 +411,7 @@ pub fn train_cluster_cnn_epochs<B: AutodiffBackend>(
         let mut order: Vec<usize> = (0..cluster_n).collect();
         let mut rng = ChaCha8Rng::seed_from_u64(
             shuffle_seed
-                ^ 0x9E37_79B9_7F4A7C15_u64
+                ^ 0x9E37_79B9_7F4A_7C15_u64
                 ^ (cluster_id as u64).wrapping_shl(32)
                 ^ (epoch as u64),
         );
@@ -422,17 +451,17 @@ pub fn train_cluster_cnn_epochs<B: AutodiffBackend>(
                 .as_ref()
                 .map(|sl| y_lasso_batch_tensor_from_cpu(sl, batch_idx, device));
 
-            let (loss, y_mse) = cnn_training_loss(
-                &model,
+            let (loss, y_mse) = cnn_training_loss(CnnTrainingLossBatch {
+                model: &model,
                 sm_tensor,
                 x_tensor,
                 sf_tensor,
                 y_tensor,
-                beta_prior_w,
-                y_lasso_b,
-                align_w,
-                &mse_loss,
-            );
+                mean_beta_lasso_prior_weight: beta_prior_w,
+                y_lasso_tensor: y_lasso_b,
+                lasso_pred_align_weight: align_w,
+                mse_loss: &mse_loss,
+            });
             let w = batch_n as f32;
             let y_mse_d = y_mse.detach();
             epoch_mse_acc = epoch_mse_acc + y_mse_d.clone().mul_scalar(w);
@@ -571,17 +600,30 @@ enum ClusterLassoPhase {
     Pass(LassoPassData),
 }
 
-fn fit_cluster_group_lasso(
-    c_id: usize,
+struct FitClusterGroupLassoArgs<'a> {
+    cluster_id: usize,
     n_samples: usize,
-    x: &Array2<f64>,
-    y: &Array1<f64>,
-    clusters: &Array1<usize>,
+    x: &'a Array2<f64>,
+    y: &'a Array1<f64>,
+    clusters: &'a Array1<usize>,
     params: GroupLassoParams,
     group_regs: Option<Vec<f64>>,
-    regulator_masks: Option<&HashMap<usize, Vec<bool>>>,
+    regulator_masks: Option<&'a HashMap<usize, Vec<bool>>>,
     score_threshold: f64,
-) -> ClusterLassoPhase {
+}
+
+fn fit_cluster_group_lasso(args: FitClusterGroupLassoArgs<'_>) -> ClusterLassoPhase {
+    let FitClusterGroupLassoArgs {
+        cluster_id: c_id,
+        n_samples,
+        x,
+        y,
+        clusters,
+        params,
+        group_regs,
+        regulator_masks,
+        score_threshold,
+    } = args;
     let indices: Vec<usize> = (0..n_samples).filter(|&i| clusters[i] == c_id).collect();
     if indices.is_empty() {
         return ClusterLassoPhase::Skipped;
@@ -753,6 +795,16 @@ pub struct ClusteredGCNNWR<B: AutodiffBackend> {
     pub cluster_training_summaries: Vec<ClusterTrainingSummary>,
 }
 
+pub struct PredictBetasInput<'a, B: AutodiffBackend> {
+    pub x: &'a Array2<f64>,
+    pub xy: &'a Array2<f64>,
+    pub clusters: &'a Array1<usize>,
+    pub num_clusters: usize,
+    pub device: &'a B::Device,
+    pub cached_spatial: Option<&'a CachedSpatialData>,
+    pub inference_batch_size: usize,
+}
+
 impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
     pub fn new(
         params: GroupLassoParams,
@@ -850,17 +902,17 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     .into_par_iter()
                     .map(|idx| {
                         let c_id = to_fit[idx];
-                        let out = fit_cluster_group_lasso(
-                            c_id,
+                        let out = fit_cluster_group_lasso(FitClusterGroupLassoArgs {
+                            cluster_id: c_id,
                             n_samples,
                             x,
                             y,
                             clusters,
-                            params.clone(),
-                            group_regs.clone(),
+                            params: params.clone(),
+                            group_regs: group_regs.clone(),
                             regulator_masks,
                             score_threshold,
-                        );
+                        });
                         let d = lasso_done.fetch_add(1, Ordering::Relaxed) + 1;
                         lasso_progress.lock().unwrap_or_else(|e| e.into_inner())(d, n_celltypes);
                         out
@@ -871,17 +923,17 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             (0..to_fit.len())
                 .map(|idx| {
                     let c_id = to_fit[idx];
-                    let out = fit_cluster_group_lasso(
-                        c_id,
+                    let out = fit_cluster_group_lasso(FitClusterGroupLassoArgs {
+                        cluster_id: c_id,
                         n_samples,
                         x,
                         y,
                         clusters,
-                        params.clone(),
-                        group_regs.clone(),
+                        params: params.clone(),
+                        group_regs: group_regs.clone(),
                         regulator_masks,
                         score_threshold,
-                    );
+                    });
                     let d = lasso_done.fetch_add(1, Ordering::Relaxed) + 1;
                     lasso_progress.lock().unwrap_or_else(|e| e.into_inner())(d, n_celltypes);
                     out
@@ -1010,21 +1062,23 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     let beta_prior_w = cnn.mean_beta_lasso_prior_weight as f32;
 
                     let (model, cnn_train_mse_epochs, cnn_diverged) = train_cluster_cnn_epochs(
-                        model,
-                        device,
-                        &sm_c,
-                        &x_c,
-                        &sf_c,
-                        &y_1d,
-                        cluster_n,
-                        c_id,
-                        y_lasso_cpu_vec.as_deref(),
-                        beta_prior_w,
-                        cnn,
-                        learning_rate,
-                        epochs,
-                        cnn_epoch_slot.as_ref(),
-                        random_seed,
+                        TrainClusterCnnEpochsInput {
+                            model,
+                            device,
+                            sm_c: &sm_c,
+                            x_c: &x_c,
+                            sf_c: &sf_c,
+                            y_c: &y_1d,
+                            cluster_n,
+                            cluster_id: c_id,
+                            y_lasso_cpu: y_lasso_cpu_vec.as_deref(),
+                            beta_prior_w,
+                            cnn,
+                            learning_rate,
+                            epochs,
+                            cnn_epoch_slot: cnn_epoch_slot.as_ref(),
+                            shuffle_seed: random_seed,
+                        },
                     );
 
                     let cnn_r2 = if cnn_diverged {
@@ -1081,11 +1135,10 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         }
 
         for s in &self.cluster_training_summaries {
-            if !s.cnn_r2.is_finite() {
-                self.models.remove(&s.cluster_id);
-            } else if cnn.drop_cnn_if_insample_worse_than_lasso
-                && s.lasso_r2.is_finite()
-                && s.cnn_r2 + cnn.cnn_vs_lasso_arbitration_margin < s.lasso_r2
+            if !s.cnn_r2.is_finite()
+                || (cnn.drop_cnn_if_insample_worse_than_lasso
+                    && s.lasso_r2.is_finite()
+                    && s.cnn_r2 + cnn.cnn_vs_lasso_arbitration_margin < s.lasso_r2)
             {
                 self.models.remove(&s.cluster_id);
             }
@@ -1205,21 +1258,23 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 let beta_prior_w = cnn.mean_beta_lasso_prior_weight as f32;
 
                 let (model, cnn_train_mse_epochs, cnn_diverged) = train_cluster_cnn_epochs(
-                    model,
-                    device,
-                    &sm_c,
-                    &x_c,
-                    &sf_c,
-                    &y_1d,
-                    cluster_n,
-                    c_id,
-                    y_lasso_cpu_vec.as_deref(),
-                    beta_prior_w,
-                    cnn,
-                    learning_rate,
-                    epochs,
-                    cnn_epoch_slot.as_ref(),
-                    random_seed,
+                    TrainClusterCnnEpochsInput {
+                        model,
+                        device,
+                        sm_c: &sm_c,
+                        x_c: &x_c,
+                        sf_c: &sf_c,
+                        y_c: &y_1d,
+                        cluster_n,
+                        cluster_id: c_id,
+                        y_lasso_cpu: y_lasso_cpu_vec.as_deref(),
+                        beta_prior_w,
+                        cnn,
+                        learning_rate,
+                        epochs,
+                        cnn_epoch_slot: cnn_epoch_slot.as_ref(),
+                        shuffle_seed: random_seed,
+                    },
                 );
 
                 let cnn_r2 = if cnn_diverged {
@@ -1268,16 +1323,16 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
         }
     }
 
-    pub fn predict_betas(
-        &self,
-        x: &Array2<f64>,
-        xy: &Array2<f64>,
-        clusters: &Array1<usize>,
-        num_clusters: usize,
-        device: &B::Device,
-        cached_spatial: Option<&CachedSpatialData>,
-        inference_batch_size: usize,
-    ) -> Array2<f64> {
+    pub fn predict_betas(&self, input: PredictBetasInput<'_, B>) -> Array2<f64> {
+        let PredictBetasInput {
+            x,
+            xy,
+            clusters,
+            num_clusters,
+            device,
+            cached_spatial,
+            inference_batch_size,
+        } = input;
         let n_samples = xy.nrows();
         let n_modulators = x.ncols();
 
@@ -1552,31 +1607,33 @@ pub fn run_benchmark_mock_cluster_cnn_training() -> std::time::Duration {
     };
     let model = cfg.init::<B>(&device, anchors_tensor, CnnOutputActivation::Sigmoid);
 
-    let mut cnn = CnnConfig::default();
-    cnn.lasso_pred_align_weight = 0.05;
-    cnn.cnn_minibatch_size = 48;
-    cnn.cnn_early_stop_patience = 0;
+    let cnn = CnnConfig {
+        lasso_pred_align_weight: 0.05,
+        cnn_minibatch_size: 48,
+        cnn_early_stop_patience: 0,
+        ..Default::default()
+    };
 
     let y_lasso_cpu = y_lasso_vec_from_xy_cpu(&x_c, intercept, &lasso_coef);
 
     let t0 = std::time::Instant::now();
-    let _ = train_cluster_cnn_epochs(
+    let _ = train_cluster_cnn_epochs(TrainClusterCnnEpochsInput {
         model,
-        &device,
-        &sm_c,
-        &x_c,
-        &sf_c,
-        &y_c,
-        CLUSTER_N,
-        0usize,
-        Some(y_lasso_cpu.as_slice()),
-        0.01f32,
-        &cnn,
-        1e-3,
-        EPOCHS,
-        None,
-        0,
-    );
+        device: &device,
+        sm_c: &sm_c,
+        x_c: &x_c,
+        sf_c: &sf_c,
+        y_c: &y_c,
+        cluster_n: CLUSTER_N,
+        cluster_id: 0usize,
+        y_lasso_cpu: Some(y_lasso_cpu.as_slice()),
+        beta_prior_w: 0.01f32,
+        cnn: &cnn,
+        learning_rate: 1e-3,
+        epochs: EPOCHS,
+        cnn_epoch_slot: None,
+        shuffle_seed: 0,
+    });
     t0.elapsed()
 }
 
@@ -1668,10 +1725,12 @@ mod tests {
         assert_eq!(cells_to_batches(Some(33)), 2);
         assert_eq!(cells_to_batches(Some(8192)), 256);
 
-        let mut cnn = CnnConfig::default();
-        cnn.cnn_minibatch_size = 32;
-        cnn.cnn_max_batches_per_epoch = Some(8);
-        cnn.cnn_max_cells_per_epoch = Some(64);
+        let cnn = CnnConfig {
+            cnn_minibatch_size: 32,
+            cnn_max_batches_per_epoch: Some(8),
+            cnn_max_cells_per_epoch: Some(64),
+            ..Default::default()
+        };
         let combined = cells_to_batches(cnn.cnn_max_cells_per_epoch).min(
             cnn.cnn_max_batches_per_epoch
                 .filter(|b| *b > 0)
@@ -1713,28 +1772,30 @@ mod tests {
         }
         .init::<B>(&device, at, CnnOutputActivation::Sigmoid);
         let y_l = y_lasso_vec_from_xy_cpu(&x, 0.0, &lasso_coef);
-        let mut cnn = CnnConfig::default();
-        cnn.lasso_pred_align_weight = 0.0;
-        cnn.cnn_minibatch_size = 32;
-        cnn.cnn_max_batches_per_epoch = Some(2);
-        cnn.cnn_early_stop_patience = 0;
-        let (_m, mse, div) = train_cluster_cnn_epochs(
-            m,
-            &device,
-            &sm,
-            &x,
-            &sf,
-            &y,
-            N,
-            0usize,
-            Some(y_l.as_slice()),
-            0.01f32,
-            &cnn,
-            1e-3,
-            3usize,
-            None,
-            0,
-        );
+        let cnn = CnnConfig {
+            lasso_pred_align_weight: 0.0,
+            cnn_minibatch_size: 32,
+            cnn_max_batches_per_epoch: Some(2),
+            cnn_early_stop_patience: 0,
+            ..Default::default()
+        };
+        let (_m, mse, div) = train_cluster_cnn_epochs(TrainClusterCnnEpochsInput {
+            model: m,
+            device: &device,
+            sm_c: &sm,
+            x_c: &x,
+            sf_c: &sf,
+            y_c: &y,
+            cluster_n: N,
+            cluster_id: 0usize,
+            y_lasso_cpu: Some(y_l.as_slice()),
+            beta_prior_w: 0.01f32,
+            cnn: &cnn,
+            learning_rate: 1e-3,
+            epochs: 3usize,
+            cnn_epoch_slot: None,
+            shuffle_seed: 0,
+        });
         assert!(!div);
         assert_eq!(mse.len(), 3);
         assert!(mse.iter().all(|v| v.is_finite()));
