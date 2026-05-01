@@ -361,6 +361,111 @@ pub fn optimal_square_chart_dims(inner_w: usize, inner_h: usize) -> (usize, usiz
     chart_size_square_pixels(max_chart_w, max_chart_h)
 }
 
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0);
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let sec = (h / 60.0).floor() as i32;
+    let (r1, g1, b1) = match sec {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r1 + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn continuous_color_from_t(t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let hue = 240.0 * (1.0 - t);
+    let (r, g, b) = hsv_to_rgb(hue, 0.88, 0.95);
+    Color::TrueColor { r, g, b }
+}
+
+/// Dense 1d `f32` / `f64` obs dataset only (not categorical HDF5 groups).
+fn try_read_obs_column_f64_vector(obs: &Group, col: &str) -> anyhow::Result<Option<Vec<f64>>> {
+    match obs
+        .loc_type_by_name(col)
+        .with_context(|| format!("obs[{col}]"))?
+    {
+        LocationType::Dataset => {
+            let ds = obs.dataset(col)?;
+            let sh = ds.shape();
+            anyhow::ensure!(sh.len() == 1, "expected 1d obs column, got shape {:?}", sh);
+            if let Ok(v) = ds.read_1d::<f64>() {
+                return Ok(Some(v.iter().cloned().collect()));
+            }
+            if let Ok(v) = ds.read_1d::<f32>() {
+                return Ok(Some(v.iter().map(|x| *x as f64).collect()));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn draw_spatial_scatter_canvas_from_points_continuous(
+    points: &[(f64, f64)],
+    values: &[f64],
+    chart_w: usize,
+    chart_h: usize,
+) -> anyhow::Result<(String, String, f64, f64)> {
+    anyhow::ensure!(
+        points.len() == values.len(),
+        "points (len {}) != values (len {})",
+        points.len(),
+        values.len()
+    );
+    let n_obs = points.len();
+    let mut vmin = f64::INFINITY;
+    let mut vmax = f64::NEG_INFINITY;
+    for &v in values {
+        if v.is_finite() {
+            vmin = vmin.min(v);
+            vmax = vmax.max(v);
+        }
+    }
+    anyhow::ensure!(
+        vmin.is_finite() && vmax.is_finite(),
+        "no finite numeric values in obs column for continuous coloring"
+    );
+    let span = (vmax - vmin).max(1e-12);
+
+    let (xr, yr) = ChartContext::get_auto_range(points, 0.04);
+    let mut chart = ChartContext::new(chart_w, chart_h);
+    let w_px = chart.canvas.pixel_width();
+    let h_px = chart.canvas.pixel_height();
+    for i in 0..n_obs {
+        let v = values[i];
+        let t = if v.is_finite() {
+            (v - vmin) / span
+        } else {
+            f64::NAN
+        };
+        let color = if t.is_finite() {
+            Some(continuous_color_from_t(t))
+        } else {
+            None
+        };
+        if let (Some(c), Some((px, py))) = (
+            color,
+            map_to_pixel_equal_aspect(w_px, h_px, points[i].0, points[i].1, xr, yr),
+        ) {
+            chart.canvas.set_pixel(px, py, Some(c));
+        }
+    }
+    let canvas_no_border = chart.canvas.render_with_options(false, None);
+    let canvas_with_border = chart.canvas.render();
+    Ok((canvas_no_border, canvas_with_border, vmin, vmax))
+}
+
 fn draw_spatial_scatter_canvas_from_points(
     points: &[(f64, f64)],
     labels: &[String],
@@ -632,6 +737,14 @@ pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Re
     resolve_plot_h5ad_color_column_from_root(&h5, fallback)
 }
 
+pub fn h5ad_obs_column_exists(path: &Path, col: &str) -> anyhow::Result<bool> {
+    let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let obs = h5.group("obs").ok();
+    Ok(obs
+        .map(|g| g.link_exists(col))
+        .unwrap_or(false))
+}
+
 const UMAP_OBSM_KEYS: &[&str] = &["X_umap", "umap"];
 
 fn h5ad_umap_obsm_key(obsm: &Group) -> anyhow::Result<String> {
@@ -653,7 +766,12 @@ fn h5ad_umap_obsm_key(obsm: &Group) -> anyhow::Result<String> {
 }
 
 /// Print a terminal UMAP scatter from a preprocessed `.h5ad` (obsm `X_umap` or `umap`).
-pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
+///
+/// When `color_obs` is `Some(column)`, color by that `obs` key (error if missing or wrong length).
+/// Dense `f32`/`f64` columns use a continuous hue scale; other columns use categorical colors.
+/// When `color_obs` is `None`, behavior matches the previous release (prefer cell-type-like
+/// columns, then `cell_type` / `leiden`, else monochrome `"cell"`).
+pub fn print_h5ad_umap_scatter(path: &Path, color_obs: Option<&str>) -> anyhow::Result<()> {
     use colored::Colorize;
     let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
 
@@ -666,29 +784,211 @@ pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
     let n_obs = xy.nrows();
     anyhow::ensure!(n_obs > 0, "obsm['{umap_key}'] is empty");
 
-    let color_col = resolve_plot_h5ad_color_column_opt(&h5).or_else(|| {
-        let obs = h5.group("obs").ok()?;
-        for fallback in ["cell_type", "leiden"] {
-            if obs.link_exists(fallback) {
-                return Some(fallback.to_string());
+    let obs = h5
+        .group("obs")
+        .context("h5ad: missing obs group — cannot color points")?;
+
+    enum DrawMode {
+        Categorical {
+            labels: Vec<String>,
+            header_color: String,
+        },
+        Continuous {
+            values: Vec<f64>,
+            header_color: String,
+        },
+    }
+
+    let mode = if let Some(col) = color_obs {
+        anyhow::ensure!(
+            obs.link_exists(col),
+            "obs column {:?} not found in {}",
+            col,
+            path.display()
+        );
+        if let Some(vals) = try_read_obs_column_f64_vector(&obs, col)? {
+            anyhow::ensure!(
+                vals.len() == n_obs,
+                "obs[{col}] length {} != n_obs {n_obs}",
+                vals.len()
+            );
+            DrawMode::Continuous {
+                values: vals,
+                header_color: format!("{col} (continuous)"),
+            }
+        } else {
+            let labels = h5ad_obs_labels(&obs, col).with_context(|| format!("read obs[{col}]"))?;
+            anyhow::ensure!(
+                labels.len() == n_obs,
+                "obs[{col}] length {} != n_obs {n_obs}",
+                labels.len()
+            );
+            DrawMode::Categorical {
+                labels,
+                header_color: col.to_string(),
             }
         }
-        None
-    });
-
-    let labels: Vec<String> = if let Some(ref col) = color_col {
-        let obs = h5.group("obs").context("h5ad: missing obs group")?;
-        match h5ad_obs_labels(&obs, col) {
-            Ok(l) if l.len() == n_obs => l,
-            _ => vec!["cell".to_string(); n_obs],
-        }
     } else {
-        vec!["cell".to_string(); n_obs]
+        let color_col = resolve_plot_h5ad_color_column_opt(&h5).or_else(|| {
+            for fallback in ["cell_type", "leiden"] {
+                if obs.link_exists(fallback) {
+                    return Some(fallback.to_string());
+                }
+            }
+            None
+        });
+        let labels: Vec<String> = if let Some(ref col) = color_col {
+            match h5ad_obs_labels(&obs, col.as_str()) {
+                Ok(l) if l.len() == n_obs => l,
+                _ => vec!["cell".to_string(); n_obs],
+            }
+        } else {
+            vec!["cell".to_string(); n_obs]
+        };
+        let header_color = color_col
+            .as_deref()
+            .filter(|_| labels.iter().any(|l| l != "cell"))
+            .unwrap_or("(none)")
+            .to_string();
+        DrawMode::Categorical {
+            labels,
+            header_color,
+        }
     };
 
     let mut points: Vec<(f64, f64)> = Vec::with_capacity(n_obs);
     for i in 0..n_obs {
         points.push((xy[[i, 0]], xy[[i, 1]]));
+    }
+
+    let term = terminal_size::terminal_size();
+    let cols = term.map(|(w, _)| w.0 as usize).unwrap_or(100).max(60);
+    let rows = term.map(|(_, h)| h.0 as usize).unwrap_or(32);
+    let margin = 4usize;
+    let legend_gap = 2usize;
+    let border_cols = 2usize;
+    let legend_budget = match &mode {
+        DrawMode::Categorical { labels, .. } => legend_plain_width_budget(labels, n_obs),
+        DrawMode::Continuous { .. } => 28usize,
+    };
+    let max_chart_w = cols
+        .saturating_sub(margin)
+        .saturating_sub(legend_gap)
+        .saturating_sub(legend_budget)
+        .saturating_sub(border_cols)
+        .clamp(15, 90);
+    let max_chart_h = rows.saturating_sub(10).clamp(8, 48);
+    let (cw, ch) = chart_size_square_pixels(max_chart_w, max_chart_h);
+
+    let (canvas, legend_lines, header_color) = match mode {
+        DrawMode::Categorical {
+            labels,
+            header_color,
+        } => {
+            let (_, canvas, legend_map) =
+                draw_spatial_scatter_canvas_from_points(&points, &labels, cw, ch)?;
+            let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
+            legend.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut label_counts: HashMap<&str, usize> = HashMap::new();
+            for l in &labels {
+                *label_counts.entry(l.as_str()).or_insert(0) += 1;
+            }
+            let legend_lines: Vec<String> = legend
+                .iter()
+                .map(|(name, c)| {
+                    let cnt = label_counts.get(name.as_str()).copied().unwrap_or(0);
+                    let (r, g, b) = match c {
+                        Color::TrueColor { r, g, b } => (*r, *g, *b),
+                        _ => (255, 255, 255),
+                    };
+                    format!(
+                        "{} {}",
+                        name.as_str().truecolor(r, g, b),
+                        cnt.to_string().dimmed()
+                    )
+                })
+                .collect();
+            (canvas, legend_lines, header_color)
+        }
+        DrawMode::Continuous {
+            values,
+            header_color,
+        } => {
+            let (_, canvas, vmin, vmax) =
+                draw_spatial_scatter_canvas_from_points_continuous(&points, &values, cw, ch)?;
+            let mid = (vmin + vmax) / 2.0;
+            let rgb_at = |t: f64| match continuous_color_from_t(t) {
+                Color::TrueColor { r, g, b } => (r, g, b),
+                _ => (200u8, 200u8, 200u8),
+            };
+            let (r0, g0, b0) = rgb_at(0.0);
+            let (r1, g1, b1) = rgb_at(0.5);
+            let (r2, g2, b2) = rgb_at(1.0);
+            let legend_lines = vec![
+                format!(
+                    "{} {:.6}",
+                    "min".truecolor(r0, g0, b0),
+                    vmin
+                ),
+                format!(
+                    "{} {:.6}",
+                    "mid".truecolor(r1, g1, b1),
+                    mid
+                ),
+                format!(
+                    "{} {:.6}",
+                    "max".truecolor(r2, g2, b2),
+                    vmax
+                ),
+            ];
+            (canvas, legend_lines, header_color)
+        }
+    };
+
+    println!(
+        "{}  {}  n={}  obsm[{umap_key}]  color=obs[{header_color}]",
+        "AnnData UMAP".bold(),
+        path.display(),
+        n_obs,
+    );
+    print!(
+        "{}",
+        zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines)
+    );
+    Ok(())
+}
+
+/// Print a terminal UMAP scatter directly from in-memory arrays (no disk I/O).
+///
+/// `umap_coords` must be (n_obs, 2). If `color_obs` is provided as `Some((col_name, labels))`,
+/// those labels are used for coloring. Otherwise falls back to monochrome.
+pub fn print_umap_scatter_from_arrays(
+    umap_coords: &Array2<f64>,
+    color_obs: Option<(&str, &[String])>,
+    source_label: &str,
+) -> anyhow::Result<()> {
+    use colored::Colorize;
+    let n_obs = umap_coords.nrows();
+    anyhow::ensure!(n_obs > 0, "UMAP coordinates are empty");
+    anyhow::ensure!(
+        umap_coords.ncols() >= 2,
+        "UMAP coordinates need >= 2 columns"
+    );
+
+    let (labels, header_color) = if let Some((col_name, lab)) = color_obs {
+        anyhow::ensure!(
+            lab.len() == n_obs,
+            "color labels length {} != n_obs {n_obs}",
+            lab.len()
+        );
+        (lab.to_vec(), col_name.to_string())
+    } else {
+        (vec!["cell".to_string(); n_obs], "(none)".to_string())
+    };
+
+    let mut points: Vec<(f64, f64)> = Vec::with_capacity(n_obs);
+    for i in 0..n_obs {
+        points.push((umap_coords[[i, 0]], umap_coords[[i, 1]]));
     }
 
     let term = terminal_size::terminal_size();
@@ -707,22 +1007,10 @@ pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
     let max_chart_h = rows.saturating_sub(10).clamp(8, 48);
     let (cw, ch) = chart_size_square_pixels(max_chart_w, max_chart_h);
 
-    let color_label = color_col
-        .as_deref()
-        .filter(|_| labels.iter().any(|l| l != "cell"))
-        .unwrap_or("(none)");
-
     let (_, canvas, legend_map) =
         draw_spatial_scatter_canvas_from_points(&points, &labels, cw, ch)?;
     let mut legend: Vec<(String, Color)> = legend_map.into_iter().collect();
     legend.sort_by(|a, b| a.0.cmp(&b.0));
-
-    println!(
-        "{}  {}  n={}  obsm[{umap_key}]  color=obs[{color_label}]",
-        "AnnData UMAP".bold(),
-        path.display(),
-        n_obs,
-    );
     let mut label_counts: HashMap<&str, usize> = HashMap::new();
     for l in &labels {
         *label_counts.entry(l.as_str()).or_insert(0) += 1;
@@ -742,6 +1030,13 @@ pub fn print_h5ad_umap_scatter(path: &Path) -> anyhow::Result<()> {
             )
         })
         .collect();
+
+    println!(
+        "{}  {}  n={}  obsm[X_umap]  color=obs[{header_color}]",
+        "AnnData UMAP".bold(),
+        source_label,
+        n_obs,
+    );
     print!(
         "{}",
         zip_spatial_canvas_and_legend_lines(&canvas, &legend_lines)

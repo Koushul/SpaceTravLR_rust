@@ -43,7 +43,7 @@
 //!
 //! | Step | Function | Output |
 //! |------|----------|--------|
-//! | Full QC → UMAP/Leiden → magic-impute | [`full_preprocess`] / [`full_preprocess_maybe_log`] | caller-chosen path (training auto-prep: [`training_prep_h5ad_path`] under **`spacetravlr_prep/`**) |
+//! | Full QC → UMAP/Leiden → magic-impute | [`full_preprocess`] / [`full_preprocess_maybe_log`] | explicit **`--process-h5ad`** (or other callers); training **`FullPreprocess`** uses [`crate::rust_preprocess::rust_preprocess_h5ad_with_steps`] instead |
 //! | Imputation + CSR only | [`imputed_count_from_normalized`] / [`magic_impute_and_attach_batch`] | `<stem>_imputed.h5ad` |
 //! | `leiden` → `cell_type` (path helper) | [`cell_type_patch_h5ad_path`] | sibling filename |
 //! | `leiden` → `cell_type` (write) | [`write_cell_type_from_leiden`] | caller-chosen path |
@@ -55,7 +55,9 @@
 //! With **`--condition`**, the same obs column name is used as the MAGIC batch axis unless **`--magic-batch-obs`** overrides.
 //!
 //! **Training:** [`ensure_training_adata_ready`] uses [`plan_training_prep`] to pick the minimal
-//! fix; derived `.h5ad` files go under **`spacetravlr_prep/`** (content-keyed from the source path + mtime), not a top-level `{stem}_processed.h5ad` copy. When **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
+//! fix; **`FullPreprocess`** / **`LayersLeidenAnnotate`** run the Rust pipeline ([`crate::rust_preprocess`]),
+//! except **`FullPreprocess`** still uses Scanpy when a non-empty MAGIC **batch** obs column is set (Rust MAGIC is not batch-aware yet).
+//! Patch / impute-only branches still use small **`uv`** Python steps. Derived `.h5ad` files go under **`spacetravlr_prep/`** (content-keyed from the source path + mtime). When **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
 //!
 //! **Spatial coordinates:** After cell/gene filtering, when **`obsm['unscaled_spatial']`** is absent
 //! and a 2D array exists under **`spatial`** / **`X_spatial`** / **`spatial_loc`**, the embedded
@@ -67,6 +69,9 @@
 //! in **µm** to match.
 
 use crate::config::expand_user_path;
+use crate::rust_preprocess::{
+    rust_preprocess_h5ad_with_steps, RustPreprocessParams, RustPreprocessSteps,
+};
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
@@ -1404,10 +1409,8 @@ pub fn plan_training_prep(
 /// **`magic_batch_obs`**: when `Some`, MAGIC imputation is batch-clusterwise on this **`adata.obs`**
 /// column (use the same name as **`[data].condition`** when training is split by that column).
 ///
-/// **`spatial_microns`**: heuristic **`obsm['spatial']` → µm** during full Scanpy preprocess only
-/// ([`TrainingPrepPlan::FullPreprocess`]). For [`TrainingPrepPlan::LayersLeidenAnnotate`], spatial
-/// microns are skipped so species resolution is not required. Empty **`species`** is otherwise
-/// resolved via [`resolve_spatial_microns_species_for_h5ad`] inside [`full_preprocess_maybe_log`].
+/// **`spatial_microns`**: used only by **`--process-h5ad`** / [`full_preprocess_maybe_log`]
+/// (heuristic **`obsm['spatial']` → µm`**). Rust training auto-prep does not rescale spatial coordinates.
 ///
 /// Prepared files are written under **`output_dir/spacetravlr_prep/`** (see [`training_prep_h5ad_path`]).
 /// Use [`crate::config::canonical_training_prep_stem`] on the pre-prep path for **`original_input_for_stem`**
@@ -1445,7 +1448,7 @@ pub fn ensure_training_adata_ready(
     agent_debug_ndjson(
         "F",
         "scanpy_preprocess.rs:ensure_training_adata_ready",
-        "training auto-prep plan; spatial_microns in FullPreprocess only (skipped for LayersLeidenAnnotate)",
+        "training auto-prep plan; spatial_microns only for explicit Scanpy full_preprocess callers",
         "preprocess",
         json!({
             "adata_in": p.to_string_lossy(),
@@ -1513,31 +1516,50 @@ pub fn ensure_training_adata_ready(
         }
         TrainingPrepPlan::LayersLeidenAnnotate { out } => {
             eprintln!(
-                "spacetravlr: expression layers present; Leiden → cell_type only (no re-impute/UMAP) → {}",
+                "spacetravlr: expression layers present; Rust UMAP+Leiden → cell_type (no re-impute) → {}",
                 out.display()
             );
-            let mut microns_skip = spatial_microns.clone();
-            microns_skip.skip = true;
-            let (written, _) =
-                full_preprocess_maybe_log(&p, &out, false, None, microns_skip, false)?;
-            debug_assert_eq!(written, out);
-            *adata_path = expand_user_path(written.to_string_lossy().as_ref());
+            let _ = std::fs::remove_file(&out);
+            let params = RustPreprocessParams::default();
+            rust_preprocess_h5ad_with_steps(
+                &p,
+                Some(out.as_path()),
+                &params,
+                &RustPreprocessSteps::TRAINING_LAYERS_LEIDEN_ANNOTATE,
+            )?;
+            *adata_path = expand_user_path(out.to_string_lossy().as_ref());
         }
         TrainingPrepPlan::FullPreprocess { out } => {
-            eprintln!(
-                "spacetravlr: running full Scanpy preprocess (UMAP, Leiden, cell_type, imputation) → {}",
-                out.display()
-            );
-            let (written, _) = full_preprocess_maybe_log(
-                &p,
-                &out,
-                false,
-                magic_batch_obs,
-                spatial_microns,
-                false,
-            )?;
-            debug_assert_eq!(written, out);
-            *adata_path = expand_user_path(written.to_string_lossy().as_ref());
+            if let Some(batch_label) = magic_batch_obs.map(str::trim).filter(|s| !s.is_empty()) {
+                eprintln!(
+                    "spacetravlr: running full Scanpy preprocess (batch-aware MAGIC on `{batch_label}`) → {}",
+                    out.display()
+                );
+                let (written, _) = full_preprocess_maybe_log(
+                    &p,
+                    &out,
+                    false,
+                    magic_batch_obs,
+                    spatial_microns,
+                    false,
+                )?;
+                debug_assert_eq!(written, out);
+                *adata_path = expand_user_path(written.to_string_lossy().as_ref());
+            } else {
+                eprintln!(
+                    "spacetravlr: running Rust preprocess (QC → log-norm → HVG → PCA → UMAP → Leiden → MAGIC) → {}",
+                    out.display()
+                );
+                let _ = std::fs::remove_file(&out);
+                let params = RustPreprocessParams::default();
+                rust_preprocess_h5ad_with_steps(
+                    &p,
+                    Some(out.as_path()),
+                    &params,
+                    &RustPreprocessSteps::FULL,
+                )?;
+                *adata_path = expand_user_path(out.to_string_lossy().as_ref());
+            }
         }
     }
     Ok(())

@@ -42,6 +42,10 @@ pub mod perturb_tui;
 pub mod run_summary_html;
 pub mod scanpy_preprocess;
 pub mod rust_preprocess;
+pub use rust_preprocess::{
+    rust_preprocess_h5ad, rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps,
+    RustPreprocessParams, RustPreprocessSteps,
+};
 #[cfg(feature = "self-update")]
 pub mod self_update;
 pub mod spatial_estimator;

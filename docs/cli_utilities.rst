@@ -22,6 +22,14 @@ Terminal plots
 
       spacetravlr --h5ad data/slide.h5ad --plot-umap
 
+   If ``X_umap`` is missing, the default is to run the **Rust** preprocess leg (same as ``--umap`` scope). ``--plot-umap-backend scanpy`` is **legacy** (embedded ``full_preprocess``); prefer ``--process-h5ad`` when you need the full Scanpy pipeline.
+
+``--plot-umap-backend`` (``rust`` \| ``scanpy``)
+   Only applies when ``--plot-umap`` must build UMAP coordinates. ``scanpy`` is deprecated for new workflows.
+
+``--umap`` / ``--leiden`` / ``--rust-magic``
+   Rust-only: write ``<stem>_prep_*.h5ad`` under ``--process-output-dir`` (default cwd). Combine as needed. ``--rust-magic`` is Rust clusterwise MAGIC into ``layers['imputed_count']`` (not the same as ``--impute``, which is Scanpy-only on existing ``normalized_count``). ``--rust-n-top-hvg`` and ``--rust-n-neighbors`` apply.
+
 AnnData preprocessing and imputation
 --------------------------------------
 

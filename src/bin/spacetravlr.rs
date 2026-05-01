@@ -105,6 +105,13 @@ impl MapLabelsExpressionMode {
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PlotUmapBackend {
+    #[default]
+    Rust,
+    Scanpy,
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum CnnOutputActivationArg {
     Identity,
@@ -259,7 +266,7 @@ struct Cli {
         long = "obs",
         value_name = "COLUMN",
         help_heading = "Input",
-        help = "With --peek: load only this obs column and print value_counts (rank, count, %, category)"
+        help = "With --peek: load only this obs column and print value_counts (rank, count, %, category). With --plot-umap: color the terminal UMAP by this obs column (overrides `--leiden` default coloring; without `--obs`, defaults are auto cell_type/leiden, or `leiden` when `--plot-umap --leiden`)."
     )]
     obs: Option<String>,
 
@@ -728,11 +735,46 @@ struct Cli {
 
     #[arg(
         long = "plot-umap",
+        value_name = "PATH",
+        num_args = 0..=1,
+        default_missing_value = "",
+        help_heading = "Utility",
+        help = "Auto-preprocess if needed, then print terminal UMAP scatter (obsm X_umap; obs coloring defaults to cell_type/leiden when present) and exit. Pass optional .h5ad on this flag (`--plot-umap data.h5ad`) or `--plot-umap` with `--h5ad data.h5ad`. If PATH is given on `--plot-umap`, that file is used (`--h5ad` is ignored for this command). With `--leiden`, runs Rust UMAP + Leiden in memory when UMAP or `obs['leiden']` is missing (no disk writes; default `--plot-umap-backend rust`); colors by `leiden` unless `--obs` is set (which wins). Missing UMAP: see `--plot-umap-backend`."
+    )]
+    plot_umap: Option<String>,
+
+    #[arg(
+        long = "plot-umap-backend",
+        value_enum,
+        default_value_t = PlotUmapBackend::Rust,
+        help_heading = "Utility",
+        help = "When obsm has no X_umap: `rust` (default) runs Rust QC→normalize_total(1e4)+log1p→HVG→PCA→UMAP; `scanpy` is legacy (embedded full_preprocess) — prefer `--process-h5ad` for Scanpy"
+    )]
+    plot_umap_backend: PlotUmapBackend,
+
+    #[arg(
+        long = "umap",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Auto-preprocess if needed, then print terminal UMAP scatter (obsm X_umap, obs colored by cluster) and exit (requires `--h5ad`)"
+        help = "Rust: run QC → normalize_total(1e4)+log1p → HVG → PCA → UMAP (obsm['X_umap'], X_pca). Combine with `--leiden` / `--rust-magic`. Writes only when `--output PATH.h5ad` is set; otherwise in-memory only."
     )]
-    plot_umap: bool,
+    prep_umap: bool,
+
+    #[arg(
+        long = "leiden",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Rust: Leiden on the UMAP fuzzy graph → obs['leiden'] (implies embedding). Often used with `--umap`. With `--plot-umap`, participates in the in-memory Rust prep path and defaults UMAP coloring to `leiden` when `--obs` is omitted. Writes only when `--output PATH.h5ad` is set."
+    )]
+    prep_leiden: bool,
+
+    #[arg(
+        long = "rust-magic",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Rust: clusterwise MAGIC → layers['imputed_count'] (implies UMAP graph). For Scanpy-only impute on existing `layers['normalized_count']` use `--impute`. Writes only when `--output PATH.h5ad` is set."
+    )]
+    prep_rust_magic: bool,
 
     #[arg(
         long = "map-labels",
@@ -841,7 +883,7 @@ struct Cli {
         long = "rust-process-h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Rust preprocessing (QC → normalize → HVG → PCA → HNSW KNN → UMAP → leiden-rs if labels are missing → clusterwise MAGIC if imputed_count is missing) → `<stem>_rust_processed.h5ad` (requires `--h5ad`)."
+        help = "Rust preprocessing (QC → normalize_total(1e4)+log1p → HVG → PCA → HNSW KNN → UMAP → Leiden if needed → MAGIC if needed) → `<stem>_rust_processed.h5ad` (requires `--h5ad`). For modular outputs use `--umap` / `--leiden` / `--rust-magic`."
     )]
     rust_process_h5ad: bool,
 
@@ -874,9 +916,18 @@ struct Cli {
         long = "process-output-dir",
         value_name = "DIR",
         help_heading = "Utility",
-        help = "With `--process-h5ad` / `--impute`: write `<stem>_processed.h5ad` or `<stem>_imputed.h5ad` here (default: current directory)"
+        help = "With `--process-h5ad` / `--impute` / `--rust-process-h5ad`: directory for the derived `<stem>_*.h5ad` (default: cwd). Rust convenience flags (`--umap` / `--leiden` / `--rust-magic`) do not write here unless you pass `--output`. `--plot-umap` with default `--plot-umap-backend rust` stays in memory (no temp `.h5ad`); legacy `--plot-umap-backend scanpy` may write under this directory or the system temp dir."
     )]
     process_output_dir: Option<PathBuf>,
+
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "With `--umap` / `--leiden` / `--rust-magic`: write the preprocessed AnnData to this `.h5ad` path (parents created). Omit to run in memory only (no prep `.h5ad` on disk; `--process-output-dir` is not used for that mode)."
+    )]
+    rust_prep_output: Option<PathBuf>,
 
     #[arg(
         long,
@@ -1550,6 +1601,72 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn resolve_rust_preprocess_params(cli: &Cli) -> spacetravlr::rust_preprocess::RustPreprocessParams {
+    let mut params = spacetravlr::rust_preprocess::RustPreprocessParams::default();
+    if let Some(n) = cli.rust_n_top_hvg {
+        params.n_top_hvg = n;
+    }
+    if let Some(n) = cli.rust_n_neighbors {
+        params.n_neighbors = n;
+    }
+    params
+}
+
+fn run_rust_prep_convenience(cli: &Cli) -> anyhow::Result<()> {
+    let h5ad_ref = cli
+        .h5ad
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("`--umap` / `--leiden` / `--rust-magic` require `--h5ad PATH`")
+        })?;
+    if let Some(ref raw_out) = cli.rust_prep_output {
+        let dest = PathBuf::from(expand_user_path(raw_out.to_string_lossy().as_ref()));
+        if !dest
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("h5ad"))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "`--output` / `-o` must be a path ending in .h5ad (got {})",
+                dest.display()
+            );
+        }
+    }
+    let h5ad = PathBuf::from(expand_user_path(h5ad_ref.to_string_lossy().as_ref()));
+    if !h5ad.is_file() {
+        anyhow::bail!("AnnData not found at {}.", h5ad.display());
+    }
+    let params = resolve_rust_preprocess_params(cli);
+    let steps = spacetravlr::rust_preprocess::RustPreprocessSteps::from_convenience_flags(
+        cli.prep_umap,
+        cli.prep_leiden,
+        cli.prep_rust_magic,
+    );
+    if let Some(ref raw_out) = cli.rust_prep_output {
+        let dest = PathBuf::from(expand_user_path(raw_out.to_string_lossy().as_ref()));
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create parent dirs for {}", dest.display()))?;
+            }
+        }
+        spacetravlr::rust_preprocess::rust_preprocess_h5ad_with_steps(
+            &h5ad,
+            Some(dest.as_path()),
+            &params,
+            &steps,
+        )?;
+        eprintln!("spacetravlr: wrote {}", dest.display());
+    } else {
+        spacetravlr::rust_preprocess::rust_preprocess_h5ad_with_steps(
+            &h5ad, None, &params, &steps,
+        )?;
+        eprintln!("spacetravlr: no --output (-o); skipped writing .h5ad");
+    }
+    Ok(())
+}
+
 fn run_rust_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let h5ad = cli
         .h5ad
@@ -1567,13 +1684,7 @@ fn run_rust_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let stem = canonical_training_prep_stem(&h5ad);
     let dest = out_dir.join(format!("{stem}_rust_processed.h5ad"));
 
-    let mut params = spacetravlr::rust_preprocess::RustPreprocessParams::default();
-    if let Some(n) = cli.rust_n_top_hvg {
-        params.n_top_hvg = n;
-    }
-    if let Some(n) = cli.rust_n_neighbors {
-        params.n_neighbors = n;
-    }
+    let params = resolve_rust_preprocess_params(cli);
 
     spacetravlr::rust_preprocess::rust_preprocess_h5ad(&h5ad, &dest, &params)?;
     eprintln!("spacetravlr: wrote {}", dest.display());
@@ -1676,18 +1787,48 @@ fn run_impute(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
-    let h5ad = cli
+fn resolve_plot_umap_h5ad(cli: &Cli) -> anyhow::Result<PathBuf> {
+    let raw = cli.plot_umap.as_deref().unwrap_or("");
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+        let p = PathBuf::from(expand_user_path(trimmed));
+        if !p.is_file() {
+            anyhow::bail!(
+                "`--plot-umap` PATH is not an existing file: {}",
+                p.display()
+            );
+        }
+        return Ok(p);
+    }
+    let cand = cli
         .h5ad
         .as_ref()
-        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())))
-        .filter(|p| p.is_file());
-    let h5ad = match h5ad {
-        Some(p) => p,
-        None => {
-            anyhow::bail!("--plot-umap requires --h5ad PATH pointing to an existing .h5ad file.");
-        }
-    };
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
+    match cand {
+        Some(p) if p.is_file() => Ok(p),
+        Some(p) => anyhow::bail!(
+            "`--plot-umap` without PATH requires `--h5ad` to an existing .h5ad file; not found: {}",
+            p.display()
+        ),
+        None => anyhow::bail!(
+            "`--plot-umap` requires PATH on the flag (`--plot-umap data.h5ad`) or `--h5ad PATH` to an existing .h5ad file."
+        ),
+    }
+}
+
+fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
+    let color_obs = cli.obs.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if cli.obs.is_some() && color_obs.is_none() {
+        anyhow::bail!("--obs must be a non-empty column name when used with --plot-umap");
+    }
+
+    if cli.prep_leiden && matches!(cli.plot_umap_backend, PlotUmapBackend::Scanpy) {
+        anyhow::bail!(
+            "--plot-umap --leiden requires the Rust in-memory path: use default `--plot-umap-backend rust` (omit scanpy)."
+        );
+    }
+
+    let h5ad = resolve_plot_umap_h5ad(cli)?;
 
     fn h5ad_obsm_has_umap(path: &Path) -> anyhow::Result<bool> {
         if !path.is_file() {
@@ -1703,67 +1844,165 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
 
     let has_umap = h5ad_obsm_has_umap(&h5ad)?;
 
-    let plot_path = if has_umap {
+    let need_mem_preprocess_for_leiden = cli.prep_leiden
+        && color_obs.is_none()
+        && !spacetravlr::adata_terminal_scatter::h5ad_obs_column_exists(&h5ad, "leiden")?;
+    let plot_from_disk = has_umap && !need_mem_preprocess_for_leiden;
+
+    if plot_from_disk {
         eprintln!(
             "obsm already has UMAP in {}; plotting directly.",
             h5ad.display()
         );
-        h5ad.clone()
-    } else {
-        eprintln!(
-            "No UMAP in obsm — running full Scanpy preprocess on {} …",
-            h5ad.display()
-        );
-        let out_dir = match &cli.process_output_dir {
-            Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
-            None => std::env::temp_dir(),
+        let disk_color = match color_obs {
+            Some(c) => Some(c),
+            None if cli.prep_leiden => Some("leiden"),
+            None => None,
         };
-        std::fs::create_dir_all(&out_dir)?;
-        let stem = canonical_training_prep_stem(&h5ad);
-        let dest = spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
-        let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
-            skip: cli.skip_spatial_microns,
-            species: cli
-                .spatial_species
-                .as_deref()
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_default(),
-            target_median_nn_um: cli.spatial_microns_target_um,
-        };
-        let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
-            cli.magic_batch_obs.as_deref(),
-            cli.condition.as_deref(),
-        );
-        let out =
-            if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(&h5ad, &dest)?
-                && h5ad_obsm_has_umap(&dest)?
-            {
-                eprintln!(
-                    "spacetravlr: reusing existing {} (>= mtime of {})",
-                    dest.display(),
-                    h5ad.display()
-                );
-                dest
-            } else {
-                let (written, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
-                    &h5ad,
-                    &dest,
-                    true,
-                    batch_owned.as_deref(),
-                    spatial_microns,
-                    true,
-                )?;
-                if let Some(l) = log {
-                    eprint!("{l}");
-                }
-                written
-            };
-        let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&out);
-        out
-    };
+        return spacetravlr::adata_terminal_scatter::print_h5ad_umap_scatter(&h5ad, disk_color);
+    }
 
-    spacetravlr::adata_terminal_scatter::print_h5ad_umap_scatter(&plot_path)
+    match cli.plot_umap_backend {
+        PlotUmapBackend::Rust => {
+            let phase = if need_mem_preprocess_for_leiden {
+                "UMAP + Leiden (in memory; file had UMAP but no obs['leiden'])"
+            } else if cli.prep_leiden {
+                "UMAP + Leiden"
+            } else {
+                "UMAP"
+            };
+            eprintln!(
+                "No usable on-disk UMAP plot path — running Rust preprocess ({phase}) on {} …",
+                h5ad.display()
+            );
+            let params = resolve_rust_preprocess_params(cli);
+            let steps =
+                spacetravlr::rust_preprocess::RustPreprocessSteps::from_convenience_flags(
+                    true,
+                    cli.prep_leiden,
+                    false,
+                );
+            let adata = spacetravlr::rust_preprocess::rust_preprocess_h5ad_to_memory(
+                &h5ad, &params, &steps,
+            )?;
+
+            use anndata::ArrayData;
+            use anndata::data::ArrayConvert;
+            let umap_elem = adata
+                .obsm()
+                .get_array("X_umap")
+                .map_err(|e| anyhow::anyhow!("obsm X_umap: {e}"))?;
+            let umap_data = umap_elem
+                .get_data()
+                .map_err(|e| anyhow::anyhow!("obsm X_umap data: {e}"))?;
+            let umap_coords: ndarray::Array2<f64> = match umap_data {
+                ArrayData::Array(d) => d.try_convert().map_err(|e| {
+                    anyhow::anyhow!("convert X_umap to Array2<f64>: {e}")
+                })?,
+                _ => anyhow::bail!("obsm['X_umap'] is not a dense array after preprocessing"),
+            };
+
+            let obs_df = adata.obs().get_data();
+            let try_cols: &[&str] = if cli.prep_leiden && color_obs.is_none() {
+                &["leiden", "cell_type"]
+            } else {
+                &["cell_type", "leiden"]
+            };
+            let obs_labels: Option<(String, Vec<String>)> = if let Some(col) = color_obs {
+                let series = obs_df
+                    .column(col)
+                    .map_err(|_| anyhow::anyhow!("obs column {:?} not found", col))?
+                    .as_materialized_series();
+                let vals: Vec<String> = (0..series.len())
+                    .map(|i| spacetravlr::betadata::obs_series_row_str(series, i))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                Some((col.to_string(), vals))
+            } else {
+                let mut found = None;
+                for col_name in try_cols {
+                    if let Ok(c) = obs_df.column(col_name) {
+                        let series = c.as_materialized_series();
+                        if let Ok(vals) = (0..series.len())
+                            .map(|i| spacetravlr::betadata::obs_series_row_str(series, i))
+                            .collect::<anyhow::Result<Vec<_>>>()
+                        {
+                            found = Some((col_name.to_string(), vals));
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+
+            let color_arg = obs_labels
+                .as_ref()
+                .map(|(name, vals)| (name.as_str(), vals.as_slice()));
+            spacetravlr::adata_terminal_scatter::print_umap_scatter_from_arrays(
+                &umap_coords,
+                color_arg,
+                &h5ad.display().to_string(),
+            )
+        }
+        PlotUmapBackend::Scanpy => {
+            eprintln!(
+                "warning: --plot-umap-backend scanpy is legacy; use `--process-h5ad` for full Scanpy, or omit this flag for Rust (default)."
+            );
+            eprintln!(
+                "No UMAP in obsm — running full Scanpy preprocess on {} …",
+                h5ad.display()
+            );
+            let out_dir = match &cli.process_output_dir {
+                Some(p) => PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())),
+                None => std::env::temp_dir(),
+            };
+            std::fs::create_dir_all(&out_dir)?;
+            let stem = canonical_training_prep_stem(&h5ad);
+            let dest =
+                spacetravlr::scanpy_preprocess::training_processed_h5ad_path(&out_dir, &stem);
+            let spatial_microns = spacetravlr::scanpy_preprocess::SpatialMicronsOptions {
+                skip: cli.skip_spatial_microns,
+                species: cli
+                    .spatial_species
+                    .as_deref()
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_default(),
+                target_median_nn_um: cli.spatial_microns_target_um,
+            };
+            let batch_owned = spacetravlr::scanpy_preprocess::resolve_magic_batch_obs_column(
+                cli.magic_batch_obs.as_deref(),
+                cli.condition.as_deref(),
+            );
+            let plot_path =
+                if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(
+                    &h5ad, &dest,
+                )? && h5ad_obsm_has_umap(&dest)?
+                {
+                    eprintln!(
+                        "spacetravlr: reusing existing {} (>= mtime of {})",
+                        dest.display(),
+                        h5ad.display()
+                    );
+                    dest
+                } else {
+                    let (written, log) =
+                        spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+                            &h5ad,
+                            &dest,
+                            true,
+                            batch_owned.as_deref(),
+                            spatial_microns,
+                            true,
+                        )?;
+                    if let Some(l) = log {
+                        eprint!("{l}");
+                    }
+                    written
+                };
+            let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&plot_path);
+            spacetravlr::adata_terminal_scatter::print_h5ad_umap_scatter(&plot_path, color_obs)
+        }
+    }
 }
 
 fn resolve_celloracle_network_data_dir(cli: &Cli) -> anyhow::Result<Option<String>> {
@@ -2031,8 +2270,10 @@ fn main() -> anyhow::Result<()> {
         return run_run_summary(&cli, rs);
     }
 
-    if cli.obs.is_some() && cli.peek.is_none() {
-        anyhow::bail!("--obs requires --peek PATH (or --peak PATH)");
+    if cli.obs.is_some() && cli.peek.is_none() && cli.plot_umap.is_none() {
+        anyhow::bail!(
+            "--obs requires --peek PATH (or --peak PATH), or use --plot-umap to color the UMAP"
+        );
     }
 
     if let Some(peek_path) = &cli.peek {
@@ -2097,6 +2338,13 @@ fn main() -> anyhow::Result<()> {
         return run_map_labels(&cli);
     }
 
+    if cli.prep_umap
+        || cli.prep_rust_magic
+        || (cli.prep_leiden && cli.plot_umap.is_none())
+    {
+        return run_rust_prep_convenience(&cli);
+    }
+
     if cli.rust_process_h5ad {
         return run_rust_process_h5ad(&cli);
     }
@@ -2144,7 +2392,7 @@ fn main() -> anyhow::Result<()> {
         return spacetravlr::adata_terminal_scatter::print_h5ad_scatter(&h5ad, "cell_type");
     }
 
-    if cli.plot_umap {
+    if cli.plot_umap.is_some() {
         return run_plot_umap(&cli);
     }
 

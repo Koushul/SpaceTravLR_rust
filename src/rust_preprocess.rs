@@ -1,6 +1,11 @@
-//! Rust-native Scanpy-style preprocessing: filter → normalize → log1p → HVG → PCA →
-//! HNSW KNN → UMAP → Leiden fallback → clusterwise MAGIC. Writes `.h5ad` via
-//! `anndata-memory` + `AnnData::<H5>`.
+//! Rust-native Scanpy-style preprocessing: optional QC, **`normalize_total` (target_sum=10_000) +
+//! `log1p` on `X`** when `X` looks like raw counts (aligned with `sc.pp.normalize_total` /
+//! `sc.pp.log1p` via `single_rust`). If `uns['log1p']` exists or **`_infer_x_is_log1p`-style**
+//! heuristics match Scanpy’s embedded preprocess, **`normalize_total` / `log1p` are skipped** and
+//! `X` is copied into `layers['normalized_count']` and `layers['log1p']` unchanged. Optional
+//! HVG → PCA → UMAP → Leiden / MAGIC via [`RustPreprocessSteps`]. HDF5 export (when an output path
+//! is provided) writes `.h5ad` via `anndata-memory` + `AnnData::<H5>` with **`X` and all `layers`**
+//! coerced to CSR `f64` for on-disk layout.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -16,10 +21,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use instant_distance::{Builder, Hnsw, Search};
 use leiden::leiden::Leiden;
 use leiden::{Clustering, Graph, Network, SimpleClustering};
-use magic_impute::{CsrF64, ImputeConfig, impute_magic};
+use magic_impute::{CsrF64, ImputeConfig, impute_magic_f32};
 use nalgebra::{DMatrix, SymmetricEigen};
-use nalgebra_sparse::{CscMatrix, CsrMatrix};
-use ndarray::Array2;
+use nalgebra_sparse::coo::CooMatrix;
+use nalgebra_sparse::CsrMatrix;
+use ndarray::{s, Array2};
 use ndarray_umap::Array2 as Array2Umap;
 use polars::prelude::{Column, DataFrame, DataType, NamedFrom, Series};
 use rand::Rng;
@@ -66,6 +72,50 @@ impl Default for RustPreprocessParams {
             min_dist: 0.5,
             n_epochs: None,
             ef_construction: 200,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RustPreprocessSteps {
+    pub qc_filter: bool,
+    pub normalize_log1p: bool,
+    pub hvg_pca: bool,
+    pub run_umap_and_graph: bool,
+    pub write_leiden: bool,
+    pub run_magic_impute: bool,
+}
+
+impl RustPreprocessSteps {
+    pub const FULL: Self = Self {
+        qc_filter: true,
+        normalize_log1p: true,
+        hvg_pca: true,
+        run_umap_and_graph: true,
+        write_leiden: false,
+        run_magic_impute: true,
+    };
+
+    /// Training auto-prep when `normalized_count` and `imputed_count` exist but neither `leiden` nor `cell_type`.
+    /// No QC subsetting (row alignment with existing layers); HVG → PCA → UMAP → Leiden → `cell_type` from labels.
+    pub const TRAINING_LAYERS_LEIDEN_ANNOTATE: Self = Self {
+        qc_filter: false,
+        normalize_log1p: true,
+        hvg_pca: true,
+        run_umap_and_graph: true,
+        write_leiden: true,
+        run_magic_impute: false,
+    };
+
+    pub fn from_convenience_flags(umap: bool, leiden: bool, rust_magic: bool) -> Self {
+        let graph = umap || leiden || rust_magic;
+        Self {
+            qc_filter: true,
+            normalize_log1p: true,
+            hvg_pca: graph,
+            run_umap_and_graph: graph,
+            write_leiden: leiden,
+            run_magic_impute: rust_magic,
         }
     }
 }
@@ -587,6 +637,110 @@ fn ensure_x_csr_for_pca(adata: &IMAnnData) -> Result<()> {
     }
 }
 
+const INFER_LOG1P_MAX_SAMPLES: usize = 100_000;
+
+fn infer_x_is_log1p_space(adata: &IMAnnData) -> Result<bool> {
+    let keys = adata.uns().keys().context("uns.keys")?;
+    if keys.iter().any(|k| k == "log1p") {
+        return Ok(true);
+    }
+    let x = adata.x().get_data().context("X for log1p inference")?;
+    let mut rng = StdRng::seed_from_u64(0);
+    let sample = sample_matrix_values_for_log1p_infer(&x, INFER_LOG1P_MAX_SAMPLES, &mut rng)?;
+    if sample.is_empty() {
+        return Ok(false);
+    }
+    let mx = sample.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut sorted = sample.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med = sorted[sorted.len() / 2];
+    let frac_int = sample
+        .iter()
+        .filter(|&&v| (v - v.round()).abs() < 1e-5)
+        .count() as f64
+        / sample.len() as f64;
+    if mx > 30.0 {
+        return Ok(false);
+    }
+    if frac_int > 0.72 && mx > 12.0 {
+        return Ok(false);
+    }
+    if mx <= 12.0 && med <= 3.5 && frac_int < 0.55 {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn reservoir_sample_f64_from_iter<I>(iter: I, limit: usize, rng: &mut StdRng) -> Vec<f64>
+where
+    I: Iterator<Item = f64>,
+{
+    let mut out: Vec<f64> = Vec::new();
+    for (i, v) in iter.enumerate() {
+        let n = i + 1;
+        if out.len() < limit {
+            out.push(v);
+        } else {
+            let j = rng.gen_range(0..n);
+            if j < limit {
+                out[j] = v;
+            }
+        }
+    }
+    out
+}
+
+fn sample_matrix_values_for_log1p_infer(
+    x: &ArrayData,
+    limit: usize,
+    rng: &mut StdRng,
+) -> Result<Vec<f64>> {
+    Ok(match x {
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => reservoir_sample_f64_from_iter(
+            m.triplet_iter().map(|(_, _, v)| *v),
+            limit,
+            rng,
+        ),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => reservoir_sample_f64_from_iter(
+            m.triplet_iter().map(|(_, _, v)| *v as f64),
+            limit,
+            rng,
+        ),
+        ArrayData::CscMatrix(DynCscMatrix::F64(m)) => reservoir_sample_f64_from_iter(
+            m.triplet_iter().map(|(_, _, v)| *v),
+            limit,
+            rng,
+        ),
+        ArrayData::CscMatrix(DynCscMatrix::F32(m)) => reservoir_sample_f64_from_iter(
+            m.triplet_iter().map(|(_, _, v)| *v as f64),
+            limit,
+            rng,
+        ),
+        ArrayData::CsrNonCanonical(non) => match non.clone().canonicalize() {
+            Ok(csr_dyn) => match csr_dyn {
+                DynCsrMatrix::F64(m) => reservoir_sample_f64_from_iter(
+                    m.triplet_iter().map(|(_, _, v)| *v),
+                    limit,
+                    rng,
+                ),
+                DynCsrMatrix::F32(m) => reservoir_sample_f64_from_iter(
+                    m.triplet_iter().map(|(_, _, v)| *v as f64),
+                    limit,
+                    rng,
+                ),
+                _ => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        },
+        ArrayData::Array(d) => {
+            let dense: Array2<f64> = d.clone().try_convert()?;
+            reservoir_sample_f64_from_iter(dense.iter().copied(), limit, rng)
+        }
+        ArrayData::DataFrame(_) => Vec::new(),
+        _ => Vec::new(),
+    })
+}
+
 fn clear_uns_for_hdf5_export(adata: &IMAnnData) -> Result<()> {
     let keys = adata.uns().keys().context("uns.keys")?;
     for k in keys {
@@ -648,6 +802,22 @@ fn temp_h5ad_path(output: &Path) -> Result<PathBuf> {
     )))
 }
 
+fn attach_dataframe_index(df: DataFrame, names: &[String]) -> Result<DataFrame> {
+    let mut cols: Vec<Column> = Vec::with_capacity(df.width() + 1);
+    cols.push(Column::from(Series::new("_index".into(), names.to_vec())));
+    for s in df.iter() {
+        let n = s.name().as_str();
+        if n == "_index" || n == "index" {
+            continue;
+        }
+        cols.push(Column::from(s.clone()));
+    }
+    if cols.len() == 1 && names.is_empty() {
+        bail!("attach_dataframe_index: empty axis index and no data columns");
+    }
+    DataFrame::new(cols).map_err(|e| anyhow!("attach_dataframe_index: {e}"))
+}
+
 fn dataframe_hdf5_safe(df: DataFrame) -> Result<DataFrame> {
     let mut cols: Vec<Column> = Vec::new();
     for s in df.iter() {
@@ -673,11 +843,6 @@ fn dataframe_hdf5_safe(df: DataFrame) -> Result<DataFrame> {
             }
         };
         cols.push(column);
-    }
-    if cols.is_empty() {
-        bail!(
-            "after HDF5 sanitization, obs/var has no exportable columns (all dropped or failed cast)"
-        );
     }
     DataFrame::new(cols).map_err(|e| anyhow!("{e}"))
 }
@@ -710,37 +875,135 @@ fn layer_replace_if_present(adata: &IMAnnData, key: &str, data: ArrayData) -> Re
     Ok(())
 }
 
-fn array_data_to_dense_f64(data: ArrayData) -> Result<Array2<f64>> {
-    match data {
-        ArrayData::Array(d) => d.try_convert(),
-        ArrayData::CsrMatrix(csr) => {
-            let csr_f64: CsrMatrix<f64> = csr.try_convert()?;
-            let mut out = Array2::<f64>::zeros((csr_f64.nrows(), csr_f64.ncols()));
-            for (r, c, v) in csr_f64.triplet_iter() {
-                out[[r, c]] = *v;
+const MAGIC_MAX_DENSE_FLOATS: usize = 3_000_000_000;
+
+fn csr_f32_to_csr_f64(m: &CsrMatrix<f32>) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::new(m.nrows(), m.ncols());
+    for (r, c, v) in m.triplet_iter() {
+        coo.push(r, c, *v as f64);
+    }
+    CsrMatrix::from(&coo)
+}
+
+fn dense_ndarray_to_csr_f64(arr: &Array2<f64>) -> Result<CsrMatrix<f64>> {
+    let nrows = arr.nrows();
+    let ncols = arr.ncols();
+    let mut coo = CooMatrix::new(nrows, ncols);
+    for i in 0..nrows {
+        for j in 0..ncols {
+            let v = arr[(i, j)];
+            if v != 0.0 {
+                coo.push(i, j, v);
             }
-            Ok(out)
         }
-        ArrayData::CscMatrix(csc) => {
-            let csc_f64: CscMatrix<f64> = csc.try_convert()?;
-            let mut out = Array2::<f64>::zeros((csc_f64.nrows(), csc_f64.ncols()));
-            for (r, c, v) in csc_f64.triplet_iter() {
-                out[[r, c]] = *v;
-            }
-            Ok(out)
+    }
+    Ok(CsrMatrix::from(&coo))
+}
+
+fn csr_dyn_to_csr_f64(d: DynCsrMatrix) -> Result<CsrMatrix<f64>> {
+    match d {
+        DynCsrMatrix::F64(m) => Ok(m),
+        DynCsrMatrix::F32(m) => Ok(csr_f32_to_csr_f64(&m)),
+        DynCsrMatrix::I8(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::I16(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::I32(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::I64(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::U8(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::U16(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::U32(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::U64(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
+        DynCsrMatrix::Bool(_) | DynCsrMatrix::String(_) => bail!(
+            "HDF5 export: CSR matrix has bool/string dtype; cannot coerce to f64 CSR"
+        ),
+    }
+}
+
+fn csr_typed_to_f64_csr<T: Copy>(m: &CsrMatrix<T>, as_f64: impl Fn(&T) -> f64) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::new(m.nrows(), m.ncols());
+    for (r, c, v) in m.triplet_iter() {
+        let vf = as_f64(v);
+        if vf != 0.0 {
+            coo.push(r, c, vf);
         }
-        ArrayData::CsrNonCanonical(non) => match non.canonicalize() {
-            Ok(csr) => {
-                let csr_f64: CsrMatrix<f64> = csr.try_convert()?;
-                let mut out = Array2::<f64>::zeros((csr_f64.nrows(), csr_f64.ncols()));
-                for (r, c, v) in csr_f64.triplet_iter() {
-                    out[[r, c]] = *v;
-                }
-                Ok(out)
+    }
+    CsrMatrix::from(&coo)
+}
+
+fn csc_dyn_to_csr_f64(d: DynCscMatrix) -> Result<CsrMatrix<f64>> {
+    match d {
+        DynCscMatrix::F64(m) => Ok(CsrMatrix::from(&m)),
+        DynCscMatrix::F32(m) => Ok(csr_f32_to_csr_f64(&CsrMatrix::from(&m))),
+        DynCscMatrix::I8(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::I16(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::I32(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::I64(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::U8(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::U16(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::U32(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::U64(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
+        DynCscMatrix::Bool(_) | DynCscMatrix::String(_) => bail!(
+            "HDF5 export: CSC matrix has bool/string dtype; cannot coerce to f64 CSR"
+        ),
+    }
+}
+
+fn array_data_to_csr_f64_for_h5_export(data: ArrayData) -> Result<ArrayData> {
+    let csr = match data {
+        ArrayData::CsrMatrix(d) => csr_dyn_to_csr_f64(d)?,
+        ArrayData::CscMatrix(d) => csc_dyn_to_csr_f64(d)?,
+        ArrayData::CsrNonCanonical(non) => {
+            let d = non
+                .clone()
+                .canonicalize()
+                .map_err(|_| anyhow!("HDF5 export: non-canonical CSR could not be canonicalized"))?;
+            csr_dyn_to_csr_f64(d)?
+        }
+        ArrayData::Array(d) => {
+            let dense: Array2<f64> = d.try_convert().context("HDF5 export: dense matrix to f64")?;
+            dense_ndarray_to_csr_f64(&dense)?
+        }
+        ArrayData::DataFrame(_) => bail!("HDF5 export: expected matrix for X or layer, got DataFrame"),
+    };
+    Ok(ArrayData::CsrMatrix(DynCsrMatrix::F64(csr)))
+}
+
+fn normalized_layer_to_csr_f64(nc: ArrayData) -> Result<CsrMatrix<f64>> {
+    match nc {
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => Ok(m),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => Ok(csr_f32_to_csr_f64(&m)),
+        ArrayData::CscMatrix(DynCscMatrix::F64(m)) => Ok(CsrMatrix::from(&m)),
+        ArrayData::CscMatrix(DynCscMatrix::F32(m)) => Ok(csr_f32_to_csr_f64(&CsrMatrix::from(&m))),
+        ArrayData::CsrNonCanonical(non) => {
+            let csr_dyn = non
+                .clone()
+                .canonicalize()
+                .map_err(|_| anyhow!("normalized_count: non-canonical CSR could not be canonicalized"))?;
+            match csr_dyn {
+                DynCsrMatrix::F64(m) => Ok(m),
+                DynCsrMatrix::F32(m) => Ok(csr_f32_to_csr_f64(&m)),
+                _ => bail!("normalized_count: unsupported CSR scalar type for MAGIC"),
             }
-            Err(_) => bail!("failed to canonicalize non-canonical CSR matrix"),
-        },
-        ArrayData::DataFrame(_) => bail!("expected matrix array data, found dataframe"),
+        }
+        ArrayData::Array(_) | ArrayData::DataFrame(_) => bail!(
+            "layers['normalized_count'] must be CSR/CSC sparse for --rust-magic (avoids full dense materialization of the count matrix)"
+        ),
+        _ => bail!(
+            "layers['normalized_count'] must be CSR/CSC f32/f64 for --rust-magic (unsupported scalar type)"
+        ),
+    }
+}
+
+fn csr_fill_cols_f32_block(
+    csr: &CsrMatrix<f64>,
+    block: &mut ndarray::ArrayViewMut2<f32>,
+    col0: usize,
+    col1: usize,
+) {
+    block.fill(0.0f32);
+    for (r, c, v) in csr.triplet_iter() {
+        if c >= col0 && c < col1 {
+            block[[r, c - col0]] = *v as f32;
+        }
     }
 }
 
@@ -786,39 +1049,63 @@ fn leiden_labels_from_graph(graph: &FuzzyGraph, resolution: f64, max_iter: usize
         .collect()
 }
 
-fn ensure_cluster_labels(
+fn sync_labels_after_embedding(
     adata: &IMAnnData,
     graph: &FuzzyGraph,
+    write_leiden: bool,
+    run_magic: bool,
     log: &mut Vec<(String, f64)>,
 ) -> Result<Vec<String>> {
     let obs = adata.obs().get_data();
-    if let Some(labels) = obs_column_as_strings(&obs, "cell_type")? {
-        return Ok(labels);
-    }
-    if let Some(labels) = obs_column_as_strings(&obs, "leiden")? {
-        let mut patched = obs;
-        patched.with_column(Series::new("cell_type".into(), labels.clone()))?;
+    let had_cell_type = obs_column_as_strings(&obs, "cell_type")?.is_some();
+    let had_leiden = obs_column_as_strings(&obs, "leiden")?.is_some();
+
+    if write_leiden || (run_magic && !had_cell_type && !had_leiden) {
+        let t = Instant::now();
+        eprintln!(">>> leiden-rs");
+        let labels = leiden_labels_from_graph(graph, 1.0, 100);
+        eprintln!("<<< leiden-rs: {:.2} s", t.elapsed().as_secs_f64());
+        log.push(("leiden-rs".to_string(), t.elapsed().as_secs_f64()));
+
+        let mut patched = adata.obs().get_data();
+        let leiden_ids: Vec<i32> = labels
+            .iter()
+            .map(|s| s.parse::<i32>())
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| {
+                format!(
+                    "rust_preprocess: leiden cluster ids must parse as i32 (first labels: {:?})",
+                    labels.iter().take(8).collect::<Vec<_>>()
+                )
+            })?;
+        patched.with_column(Series::new("leiden".into(), leiden_ids))?;
+        if !had_cell_type {
+            patched.with_column(Series::new("cell_type".into(), labels.clone()))?;
+        }
         adata
             .obs()
             .set_data(patched)
-            .context("obs.set_data add cell_type from leiden")?;
-        return Ok(labels);
+            .context("obs after leiden-rs")?;
     }
 
-    let t = Instant::now();
-    eprintln!(">>> leiden-rs");
-    let labels = leiden_labels_from_graph(graph, 1.0, 100);
-    eprintln!("<<< leiden-rs: {:.2} s", t.elapsed().as_secs_f64());
-    log.push(("leiden-rs".to_string(), t.elapsed().as_secs_f64()));
+    if run_magic {
+        let obs2 = adata.obs().get_data();
+        if let Some(ct) = obs_column_as_strings(&obs2, "cell_type")? {
+            return Ok(ct);
+        }
+        if let Some(l) = obs_column_as_strings(&obs2, "leiden")? {
+            let mut patched = obs2;
+            patched.with_column(Series::new("cell_type".into(), l.clone()))?;
+            adata
+                .obs()
+                .set_data(patched)
+                .context("obs cell_type from leiden")?;
+            return Ok(l);
+        }
+        bail!("impute: expected cell_type or leiden in obs after clustering");
+    }
 
-    let mut patched = obs;
-    patched.with_column(Series::new("leiden".into(), labels.clone()))?;
-    patched.with_column(Series::new("cell_type".into(), labels.clone()))?;
-    adata
-        .obs()
-        .set_data(patched)
-        .context("obs.set_data add leiden/cell_type")?;
-    Ok(labels)
+    Ok(Vec::new())
 }
 
 fn diffusion_for_subset(graph: &FuzzyGraph, rows: &[usize]) -> CsrF64 {
@@ -870,56 +1157,81 @@ fn add_magic_imputed_count(
     }
 
     let t = Instant::now();
-    eprintln!(">>> MAGIC per cell_type");
+    eprintln!(">>> MAGIC per cell_type (gene-blocked CSR, f32; no full-matrix densify)");
     let nc = adata
         .layers()
         .get_array("normalized_count")
         .context("layers['normalized_count'] missing before MAGIC")?
         .get_data()
         .context("read normalized_count")?;
-    let x = array_data_to_dense_f64(nc).context("normalized_count dense")?;
-    let mut out = x.clone();
+    let csr = normalized_layer_to_csr_f64(nc)?;
+    let n = csr.nrows();
+    let p = csr.ncols();
+    let np = n
+        .checked_mul(p)
+        .ok_or_else(|| anyhow!("rust-magic: n_obs * n_vars overflow"))?;
+    if np > MAGIC_MAX_DENSE_FLOATS {
+        bail!(
+            "rust-magic: n_obs * n_vars = {np} exceeds limit {MAGIC_MAX_DENSE_FLOATS} (dense f32 imputed buffer); subsample or omit --rust-magic"
+        );
+    }
+
     let mut groups = std::collections::BTreeMap::<String, Vec<usize>>::new();
     for (i, label) in labels.iter().enumerate() {
         groups.entry(label.clone()).or_default().push(i);
     }
+
     let cfg = ImputeConfig {
         threads: None,
         gene_block_size: 128,
     };
-    for rows in groups.values() {
-        if rows.len() < 2 {
-            continue;
-        }
-        let subset =
-            Array2::<f64>::from_shape_fn((rows.len(), x.ncols()), |(i, j)| x[[rows[i], j]]);
-        let diff = diffusion_for_subset(graph, rows);
-        let imp = impute_magic(&diff, &subset, 3, &cfg);
-        for (local_i, &global_i) in rows.iter().enumerate() {
-            for j in 0..x.ncols() {
-                out[[global_i, j]] = imp[[local_i, j]];
+    let gene_strip = cfg.gene_block_size.max(256);
+
+    let mut out = ndarray::Array2::<f32>::zeros((n, p));
+    for kc in (0..p).step_by(gene_strip) {
+        let ke = (kc + gene_strip).min(p);
+        let mut block = ndarray::Array2::<f32>::zeros((n, ke - kc));
+        csr_fill_cols_f32_block(&csr, &mut block.view_mut(), kc, ke);
+        for rows in groups.values() {
+            if rows.len() < 2 {
+                continue;
+            }
+            let diff = diffusion_for_subset(graph, rows);
+            let sub = ndarray::Array2::<f32>::from_shape_fn((rows.len(), ke - kc), |(i, j)| {
+                block[[rows[i], j]]
+            });
+            let imp = impute_magic_f32(&diff, &sub, 3, &cfg);
+            for (i, &gi) in rows.iter().enumerate() {
+                for j in 0..(ke - kc) {
+                    block[[gi, j]] = imp[[i, j]];
+                }
             }
         }
+        out.slice_mut(s![.., kc..ke]).assign(&block);
     }
+
+    let out_f64 = out.mapv(|v| v as f64);
     layer_replace_if_present(
         adata,
         "imputed_count",
-        ArrayData::Array(DynArray::from(out)),
+        ArrayData::Array(DynArray::from(out_f64)),
     )?;
     eprintln!(
-        "<<< MAGIC per cell_type: {:.2} s",
+        "<<< MAGIC per cell_type: {:.2} s (n_obs * n_vars = {np})",
         t.elapsed().as_secs_f64()
     );
     log.push(("MAGIC per cell_type".to_string(), t.elapsed().as_secs_f64()));
     Ok(())
 }
 
-/// Full Rust preprocessing pipeline; writes `output` as a backed HDF5 AnnData.
-pub fn rust_preprocess_h5ad(
+/// Core in-memory preprocessing: loads h5ad, runs the requested pipeline steps, returns the
+/// `IMAnnData` without any disk writes. Used by `rust_preprocess_h5ad_with_steps` and callers
+/// that need the processed data in memory (e.g. `--plot-umap`).
+pub fn rust_preprocess_h5ad_to_memory(
     input: &Path,
-    output: &Path,
     params: &RustPreprocessParams,
-) -> Result<PathBuf> {
+    steps: &RustPreprocessSteps,
+) -> Result<IMAnnData> {
     let mut log: Vec<(String, f64)> = Vec::new();
 
     let t0 = Instant::now();
@@ -929,186 +1241,260 @@ pub fn rust_preprocess_h5ad(
     eprintln!("<<< read_h5ad: {:.2} s", t0.elapsed().as_secs_f64());
     log.push(("read_h5ad".to_string(), t0.elapsed().as_secs_f64()));
 
-    let t = Instant::now();
-    eprintln!(">>> filter_genes(min_cells=3)");
-    let gene_mask = mark_filter_genes::<u32, f64>(&adata, Some(3u32), None, None, None, None, None)
-        .map_err(|e| anyhow!("mark_filter_genes: {e:?}"))?;
-    eprintln!(
-        "<<< filter_genes(min_cells=3): {:.2} s",
-        t.elapsed().as_secs_f64()
-    );
-    log.push((
-        "filter_genes(min_cells=3)".to_string(),
-        t.elapsed().as_secs_f64(),
-    ));
+    if steps.qc_filter {
+        let t = Instant::now();
+        eprintln!(">>> filter_genes(min_cells=3)");
+        let gene_mask =
+            mark_filter_genes::<u32, f64>(&adata, Some(3u32), None, None, None, None, None)
+                .map_err(|e| anyhow!("mark_filter_genes: {e:?}"))?;
+        eprintln!(
+            "<<< filter_genes(min_cells=3): {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
+        log.push((
+            "filter_genes(min_cells=3)".to_string(),
+            t.elapsed().as_secs_f64(),
+        ));
 
-    let t = Instant::now();
-    eprintln!(">>> filter_cells(min_genes=100)");
-    let cell_mask =
-        mark_filter_cells::<u32, f64>(&adata, Some(100u32), None, None, None, None, None)
-            .map_err(|e| anyhow!("mark_filter_cells: {e:?}"))?;
-    eprintln!(
-        "<<< filter_cells(min_genes=100): {:.2} s",
-        t.elapsed().as_secs_f64()
-    );
-    log.push((
-        "filter_cells(min_genes=100)".to_string(),
-        t.elapsed().as_secs_f64(),
-    ));
+        let t = Instant::now();
+        eprintln!(">>> filter_cells(min_genes=100)");
+        let cell_mask =
+            mark_filter_cells::<u32, f64>(&adata, Some(100u32), None, None, None, None, None)
+                .map_err(|e| anyhow!("mark_filter_cells: {e:?}"))?;
+        eprintln!(
+            "<<< filter_cells(min_genes=100): {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
+        log.push((
+            "filter_cells(min_genes=100)".to_string(),
+            t.elapsed().as_secs_f64(),
+        ));
 
-    let t = Instant::now();
-    eprintln!(">>> apply masks (subset)");
-    let cell_idx = mask_to_indices(&cell_mask);
-    let gene_idx = mask_to_indices(&gene_mask);
-    let obs_sel = SelectInfoElem::from(cell_idx.clone());
-    let var_sel = SelectInfoElem::from(gene_idx.clone());
-    adata = adata
-        .subset(&[&obs_sel, &var_sel])
-        .map_err(|e| anyhow!("subset: {e:?}"))?;
-    eprintln!(
-        "  shape after filter: ({}, {})",
-        adata.n_obs(),
-        adata.n_vars()
-    );
-    eprintln!(
-        "<<< apply masks (subset): {:.2} s",
-        t.elapsed().as_secs_f64()
-    );
-    log.push((
-        "apply masks (subset)".to_string(),
-        t.elapsed().as_secs_f64(),
-    ));
+        let t = Instant::now();
+        eprintln!(">>> apply masks (subset)");
+        let cell_idx = mask_to_indices(&cell_mask);
+        let gene_idx = mask_to_indices(&gene_mask);
+        let obs_sel = SelectInfoElem::from(cell_idx.clone());
+        let var_sel = SelectInfoElem::from(gene_idx.clone());
+        adata = adata
+            .subset(&[&obs_sel, &var_sel])
+            .map_err(|e| anyhow!("subset: {e:?}"))?;
+        eprintln!(
+            "  shape after filter: ({}, {})",
+            adata.n_obs(),
+            adata.n_vars()
+        );
+        eprintln!(
+            "<<< apply masks (subset): {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
+        log.push((
+            "apply masks (subset)".to_string(),
+            t.elapsed().as_secs_f64(),
+        ));
+    } else {
+        eprintln!("rust_preprocess: skipping QC filters (steps.qc_filter=false)");
+    }
 
-    let t = Instant::now();
-    eprintln!(">>> normalize_total");
-    normalize_expression(&adata.x(), 10_000, &Direction::ROW, None)
-        .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
-    let norm_data = adata.x().get_data().context("x after normalize")?;
-    layer_replace_if_present(&adata, "normalized_count", norm_data)?;
-    eprintln!("<<< normalize_total: {:.2} s", t.elapsed().as_secs_f64());
-    log.push(("normalize_total".to_string(), t.elapsed().as_secs_f64()));
+    let needs_expr_pipeline = steps.normalize_log1p
+        || steps.hvg_pca
+        || steps.run_umap_and_graph
+        || steps.run_magic_impute;
+    if !needs_expr_pipeline {
+        bail!("rust_preprocess: at least one of normalize_log1p, hvg_pca, run_umap_and_graph, run_magic_impute must be true");
+    }
 
-    let t = Instant::now();
-    eprintln!(">>> log1p");
-    log1p_expression(&adata.x(), None).map_err(|e| anyhow!("log1p_expression: {e:?}"))?;
-    let log_data = adata.x().get_data().context("x after log1p")?;
-    layer_replace_if_present(&adata, "log1p", log_data)?;
-    eprintln!("<<< log1p: {:.2} s", t.elapsed().as_secs_f64());
-    log.push(("log1p".to_string(), t.elapsed().as_secs_f64()));
+    if steps.normalize_log1p {
+        let log_like = infer_x_is_log1p_space(&adata)?;
+        if log_like {
+            eprintln!(
+                "rust_preprocess: X classified as log-normalized (uns['log1p'] or Scanpy-style heuristic); skip normalize_total + log1p; copy X → layers['normalized_count'] / ['log1p']"
+            );
+            let x = adata.x().get_data().context("x for layer copy")?;
+            layer_replace_if_present(&adata, "normalized_count", x.clone())?;
+            layer_replace_if_present(&adata, "log1p", x)?;
+            log.push(("skip_normalize_log1p_log_space".to_string(), 0.0));
+        } else {
+            let t = Instant::now();
+            eprintln!(">>> normalize_total (target_sum=10000, Scanpy-equivalent)");
+            normalize_expression(&adata.x(), 10_000, &Direction::ROW, None)
+                .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
+            let norm_data = adata.x().get_data().context("x after normalize")?;
+            layer_replace_if_present(&adata, "normalized_count", norm_data)?;
+            eprintln!(
+                "<<< normalize_total: {:.2} s",
+                t.elapsed().as_secs_f64()
+            );
+            log.push(("normalize_total".to_string(), t.elapsed().as_secs_f64()));
 
-    let hvg_target = params
-        .n_top_hvg
-        .min(adata.n_vars().saturating_sub(50).max(1));
-    let t = Instant::now();
-    eprintln!(">>> highly_variable_genes({hvg_target})");
-    compute_highly_variable_genes(
-        &adata,
-        Some(HVGParams {
-            n_top_genes: Some(hvg_target),
-            ..Default::default()
-        }),
-    )
-    .map_err(|e| anyhow!("compute_highly_variable_genes: {e:?}"))?;
-    eprintln!(
-        "<<< highly_variable_genes({hvg_target}): {:.2} s",
-        t.elapsed().as_secs_f64()
-    );
-    log.push((
-        format!("highly_variable_genes({hvg_target})"),
-        t.elapsed().as_secs_f64(),
-    ));
+            let t = Instant::now();
+            eprintln!(">>> log1p");
+            log1p_expression(&adata.x(), None).map_err(|e| anyhow!("log1p_expression: {e:?}"))?;
+            let log_data = adata.x().get_data().context("x after log1p")?;
+            layer_replace_if_present(&adata, "log1p", log_data)?;
+            eprintln!("<<< log1p: {:.2} s", t.elapsed().as_secs_f64());
+            log.push(("log1p".to_string(), t.elapsed().as_secs_f64()));
+        }
+    } else if steps.hvg_pca || steps.run_umap_and_graph || steps.run_magic_impute {
+        bail!("rust_preprocess: HVG/PCA/UMAP/impute require normalize_log1p=true (Scanpy normalize_total + log1p on X)");
+    }
 
-    let t = Instant::now();
-    eprintln!(">>> subset HVG & drop mt");
-    let hvg_mask = read_var_hvg_mask(&adata)?;
-    let var_names = adata.var_names();
-    let combined_mask: Vec<bool> = hvg_mask
-        .iter()
-        .zip(var_names.iter())
-        .map(|(&hv, name)| hv && !name.to_lowercase().starts_with("mt"))
-        .collect();
-    eprintln!(
-        "<<< subset HVG & drop mt: {:.2} s",
-        t.elapsed().as_secs_f64()
-    );
-    log.push((
-        "subset HVG & drop mt".to_string(),
-        t.elapsed().as_secs_f64(),
-    ));
+    let mut pca = ndarray::Array2::<f64>::zeros((0, 0));
+    if steps.hvg_pca {
+        let hvg_target = params
+            .n_top_hvg
+            .min(adata.n_vars().saturating_sub(50).max(1));
+        let t = Instant::now();
+        eprintln!(">>> highly_variable_genes({hvg_target})");
+        compute_highly_variable_genes(
+            &adata,
+            Some(HVGParams {
+                n_top_genes: Some(hvg_target),
+                ..Default::default()
+            }),
+        )
+        .map_err(|e| anyhow!("compute_highly_variable_genes: {e:?}"))?;
+        eprintln!(
+            "<<< highly_variable_genes({hvg_target}): {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
+        log.push((
+            format!("highly_variable_genes({hvg_target})"),
+            t.elapsed().as_secs_f64(),
+        ));
 
-    let t = Instant::now();
-    eprintln!(">>> convert X to CSR (for PCA)");
-    ensure_x_csr_for_pca(&adata)?;
-    eprintln!("<<< convert X to CSR: {:.2} s", t.elapsed().as_secs_f64());
-    log.push(("convert X to CSR".to_string(), t.elapsed().as_secs_f64()));
+        let t = Instant::now();
+        eprintln!(">>> subset HVG & drop mt");
+        let hvg_mask = read_var_hvg_mask(&adata)?;
+        let var_names = adata.var_names();
+        let combined_mask: Vec<bool> = hvg_mask
+            .iter()
+            .zip(var_names.iter())
+            .map(|(&hv, name)| hv && !name.to_lowercase().starts_with("mt"))
+            .collect();
+        eprintln!(
+            "<<< subset HVG & drop mt: {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
+        log.push((
+            "subset HVG & drop mt".to_string(),
+            t.elapsed().as_secs_f64(),
+        ));
 
-    let t = Instant::now();
-    eprintln!(">>> pca");
-    let pca_res = run_pca_sparse_masked::<f64>(
-        &adata.x(),
-        Some(FeatureSelectionMethod::HighlyVariableSelection(
-            combined_mask,
-        )),
-        Some(true),
-        Some(false),
-        Some(params.n_pca_components),
-        None,
-        Some(42),
-        Some(SVDMethod::Random {
-            n_oversamples: 10,
-            n_power_iterations: 4,
-            normalizer: PowerIterationNormalizer::QR,
-        }),
-    )
-    .map_err(|e| anyhow!("PCA: {e:?}"))?;
-    let pca = pca_res.transformed;
-    eprintln!("  PCA shape: {:?}", pca.shape());
-    eprintln!("<<< pca: {:.2} s", t.elapsed().as_secs_f64());
-    log.push(("pca".to_string(), t.elapsed().as_secs_f64()));
+        let t = Instant::now();
+        eprintln!(">>> convert X to CSR (for PCA)");
+        ensure_x_csr_for_pca(&adata)?;
+        eprintln!(
+            "<<< convert X to CSR: {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
+        log.push(("convert X to CSR".to_string(), t.elapsed().as_secs_f64()));
 
-    let (emb_umap, fuzzy_graph) = run_umap(&pca, params, &mut log)?;
+        let t = Instant::now();
+        eprintln!(">>> pca");
+        let pca_res = run_pca_sparse_masked::<f64>(
+            &adata.x(),
+            Some(FeatureSelectionMethod::HighlyVariableSelection(
+                combined_mask,
+            )),
+            Some(true),
+            Some(false),
+            Some(params.n_pca_components),
+            None,
+            Some(42),
+            Some(SVDMethod::Random {
+                n_oversamples: 10,
+                n_power_iterations: 4,
+                normalizer: PowerIterationNormalizer::QR,
+            }),
+        )
+        .map_err(|e| anyhow!("PCA: {e:?}"))?;
+        pca = pca_res.transformed;
+        eprintln!("  PCA shape: {:?}", pca.shape());
+        eprintln!("<<< pca: {:.2} s", t.elapsed().as_secs_f64());
+        log.push(("pca".to_string(), t.elapsed().as_secs_f64()));
+    } else if steps.run_umap_and_graph {
+        bail!("rust_preprocess: UMAP requires hvg_pca=true");
+    }
 
-    let n = emb_umap.nrows();
-    let pca_f64 =
-        ndarray::Array2::<f64>::from_shape_fn((pca.nrows(), pca.ncols()), |(i, j)| pca[(i, j)]);
-    let umap_f64 = ndarray::Array2::<f64>::from_shape_fn((n, 2), |(i, j)| emb_umap[(i, j)] as f64);
+    if steps.run_umap_and_graph {
+        let (emb_umap, fuzzy_graph) = run_umap(&pca, params, &mut log)?;
 
-    axis_replace_array(
-        &adata.obsm(),
-        "X_pca",
-        ArrayData::Array(DynArray::from(pca_f64)),
-    )?;
-    axis_replace_array(
-        &adata.obsm(),
-        "X_umap",
-        ArrayData::Array(DynArray::from(umap_f64)),
-    )?;
+        let n = emb_umap.nrows();
+        let pca_f64 = ndarray::Array2::<f64>::from_shape_fn((pca.nrows(), pca.ncols()), |(i, j)| {
+            pca[(i, j)]
+        });
+        let umap_f64 =
+            ndarray::Array2::<f64>::from_shape_fn((n, 2), |(i, j)| emb_umap[(i, j)] as f64);
 
-    let labels = ensure_cluster_labels(&adata, &fuzzy_graph, &mut log)?;
-    add_magic_imputed_count(&adata, &fuzzy_graph, &labels, &mut log)?;
+        axis_replace_array(
+            &adata.obsm(),
+            "X_pca",
+            ArrayData::Array(DynArray::from(pca_f64)),
+        )?;
+        axis_replace_array(
+            &adata.obsm(),
+            "X_umap",
+            ArrayData::Array(DynArray::from(umap_f64)),
+        )?;
 
+        let labels = sync_labels_after_embedding(
+            &adata,
+            &fuzzy_graph,
+            steps.write_leiden,
+            steps.run_magic_impute,
+            &mut log,
+        )?;
+        if steps.run_magic_impute {
+            add_magic_imputed_count(&adata, &fuzzy_graph, &labels, &mut log)?;
+        }
+    }
+
+    let total: f64 = log.iter().map(|(_, s)| s).sum();
+    eprintln!("rust_preprocess: TOTAL (sum of steps) {total:.2} s");
+    for (name, dt) in &log {
+        eprintln!("  {name}: {dt:.2} s");
+    }
+
+    Ok(adata)
+}
+
+/// Scanpy-style pipeline on AnnData: optional QC, then either **`normalize_total` (target_sum=10_000) + `log1p`**
+/// on `X` or a **log-space skip** matching Scanpy `full_preprocess` rules for `X`, then optional HVG → PCA → UMAP
+/// and optional Leiden / MAGIC per [`RustPreprocessSteps`]. When `output` is `None`, runs in memory and skips the
+/// HDF5 write. When `output` is `Some(path)`, writes `path` with **`X` and every `layers` matrix stored as CSR f64**.
+pub fn rust_preprocess_h5ad_with_steps(
+    input: &Path,
+    output: Option<&Path>,
+    params: &RustPreprocessParams,
+    steps: &RustPreprocessSteps,
+) -> Result<Option<PathBuf>> {
+    let adata = rust_preprocess_h5ad_to_memory(input, params, steps)?;
+
+    let Some(output) = output else {
+        eprintln!("rust_preprocess: no output path; skipped HDF5 write");
+        return Ok(None);
+    };
+
+    write_adata_h5ad(&adata, output)?;
+    Ok(Some(output.to_path_buf()))
+}
+
+fn write_adata_h5ad(adata: &IMAnnData, output: &Path) -> Result<()> {
     let t = Instant::now();
     eprintln!(">>> write_h5ad {}", output.display());
     if output.exists() {
         std::fs::remove_file(output)
             .map_err(|e| anyhow!("cannot remove existing output {}: {e}", output.display()))?;
     }
-    strip_supplemental_axis_arrays_for_h5_export(&adata)
+    strip_supplemental_axis_arrays_for_h5_export(adata)
         .context("strip obsp/varm/varp and non-embedding obsm for HDF5 export")?;
     let obs_safe = dataframe_hdf5_safe(adata.obs().get_data()).context("sanitize obs for HDF5")?;
     adata
         .obs()
         .set_data(obs_safe)
         .context("obs.set_data after sanitize")?;
-    let var_names = adata.var_names();
-    let var_df = DataFrame::new(vec![Series::new("_index".into(), var_names.clone()).into()])
-        .context("minimal var dataframe")?;
-    let var_index = anndata::data::DataFrameIndex::from(var_names);
-    adata
-        .var()
-        .set_both(var_df, var_index)
-        .context("var.set_both minimal before HDF5 export")?;
-    clear_uns_for_hdf5_export(&adata).context("clear uns for HDF5")?;
+    clear_uns_for_hdf5_export(adata).context("clear uns for HDF5")?;
 
     let tmp = temp_h5ad_path(output).context("temp output path for HDF5")?;
     if tmp.exists() {
@@ -1116,21 +1502,24 @@ pub fn rust_preprocess_h5ad(
     }
     let write_result = (|| -> Result<()> {
         let written = AnnData::<H5>::new(&tmp).context("create temp h5ad")?;
+
+        let obs_with_index = attach_dataframe_index(adata.obs().get_data(), &adata.obs_names())
+            .context("attach _index to obs before HDF5 write")?;
         written
-            .set_x(adata.x().get_data().context("read X for export")?)
-            .context("write X")?;
+            .set_obs(obs_with_index)
+            .context("write obs (with _index)")?;
+
+        let var_with_index = attach_dataframe_index(adata.var().get_data(), &adata.var_names())
+            .context("attach _index to var before HDF5 write")?;
         written
-            .set_obs_names(anndata::data::DataFrameIndex::from(adata.obs_names()))
-            .context("write obs_names")?;
-        written
-            .set_var_names(anndata::data::DataFrameIndex::from(adata.var_names()))
-            .context("write var_names")?;
-        written
-            .set_obs(adata.obs().get_data())
-            .context("write obs")?;
-        written
-            .set_var(adata.var().get_data())
-            .context("write var")?;
+            .set_var(var_with_index)
+            .context("write var (with _index)")?;
+
+        let x_export = array_data_to_csr_f64_for_h5_export(
+            adata.x().get_data().context("read X for export")?,
+        )
+        .context("coerce X to CSR f64 for HDF5 export")?;
+        written.set_x(x_export).context("write X")?;
         for key in adata.obsm().keys() {
             let elem = adata
                 .obsm()
@@ -1146,9 +1535,12 @@ pub fn rust_preprocess_h5ad(
                 .layers()
                 .get_array(&key)
                 .with_context(|| format!("read layers[{key}]"))?;
+            let layer_export = array_data_to_csr_f64_for_h5_export(elem.get_data()?).with_context(
+                || format!("coerce layers[{key}] to CSR f64 for HDF5 export"),
+            )?;
             written
                 .layers()
-                .add(&key, elem.get_data()?)
+                .add(&key, layer_export)
                 .with_context(|| format!("write layers[{key}]"))?;
         }
         written.close().context("close AnnData H5")?;
@@ -1168,13 +1560,13 @@ pub fn rust_preprocess_h5ad(
         )
     })?;
     eprintln!("<<< write_h5ad: {:.2} s", t.elapsed().as_secs_f64());
-    log.push(("write_h5ad".to_string(), t.elapsed().as_secs_f64()));
+    Ok(())
+}
 
-    let total: f64 = log.iter().map(|(_, s)| s).sum();
-    eprintln!("rust_preprocess: TOTAL (sum of steps) {total:.2} s");
-    for (name, dt) in &log {
-        eprintln!("  {name}: {dt:.2} s");
-    }
-
-    Ok(output.to_path_buf())
+pub fn rust_preprocess_h5ad(
+    input: &Path,
+    output: &Path,
+    params: &RustPreprocessParams,
+) -> Result<Option<PathBuf>> {
+    rust_preprocess_h5ad_with_steps(input, Some(output), params, &RustPreprocessSteps::FULL)
 }
