@@ -1274,6 +1274,118 @@ def _label_distribution_features(
     return np.concatenate(blocks, axis=1).astype(np.float32), names
 
 
+def _reference_soft_label_targets(
+    ref_i: sc.AnnData,
+    ref_li: np.ndarray,
+    n_ct: int,
+    *,
+    k: int = 12,
+    spatial_blend: float = 0.25,
+) -> np.ndarray:
+    y = np.full((ref_i.n_obs, n_ct), 0.02 / max(n_ct - 1, 1), dtype=np.float32)
+    y[np.arange(ref_i.n_obs), ref_li.astype(int)] = 0.98
+    _, xy = _resolve_spatial_xy(ref_i)
+    if xy is None or ref_i.n_obs < 4:
+        return y
+    nn = NearestNeighbors(n_neighbors=min(k + 1, ref_i.n_obs), metric="euclidean")
+    nn.fit(xy)
+    dist, idx = nn.kneighbors(xy)
+    neigh = idx[:, 1:]
+    dist = dist[:, 1:]
+    if neigh.shape[1] == 0:
+        return y
+    sig = float(np.median(dist[dist > 0])) if np.any(dist > 0) else 1.0
+    w = np.exp(-(dist**2) / (2.0 * max(sig, 1e-6) ** 2)).astype(np.float32)
+    w /= np.maximum(w.sum(axis=1, keepdims=True), 1e-8)
+    local = np.zeros_like(y)
+    for i in range(ref_i.n_obs):
+        for jj, nb in enumerate(neigh[i]):
+            local[i, int(ref_li[int(nb)])] += w[i, jj]
+    out = (1.0 - spatial_blend) * y + spatial_blend * local
+    out /= np.maximum(out.sum(1, keepdims=True), 1e-8)
+    return out.astype(np.float32)
+
+
+def _concentration_ldl_probs(
+    X_ref: np.ndarray,
+    X_query: np.ndarray,
+    y_ref_dist: np.ndarray,
+    *,
+    epochs: int = 80,
+    batch_size: int = 1024,
+    lr: float = 1e-3,
+    hidden: int = 64,
+) -> tuple[np.ndarray, dict]:
+    dev = torch.device("cpu")
+    torch.manual_seed(7)
+    np.random.seed(7)
+    X_ref = _safe_zscore(X_ref).astype(np.float32)
+    X_query = _safe_zscore(X_query).astype(np.float32)
+    y_ref_dist = np.asarray(y_ref_dist, dtype=np.float32)
+    n_features = int(X_ref.shape[1])
+    n_outputs = int(y_ref_dist.shape[1])
+    model = torch.nn.Sequential(
+        torch.nn.Linear(n_features, hidden),
+        torch.nn.ReLU(),
+        torch.nn.Linear(hidden, hidden),
+        torch.nn.ReLU(),
+        torch.nn.Linear(hidden, n_outputs),
+        torch.nn.Softplus(),
+    ).to(dev)
+    X_t = torch.tensor(X_ref, dtype=torch.float32, device=dev)
+    y_t = torch.tensor(y_ref_dist, dtype=torch.float32, device=dev)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    n = X_ref.shape[0]
+    losses: list[float] = []
+    for ep in range(epochs):
+        order = np.random.permutation(n)
+        total = 0.0
+        nb = 0
+        for start in range(0, n, batch_size):
+            idx = torch.tensor(order[start : start + batch_size], dtype=torch.long, device=dev)
+            xb = X_t[idx]
+            yb = y_t[idx]
+            opt.zero_grad()
+            evidence = model(xb)
+            alpha = evidence + 1.0
+            S = alpha.sum(dim=1, keepdim=True)
+            mean = alpha / S
+            sq = ((yb - mean) ** 2).sum(dim=1, keepdim=True)
+            var = (alpha * (S - alpha) / (S * S * (S + 1.0))).sum(dim=1, keepdim=True)
+            loss = (sq + var).mean()
+            loss.backward()
+            opt.step()
+            total += float(loss.item())
+            nb += 1
+        losses.append(total / max(nb, 1))
+    with torch.no_grad():
+        q_t = torch.tensor(X_query, dtype=torch.float32, device=dev)
+        evidence = model(q_t)
+        alpha = evidence + 1.0
+        S = alpha.sum(dim=1, keepdim=True)
+        belief = evidence / S
+        background = n_outputs / S
+        class_prior = torch.tensor(y_ref_dist.mean(axis=0), dtype=torch.float32, device=dev)
+        class_prior = class_prior / class_prior.sum().clamp_min(1e-8)
+        probs = belief + background * class_prior.unsqueeze(0)
+        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        train_evidence = model(X_t)
+        train_alpha = train_evidence + 1.0
+        train_pred = (train_alpha / train_alpha.sum(dim=1, keepdim=True)).argmax(dim=1).cpu().numpy()
+    train_hard = y_ref_dist.argmax(axis=1)
+    return probs.cpu().numpy().astype(np.float32), {
+        "enabled": True,
+        "model": "scLDL_concentration_evidence",
+        "n_features": n_features,
+        "n_outputs": n_outputs,
+        "epochs": epochs,
+        "final_loss": float(losses[-1]) if losses else None,
+        "train_accuracy": float(np.mean(train_pred == train_hard)),
+        "mean_background": float(background.mean().cpu().item()),
+        "median_background": float(background.median().cpu().item()),
+    }
+
+
 def label_distribution_learning_probs(
     ref_i: sc.AnnData,
     query: sc.AnnData,
@@ -1291,55 +1403,17 @@ def label_distribution_learning_probs(
         d = min(ref_beta.shape[1], query_beta.shape[1])
         ref_beta_use = ref_beta[:, :d]
         query_beta_use = query_beta[:, :d]
-
-    components: list[tuple[str, float, np.ndarray, dict]] = []
-
-    d_pca = min(40, ref_pca.shape[1], query_pca.shape[1])
-    pca_p, pca_meta = _feature_knn_probs(
-        _safe_zscore(ref_pca[:, :d_pca]),
-        _safe_zscore(query_pca[:, :d_pca]),
-        ref_li,
-        len(cell_types),
+    ref_labels = np.array(cell_types, dtype=object)[ref_li.astype(int)]
+    ref_spatial_prior, ref_spatial_meta = spatial_coordinate_prior(
+        ref_i, ref_i, ref_labels, cell_types
     )
-    components.append(("pca_knn", 0.40, pca_p, {"n_features": int(d_pca), **pca_meta}))
-
-    ru = ref_i.obsm.get("X_umap")
-    qu = query.obsm.get("X_umap")
-    if ru is not None and qu is not None:
-        ru = np.asarray(ru, dtype=np.float32)
-        qu = np.asarray(qu, dtype=np.float32)
-        if ru.ndim == 2 and qu.ndim == 2 and ru.shape[0] == ref_i.n_obs and qu.shape[0] == query.n_obs:
-            d_umap = min(ru.shape[1], qu.shape[1], 3)
-            if d_umap >= 2:
-                umap_p, umap_meta = _feature_knn_probs(
-                    _safe_zscore(ru[:, :d_umap]),
-                    _safe_zscore(qu[:, :d_umap]),
-                    ref_li,
-                    len(cell_types),
-                    n_neighbors=35,
-                )
-                components.append(("umap_knn", 0.15, umap_p, {"n_features": int(d_umap), **umap_meta}))
-
-    if ref_beta_use is not None and query_beta_use is not None and ref_beta_use.size and query_beta_use.size:
-        beta_p, beta_meta = _feature_knn_probs(
-            _safe_zscore(ref_beta_use),
-            _safe_zscore(query_beta_use),
-            ref_li,
-            len(cell_types),
-            n_neighbors=35,
-        )
-        components.append(("betadata_knn", 0.25, beta_p, {"n_features": int(ref_beta_use.shape[1]), **beta_meta}))
-
-    if spatial_prior is not None and spatial_prior.shape == (query.n_obs, len(cell_types)):
-        components.append(("spatial_prior", 0.10, spatial_prior.astype(np.float32), {"n_features": int(spatial_prior.shape[1])}))
-
-    ref_prior = np.zeros((ref_i.n_obs, len(cell_types)), dtype=np.float32)
-    ref_prior[np.arange(ref_i.n_obs), ref_li.astype(int)] = 1.0
+    if ref_spatial_prior is not None and ref_spatial_prior.shape != (ref_i.n_obs, len(cell_types)):
+        ref_spatial_prior = None
     X_ref, blocks_ref = _label_distribution_features(
         ref_i,
         pca_features=ref_pca,
         beta_features=ref_beta_use,
-        spatial_prior=ref_prior,
+        spatial_prior=ref_spatial_prior,
     )
     X_query, blocks_query = _label_distribution_features(
         query,
@@ -1351,40 +1425,24 @@ def label_distribution_learning_probs(
         d = min(X_ref.shape[1], X_query.shape[1])
         X_ref = X_ref[:, :d]
         X_query = X_query[:, :d]
-    clf = LogisticRegression(
-        max_iter=1000,
-        class_weight="balanced",
-        C=0.75,
-        solver="lbfgs",
+    y_ref_dist = _reference_soft_label_targets(ref_i, ref_li, len(cell_types))
+    probs, conc_meta = _concentration_ldl_probs(
+        X_ref,
+        X_query,
+        y_ref_dist,
+        epochs=80,
+        batch_size=1024,
+        lr=1e-3,
+        hidden=64,
     )
-    clf.fit(X_ref, ref_li)
-    raw = clf.predict_proba(X_query).astype(np.float32)
-    logit_p = np.full((query.n_obs, len(cell_types)), 1e-6, dtype=np.float32)
-    for j, cls in enumerate(clf.classes_):
-        ci = int(cls)
-        if 0 <= ci < logit_p.shape[1]:
-            logit_p[:, ci] = raw[:, j]
-    logit_p /= np.maximum(logit_p.sum(1, keepdims=True), 1e-8)
-    train_pred = clf.predict(X_ref)
-    train_acc = float(np.mean(train_pred.astype(int) == ref_li.astype(int)))
-    logistic_weight = 0.10 if train_acc >= 0.65 else 0.03
-    components.append(("logistic", logistic_weight, logit_p, {"train_accuracy": train_acc}))
-
-    total_w = sum(w for _, w, _, _ in components)
-    probs = sum(w * p for _, w, p, _ in components) / max(total_w, 1e-8)
-    probs /= np.maximum(probs.sum(1, keepdims=True), 1e-8)
-    return probs, {
-        "enabled": True,
-        "model": "calibrated_label_distribution_ensemble",
+    conc_meta.update({
         "feature_blocks_ref": blocks_ref,
         "feature_blocks_query": blocks_query,
         "n_features": int(X_ref.shape[1]),
-        "classes": [cell_types[int(i)] for i in clf.classes_],
-        "components": {
-            name: {"weight": float(w), **meta}
-            for name, w, _, meta in components
-        },
-    }
+        "classes": list(cell_types),
+        "ref_spatial_prior": ref_spatial_meta,
+    })
+    return probs, conc_meta
 
 
 def run_malt(
