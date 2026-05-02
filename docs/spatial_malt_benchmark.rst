@@ -49,6 +49,10 @@ accuracy, ARI, and dotplot/profile R² in this 50/50 split. The ``glorious``
 row is an adaptive probabilistic blend of KNN, anchored MALT, scLDL, beta KNN,
 and spatial priors; it has the best held-out accuracy, balanced accuracy, and
 ARI while keeping dotplot/profile R² above expression KNN.
+The full per-cell glorious distribution is written to
+``glorious_probabilities.csv`` with columns ``obs_name``, one probability column
+per cell type, and ``background``. Cell-type probabilities are scaled by
+``1 - background`` so each row sums to one across labels plus background.
 
 Full-data 50/50 MERFISH Mouse Cortex command:
 

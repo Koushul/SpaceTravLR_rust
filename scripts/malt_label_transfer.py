@@ -1275,6 +1275,28 @@ def _adaptive_probability_ensemble(
     return acc.astype(np.float32), meta
 
 
+def _write_probability_matrix_csv(
+    outdir: str,
+    filename: str,
+    obs_names: np.ndarray,
+    cell_types: list[str],
+    probs: np.ndarray,
+    *,
+    background: np.ndarray | None = None,
+) -> str:
+    probs = np.asarray(probs, dtype=np.float32)
+    bg = np.zeros(probs.shape[0], dtype=np.float32) if background is None else np.asarray(background, dtype=np.float32)
+    if bg.ndim != 1 or bg.shape[0] != probs.shape[0]:
+        raise ValueError(f"background shape {bg.shape} incompatible with probabilities {probs.shape}")
+    mat = probs * (1.0 - np.clip(bg, 0.0, 1.0))[:, None]
+    df = pd.DataFrame(mat, columns=[str(c) for c in cell_types])
+    df.insert(0, "obs_name", np.asarray(obs_names).astype(str))
+    df["background"] = np.clip(bg, 0.0, 1.0)
+    path = os.path.join(outdir, filename)
+    df.to_csv(path, index=False)
+    return path
+
+
 def _label_distribution_features(
     adata: sc.AnnData,
     *,
@@ -1352,7 +1374,7 @@ def _concentration_ldl_probs(
     batch_size: int = 1024,
     lr: float = 1e-3,
     hidden: int = 64,
-) -> tuple[np.ndarray, dict]:
+) -> tuple[np.ndarray, np.ndarray, dict]:
     dev = torch.device("cpu")
     torch.manual_seed(7)
     np.random.seed(7)
@@ -1410,7 +1432,7 @@ def _concentration_ldl_probs(
         train_alpha = train_evidence + 1.0
         train_pred = (train_alpha / train_alpha.sum(dim=1, keepdim=True)).argmax(dim=1).cpu().numpy()
     train_hard = y_ref_dist.argmax(axis=1)
-    return probs.cpu().numpy().astype(np.float32), {
+    return probs.cpu().numpy().astype(np.float32), background.cpu().numpy().reshape(-1).astype(np.float32), {
         "enabled": True,
         "model": "scLDL_concentration_evidence",
         "n_features": n_features,
@@ -1434,7 +1456,7 @@ def label_distribution_learning_probs(
     ref_beta: np.ndarray | None,
     query_beta: np.ndarray | None,
     spatial_prior: np.ndarray | None,
-) -> tuple[np.ndarray, dict]:
+) -> tuple[np.ndarray, np.ndarray, dict]:
     ref_beta_use = query_beta_use = None
     if ref_beta is not None and query_beta is not None:
         d = min(ref_beta.shape[1], query_beta.shape[1])
@@ -1463,7 +1485,7 @@ def label_distribution_learning_probs(
         X_ref = X_ref[:, :d]
         X_query = X_query[:, :d]
     y_ref_dist = _reference_soft_label_targets(ref_i, ref_li, len(cell_types))
-    probs, conc_meta = _concentration_ldl_probs(
+    probs, background, conc_meta = _concentration_ldl_probs(
         X_ref,
         X_query,
         y_ref_dist,
@@ -1479,7 +1501,7 @@ def label_distribution_learning_probs(
         "classes": list(cell_types),
         "ref_spatial_prior": ref_spatial_meta,
     })
-    return probs, conc_meta
+    return probs, background, conc_meta
 
 
 def run_malt(
@@ -2040,7 +2062,7 @@ def run_malt(
             spatial_prior, spatial_prior_meta = spatial_coordinate_prior(ref_i, query, ref_labels, cell_types)
             if spatial_prior is None:
                 spatial_prior = np.full_like(knn_p, 1.0 / max(n_ct, 1))
-            ldl_p, ldl_meta = label_distribution_learning_probs(
+            ldl_p, ldl_background, ldl_meta = label_distribution_learning_probs(
                 ref_i,
                 query,
                 ref_li,
@@ -2099,6 +2121,20 @@ def run_malt(
             glorious_wsum = sum(w for w, _ in glorious_components.values())
             glorious_p = sum(w * p for w, p in glorious_components.values()) / max(glorious_wsum, 1e-8)
             glorious_p /= np.maximum(glorious_p.sum(1, keepdims=True), 1e-8)
+            glorious_conf_source = _label_prob_confidence(glorious_p)
+            glorious_background = np.clip(
+                0.65 * ldl_background + 0.35 * (1.0 - glorious_conf_source),
+                0.0,
+                1.0,
+            ).astype(np.float32)
+            glorious_prob_csv = _write_probability_matrix_csv(
+                outdir,
+                f"glorious_probabilities{plot_suffix}.csv",
+                query.obs_names.astype(str),
+                cell_types,
+                glorious_p,
+                background=glorious_background,
+            )
             glorious_label = np.array(cell_types)[glorious_p.argmax(1)]
             glorious_conf = glorious_p.max(1)
 
@@ -2160,7 +2196,10 @@ def run_malt(
                 "ldl_confidence_column": ldl_conf_c,
                 "glorious_label_column": glorious_c,
                 "glorious_confidence_column": glorious_conf_c,
+                "glorious_probability_csv": glorious_prob_csv,
                 "glorious_components": {k: float(w) for k, (w, _) in glorious_components.items()},
+                "glorious_background_mean": float(glorious_background.mean()),
+                "glorious_background_median": float(np.median(glorious_background)),
                 "prior_weights": prior_weights,
                 "spatial_prior": spatial_prior_meta,
                 "spatial_neighbors": spatial_neighbor_meta,
