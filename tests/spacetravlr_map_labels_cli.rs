@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -231,8 +232,14 @@ ref.write_h5ad(ref_path)
 q_labels = np.array(["Neural"] * 10 + ["Mesenchyme"] * 10 + ["Epithelial"] * 10, dtype=object)
 n_q = len(q_labels)
 x_q = rng.poisson(2, (n_q, len(genes))).astype(np.float32)
-for gi, mask in [(0, q_labels == "Neural"), (1, q_labels == "Mesenchyme"), (2, q_labels == "Epithelial")]:
-    x_q[mask, gi] += rng.poisson(10, mask.sum()).astype(np.float32)
+misleading = {
+    "Neural": 1,       # looks mesenchymal by expression
+    "Mesenchyme": 2,   # looks epithelial by expression
+    "Epithelial": 0,   # looks neural by expression
+}
+for ct, gi in misleading.items():
+    mask = q_labels == ct
+    x_q[mask, gi] += rng.poisson(12, mask.sum()).astype(np.float32)
     x_q[mask, 3 + gi] += rng.poisson(3, mask.sum()).astype(np.float32)
 xy_q = np.vstack([
     rng.normal([0.1, 0.0], 0.22, (10, 2)),
@@ -334,6 +341,23 @@ for gene in spatial_genes:
     let run_meta = std::fs::read_to_string(outdir.join("run_meta.json")).expect("run_meta");
     assert!(run_meta.contains("\"spatial\""));
     assert!(run_meta.contains("\"spatial_malt\""));
+    let meta: Value = serde_json::from_str(&run_meta).expect("run_meta json");
+    let spatial = &meta["per_group"][0]["spatial_malt"]["benchmark"];
+    let knn_acc = spatial["knn"]["accuracy"].as_f64().expect("knn accuracy");
+    let spatial_acc = spatial["spatial_malt"]["accuracy"]
+        .as_f64()
+        .expect("spatial accuracy");
+    let beta_acc = spatial["beta_knn"]["accuracy"]
+        .as_f64()
+        .expect("beta accuracy");
+    assert!(
+        spatial_acc > knn_acc,
+        "expected spatial MALT to beat expression KNN ({spatial_acc} <= {knn_acc})"
+    );
+    assert!(
+        beta_acc > knn_acc,
+        "expected beta KNN to beat expression KNN ({beta_acc} <= {knn_acc})"
+    );
     let labels = spacetravlr::read_h5ad_obs_column_str(
         &outdir.join("query_labeled.h5ad"),
         "spatial_malt_label",

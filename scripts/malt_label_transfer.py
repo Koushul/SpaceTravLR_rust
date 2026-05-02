@@ -1697,14 +1697,19 @@ def run_malt(
 
             beta_knn_p = None
             beta_meta = {"enabled": False, "reference": ref_beta_meta, "query": query_beta_meta}
+            beta_feature_scale = 1.0
             if ref_beta is not None and query_beta is not None:
                 d_beta = min(ref_beta.shape[1], query_beta.shape[1])
+                beta_feature_scale = max(1.0, np.sqrt(max(1, len(hvg_i)) / max(1, d_beta))) * 2.0
                 ref_aug = np.concatenate(
-                    [_safe_zscore(ref_ln[:, hvg_i]), _safe_zscore(ref_beta[:, :d_beta])],
+                    [_safe_zscore(ref_ln[:, hvg_i]), _safe_zscore(ref_beta[:, :d_beta]) * beta_feature_scale],
                     axis=1,
                 )
                 query_aug = np.concatenate(
-                    [_safe_zscore(query.layers["ln"][:, hvg_i]), _safe_zscore(query_beta[:, :d_beta])],
+                    [
+                        _safe_zscore(query.layers["ln"][:, hvg_i]),
+                        _safe_zscore(query_beta[:, :d_beta]) * beta_feature_scale,
+                    ],
                     axis=1,
                 )
                 beta_knn_p, beta_knn_meta = _feature_knn_probs(ref_aug, query_aug, ref_li, n_ct)
@@ -1714,6 +1719,7 @@ def run_malt(
                     "query": query_beta_meta,
                     "knn": beta_knn_meta,
                     "n_features": int(d_beta),
+                    "feature_scale": float(beta_feature_scale),
                     "columns": {"reference": ref_beta_cols[:50], "query": query_beta_cols[:50]},
                 }
                 print(f"  Betadata KNN features: {d_beta} beta columns from {ref_beta_meta.get('n_genes', 0)} genes")
@@ -1724,7 +1730,17 @@ def run_malt(
             if spatial_prior is None:
                 spatial_prior = np.full_like(knn_p, 1.0 / max(n_ct, 1))
             beta_prior = beta_knn_p if beta_knn_p is not None else knn_p
-            spatial_seed = 0.45 * knn_p + 0.25 * mk_p + 0.20 * beta_prior + 0.10 * spatial_prior
+            prior_weights = (
+                {"knn": 0.20, "marker": 0.10, "betadata": 0.55, "spatial": 0.15}
+                if beta_knn_p is not None
+                else {"knn": 0.45, "marker": 0.30, "betadata": 0.0, "spatial": 0.25}
+            )
+            spatial_seed = (
+                prior_weights["knn"] * knn_p
+                + prior_weights["marker"] * mk_p
+                + prior_weights["betadata"] * beta_prior
+                + prior_weights["spatial"] * spatial_prior
+            )
             spatial_seed /= np.maximum(spatial_seed.sum(1, keepdims=True), 1e-8)
             spatial_smoothed, spatial_neighbor_meta = _spatial_neighbor_label_prior(query, spatial_seed)
             spatial_label = np.array(cell_types)[spatial_smoothed.argmax(1)]
@@ -1769,6 +1785,7 @@ def run_malt(
                 "reference_betadata_dir": reference_betadata_dir,
                 "query_betadata_dir": query_betadata_dir,
                 "betadata": beta_meta,
+                "prior_weights": prior_weights,
                 "spatial_prior": spatial_prior_meta,
                 "spatial_neighbors": spatial_neighbor_meta,
                 "benchmark_truth": benchmark_truth,
