@@ -1005,6 +1005,20 @@ def _find_betadata_file(betadata_dir: str | None, gene: str) -> str | None:
     return None
 
 
+def _available_betadata_genes(betadata_dir: str | None, shared: set[str]) -> list[str]:
+    if not betadata_dir or not os.path.isdir(betadata_dir):
+        return []
+    genes: list[str] = []
+    seen: set[str] = set()
+    for path in sorted(glob.glob(os.path.join(betadata_dir, "**", "*_betadata.feather"), recursive=True)):
+        base = os.path.basename(path)
+        gene = base[: -len("_betadata.feather")]
+        if gene in shared and gene not in seen:
+            genes.append(gene)
+            seen.add(gene)
+    return genes
+
+
 def _read_betadata_table(path: str) -> pd.DataFrame:
     try:
         return pd.read_feather(path)
@@ -1483,6 +1497,13 @@ def run_malt(
         mmask_t = torch.tensor(mk_mask, dtype=torch.float32, device=dev)
         knn_t = torch.tensor(knn_p, dtype=torch.float32, device=dev)
         cll_t = torch.tensor(cell_ll, dtype=torch.float32, device=dev)
+        anchor_np = 0.75 * knn_p + 0.25 * mk_p
+        anchor_np /= np.maximum(anchor_np.sum(1, keepdims=True), 1e-8)
+        anchor_order = np.sort(anchor_np, axis=1)
+        anchor_margin = anchor_order[:, -1] - anchor_order[:, -2] if n_ct > 1 else anchor_order[:, -1]
+        anchor_w_np = np.clip((anchor_margin - 0.05) / 0.35, 0.0, 1.0).astype(np.float32)
+        anchor_t = torch.tensor(anchor_np, dtype=torch.float32, device=dev)
+        anchor_w_t = torch.tensor(anchor_w_np, dtype=torch.float32, device=dev)
 
         logits = torch.tensor(
             np.log(init_p + 1e-8), dtype=torch.float32, device=dev, requires_grad=True
@@ -1490,9 +1511,10 @@ def run_malt(
 
         alpha_p = 15.0
         alpha_c = 3.0
-        alpha_k = 0.3
+        alpha_k = 0.8
         alpha_e = 0.5
         alpha_m = 0.12
+        alpha_a = 3.0
 
         C_ref_m, W_m, U_q_m, manifold_src = _malt_manifold_loss_tensors(
             ref_i, query, ref_li, n_ct, rp, qp, dev
@@ -1512,7 +1534,7 @@ def run_malt(
         n_mp = max(n_mp, 1.0)
         hist = {
             k: []
-            for k in ["total", "profile", "cell", "knn", "entropy", "manifold"]
+            for k in ["total", "profile", "cell", "knn", "anchor", "entropy", "manifold"]
         }
         best_l, best_lg = float("inf"), None
         pat, pat_ctr = 60, 0
@@ -1523,12 +1545,12 @@ def run_malt(
         if use_manifold:
             print(
                 f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, "
-                f"entropy={alpha_e}, manifold={alpha_m} ({manifold_src})\n"
+                f"anchor={alpha_a}, entropy={alpha_e}, manifold={alpha_m} ({manifold_src})\n"
             )
         else:
             print(
                 f"  Weights: profile={alpha_p}, cell={alpha_c}, knn={alpha_k}, "
-                f"entropy={alpha_e} (manifold skipped)\n"
+                f"anchor={alpha_a}, entropy={alpha_e} (manifold skipped)\n"
             )
 
         for ep in range(800):
@@ -1545,6 +1567,8 @@ def run_malt(
             Lc = -(p * cll_t).sum() / n_q
 
             Lk = F.kl_div(lp, knn_t, reduction="batchmean")
+
+            La = -((anchor_t * lp).sum(dim=1) * anchor_w_t).sum() / anchor_w_t.sum().clamp_min(1.0)
 
             Le = -(p * lp).sum(1).mean()
 
@@ -1563,7 +1587,7 @@ def run_malt(
             else:
                 Lm = torch.zeros((), device=dev)
 
-            loss = alpha_p * Lp + alpha_c * Lc + alpha_k * Lk + alpha_e * Le
+            loss = alpha_p * Lp + alpha_c * Lc + alpha_k * Lk + alpha_a * La + alpha_e * Le
             if use_manifold:
                 loss = loss + alpha_m * Lm
             loss.backward()
@@ -1575,6 +1599,7 @@ def run_malt(
             hist["profile"].append(Lp.item())
             hist["cell"].append(Lc.item())
             hist["knn"].append(Lk.item())
+            hist["anchor"].append(La.item())
             hist["entropy"].append(Le.item())
             hist["manifold"].append(float(Lm.item()))
 
@@ -1591,7 +1616,8 @@ def run_malt(
                 )
                 print(
                     f"  E{ep:4d} | L={lv:7.2f} | prof={Lp.item():.3f} cell={Lc.item():.3f} "
-                    f"knn={Lk.item():.3f} ent={Le.item():.3f} man={Lm.item():.3f} | {tstr}"
+                    f"knn={Lk.item():.3f} anchor={La.item():.3f} ent={Le.item():.3f} "
+                    f"man={Lm.item():.3f} | {tstr}"
                 )
 
             if pat_ctr >= pat and ep > 200:
@@ -1731,12 +1757,13 @@ def run_malt(
                 spatial_prior = np.full_like(knn_p, 1.0 / max(n_ct, 1))
             beta_prior = beta_knn_p if beta_knn_p is not None else knn_p
             prior_weights = (
-                {"knn": 0.20, "marker": 0.10, "betadata": 0.55, "spatial": 0.15}
+                {"malt": 0.35, "knn": 0.15, "marker": 0.05, "betadata": 0.35, "spatial": 0.10}
                 if beta_knn_p is not None
-                else {"knn": 0.45, "marker": 0.30, "betadata": 0.0, "spatial": 0.25}
+                else {"malt": 0.45, "knn": 0.30, "marker": 0.10, "betadata": 0.0, "spatial": 0.15}
             )
             spatial_seed = (
-                prior_weights["knn"] * knn_p
+                prior_weights["malt"] * fp
+                + prior_weights["knn"] * knn_p
                 + prior_weights["marker"] * mk_p
                 + prior_weights["betadata"] * beta_prior
                 + prior_weights["spatial"] * spatial_prior
@@ -1824,7 +1851,7 @@ def run_malt(
         axes[0].plot(hist["total"], lw=1.5)
         axes[0].set(xlabel="Epoch", ylabel="Loss", title="Total Loss")
         axes[0].grid(alpha=0.3)
-        for k in ["profile", "cell", "knn", "entropy", "manifold"]:
+        for k in ["profile", "cell", "knn", "anchor", "entropy", "manifold"]:
             axes[1].plot(hist[k], lw=1.2, label=k)
         axes[1].set(xlabel="Epoch", ylabel="Value", title="Loss Components")
         axes[1].legend()

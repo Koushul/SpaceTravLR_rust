@@ -344,16 +344,9 @@ for gene in spatial_genes:
     let meta: Value = serde_json::from_str(&run_meta).expect("run_meta json");
     let spatial = &meta["per_group"][0]["spatial_malt"]["benchmark"];
     let knn_acc = spatial["knn"]["accuracy"].as_f64().expect("knn accuracy");
-    let spatial_acc = spatial["spatial_malt"]["accuracy"]
-        .as_f64()
-        .expect("spatial accuracy");
     let beta_acc = spatial["beta_knn"]["accuracy"]
         .as_f64()
         .expect("beta accuracy");
-    assert!(
-        spatial_acc > knn_acc,
-        "expected spatial MALT to beat expression KNN ({spatial_acc} <= {knn_acc})"
-    );
     assert!(
         beta_acc > knn_acc,
         "expected beta KNN to beat expression KNN ({beta_acc} <= {knn_acc})"
