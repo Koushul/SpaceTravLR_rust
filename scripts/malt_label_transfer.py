@@ -2059,9 +2059,18 @@ def run_malt(
             else:
                 print(f"  Betadata skipped: ref={ref_beta_meta.get('reason')} query={query_beta_meta.get('reason')}")
 
+            ref_spatial_key, _ = _resolve_spatial_xy(ref_i)
+            query_spatial_key, _ = _resolve_spatial_xy(query)
+            spatial_available = ref_spatial_key is not None and query_spatial_key is not None
+            spatial_algorithm = "spatial_glorious" if spatial_available else "nonspatial_glorious_fallback"
             spatial_prior, spatial_prior_meta = spatial_coordinate_prior(ref_i, query, ref_labels, cell_types)
             if spatial_prior is None:
-                spatial_prior = np.full_like(knn_p, 1.0 / max(n_ct, 1))
+                spatial_prior = np.zeros_like(knn_p)
+                spatial_prior_meta = {
+                    **spatial_prior_meta,
+                    "enabled": False,
+                    "reason": spatial_prior_meta.get("reason", "spatial unavailable"),
+                }
             ldl_p, ldl_background, ldl_meta = label_distribution_learning_probs(
                 ref_i,
                 query,
@@ -2071,30 +2080,51 @@ def run_malt(
                 query_pca=qp,
                 ref_beta=ref_beta,
                 query_beta=query_beta,
-                spatial_prior=spatial_prior,
+                spatial_prior=spatial_prior if spatial_available else None,
             )
             ldl_label = np.array(cell_types)[ldl_p.argmax(1)]
             ldl_conf = ldl_p.max(1)
             beta_prior = beta_knn_p if beta_knn_p is not None else knn_p
-            prior_weights = (
-                {
-                    "malt": 0.25,
-                    "ldl": 0.35,
-                    "knn": 0.10,
-                    "marker": 0.05,
-                    "betadata": 0.15,
-                    "spatial": 0.10,
-                }
-                if beta_knn_p is not None
-                else {
-                    "malt": 0.35,
-                    "ldl": 0.30,
-                    "knn": 0.20,
-                    "marker": 0.05,
-                    "betadata": 0.0,
-                    "spatial": 0.10,
-                }
-            )
+            if spatial_available:
+                prior_weights = (
+                    {
+                        "malt": 0.25,
+                        "ldl": 0.35,
+                        "knn": 0.10,
+                        "marker": 0.05,
+                        "betadata": 0.15,
+                        "spatial": 0.10,
+                    }
+                    if beta_knn_p is not None
+                    else {
+                        "malt": 0.35,
+                        "ldl": 0.30,
+                        "knn": 0.20,
+                        "marker": 0.05,
+                        "betadata": 0.0,
+                        "spatial": 0.10,
+                    }
+                )
+            else:
+                prior_weights = (
+                    {
+                        "malt": 0.30,
+                        "ldl": 0.40,
+                        "knn": 0.15,
+                        "marker": 0.05,
+                        "betadata": 0.10,
+                        "spatial": 0.0,
+                    }
+                    if beta_knn_p is not None
+                    else {
+                        "malt": 0.40,
+                        "ldl": 0.35,
+                        "knn": 0.20,
+                        "marker": 0.05,
+                        "betadata": 0.0,
+                        "spatial": 0.0,
+                    }
+                )
             spatial_seed = (
                 prior_weights["malt"] * fp
                 + prior_weights["ldl"] * ldl_p
@@ -2104,7 +2134,14 @@ def run_malt(
                 + prior_weights["spatial"] * spatial_prior
             )
             spatial_seed /= np.maximum(spatial_seed.sum(1, keepdims=True), 1e-8)
-            spatial_smoothed, spatial_neighbor_meta = _spatial_neighbor_label_prior(query, spatial_seed)
+            if spatial_available:
+                spatial_smoothed, spatial_neighbor_meta = _spatial_neighbor_label_prior(query, spatial_seed)
+            else:
+                spatial_smoothed = spatial_seed
+                spatial_neighbor_meta = {
+                    "enabled": False,
+                    "reason": "reference or query lacks spatial coordinates; using non-spatial fallback",
+                }
             spatial_label = np.array(cell_types)[spatial_smoothed.argmax(1)]
             spatial_conf = spatial_smoothed.max(1)
 
@@ -2114,8 +2151,9 @@ def run_malt(
                 "expression_knn": (0.15, knn_p),
                 "marker": (0.05, mk_p),
                 "spatial_malt": (0.10, spatial_smoothed),
-                "spatial_prior": (0.05, spatial_prior),
             }
+            if spatial_available:
+                glorious_components["spatial_prior"] = (0.05, spatial_prior)
             if beta_knn_p is not None:
                 glorious_components["beta_knn"] = (0.20, beta_knn_p)
             glorious_wsum = sum(w for w, _ in glorious_components.values())
@@ -2183,6 +2221,15 @@ def run_malt(
                 )
             spatial_section = {
                 "enabled": True,
+                "algorithm": spatial_algorithm,
+                "spatial_available": bool(spatial_available),
+                "spatial_reason": (
+                    "reference and query spatial coordinates available"
+                    if spatial_available
+                    else "reference or query lacks spatial coordinates; using non-spatial fallback"
+                ),
+                "reference_spatial_obsm": ref_spatial_key,
+                "query_spatial_obsm": query_spatial_key,
                 "label_column": spatial_c,
                 "confidence_column": spatial_conf_c,
                 "training_genes": spatial_genes,

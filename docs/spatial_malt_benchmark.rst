@@ -7,8 +7,11 @@ downloads the AnnData file, creates stratified reference/query splits, builds
 lightweight seed-style betadata features from each cell's local spatial
 neighborhood, and runs ``spacetravlr --map-labels --map-labels-spatial`` with
 ``--map-labels-no-leiden`` so the benchmark excludes adaptive Leiden cluster
-enrichment/mapping. Use ``--spacetravlr python`` to run
-``scripts/malt_label_transfer.py`` directly when changing only Python code.
+enrichment/mapping. The spatial path explicitly checks for reference and query
+spatial coordinates; when either side is missing it records a non-spatial
+fallback and removes spatial-prior/spatial-smoothing terms from the ensemble.
+Use ``--spacetravlr python`` to run ``scripts/malt_label_transfer.py`` directly
+when changing only Python code.
 
 Full-data 50/50 seqFISH Mouse Organogenesis command:
 
