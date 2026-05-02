@@ -68,6 +68,7 @@ import torch
 import torch.nn.functional as F
 from scipy.stats import pearsonr
 from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import adjusted_rand_score, balanced_accuracy_score
 from sklearn.neighbors import NearestNeighbors
 
@@ -1105,6 +1106,30 @@ def _feature_knn_probs(
     return p, {"n_neighbors": int(k), "metric": "cosine"}
 
 
+def _self_knn_probs(
+    features: np.ndarray,
+    labels: np.ndarray,
+    n_ct: int,
+    *,
+    n_neighbors: int = 30,
+) -> np.ndarray:
+    k = min(n_neighbors + 1, features.shape[0])
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=-1)
+    nn.fit(features)
+    dists, idxs = nn.kneighbors(features)
+    if k > 1:
+        dists = dists[:, 1:]
+        idxs = idxs[:, 1:]
+    w = 1.0 / (dists + 1e-6)
+    w /= np.maximum(w.sum(1, keepdims=True), 1e-8)
+    p = np.zeros((features.shape[0], n_ct), dtype=np.float32)
+    for i in range(features.shape[0]):
+        for j in range(idxs.shape[1]):
+            p[i, labels[idxs[i, j]]] += w[i, j]
+    p /= np.maximum(p.sum(1, keepdims=True), 1e-8)
+    return p
+
+
 def spatial_coordinate_prior(
     ref_i: sc.AnnData,
     query: sc.AnnData,
@@ -1155,6 +1180,22 @@ def _spatial_neighbor_label_prior(
     return out.astype(np.float32), {"enabled": True, "obsm": key, "k": int(neigh.shape[1]), "blend": float(blend)}
 
 
+def _prob_accuracy(p: np.ndarray, labels: np.ndarray) -> float:
+    if p is None or p.size == 0:
+        return 0.0
+    return float(np.mean(p.argmax(1) == labels))
+
+
+def _weighted_prob_blend(parts: list[tuple[str, np.ndarray, float]]) -> tuple[np.ndarray, dict]:
+    usable = [(name, p, max(0.0, float(w))) for name, p, w in parts if p is not None and p.size and w > 0]
+    if not usable:
+        raise ValueError("no probability parts to blend")
+    total = sum(w for _, _, w in usable)
+    out = sum(w * p for _, p, w in usable) / max(total, 1e-8)
+    out /= np.maximum(out.sum(1, keepdims=True), 1e-8)
+    return out.astype(np.float32), {name: float(w / max(total, 1e-8)) for name, _, w in usable}
+
+
 def _evaluate_transfer(
     labels: np.ndarray,
     truth: np.ndarray | None,
@@ -1195,6 +1236,155 @@ def _evaluate_transfer(
     out["dotplot_mean_r2"] = float(np.mean(vals)) if vals else 0.0
     out["dotplot_per_type"] = per_type
     return out
+
+
+def _label_distribution_features(
+    adata: sc.AnnData,
+    *,
+    pca_features: np.ndarray,
+    beta_features: np.ndarray | None = None,
+    spatial_prior: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[str]]:
+    blocks: list[np.ndarray] = []
+    names: list[str] = []
+    if pca_features is not None and pca_features.size:
+        d = min(30, pca_features.shape[1])
+        blocks.append(_safe_zscore(pca_features[:, :d]))
+        names.append(f"pca:{d}")
+    umap = adata.obsm.get("X_umap")
+    if umap is not None:
+        umap = np.asarray(umap, dtype=np.float32)
+        if umap.ndim == 2 and umap.shape[0] == adata.n_obs and umap.shape[1] >= 2:
+            d = min(umap.shape[1], 3)
+            blocks.append(_safe_zscore(umap[:, :d]))
+            names.append(f"umap:{d}")
+    _, xy = _resolve_spatial_xy(adata)
+    if xy is not None:
+        blocks.append(_safe_zscore(xy))
+        names.append("spatial_xy")
+    if beta_features is not None and beta_features.size:
+        d = min(beta_features.shape[1], 128)
+        blocks.append(_safe_zscore(beta_features[:, :d]))
+        names.append(f"betadata:{d}")
+    if spatial_prior is not None:
+        blocks.append(_safe_zscore(spatial_prior))
+        names.append("spatial_prior")
+    if not blocks:
+        return np.zeros((adata.n_obs, 1), dtype=np.float32), ["bias"]
+    return np.concatenate(blocks, axis=1).astype(np.float32), names
+
+
+def label_distribution_learning_probs(
+    ref_i: sc.AnnData,
+    query: sc.AnnData,
+    ref_li: np.ndarray,
+    cell_types: list[str],
+    *,
+    ref_pca: np.ndarray,
+    query_pca: np.ndarray,
+    ref_beta: np.ndarray | None,
+    query_beta: np.ndarray | None,
+    spatial_prior: np.ndarray | None,
+) -> tuple[np.ndarray, dict]:
+    ref_beta_use = query_beta_use = None
+    if ref_beta is not None and query_beta is not None:
+        d = min(ref_beta.shape[1], query_beta.shape[1])
+        ref_beta_use = ref_beta[:, :d]
+        query_beta_use = query_beta[:, :d]
+
+    components: list[tuple[str, float, np.ndarray, dict]] = []
+
+    d_pca = min(40, ref_pca.shape[1], query_pca.shape[1])
+    pca_p, pca_meta = _feature_knn_probs(
+        _safe_zscore(ref_pca[:, :d_pca]),
+        _safe_zscore(query_pca[:, :d_pca]),
+        ref_li,
+        len(cell_types),
+    )
+    components.append(("pca_knn", 0.40, pca_p, {"n_features": int(d_pca), **pca_meta}))
+
+    ru = ref_i.obsm.get("X_umap")
+    qu = query.obsm.get("X_umap")
+    if ru is not None and qu is not None:
+        ru = np.asarray(ru, dtype=np.float32)
+        qu = np.asarray(qu, dtype=np.float32)
+        if ru.ndim == 2 and qu.ndim == 2 and ru.shape[0] == ref_i.n_obs and qu.shape[0] == query.n_obs:
+            d_umap = min(ru.shape[1], qu.shape[1], 3)
+            if d_umap >= 2:
+                umap_p, umap_meta = _feature_knn_probs(
+                    _safe_zscore(ru[:, :d_umap]),
+                    _safe_zscore(qu[:, :d_umap]),
+                    ref_li,
+                    len(cell_types),
+                    n_neighbors=35,
+                )
+                components.append(("umap_knn", 0.15, umap_p, {"n_features": int(d_umap), **umap_meta}))
+
+    if ref_beta_use is not None and query_beta_use is not None and ref_beta_use.size and query_beta_use.size:
+        beta_p, beta_meta = _feature_knn_probs(
+            _safe_zscore(ref_beta_use),
+            _safe_zscore(query_beta_use),
+            ref_li,
+            len(cell_types),
+            n_neighbors=35,
+        )
+        components.append(("betadata_knn", 0.25, beta_p, {"n_features": int(ref_beta_use.shape[1]), **beta_meta}))
+
+    if spatial_prior is not None and spatial_prior.shape == (query.n_obs, len(cell_types)):
+        components.append(("spatial_prior", 0.10, spatial_prior.astype(np.float32), {"n_features": int(spatial_prior.shape[1])}))
+
+    ref_prior = np.zeros((ref_i.n_obs, len(cell_types)), dtype=np.float32)
+    ref_prior[np.arange(ref_i.n_obs), ref_li.astype(int)] = 1.0
+    X_ref, blocks_ref = _label_distribution_features(
+        ref_i,
+        pca_features=ref_pca,
+        beta_features=ref_beta_use,
+        spatial_prior=ref_prior,
+    )
+    X_query, blocks_query = _label_distribution_features(
+        query,
+        pca_features=query_pca,
+        beta_features=query_beta_use,
+        spatial_prior=spatial_prior,
+    )
+    if X_ref.shape[1] != X_query.shape[1]:
+        d = min(X_ref.shape[1], X_query.shape[1])
+        X_ref = X_ref[:, :d]
+        X_query = X_query[:, :d]
+    clf = LogisticRegression(
+        max_iter=1000,
+        class_weight="balanced",
+        C=0.75,
+        solver="lbfgs",
+    )
+    clf.fit(X_ref, ref_li)
+    raw = clf.predict_proba(X_query).astype(np.float32)
+    logit_p = np.full((query.n_obs, len(cell_types)), 1e-6, dtype=np.float32)
+    for j, cls in enumerate(clf.classes_):
+        ci = int(cls)
+        if 0 <= ci < logit_p.shape[1]:
+            logit_p[:, ci] = raw[:, j]
+    logit_p /= np.maximum(logit_p.sum(1, keepdims=True), 1e-8)
+    train_pred = clf.predict(X_ref)
+    train_acc = float(np.mean(train_pred.astype(int) == ref_li.astype(int)))
+    logistic_weight = 0.10 if train_acc >= 0.65 else 0.03
+    components.append(("logistic", logistic_weight, logit_p, {"train_accuracy": train_acc}))
+
+    total_w = sum(w for _, w, _, _ in components)
+    probs = sum(w * p for _, w, p, _ in components) / max(total_w, 1e-8)
+    probs /= np.maximum(probs.sum(1, keepdims=True), 1e-8)
+    return probs, {
+        "enabled": True,
+        "model": "calibrated_label_distribution_ensemble",
+        "feature_blocks_ref": blocks_ref,
+        "feature_blocks_query": blocks_query,
+        "n_features": int(X_ref.shape[1]),
+        "classes": [cell_types[int(i)] for i in clf.classes_],
+        "components": {
+            name: {"weight": float(w), **meta}
+            for name, w, _, meta in components
+        },
+    }
 
 
 def run_malt(
@@ -1755,14 +1945,42 @@ def run_malt(
             spatial_prior, spatial_prior_meta = spatial_coordinate_prior(ref_i, query, ref_labels, cell_types)
             if spatial_prior is None:
                 spatial_prior = np.full_like(knn_p, 1.0 / max(n_ct, 1))
+            ldl_p, ldl_meta = label_distribution_learning_probs(
+                ref_i,
+                query,
+                ref_li,
+                cell_types,
+                ref_pca=rp,
+                query_pca=qp,
+                ref_beta=ref_beta,
+                query_beta=query_beta,
+                spatial_prior=spatial_prior,
+            )
+            ldl_label = np.array(cell_types)[ldl_p.argmax(1)]
+            ldl_conf = ldl_p.max(1)
             beta_prior = beta_knn_p if beta_knn_p is not None else knn_p
             prior_weights = (
-                {"malt": 0.35, "knn": 0.15, "marker": 0.05, "betadata": 0.35, "spatial": 0.10}
+                {
+                    "malt": 0.25,
+                    "ldl": 0.35,
+                    "knn": 0.10,
+                    "marker": 0.05,
+                    "betadata": 0.15,
+                    "spatial": 0.10,
+                }
                 if beta_knn_p is not None
-                else {"malt": 0.45, "knn": 0.30, "marker": 0.10, "betadata": 0.0, "spatial": 0.15}
+                else {
+                    "malt": 0.35,
+                    "ldl": 0.30,
+                    "knn": 0.20,
+                    "marker": 0.05,
+                    "betadata": 0.0,
+                    "spatial": 0.10,
+                }
             )
             spatial_seed = (
                 prior_weights["malt"] * fp
+                + prior_weights["ldl"] * ldl_p
                 + prior_weights["knn"] * knn_p
                 + prior_weights["marker"] * mk_p
                 + prior_weights["betadata"] * beta_prior
@@ -1776,10 +1994,16 @@ def run_malt(
             spatial_c = f"spatial_malt_label_{slug}" if multi else "spatial_malt_label"
             spatial_conf_c = f"spatial_malt_confidence_{slug}" if multi else "spatial_malt_confidence"
             beta_c = f"beta_knn_label_{slug}" if multi else "beta_knn_label"
+            ldl_c = f"ldl_label_{slug}" if multi else "ldl_label"
+            ldl_conf_c = f"ldl_confidence_{slug}" if multi else "ldl_confidence"
             if beta_knn_p is not None:
                 query.obs[beta_c] = np.array(cell_types)[beta_knn_p.argmax(1)]
                 query.obs[beta_c] = query.obs[beta_c].astype(str).astype("category")
                 csv_label_columns.append(beta_c)
+            query.obs[ldl_c] = ldl_label
+            query.obs[ldl_c] = query.obs[ldl_c].astype(str).astype("category")
+            query.obs[ldl_conf_c] = ldl_conf
+            csv_label_columns.extend([ldl_c, ldl_conf_c])
             query.obs[spatial_c] = spatial_label
             query.obs[spatial_c] = query.obs[spatial_c].astype(str).astype("category")
             query.obs[spatial_conf_c] = spatial_conf
@@ -1789,6 +2013,7 @@ def run_malt(
             bench = {
                 "knn": _evaluate_transfer(knn_labels, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
                 "malt": _evaluate_transfer(opt_lbl, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
+                "ldl": _evaluate_transfer(ldl_label, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
                 "spatial_malt": _evaluate_transfer(spatial_label, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
             }
             if beta_knn_p is not None:
@@ -1812,6 +2037,9 @@ def run_malt(
                 "reference_betadata_dir": reference_betadata_dir,
                 "query_betadata_dir": query_betadata_dir,
                 "betadata": beta_meta,
+                "ldl": ldl_meta,
+                "ldl_label_column": ldl_c,
+                "ldl_confidence_column": ldl_conf_c,
                 "prior_weights": prior_weights,
                 "spatial_prior": spatial_prior_meta,
                 "spatial_neighbors": spatial_neighbor_meta,
