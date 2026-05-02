@@ -50,6 +50,7 @@ Where to look next
    perturbation
    rctd
    spatial_viewer
+   spatial_malt_benchmark
 
 .. toctree::
    :hidden:
