@@ -31,17 +31,30 @@ import scanpy as sc
 from sklearn.neighbors import NearestNeighbors
 
 
-DATASET_URL = (
-    "https://openproblems-data.s3.amazonaws.com/resources/datasets/"
-    "zenodo_spatial/seqfish/mouse_organogenesis_seqfish/dataset.h5ad"
-)
+OPENPROBLEMS_BASE = "https://openproblems-data.s3.amazonaws.com/resources/datasets"
+DATASETS = {
+    "seqfish_mouse_organogenesis": {
+        "url": f"{OPENPROBLEMS_BASE}/zenodo_spatial/seqfish/mouse_organogenesis_seqfish/dataset.h5ad",
+        "label_key": "celltype_mapped_refined",
+        "filename": "mouse_organogenesis_seqfish.h5ad",
+        "description": "Open Problems seqFISH Mouse Organogenesis",
+        "invalid_labels": {"Low quality", "nan", "None"},
+    },
+    "merfish_mouse_cortex": {
+        "url": f"{OPENPROBLEMS_BASE}/zenodo_spatial/merfish/mouse_cortex/dataset.h5ad",
+        "label_key": "cluster_L2",
+        "filename": "merfish_mouse_cortex.h5ad",
+        "description": "Open Problems MERFISH Mouse Cortex",
+        "invalid_labels": {"nan", "None"},
+    },
+}
 
 
-def download_dataset(path: Path) -> None:
+def download_dataset(path: Path, url: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file() and path.stat().st_size > 1_000_000:
         return
-    with requests.get(DATASET_URL, stream=True, timeout=120) as r:
+    with requests.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
         with path.open("wb") as f:
             for chunk in r.iter_content(1 << 20):
@@ -54,7 +67,9 @@ def prepare_split(
     out_dir: Path,
     *,
     label_key: str,
+    invalid_labels: set[str],
     cells_per_type: int | None,
+    min_cells_per_type: int,
     n_types: int | None,
     train_fraction: float,
     seed: int,
@@ -66,10 +81,10 @@ def prepare_split(
     a.var_names = a.var["feature_name"].astype(str).values if "feature_name" in a.var else a.var_names
     a.var_names_make_unique()
     a.obs[label_key] = a.obs[label_key].astype(str)
-    a = a[a.obs[label_key] != "Low quality"].copy()
+    a = a[~a.obs[label_key].isin(invalid_labels)].copy()
 
     counts = a.obs[label_key].value_counts()
-    min_cells = 2 if cells_per_type is None else max(2, cells_per_type)
+    min_cells = max(2, min_cells_per_type) if cells_per_type is None else max(2, cells_per_type)
     chosen = counts[counts >= min_cells].index.tolist()
     if n_types is not None:
         chosen = chosen[:n_types]
@@ -104,8 +119,8 @@ def prepare_split(
         if "counts" not in x.layers:
             x.layers["counts"] = x.X.copy()
 
-    ref_path = out_dir / "seqfish_reference_train.h5ad"
-    query_path = out_dir / "seqfish_query_test.h5ad"
+    ref_path = out_dir / "reference_train.h5ad"
+    query_path = out_dir / "query_test.h5ad"
     ref.write_h5ad(ref_path)
     query.write_h5ad(query_path)
     return ref_path, query_path, chosen
@@ -230,9 +245,11 @@ def run_spacetravlr(args: argparse.Namespace, ref_path: Path, query_path: Path, 
 
 def main() -> None:
     p = argparse.ArgumentParser()
+    p.add_argument("--dataset", choices=sorted(DATASETS), default="seqfish_mouse_organogenesis")
     p.add_argument("--out-dir", type=Path, default=Path("/tmp/spacetravlr_real_spatial_benchmark"))
     p.add_argument("--spacetravlr", type=Path, default=Path("./target/debug/spacetravlr"))
     p.add_argument("--cells-per-type", type=int, default=0, help="0 uses every cell per retained type")
+    p.add_argument("--min-cells-per-type", type=int, default=20, help="Minimum label size when --cells-per-type=0")
     p.add_argument("--n-types", type=int, default=0, help="0 uses every non-low-quality annotated type")
     p.add_argument("--train-fraction", type=float, default=0.5)
     p.add_argument("--genes-per-type", type=int, default=4)
@@ -241,13 +258,16 @@ def main() -> None:
     args = p.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    dataset = args.out_dir / "mouse_organogenesis_seqfish.h5ad"
-    download_dataset(dataset)
+    preset = DATASETS[args.dataset]
+    dataset = args.out_dir / preset["filename"]
+    download_dataset(dataset, preset["url"])
     ref_path, query_path, cell_types = prepare_split(
         dataset,
         args.out_dir,
-        label_key="celltype_mapped_refined",
+        label_key=preset["label_key"],
+        invalid_labels=set(preset["invalid_labels"]),
         cells_per_type=None if args.cells_per_type == 0 else args.cells_per_type,
+        min_cells_per_type=args.min_cells_per_type,
         n_types=None if args.n_types == 0 else args.n_types,
         train_fraction=args.train_fraction,
         seed=args.seed,
@@ -275,7 +295,7 @@ def main() -> None:
         )
     df = pd.DataFrame(rows).sort_values("method")
     df.to_csv(args.out_dir / "metrics.csv", index=False)
-    print("Dataset: Open Problems seqFISH Mouse Organogenesis")
+    print(f"Dataset: {preset['description']}")
     print(f"Cell types: {', '.join(cell_types)}")
     print(f"Reference: {ref_path}")
     print(f"Query: {query_path}")
