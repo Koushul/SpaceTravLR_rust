@@ -880,6 +880,47 @@ struct Cli {
     map_labels_reference_gene_list: Option<PathBuf>,
 
     #[arg(
+        long = "map-labels-spatial",
+        action = ArgAction::SetTrue,
+        help_heading = "Map labels",
+        help = "Enable spatial MALT: dotplot-selected transfer genes, SpaceTravLR betadata priors, and spatial-neighbor smoothing."
+    )]
+    map_labels_spatial: bool,
+
+    #[arg(
+        long = "map-labels-reference-betadata-dir",
+        value_name = "DIR",
+        help_heading = "Map labels",
+        help = "Reference SpaceTravLR output directory containing seed *_betadata.feather files for selected genes."
+    )]
+    map_labels_reference_betadata_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "map-labels-query-betadata-dir",
+        value_name = "DIR",
+        help_heading = "Map labels",
+        help = "Query SpaceTravLR output directory containing seed *_betadata.feather files for selected genes."
+    )]
+    map_labels_query_betadata_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "map-labels-benchmark-truth",
+        value_name = "OBS_COLUMN",
+        help_heading = "Map labels",
+        help = "Optional query obs column with ground-truth labels; writes accuracy/ARI for KNN, MALT, and spatial MALT."
+    )]
+    map_labels_benchmark_truth: Option<String>,
+
+    #[arg(
+        long = "map-labels-spatial-genes-per-type",
+        value_name = "N",
+        default_value_t = 6,
+        help_heading = "Map labels",
+        help = "Number of compact dotplot-optimized training genes to select per reference cell type for spatial MALT."
+    )]
+    map_labels_spatial_genes_per_type: usize,
+
+    #[arg(
         long = "rust-process-h5ad",
         action = ArgAction::SetTrue,
         help_heading = "Utility",
@@ -1583,6 +1624,14 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
         outdir.display()
     );
     let groupby_expanded = expand_map_labels_groupby_columns(&cli.map_labels_groupby);
+    let reference_betadata_dir = cli
+        .map_labels_reference_betadata_dir
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
+    let query_betadata_dir = cli
+        .map_labels_query_betadata_dir
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
     spacetravlr::malt_label_transfer::run_map_labels(
         spacetravlr::malt_label_transfer::MapLabelsParams {
             reference: &reference,
@@ -1596,6 +1645,11 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
             prefer_raw_counts: cli.map_labels_prefer_raw_counts,
             leiden_map: !cli.map_labels_no_leiden,
             reference_gene_list: cli.map_labels_reference_gene_list.as_deref(),
+            spatial: cli.map_labels_spatial,
+            reference_betadata_dir: reference_betadata_dir.as_deref(),
+            query_betadata_dir: query_betadata_dir.as_deref(),
+            benchmark_truth: cli.map_labels_benchmark_truth.as_deref(),
+            spatial_genes_per_type: Some(cli.map_labels_spatial_genes_per_type),
         },
     )?;
     Ok(())
@@ -1613,12 +1667,9 @@ fn resolve_rust_preprocess_params(cli: &Cli) -> spacetravlr::rust_preprocess::Ru
 }
 
 fn run_rust_prep_convenience(cli: &Cli) -> anyhow::Result<()> {
-    let h5ad_ref = cli
-        .h5ad
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow::anyhow!("`--umap` / `--leiden` / `--rust-magic` require `--h5ad PATH`")
-        })?;
+    let h5ad_ref = cli.h5ad.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("`--umap` / `--leiden` / `--rust-magic` require `--h5ad PATH`")
+    })?;
     if let Some(ref raw_out) = cli.rust_prep_output {
         let dest = PathBuf::from(expand_user_path(raw_out.to_string_lossy().as_ref()));
         if !dest
@@ -1876,12 +1927,11 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
                 h5ad.display()
             );
             let params = resolve_rust_preprocess_params(cli);
-            let steps =
-                spacetravlr::rust_preprocess::RustPreprocessSteps::from_convenience_flags(
-                    true,
-                    cli.prep_leiden,
-                    false,
-                );
+            let steps = spacetravlr::rust_preprocess::RustPreprocessSteps::from_convenience_flags(
+                true,
+                cli.prep_leiden,
+                false,
+            );
             let adata = spacetravlr::rust_preprocess::rust_preprocess_h5ad_to_memory(
                 &h5ad, &params, &steps,
             )?;
@@ -1896,9 +1946,9 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
                 .get_data()
                 .map_err(|e| anyhow::anyhow!("obsm X_umap data: {e}"))?;
             let umap_coords: ndarray::Array2<f64> = match umap_data {
-                ArrayData::Array(d) => d.try_convert().map_err(|e| {
-                    anyhow::anyhow!("convert X_umap to Array2<f64>: {e}")
-                })?,
+                ArrayData::Array(d) => d
+                    .try_convert()
+                    .map_err(|e| anyhow::anyhow!("convert X_umap to Array2<f64>: {e}"))?,
                 _ => anyhow::bail!("obsm['X_umap'] is not a dense array after preprocessing"),
             };
 
@@ -1973,33 +2023,33 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
                 cli.magic_batch_obs.as_deref(),
                 cli.condition.as_deref(),
             );
-            let plot_path =
-                if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(
-                    &h5ad, &dest,
-                )? && h5ad_obsm_has_umap(&dest)?
-                {
-                    eprintln!(
-                        "spacetravlr: reusing existing {} (>= mtime of {})",
-                        dest.display(),
-                        h5ad.display()
-                    );
-                    dest
-                } else {
-                    let (written, log) =
-                        spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
-                            &h5ad,
-                            &dest,
-                            true,
-                            batch_owned.as_deref(),
-                            spatial_microns,
-                            true,
-                        )?;
-                    if let Some(l) = log {
-                        eprint!("{l}");
-                    }
-                    written
-                };
-            let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(&plot_path);
+            let plot_path = if spacetravlr::scanpy_preprocess::prepared_training_output_is_reusable(
+                &h5ad, &dest,
+            )? && h5ad_obsm_has_umap(&dest)?
+            {
+                eprintln!(
+                    "spacetravlr: reusing existing {} (>= mtime of {})",
+                    dest.display(),
+                    h5ad.display()
+                );
+                dest
+            } else {
+                let (written, log) = spacetravlr::scanpy_preprocess::full_preprocess_maybe_log(
+                    &h5ad,
+                    &dest,
+                    true,
+                    batch_owned.as_deref(),
+                    spatial_microns,
+                    true,
+                )?;
+                if let Some(l) = log {
+                    eprint!("{l}");
+                }
+                written
+            };
+            let _ = spacetravlr::scanpy_preprocess::strip_heavy_training_artifacts_from_h5ad(
+                &plot_path,
+            );
             spacetravlr::adata_terminal_scatter::print_h5ad_umap_scatter(&plot_path, color_obs)
         }
     }
@@ -2338,10 +2388,7 @@ fn main() -> anyhow::Result<()> {
         return run_map_labels(&cli);
     }
 
-    if cli.prep_umap
-        || cli.prep_rust_magic
-        || (cli.prep_leiden && cli.plot_umap.is_none())
-    {
+    if cli.prep_umap || cli.prep_rust_magic || (cli.prep_leiden && cli.plot_umap.is_none()) {
         return run_rust_prep_convenience(&cli);
     }
 

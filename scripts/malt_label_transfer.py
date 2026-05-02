@@ -47,6 +47,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -60,12 +61,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow.feather as feather
 import scanpy as sc
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
 from scipy.stats import pearsonr
 from sklearn.decomposition import PCA
+from sklearn.metrics import adjusted_rand_score, balanced_accuracy_score
 from sklearn.neighbors import NearestNeighbors
 
 warnings.filterwarnings("ignore")
@@ -890,6 +893,296 @@ def _malt_manifold_loss_tensors(
     )
 
 
+def _safe_zscore(X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X, dtype=np.float32)
+    mu = np.nanmean(X, axis=0, keepdims=True)
+    sig = np.nanstd(X, axis=0, keepdims=True)
+    sig = np.where(sig < 1e-6, 1.0, sig)
+    return np.nan_to_num((X - mu) / sig, copy=False).astype(np.float32)
+
+
+def _resolve_spatial_xy(adata: sc.AnnData) -> tuple[str | None, np.ndarray | None]:
+    for key in ("spatial", "X_spatial", "spatial_loc", "unscaled_spatial"):
+        if key not in adata.obsm:
+            continue
+        arr = np.asarray(adata.obsm[key], dtype=np.float32)
+        if arr.ndim == 2 and arr.shape[0] == adata.n_obs and arr.shape[1] >= 2:
+            return key, arr[:, :2].astype(np.float32)
+    return None, None
+
+
+def select_dotplot_training_markers(
+    ref_i: sc.AnnData,
+    groupby_col: str,
+    cell_types: list[str],
+    shared: list[str],
+    *,
+    genes_per_type: int = 6,
+) -> tuple[dict[str, list[str]], list[str], dict[str, list[dict]]]:
+    ln = ref_i.layers["ln"]
+    if sp.issparse(ln):
+        ln = ln.toarray()
+    ln = np.asarray(ln, dtype=np.float32)
+    labels = ref_i.obs[groupby_col].astype(str).values
+    global_mu = ln.mean(0)
+    global_sd = ln.std(0) + 1e-6
+    gene_to_i = {str(g): i for i, g in enumerate(ref_i.var_names)}
+    ranked: dict[str, list[str]] = {}
+    details: dict[str, list[dict]] = {}
+    for ct in cell_types:
+        m = labels == str(ct)
+        if not m.any():
+            ranked[ct], details[ct] = [], []
+            continue
+        rest = ~m
+        in_mu = ln[m].mean(0)
+        out_mu = ln[rest].mean(0) if rest.any() else global_mu
+        pct_in = (ln[m] > 0).mean(0)
+        pct_out = (ln[rest] > 0).mean(0) if rest.any() else np.zeros_like(pct_in)
+        specificity = (in_mu - out_mu) / global_sd
+        prevalence = np.sqrt(np.clip(pct_in, 0, 1)) * np.clip(pct_in - pct_out, 0, 1)
+        score = specificity * (0.25 + prevalence) * (0.25 + np.log1p(np.maximum(in_mu, 0)))
+        try:
+            df = sc.get.rank_genes_groups_df(ref_i, group=ct)
+            for _, r in df.head(160).iterrows():
+                gi = gene_to_i.get(str(r["names"]))
+                if gi is not None:
+                    score[gi] += 0.3 * max(0.0, float(r.get("logfoldchanges", 0.0)))
+        except Exception:
+            pass
+        chosen: list[str] = []
+        chosen_vecs: list[np.ndarray] = []
+        rows: list[dict] = []
+        for gi in np.argsort(-score):
+            g = str(ref_i.var_names[int(gi)])
+            if g not in shared or not np.isfinite(score[int(gi)]) or score[int(gi)] <= 0:
+                continue
+            v = ln[:, int(gi)]
+            redundant = False
+            for prev in chosen_vecs:
+                if np.std(v) > 1e-6 and np.std(prev) > 1e-6:
+                    if abs(float(np.corrcoef(v, prev)[0, 1])) > 0.92:
+                        redundant = True
+                        break
+            if redundant:
+                continue
+            chosen.append(g)
+            chosen_vecs.append(v)
+            rows.append({
+                "gene": g,
+                "score": float(score[int(gi)]),
+                "specificity_z": float(specificity[int(gi)]),
+                "pct_in": float(pct_in[int(gi)]),
+                "pct_out": float(pct_out[int(gi)]),
+            })
+            if len(chosen) >= genes_per_type:
+                break
+        ranked[ct] = chosen
+        details[ct] = rows
+    flat: list[str] = []
+    seen: set[str] = set()
+    for ct in cell_types:
+        for g in ranked.get(ct, []):
+            if g not in seen:
+                flat.append(g)
+                seen.add(g)
+    return ranked, flat, details
+
+
+def _find_betadata_file(betadata_dir: str | None, gene: str) -> str | None:
+    if not betadata_dir or not os.path.isdir(betadata_dir):
+        return None
+    exact = os.path.join(betadata_dir, f"{gene}_betadata.feather")
+    if os.path.isfile(exact):
+        return exact
+    hits = glob.glob(os.path.join(betadata_dir, "**", f"{gene}_betadata.feather"), recursive=True)
+    if hits:
+        return sorted(hits)[0]
+    safe = re.escape(gene)
+    for path in glob.glob(os.path.join(betadata_dir, "**", "*_betadata.feather"), recursive=True):
+        if re.match(rf"^{safe}_betadata\.feather$", os.path.basename(path), flags=re.IGNORECASE):
+            return path
+    return None
+
+
+def _read_betadata_table(path: str) -> pd.DataFrame:
+    try:
+        return pd.read_feather(path)
+    except Exception:
+        return feather.read_feather(path)
+
+
+def _betadata_query_keys(id_col: str | None, obs_names: np.ndarray, cluster_labels: np.ndarray) -> np.ndarray:
+    if id_col in ("CellID", "obs_names", "cell_id"):
+        return obs_names
+    return cluster_labels
+
+
+def load_betadata_embedding(
+    betadata_dir: str | None,
+    genes: list[str],
+    *,
+    obs_names: list[str],
+    cluster_labels: np.ndarray,
+    max_beta_features: int = 8,
+) -> tuple[np.ndarray | None, list[str], dict]:
+    if not betadata_dir:
+        return None, [], {"enabled": False, "reason": "no betadata dir"}
+    feats: list[np.ndarray] = []
+    names: list[str] = []
+    used: list[dict] = []
+    obs = np.asarray([str(x) for x in obs_names])
+    fallback_labels = np.asarray([str(x) for x in cluster_labels])
+    for gene in genes:
+        path = _find_betadata_file(betadata_dir, gene)
+        if path is None:
+            continue
+        df = _read_betadata_table(path)
+        id_col = next((c for c in ("CellID", "obs_names", "cell_id", "Cluster") if c in df.columns), None)
+        if id_col is None:
+            row_keys = np.asarray([str(i) for i in range(df.shape[0])])
+            value_df = df
+        else:
+            row_keys = df[id_col].astype(str).to_numpy()
+            value_df = df.drop(columns=[id_col])
+        numeric = value_df.select_dtypes(include=[np.number])
+        cols = [c for c in numeric.columns if c not in ("beta0", "beta_0")]
+        if not cols:
+            continue
+        cols = list(numeric[cols].abs().mean(axis=0).sort_values(ascending=False).head(max_beta_features).index)
+        mat = numeric[cols].to_numpy(dtype=np.float32)
+        fallback = np.nanmean(mat, axis=0, keepdims=True)
+        fallback = np.nan_to_num(fallback, nan=0.0, posinf=0.0, neginf=0.0)
+        key_to_row = {str(k): i for i, k in enumerate(row_keys)}
+        keys = _betadata_query_keys(id_col, obs, fallback_labels)
+        idx = np.array([key_to_row.get(str(k), -1) for k in keys], dtype=int)
+        aligned = np.repeat(fallback, len(keys), axis=0)
+        ok = idx >= 0
+        if np.any(ok):
+            aligned[ok] = mat[idx[ok]]
+        feats.append(aligned.astype(np.float32))
+        names.extend([f"beta:{gene}:{c}" for c in cols])
+        used.append({"gene": gene, "path": path, "id_col": id_col, "features": cols, "n_rows": int(df.shape[0])})
+    if not feats:
+        return None, [], {"enabled": True, "used": [], "reason": "no matching beta feathers"}
+    emb = _safe_zscore(np.concatenate(feats, axis=1))
+    return emb, names, {"enabled": True, "used": used, "n_features": len(names), "n_genes": len(used)}
+
+
+def _feature_knn_probs(
+    ref_features: np.ndarray,
+    query_features: np.ndarray,
+    ref_li: np.ndarray,
+    n_ct: int,
+    *,
+    n_neighbors: int = 50,
+) -> tuple[np.ndarray, dict]:
+    k = min(n_neighbors, ref_features.shape[0])
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=-1)
+    nn.fit(ref_features)
+    dists, idxs = nn.kneighbors(query_features)
+    w = 1.0 / (dists + 1e-6)
+    w /= np.maximum(w.sum(1, keepdims=True), 1e-8)
+    p = np.zeros((query_features.shape[0], n_ct), dtype=np.float32)
+    for i in range(query_features.shape[0]):
+        for j in range(k):
+            p[i, ref_li[idxs[i, j]]] += w[i, j]
+    p /= np.maximum(p.sum(1, keepdims=True), 1e-8)
+    return p, {"n_neighbors": int(k), "metric": "cosine"}
+
+
+def spatial_coordinate_prior(
+    ref_i: sc.AnnData,
+    query: sc.AnnData,
+    ref_labels: np.ndarray,
+    cell_types: list[str],
+) -> tuple[np.ndarray | None, dict]:
+    _, rxy = _resolve_spatial_xy(ref_i)
+    qkey, qxy = _resolve_spatial_xy(query)
+    if rxy is None or qxy is None or len(cell_types) < 2:
+        return None, {"enabled": False, "reason": "missing spatial coordinates"}
+    rz = _safe_zscore(rxy)
+    qz = _safe_zscore(qxy)
+    labels = np.asarray([str(x) for x in ref_labels])
+    centers = []
+    for ct in cell_types:
+        m = labels == str(ct)
+        centers.append(rz[m].mean(0) if m.any() else np.zeros(2, dtype=np.float32))
+    centers = np.asarray(centers, dtype=np.float32)
+    d = np.sqrt(np.maximum(((qz[:, None, :] - centers[None, :, :]) ** 2).sum(-1), 0.0))
+    p = np.exp(-d / max(float(np.median(d)), 0.25))
+    p /= np.maximum(p.sum(1, keepdims=True), 1e-8)
+    return p.astype(np.float32), {"enabled": True, "query_obsm": qkey}
+
+
+def _spatial_neighbor_label_prior(
+    query: sc.AnnData,
+    base_p: np.ndarray,
+    *,
+    k: int = 8,
+    blend: float = 0.35,
+) -> tuple[np.ndarray, dict]:
+    key, xy = _resolve_spatial_xy(query)
+    if xy is None or query.n_obs < 4:
+        return base_p, {"enabled": False, "reason": "no spatial coordinates"}
+    nn = NearestNeighbors(n_neighbors=min(k + 1, query.n_obs), metric="euclidean")
+    nn.fit(xy)
+    dist, idx = nn.kneighbors(xy)
+    neigh = idx[:, 1:]
+    dist = dist[:, 1:]
+    if neigh.shape[1] == 0:
+        return base_p, {"enabled": False, "reason": "not enough spatial neighbors"}
+    sig = float(np.median(dist[dist > 0])) if np.any(dist > 0) else 1.0
+    w = np.exp(-(dist**2) / (2.0 * max(sig, 1e-6) ** 2)).astype(np.float32)
+    w /= np.maximum(w.sum(axis=1, keepdims=True), 1e-8)
+    sm = np.einsum("ij,ijk->ik", w, base_p[neigh])
+    out = (1.0 - blend) * base_p + blend * sm
+    out /= np.maximum(out.sum(1, keepdims=True), 1e-8)
+    return out.astype(np.float32), {"enabled": True, "obsm": key, "k": int(neigh.shape[1]), "blend": float(blend)}
+
+
+def _evaluate_transfer(
+    labels: np.ndarray,
+    truth: np.ndarray | None,
+    query: sc.AnnData,
+    ref_ln: np.ndarray,
+    ref_labels: np.ndarray,
+    mgenes: dict[str, list[str]],
+    amk: list[str],
+    midx: np.ndarray,
+) -> dict:
+    out: dict = {}
+    if truth is not None:
+        truth_s = np.asarray([str(x) for x in truth])
+        pred_s = np.asarray([str(x) for x in labels])
+        out["accuracy"] = float(np.mean(truth_s == pred_s))
+        out["balanced_accuracy"] = float(balanced_accuracy_score(truth_s, pred_s))
+        out["ari"] = float(adjusted_rand_score(truth_s, pred_s))
+    ref_lab_s = np.array([str(x) for x in ref_labels])
+    pred = np.asarray([str(x) for x in labels])
+    vals = []
+    per_type = {}
+    for ct in mgenes:
+        mr = ref_lab_s == str(ct)
+        mq = pred == str(ct)
+        if mq.sum() < 3:
+            continue
+        ci = [amk.index(g) for g in mgenes[ct] if g in amk]
+        if len(ci) < 2:
+            continue
+        rv = ref_ln[mr][:, midx[ci]].mean(0)
+        qv = query.layers["ln"][mq][:, midx[ci]].mean(0)
+        if np.std(rv) < 1e-6 or np.std(qv) < 1e-6:
+            continue
+        r, _ = pearsonr(rv, qv)
+        r2 = float(r**2)
+        vals.append(r2)
+        per_type[str(ct)] = {"r2": r2, "n": int(mq.sum())}
+    out["dotplot_mean_r2"] = float(np.mean(vals)) if vals else 0.0
+    out["dotplot_per_type"] = per_type
+    return out
+
+
 def run_malt(
     reference_path: str,
     query_path: str,
@@ -902,6 +1195,11 @@ def run_malt(
     prefer_raw_counts: bool = False,
     leiden_map: bool = True,
     reference_gene_list: str | None = None,
+    spatial: bool = False,
+    reference_betadata_dir: str | None = None,
+    query_betadata_dir: str | None = None,
+    benchmark_truth: str | None = None,
+    spatial_genes_per_type: int = 6,
 ) -> None:
     os.makedirs(outdir, exist_ok=True)
     extra_dotplot_markers = extra_dotplot_markers or []
@@ -1361,6 +1659,127 @@ def run_malt(
         print(f"\n  {'MEAN':<18} {malt_r2:>8.3f} {knn_r2:>8.3f}")
         print(f"  Improvement: {malt_r2 - knn_r2:+.3f}")
 
+        spatial_section = None
+        if spatial:
+            print("\n" + "=" * 60)
+            print("STEP 6b: Spatial MALT beta benchmark")
+            print("=" * 60)
+            spatial_mk_per_ct, spatial_genes, spatial_marker_details = select_dotplot_training_markers(
+                ref_i,
+                groupby_col,
+                cell_types,
+                shared,
+                genes_per_type=spatial_genes_per_type,
+            )
+            if not spatial_genes:
+                spatial_genes = list(all_mk)
+                spatial_mk_per_ct = mk_per_ct
+            spatial_midx = np.array([g2i[g] for g in spatial_genes])
+            train_gene_path = os.path.join(outdir, f"spatial_malt_training_genes{plot_suffix}.txt")
+            with open(train_gene_path, "w") as f:
+                for g in spatial_genes:
+                    f.write(f"{g}\n")
+            with open(os.path.join(outdir, f"spatial_malt_marker_scores{plot_suffix}.json"), "w") as f:
+                json.dump(_json_sanitize(spatial_marker_details), f, indent=2)
+
+            ref_beta, ref_beta_cols, ref_beta_meta = load_betadata_embedding(
+                reference_betadata_dir,
+                spatial_genes,
+                obs_names=list(ref_i.obs_names.astype(str)),
+                cluster_labels=ref_i.obs[groupby_col].astype(str).values,
+            )
+            query_beta, query_beta_cols, query_beta_meta = load_betadata_embedding(
+                query_betadata_dir or reference_betadata_dir,
+                spatial_genes,
+                obs_names=list(query.obs_names.astype(str)),
+                cluster_labels=knn_labels,
+            )
+
+            beta_knn_p = None
+            beta_meta = {"enabled": False, "reference": ref_beta_meta, "query": query_beta_meta}
+            if ref_beta is not None and query_beta is not None:
+                d_beta = min(ref_beta.shape[1], query_beta.shape[1])
+                ref_aug = np.concatenate(
+                    [_safe_zscore(ref_ln[:, hvg_i]), _safe_zscore(ref_beta[:, :d_beta])],
+                    axis=1,
+                )
+                query_aug = np.concatenate(
+                    [_safe_zscore(query.layers["ln"][:, hvg_i]), _safe_zscore(query_beta[:, :d_beta])],
+                    axis=1,
+                )
+                beta_knn_p, beta_knn_meta = _feature_knn_probs(ref_aug, query_aug, ref_li, n_ct)
+                beta_meta = {
+                    "enabled": True,
+                    "reference": ref_beta_meta,
+                    "query": query_beta_meta,
+                    "knn": beta_knn_meta,
+                    "n_features": int(d_beta),
+                    "columns": {"reference": ref_beta_cols[:50], "query": query_beta_cols[:50]},
+                }
+                print(f"  Betadata KNN features: {d_beta} beta columns from {ref_beta_meta.get('n_genes', 0)} genes")
+            else:
+                print(f"  Betadata skipped: ref={ref_beta_meta.get('reason')} query={query_beta_meta.get('reason')}")
+
+            spatial_prior, spatial_prior_meta = spatial_coordinate_prior(ref_i, query, ref_labels, cell_types)
+            if spatial_prior is None:
+                spatial_prior = np.full_like(knn_p, 1.0 / max(n_ct, 1))
+            beta_prior = beta_knn_p if beta_knn_p is not None else knn_p
+            spatial_seed = 0.45 * knn_p + 0.25 * mk_p + 0.20 * beta_prior + 0.10 * spatial_prior
+            spatial_seed /= np.maximum(spatial_seed.sum(1, keepdims=True), 1e-8)
+            spatial_smoothed, spatial_neighbor_meta = _spatial_neighbor_label_prior(query, spatial_seed)
+            spatial_label = np.array(cell_types)[spatial_smoothed.argmax(1)]
+            spatial_conf = spatial_smoothed.max(1)
+
+            spatial_c = f"spatial_malt_label_{slug}" if multi else "spatial_malt_label"
+            spatial_conf_c = f"spatial_malt_confidence_{slug}" if multi else "spatial_malt_confidence"
+            beta_c = f"beta_knn_label_{slug}" if multi else "beta_knn_label"
+            if beta_knn_p is not None:
+                query.obs[beta_c] = np.array(cell_types)[beta_knn_p.argmax(1)]
+                query.obs[beta_c] = query.obs[beta_c].astype(str).astype("category")
+                csv_label_columns.append(beta_c)
+            query.obs[spatial_c] = spatial_label
+            query.obs[spatial_c] = query.obs[spatial_c].astype(str).astype("category")
+            query.obs[spatial_conf_c] = spatial_conf
+            csv_label_columns.extend([spatial_c, spatial_conf_c])
+
+            truth = query.obs[benchmark_truth].astype(str).values if benchmark_truth and benchmark_truth in query.obs else None
+            bench = {
+                "knn": _evaluate_transfer(knn_labels, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
+                "malt": _evaluate_transfer(opt_lbl, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
+                "spatial_malt": _evaluate_transfer(spatial_label, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
+            }
+            if beta_knn_p is not None:
+                bench["beta_knn"] = _evaluate_transfer(
+                    np.array(cell_types)[beta_knn_p.argmax(1)],
+                    truth,
+                    query,
+                    ref_ln,
+                    ref_labels,
+                    spatial_mk_per_ct,
+                    spatial_genes,
+                    spatial_midx,
+                )
+            spatial_section = {
+                "enabled": True,
+                "label_column": spatial_c,
+                "confidence_column": spatial_conf_c,
+                "training_genes": spatial_genes,
+                "training_genes_file": train_gene_path,
+                "markers_by_type": spatial_mk_per_ct,
+                "reference_betadata_dir": reference_betadata_dir,
+                "query_betadata_dir": query_betadata_dir,
+                "betadata": beta_meta,
+                "spatial_prior": spatial_prior_meta,
+                "spatial_neighbors": spatial_neighbor_meta,
+                "benchmark_truth": benchmark_truth,
+                "benchmark": bench,
+            }
+            print("  Spatial benchmark dotplot R2:")
+            for name, info in bench.items():
+                acc = info.get("accuracy")
+                acc_s = f", acc={acc:.3f}" if acc is not None else ""
+                print(f"    {name}: {info.get('dotplot_mean_r2', 0.0):.3f}{acc_s}")
+
         print("\n" + "=" * 60)
         print("STEP 7: Dotplot comparison")
         print("=" * 60)
@@ -1447,14 +1866,19 @@ def run_malt(
             print(f"  KNN dotplot saved (dotplot_knn{plot_suffix}.png)")
 
         all_markers_by_group[groupby_col] = mk_per_ct
-        per_group_metrics.append(
-            {
-                "groupby": groupby_col,
-                "malt_label_column": malt_c,
-                "malt_mean_r2": float(malt_r2),
-                "knn_mean_r2": float(knn_r2),
-            }
-        )
+        metric_row = {
+            "groupby": groupby_col,
+            "malt_label_column": malt_c,
+            "malt_mean_r2": float(malt_r2),
+            "knn_mean_r2": float(knn_r2),
+        }
+        if spatial_section is not None:
+            metric_row["spatial_malt_label_column"] = spatial_section["label_column"]
+            metric_row["spatial_malt_mean_r2"] = float(
+                spatial_section["benchmark"]["spatial_malt"].get("dotplot_mean_r2", 0.0)
+            )
+            metric_row["spatial_malt"] = spatial_section
+        per_group_metrics.append(metric_row)
         csv_label_columns.extend([malt_c, conf_c, knn_c])
 
         _rl = ref_ln
@@ -1595,6 +2019,13 @@ def run_malt(
         "reference_gene_list": reference_gene_list,
         "reference_expression": ref_meta,
         "query_expression": query_meta,
+        "spatial": {
+            "enabled": bool(spatial),
+            "reference_betadata_dir": reference_betadata_dir,
+            "query_betadata_dir": query_betadata_dir,
+            "benchmark_truth": benchmark_truth,
+            "genes_per_type": spatial_genes_per_type,
+        },
         "leiden_map": bool(leiden_map),
         "leiden": leiden_section,
     }
@@ -1700,6 +2131,32 @@ def main() -> None:
         "Line count must equal reference n_vars. Replaces reference var_names before intersecting "
         "with the query (for .h5ad files whose var_names are numeric placeholders).",
     )
+    p.add_argument(
+        "--spatial",
+        action="store_true",
+        help="Enable spatial MALT: dotplot-selected genes, SpaceTravLR betadata features, and spatial smoothing.",
+    )
+    p.add_argument(
+        "--reference-betadata-dir",
+        default=None,
+        help="Reference SpaceTravLR output directory containing seed *_betadata.feather files.",
+    )
+    p.add_argument(
+        "--query-betadata-dir",
+        default=None,
+        help="Query SpaceTravLR output directory containing seed *_betadata.feather files.",
+    )
+    p.add_argument(
+        "--benchmark-truth",
+        default=None,
+        help="Optional query obs column with true labels for benchmarking KNN/MALT/spatial MALT.",
+    )
+    p.add_argument(
+        "--spatial-genes-per-type",
+        type=int,
+        default=6,
+        help="Number of dotplot-optimized genes to select per reference cell type.",
+    )
     args = p.parse_args()
 
     extra = [x for x in args.extra_markers.split(",") if x.strip()]
@@ -1716,6 +2173,11 @@ def main() -> None:
         prefer_raw_counts=args.prefer_raw_counts,
         leiden_map=not args.no_leiden_map,
         reference_gene_list=args.reference_gene_list,
+        spatial=args.spatial,
+        reference_betadata_dir=args.reference_betadata_dir,
+        query_betadata_dir=args.query_betadata_dir,
+        benchmark_truth=args.benchmark_truth,
+        spatial_genes_per_type=args.spatial_genes_per_type,
     )
 
 

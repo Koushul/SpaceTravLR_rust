@@ -21,6 +21,7 @@ pub const UV_WITH_MAP_LABELS: &[&str] = &[
     "scanpy",
     "h5py",
     "matplotlib",
+    "pyarrow",
     "scikit-learn",
     "torch",
     "leidenalg",
@@ -39,6 +40,11 @@ pub struct MapLabelsParams<'a> {
     pub prefer_raw_counts: bool,
     pub leiden_map: bool,
     pub reference_gene_list: Option<&'a Path>,
+    pub spatial: bool,
+    pub reference_betadata_dir: Option<&'a Path>,
+    pub query_betadata_dir: Option<&'a Path>,
+    pub benchmark_truth: Option<&'a str>,
+    pub spatial_genes_per_type: Option<usize>,
 }
 
 pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
@@ -90,14 +96,38 @@ pub fn run_map_labels(params: MapLabelsParams<'_>) -> anyhow::Result<()> {
         argv.push("--no-leiden-map".into());
     }
     if let Some(p) = params.reference_gene_list {
-        let s = p.to_str().with_context(|| {
-            format!(
-                "reference gene list path must be UTF-8: {}",
-                p.display()
-            )
-        })?;
+        let s = p
+            .to_str()
+            .with_context(|| format!("reference gene list path must be UTF-8: {}", p.display()))?;
         argv.push("--reference-gene-list".into());
         argv.push(s.into());
+    }
+    if params.spatial {
+        argv.push("--spatial".into());
+    }
+    if let Some(p) = params.reference_betadata_dir {
+        let s = p.to_str().with_context(|| {
+            format!("reference betadata dir path must be UTF-8: {}", p.display())
+        })?;
+        argv.push("--reference-betadata-dir".into());
+        argv.push(s.into());
+    }
+    if let Some(p) = params.query_betadata_dir {
+        let s = p
+            .to_str()
+            .with_context(|| format!("query betadata dir path must be UTF-8: {}", p.display()))?;
+        argv.push("--query-betadata-dir".into());
+        argv.push(s.into());
+    }
+    if let Some(col) = params.benchmark_truth {
+        if !col.trim().is_empty() {
+            argv.push("--benchmark-truth".into());
+            argv.push(col.into());
+        }
+    }
+    if let Some(n) = params.spatial_genes_per_type {
+        argv.push("--spatial-genes-per-type".into());
+        argv.push(n.to_string());
     }
 
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
