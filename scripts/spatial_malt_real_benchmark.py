@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import anndata as ad
@@ -174,30 +175,56 @@ def write_local_betadata(
 
 
 def run_spacetravlr(args: argparse.Namespace, ref_path: Path, query_path: Path, ref_beta: Path, query_beta: Path) -> None:
-    cmd = [
-        str(args.spacetravlr),
-        "--map-labels",
-        "--map-labels-spatial",
-        "--reference",
-        str(ref_path),
-        "--query",
-        str(query_path),
-        "--map-labels-outdir",
-        str(args.out_dir / "malt_out"),
-        "--map-labels-groupby",
-        "cell_type",
-        "--map-labels-reference-betadata-dir",
-        str(ref_beta),
-        "--map-labels-query-betadata-dir",
-        str(query_beta),
-        "--map-labels-benchmark-truth",
-        "truth",
-        "--map-labels-no-leiden",
-        "--map-labels-expression-mode",
-        "counts",
-        "--map-labels-counts-layer",
-        "counts",
-    ]
+    if str(args.spacetravlr) == "python":
+        cmd = [
+            sys.executable,
+            "scripts/malt_label_transfer.py",
+            "--spatial",
+            "--reference",
+            str(ref_path),
+            "--query",
+            str(query_path),
+            "--outdir",
+            str(args.out_dir / "malt_out"),
+            "--groupby",
+            "cell_type",
+            "--reference-betadata-dir",
+            str(ref_beta),
+            "--query-betadata-dir",
+            str(query_beta),
+            "--benchmark-truth",
+            "truth",
+            "--no-leiden-map",
+            "--expression-mode",
+            "counts",
+            "--counts-layer",
+            "counts",
+        ]
+    else:
+        cmd = [
+            str(args.spacetravlr),
+            "--map-labels",
+            "--map-labels-spatial",
+            "--reference",
+            str(ref_path),
+            "--query",
+            str(query_path),
+            "--map-labels-outdir",
+            str(args.out_dir / "malt_out"),
+            "--map-labels-groupby",
+            "cell_type",
+            "--map-labels-reference-betadata-dir",
+            str(ref_beta),
+            "--map-labels-query-betadata-dir",
+            str(query_beta),
+            "--map-labels-benchmark-truth",
+            "truth",
+            "--map-labels-no-leiden",
+            "--map-labels-expression-mode",
+            "counts",
+            "--map-labels-counts-layer",
+            "counts",
+        ]
     subprocess.run(cmd, check=True)
 
 

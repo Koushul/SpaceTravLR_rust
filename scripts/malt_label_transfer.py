@@ -1238,6 +1238,43 @@ def _evaluate_transfer(
     return out
 
 
+def _label_prob_confidence(p: np.ndarray) -> np.ndarray:
+    p = np.asarray(p, dtype=np.float32)
+    if p.shape[1] <= 1:
+        return np.ones(p.shape[0], dtype=np.float32)
+    order = np.sort(p, axis=1)
+    margin = order[:, -1] - order[:, -2]
+    entropy = -(p * np.log(np.clip(p, 1e-8, 1.0))).sum(1) / np.log(float(p.shape[1]))
+    return np.clip(0.55 * margin + 0.45 * (1.0 - entropy), 0.0, 1.0).astype(np.float32)
+
+
+def _adaptive_probability_ensemble(
+    components: list[tuple[str, float, np.ndarray]],
+) -> tuple[np.ndarray, dict]:
+    usable = [(name, weight, np.asarray(prob, dtype=np.float32)) for name, weight, prob in components if prob is not None and weight > 0]
+    if not usable:
+        raise ValueError("adaptive probability ensemble needs at least one component")
+    n, k = usable[0][2].shape
+    acc = np.zeros((n, k), dtype=np.float32)
+    meta: dict[str, dict] = {}
+    top_labels = np.stack([p.argmax(1) for _, _, p in usable], axis=1)
+    for name, base_weight, p in usable:
+        if p.shape != (n, k):
+            raise ValueError(f"component {name!r} has shape {p.shape}, expected {(n, k)}")
+        conf = _label_prob_confidence(p)
+        agree = (top_labels == p.argmax(1)[:, None]).mean(1).astype(np.float32)
+        w = base_weight * (0.35 + 0.65 * conf) * (0.75 + 0.25 * agree)
+        acc += p * w[:, None]
+        meta[name] = {
+            "base_weight": float(base_weight),
+            "mean_confidence": float(conf.mean()),
+            "mean_agreement": float(agree.mean()),
+            "mean_effective_weight": float(w.mean()),
+        }
+    acc /= np.maximum(acc.sum(1, keepdims=True), 1e-8)
+    return acc.astype(np.float32), meta
+
+
 def _label_distribution_features(
     adata: sc.AnnData,
     *,
@@ -2049,11 +2086,29 @@ def run_malt(
             spatial_label = np.array(cell_types)[spatial_smoothed.argmax(1)]
             spatial_conf = spatial_smoothed.max(1)
 
+            glorious_components = {
+                "ldl": (0.35, ldl_p),
+                "malt_anchor": (0.25, fp),
+                "expression_knn": (0.15, knn_p),
+                "marker": (0.05, mk_p),
+                "spatial_malt": (0.10, spatial_smoothed),
+                "spatial_prior": (0.05, spatial_prior),
+            }
+            if beta_knn_p is not None:
+                glorious_components["beta_knn"] = (0.20, beta_knn_p)
+            glorious_wsum = sum(w for w, _ in glorious_components.values())
+            glorious_p = sum(w * p for w, p in glorious_components.values()) / max(glorious_wsum, 1e-8)
+            glorious_p /= np.maximum(glorious_p.sum(1, keepdims=True), 1e-8)
+            glorious_label = np.array(cell_types)[glorious_p.argmax(1)]
+            glorious_conf = glorious_p.max(1)
+
             spatial_c = f"spatial_malt_label_{slug}" if multi else "spatial_malt_label"
             spatial_conf_c = f"spatial_malt_confidence_{slug}" if multi else "spatial_malt_confidence"
             beta_c = f"beta_knn_label_{slug}" if multi else "beta_knn_label"
             ldl_c = f"ldl_label_{slug}" if multi else "ldl_label"
             ldl_conf_c = f"ldl_confidence_{slug}" if multi else "ldl_confidence"
+            glorious_c = f"glorious_label_{slug}" if multi else "glorious_label"
+            glorious_conf_c = f"glorious_confidence_{slug}" if multi else "glorious_confidence"
             if beta_knn_p is not None:
                 query.obs[beta_c] = np.array(cell_types)[beta_knn_p.argmax(1)]
                 query.obs[beta_c] = query.obs[beta_c].astype(str).astype("category")
@@ -2066,6 +2121,10 @@ def run_malt(
             query.obs[spatial_c] = query.obs[spatial_c].astype(str).astype("category")
             query.obs[spatial_conf_c] = spatial_conf
             csv_label_columns.extend([spatial_c, spatial_conf_c])
+            query.obs[glorious_c] = glorious_label
+            query.obs[glorious_c] = query.obs[glorious_c].astype(str).astype("category")
+            query.obs[glorious_conf_c] = glorious_conf
+            csv_label_columns.extend([glorious_c, glorious_conf_c])
 
             truth = query.obs[benchmark_truth].astype(str).values if benchmark_truth and benchmark_truth in query.obs else None
             bench = {
@@ -2073,6 +2132,7 @@ def run_malt(
                 "malt": _evaluate_transfer(opt_lbl, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
                 "ldl": _evaluate_transfer(ldl_label, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
                 "spatial_malt": _evaluate_transfer(spatial_label, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
+                "glorious": _evaluate_transfer(glorious_label, truth, query, ref_ln, ref_labels, spatial_mk_per_ct, spatial_genes, spatial_midx),
             }
             if beta_knn_p is not None:
                 bench["beta_knn"] = _evaluate_transfer(
@@ -2098,6 +2158,9 @@ def run_malt(
                 "ldl": ldl_meta,
                 "ldl_label_column": ldl_c,
                 "ldl_confidence_column": ldl_conf_c,
+                "glorious_label_column": glorious_c,
+                "glorious_confidence_column": glorious_conf_c,
+                "glorious_components": {k: float(w) for k, (w, _) in glorious_components.items()},
                 "prior_weights": prior_weights,
                 "spatial_prior": spatial_prior_meta,
                 "spatial_neighbors": spatial_neighbor_meta,
