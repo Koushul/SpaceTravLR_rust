@@ -53,8 +53,8 @@ def prepare_split(
     out_dir: Path,
     *,
     label_key: str,
-    cells_per_type: int,
-    n_types: int,
+    cells_per_type: int | None,
+    n_types: int | None,
     train_fraction: float,
     seed: int,
 ) -> tuple[Path, Path, list[str]]:
@@ -68,11 +68,17 @@ def prepare_split(
     a = a[a.obs[label_key] != "Low quality"].copy()
 
     counts = a.obs[label_key].value_counts()
-    chosen = counts[counts >= cells_per_type].head(n_types).index.tolist()
+    min_cells = 2 if cells_per_type is None else max(2, cells_per_type)
+    chosen = counts[counts >= min_cells].index.tolist()
+    if n_types is not None:
+        chosen = chosen[:n_types]
     keep_idx: list[int] = []
     for ct in chosen:
         idx = np.flatnonzero(a.obs[label_key].values == ct)
-        take = rng.choice(idx, size=cells_per_type, replace=False)
+        if cells_per_type is None:
+            take = idx
+        else:
+            take = rng.choice(idx, size=cells_per_type, replace=False)
         keep_idx.extend(take.tolist())
     keep_idx = np.array(sorted(keep_idx))
     a = a[keep_idx].copy()
@@ -83,7 +89,8 @@ def prepare_split(
     for ct in chosen:
         idx = np.flatnonzero(labels == ct)
         rng.shuffle(idx)
-        n_train = max(5, int(round(len(idx) * train_fraction)))
+        n_train = int(round(len(idx) * train_fraction))
+        n_train = min(max(1, n_train), len(idx) - 1)
         train_idx.extend(idx[:n_train].tolist())
         test_idx.extend(idx[n_train:].tolist())
 
@@ -198,9 +205,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--out-dir", type=Path, default=Path("/tmp/spacetravlr_real_spatial_benchmark"))
     p.add_argument("--spacetravlr", type=Path, default=Path("./target/debug/spacetravlr"))
-    p.add_argument("--cells-per-type", type=int, default=40)
-    p.add_argument("--n-types", type=int, default=8)
-    p.add_argument("--train-fraction", type=float, default=0.6)
+    p.add_argument("--cells-per-type", type=int, default=0, help="0 uses every cell per retained type")
+    p.add_argument("--n-types", type=int, default=0, help="0 uses every non-low-quality annotated type")
+    p.add_argument("--train-fraction", type=float, default=0.5)
     p.add_argument("--genes-per-type", type=int, default=4)
     p.add_argument("--neighbor-k", type=int, default=8)
     p.add_argument("--seed", type=int, default=11)
@@ -213,8 +220,8 @@ def main() -> None:
         dataset,
         args.out_dir,
         label_key="celltype_mapped_refined",
-        cells_per_type=args.cells_per_type,
-        n_types=args.n_types,
+        cells_per_type=None if args.cells_per_type == 0 else args.cells_per_type,
+        n_types=None if args.n_types == 0 else args.n_types,
         train_fraction=args.train_fraction,
         seed=args.seed,
     )
