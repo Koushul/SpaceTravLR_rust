@@ -52,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import warnings
 
@@ -677,22 +678,29 @@ def _looks_log_normalized(X: np.ndarray | sp.spmatrix) -> bool:
     mx = float(flat.max())
     pos = flat[flat > 0]
     med_nz = float(np.median(pos)) if pos.size else 0.0
+    int_like = float(np.mean(np.isclose(flat, np.round(flat), rtol=0, atol=1e-5)))
+    pos_int = (
+        float(np.mean(np.isclose(pos, np.round(pos), rtol=0, atol=1e-5)))
+        if pos.size
+        else 0.0
+    )
+    if pos_int >= 0.85:
+        return False
     if mx > 50:
         return False
-    if mx <= 20 and med_nz < 10:
-        return True
-    int_like = np.mean(np.isclose(flat, np.round(flat), rtol=0, atol=1e-5))
     if mx > 200 and int_like > 0.85:
         return False
     if mx > 30 and med_nz > 15 and int_like > 0.8:
         return False
-    if mx < 40 and med_nz < 10:
+    if mx <= 20 and med_nz < 10 and pos_int < 0.5:
+        return True
+    if mx < 40 and med_nz < 10 and pos_int < 0.5:
         return True
     log1p_10k = float(np.log1p(10_000.0))
     frac_in_log_range = float(np.mean(flat <= log1p_10k + 1e-6))
-    if mx < 45 and med_nz < 12 and frac_in_log_range > 0.88:
+    if mx < 45 and med_nz < 12 and frac_in_log_range > 0.88 and pos_int < 0.5:
         return True
-    return mx < 35
+    return mx < 35 and pos_int < 0.5
 
 
 def _raw_counts_aligned(adata: sc.AnnData):
@@ -809,10 +817,18 @@ def prepare_expression_inplace(
         )
 
     # --- auto: no counts found — check if .X is already log-normalized ---
-    already_log = "log1p" in adata.uns or _looks_log_normalized(X0)
+    uns_says_log = "log1p" in adata.uns
+    heuristic_log = _looks_log_normalized(X0)
+    if uns_says_log and not heuristic_log:
+        print(
+            f"  [{name}] auto: uns['log1p'] present but X looks like integer counts "
+            f"— treating as raw counts (stale uns metadata?).",
+            file=sys.stderr,
+        )
+    already_log = heuristic_log
     reason = (
-        "adata.uns['log1p'] present"
-        if "log1p" in adata.uns
+        "adata.uns['log1p'] present + heuristic"
+        if uns_says_log and heuristic_log
         else "heuristic (max/median)"
     )
 
@@ -910,6 +926,148 @@ def _resolve_spatial_xy(adata: sc.AnnData) -> tuple[str | None, np.ndarray | Non
         if arr.ndim == 2 and arr.shape[0] == adata.n_obs and arr.shape[1] >= 2:
             return key, arr[:, :2].astype(np.float32)
     return None, None
+
+
+def _ensure_query_umap(
+    query: sc.AnnData,
+    *,
+    n_top_genes: int = 2000,
+    n_pcs: int = 50,
+    n_neighbors: int = 15,
+) -> None:
+    """Compute a query-native UMAP from log-normalized expression.
+
+    The MALT pipeline projects the query onto the reference-fit PCA, which
+    is great for cross-dataset KNN but poor for visualizing query-internal
+    structure. For the projection plot we want a UMAP that separates query
+    cell types, so we run the standard scanpy pipeline (HVG → scale → PCA →
+    neighbors → UMAP) on a temporary copy of the query and stash the result
+    in ``query.obsm['X_umap']``.
+    """
+    if "X_umap" in query.obsm:
+        return
+    if "ln" not in query.layers:
+        raise RuntimeError("query has no layers['ln']; cannot compute UMAP")
+
+    print(
+        f"  Computing query-native UMAP (HVG={n_top_genes}, PCs={n_pcs}, k={n_neighbors})",
+        file=sys.stderr,
+    )
+    q_tmp = sc.AnnData(
+        X=query.layers["ln"].copy(),
+        obs=query.obs.copy(),
+        var=query.var.copy(),
+    )
+    q_tmp.uns.pop("log1p", None)
+    sc.pp.highly_variable_genes(
+        q_tmp,
+        n_top_genes=min(n_top_genes, max(50, q_tmp.n_vars - 1)),
+        flavor="seurat",
+    )
+    q_tmp = q_tmp[:, q_tmp.var.highly_variable].copy()
+    sc.pp.scale(q_tmp, max_value=10)
+    sc.pp.pca(q_tmp, n_comps=min(n_pcs, q_tmp.n_vars - 1, q_tmp.n_obs - 1))
+    sc.pp.neighbors(q_tmp, n_neighbors=n_neighbors, metric="cosine")
+    sc.tl.umap(q_tmp, random_state=0)
+    query.obsm["X_umap"] = np.asarray(q_tmp.obsm["X_umap"], dtype=np.float32)
+
+
+def _save_nichemap_umap_spatial_png(
+    query: sc.AnnData,
+    *,
+    label_col: str,
+    cell_types: list[str],
+    outpath: str,
+    plot_suffix: str = "",
+) -> None:
+    if "X_umap" not in query.obsm:
+        try:
+            _ensure_query_umap(query)
+        except Exception as exc:
+            print(f"  UMAP computation skipped: {exc!r}", file=sys.stderr)
+
+    umap = query.obsm.get("X_umap")
+    has_umap = (
+        umap is not None
+        and np.asarray(umap).ndim == 2
+        and np.asarray(umap).shape[0] == query.n_obs
+        and np.asarray(umap).shape[1] >= 2
+    )
+    _, xy = _resolve_spatial_xy(query)
+    has_spatial = xy is not None and xy.shape[0] == query.n_obs
+    if not has_umap and not has_spatial:
+        return
+
+    labels = query.obs[label_col].astype(str).values
+    present = [str(c) for c in cell_types if str(c) in set(labels)]
+    extra = sorted(set(labels) - set(present))
+    ordered = present + extra
+    if not ordered:
+        return
+    cmap = plt.get_cmap("tab20" if len(ordered) <= 20 else "gist_ncar")
+    palette = {ct: cmap(i % cmap.N) for i, ct in enumerate(ordered)}
+    colors = np.array([palette[l] for l in labels])
+
+    n_panels = int(has_umap) + int(has_spatial)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6.4))
+    if n_panels == 1:
+        axes = [axes]
+    rng = np.random.default_rng(0)
+    order = rng.permutation(query.n_obs)
+    point_size = max(2.0, min(8.0, 30000.0 / max(query.n_obs, 1)))
+
+    panel_idx = 0
+    if has_umap:
+        u = np.asarray(umap, dtype=np.float32)
+        ax = axes[panel_idx]
+        ax.scatter(
+            u[order, 0],
+            u[order, 1],
+            c=colors[order],
+            s=point_size,
+            linewidths=0,
+            alpha=1.0,
+        )
+        ax.set(xlabel="UMAP-1", ylabel="UMAP-2", title=f"UMAP — {label_col}")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(alpha=0.15)
+        panel_idx += 1
+    if has_spatial:
+        ax = axes[panel_idx]
+        ax.scatter(
+            xy[order, 0],
+            xy[order, 1],
+            c=colors[order],
+            s=point_size,
+            linewidths=0,
+            alpha=1.0,
+        )
+        ax.set(xlabel="x", ylabel="y", title=f"Spatial — {label_col}")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.invert_yaxis()
+        ax.grid(alpha=0.15)
+        panel_idx += 1
+
+    handles = [
+        plt.Line2D(
+            [0], [0],
+            marker="o", linestyle="", markersize=6,
+            markerfacecolor=palette[ct], markeredgecolor="none", label=ct,
+        )
+        for ct in ordered
+    ]
+    fig.legend(
+        handles=handles,
+        loc="center left",
+        bbox_to_anchor=(1.0, 0.5),
+        frameon=False,
+        fontsize=9,
+        title=label_col,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 0.92, 1.0))
+    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Nichemap UMAP+spatial saved ({os.path.basename(outpath)})")
 
 
 def select_dotplot_training_markers(
@@ -1310,17 +1468,6 @@ def _label_distribution_features(
         d = min(30, pca_features.shape[1])
         blocks.append(_safe_zscore(pca_features[:, :d]))
         names.append(f"pca:{d}")
-    umap = adata.obsm.get("X_umap")
-    if umap is not None:
-        umap = np.asarray(umap, dtype=np.float32)
-        if umap.ndim == 2 and umap.shape[0] == adata.n_obs and umap.shape[1] >= 2:
-            d = min(umap.shape[1], 3)
-            blocks.append(_safe_zscore(umap[:, :d]))
-            names.append(f"umap:{d}")
-    _, xy = _resolve_spatial_xy(adata)
-    if xy is not None:
-        blocks.append(_safe_zscore(xy))
-        names.append("spatial_xy")
     if beta_features is not None and beta_features.size:
         d = min(beta_features.shape[1], 128)
         blocks.append(_safe_zscore(beta_features[:, :d]))
@@ -1625,6 +1772,15 @@ def run_malt(
     print(f"  Genes: {len(shared)} | Ref: {ref.shape[0]} | Query: {n_q}")
     print(f"  Groupby runs ({len(gb_loop)}): {[_resolve_groupby(ref, g) for g in gb_loop]}")
 
+    if not spatial:
+        ref_sp_key, _ = _resolve_spatial_xy(ref)
+        query_sp_key, _ = _resolve_spatial_xy(query)
+        if ref_sp_key is not None and query_sp_key is not None:
+            spatial = True
+            print(
+                f"  Auto-enabled spatial: ref obsm[{ref_sp_key!r}] + query obsm[{query_sp_key!r}] detected"
+            )
+
     def calc_r2(adata, col, ref_ln_arr, ref_lab, mgenes, amk, midx):
         res, vals = {}, []
         pred = adata.obs[col].astype(str).values
@@ -1730,7 +1886,20 @@ def run_malt(
         pca = PCA(n_components=50, random_state=42)
         rp = pca.fit_transform(ref_ln[:, hvg_i])
         qp = pca.transform(query.layers["ln"][:, hvg_i])
+        if "X_pca" not in ref_i.obsm:
+            ref_i.obsm["X_pca"] = np.asarray(rp, dtype=np.float32)
+        if "X_pca" not in query.obsm:
+            query.obsm["X_pca"] = np.asarray(qp, dtype=np.float32)
         print(f"  PCA explained: {pca.explained_variance_ratio_.sum():.3f}")
+
+        if "X_umap" not in query.obsm:
+            try:
+                _ensure_query_umap(query, n_top_genes=2000, n_pcs=50, n_neighbors=15)
+            except Exception as exc:
+                print(
+                    f"  Query UMAP precompute skipped: {exc!r}",
+                    file=sys.stderr,
+                )
 
         nn = NearestNeighbors(n_neighbors=50, metric="cosine", n_jobs=-1)
         nn.fit(rp)
@@ -2145,20 +2314,20 @@ def run_malt(
             spatial_label = np.array(cell_types)[spatial_smoothed.argmax(1)]
             spatial_conf = spatial_smoothed.max(1)
 
-            glorious_components = {
-                "ldl": (0.35, ldl_p),
-                "malt_anchor": (0.25, fp),
-                "expression_knn": (0.15, knn_p),
-                "marker": (0.05, mk_p),
-                "spatial_malt": (0.10, spatial_smoothed),
-            }
+            glorious_components_list: list[tuple[str, float, np.ndarray]] = [
+                ("malt_anchor", 0.40, fp),
+                ("ldl", 0.20, ldl_p),
+                ("expression_knn", 0.15, knn_p),
+                ("spatial_malt", 0.15, spatial_smoothed),
+                ("marker", 0.05, mk_p),
+            ]
             if spatial_available:
-                glorious_components["spatial_prior"] = (0.05, spatial_prior)
+                glorious_components_list.append(("spatial_prior", 0.05, spatial_prior))
             if beta_knn_p is not None:
-                glorious_components["beta_knn"] = (0.20, beta_knn_p)
-            glorious_wsum = sum(w for w, _ in glorious_components.values())
-            glorious_p = sum(w * p for w, p in glorious_components.values()) / max(glorious_wsum, 1e-8)
-            glorious_p /= np.maximum(glorious_p.sum(1, keepdims=True), 1e-8)
+                glorious_components_list.append(("beta_knn", 0.15, beta_knn_p))
+            glorious_p, glorious_ensemble_meta = _adaptive_probability_ensemble(
+                glorious_components_list
+            )
             glorious_conf_source = _label_prob_confidence(glorious_p)
             glorious_background = np.clip(
                 0.65 * ldl_background + 0.35 * (1.0 - glorious_conf_source),
@@ -2244,7 +2413,8 @@ def run_malt(
                 "glorious_label_column": glorious_c,
                 "glorious_confidence_column": glorious_conf_c,
                 "glorious_probability_csv": glorious_prob_csv,
-                "glorious_components": {k: float(w) for k, (w, _) in glorious_components.items()},
+                "glorious_components": {name: float(w) for name, w, _ in glorious_components_list},
+                "glorious_ensemble": glorious_ensemble_meta,
                 "glorious_background_mean": float(glorious_background.mean()),
                 "glorious_background_median": float(np.median(glorious_background)),
                 "prior_weights": prior_weights,
@@ -2343,6 +2513,19 @@ def run_malt(
             )
             plt.close("all")
             print(f"  KNN dotplot saved (dotplot_knn{plot_suffix}.png)")
+
+        if spatial_section is not None:
+            nichemap_col = spatial_section.get("glorious_label_column")
+            if nichemap_col and nichemap_col in query.obs.columns:
+                _save_nichemap_umap_spatial_png(
+                    query,
+                    label_col=nichemap_col,
+                    cell_types=cell_types,
+                    outpath=os.path.join(
+                        outdir, f"nichemap_umap_spatial{plot_suffix}.png"
+                    ),
+                    plot_suffix=plot_suffix,
+                )
 
         all_markers_by_group[groupby_col] = mk_per_ct
         metric_row = {
