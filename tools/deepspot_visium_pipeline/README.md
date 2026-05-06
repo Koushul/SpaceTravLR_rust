@@ -101,9 +101,10 @@ spacetravlr --plain \
 
 ## Example artifact (CI / plumbing)
 
-If gated Hugging Face weights are unavailable, see `example_run/README_RUN.md` and
-`demo_dummy_fm_inference.py` for a small **dummy-FM** `.h5ad` that exercises the
-DeepSpot gene head only (not biological inference).
+If gated Hugging Face weights are unavailable, use **`--foundation-timm-imagenet`** with Colon
+(checkpoint must use `image_feature_model: uni`) for an ImageNet ViT-L backbone with the same
+architecture as UNI — **not** the pathology FM from the paper. Alternatively see
+`example_run/README_RUN.md` and `demo_dummy_fm_inference.py` for a random-FM plumbing test.
 
 ## References
 
