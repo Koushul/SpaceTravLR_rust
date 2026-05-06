@@ -559,6 +559,12 @@ def run_spacetravlr(label: str, config: Path, run_dir: Path, args: argparse.Name
         raise RuntimeError(f"SpaceTravLR {label} run failed with exit code {proc.returncode}; see {log_path}")
 
 
+def reset_run_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def read_beta_long(run_dir: Path, genes: list[str], source: str, include_intercept: bool) -> pd.DataFrame:
     rows = []
     for gene in genes:
@@ -852,6 +858,8 @@ def main() -> int:
         return 0
 
     if not args.skip_train:
+        reset_run_dir(measured_run)
+        reset_run_dir(he_run)
         run_spacetravlr("measured", measured_cfg, measured_run, args)
         run_spacetravlr("he", he_cfg, he_run, args)
 
