@@ -454,19 +454,6 @@ def toml_quote(value: str | Path) -> str:
     return json.dumps(str(value))
 
 
-def ensure_empty_tf_priors(path: Path) -> None:
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "source": pd.Series(dtype="string"),
-            "target": pd.Series(dtype="string"),
-            "cell_type": pd.Series(dtype="string"),
-        }
-    ).to_feather(path)
-
-
 def write_config(
     path: Path,
     h5ad_path: Path,
@@ -476,8 +463,6 @@ def write_config(
     args: argparse.Namespace,
 ) -> None:
     data_dir = args.network_data_dir or (repo_root() / "data")
-    tf_priors = path.parent / "empty_tf_priors.feather"
-    ensure_empty_tf_priors(tf_priors)
     genes_toml = "[" + ", ".join(toml_quote(g) for g in genes) + "]"
     text = f"""[data]
 adata_path = {toml_quote(h5ad_path)}
@@ -492,11 +477,10 @@ weighted_ligand_scale_factor = {args.weighted_ligand_scale_factor}
 
 [grn]
 network_data_dir = {toml_quote(data_dir)}
-tf_priors_feather = {toml_quote(tf_priors)}
 tf_ligand_cutoff = 0.1
 max_lr = 0
-use_tf_modulators = true
-use_lr_modulators = false
+use_tf_modulators = false
+use_lr_modulators = true
 use_tfl_modulators = false
 extra_modulators = {genes_toml}
 
