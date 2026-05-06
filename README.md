@@ -40,6 +40,11 @@ cargo build -p spacetravlr --features rctd
 spacetravlr --rctd --h5ad spatial.h5ad --ref-adata reference.h5ad --rctd-output ./out/deconv
 ```
 
+## DeepSpot virtual spatial transcriptomics from H&E (optional)
+
+For an **H&E → virtual gene expression `.h5ad`** pipeline (DeepSpot → SpaceTravLR), see
+[`tools/deepspot_visium_pipeline/README.md`](tools/deepspot_visium_pipeline/README.md) and
+[`deepspot_spacetravlr_summary.md`](deepspot_spacetravlr_summary.md).
 
 
 

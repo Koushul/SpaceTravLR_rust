@@ -1,0 +1,20 @@
+# Install DeepSpot from source (not always on PyPI).
+# pip install -r requirements.txt
+git+https://github.com/ratschlab/DeepSpot.git
+
+torch>=2.0
+torchvision
+pyyaml
+tqdm
+pandas
+numpy
+anndata>=0.10
+scanpy>=1.9
+squidpy>=1.3
+pyvips  # conda install -c conda-forge pyvips  (recommended)
+timm
+transformers
+huggingface_hub
+openslide-python
+Pillow
+matplotlib
