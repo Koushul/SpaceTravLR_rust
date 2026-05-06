@@ -99,6 +99,12 @@ spacetravlr --plain \
   --output-dir /path/to/spacetravlr_run
 ```
 
+## Example artifact (CI / plumbing)
+
+If gated Hugging Face weights are unavailable, see `example_run/README_RUN.md` and
+`demo_dummy_fm_inference.py` for a small **dummy-FM** `.h5ad` that exercises the
+DeepSpot gene head only (not biological inference).
+
 ## References
 
 - DeepSpot repository: [github.com/ratschlab/DeepSpot](https://github.com/ratschlab/DeepSpot)

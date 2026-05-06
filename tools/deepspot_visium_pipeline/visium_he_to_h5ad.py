@@ -340,7 +340,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     # Models
-    model_expression = torch.load(model_weights, map_location=device)
+    model_expression = torch.load(model_weights, map_location=device, weights_only=False)
     model_expression.to(device)
     model_expression.eval()
 
