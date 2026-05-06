@@ -18,6 +18,20 @@ This matches the **Colon_HEST1K** DeepSpot checkpoint (same disease context).
 | `zen38_pearson_markers.csv` | Subset of CRC / immune markers |
 | `zen38_paired_measured_vs_deepspot.counts.npz` | Cached prediction matrix (skip ViT re-run via `finalize_from_counts_npz.py`) |
 
+## MAGIC + SpaceTravLR seed-beta benchmark
+
+`../compare_spacetravlr_magic_betas.py` builds matched 10-gene AnnData inputs from this paired
+artifact, MAGIC-imputes both the measured and H&E-imputed layers, trains two SpaceTravLR seed runs,
+and reports matched beta correlations with bootstrap confidence intervals and a permutation p-value.
+
+```bash
+python ../compare_spacetravlr_magic_betas.py \
+  --paired-h5ad zen38_paired_uni_official.h5ad \
+  --out-dir spacetravlr_magic_beta_benchmark \
+  --force-spatial-bins \
+  --spacetravlr-cmd "cargo run --release --bin spacetravlr --"
+```
+
 ## Commands
 
 ```bash

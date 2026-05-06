@@ -3,3 +3,4 @@ DeepSpot_pretrained_model_weights.zip
 # Rerunnable eval artifacts
 *.counts.npz
 zen38_paired_measured_vs_deepspot.h5ad
+spacetravlr_magic_beta_benchmark/

@@ -109,6 +109,24 @@ architecture as UNI — **not** the pathology FM from the paper. Alternatively s
 **Paired Visium benchmark** (measured RNA vs DeepSpot on the same spots): see
 [`example_run/README_ZEN38_PAIRED.md`](example_run/README_ZEN38_PAIRED.md) and `eval_paired_zen38.py`.
 
+### MAGIC + SpaceTravLR seed-beta benchmark
+
+To test whether SpaceTravLR seed betas trained from H&E-imputed expression agree with betas trained
+from measured spatial transcriptomics on the same spots, run:
+
+```bash
+python compare_spacetravlr_magic_betas.py \
+  --paired-h5ad example_run/zen38_paired_uni_official.h5ad \
+  --out-dir example_run/spacetravlr_magic_beta_benchmark \
+  --force-spatial-bins \
+  --spacetravlr-cmd "cargo run --release --bin spacetravlr --"
+```
+
+The script selects 10 shared genes by measured-vs-H&E expression correlation unless `--genes` is
+provided, applies clusterwise MAGIC to both source layers, trains two matched seed-mode runs with the
+same 10 genes as extra modulators, and writes `beta_correlation_summary.json`,
+`matched_beta_pairs.csv`, and per-gene beta correlations.
+
 ## References
 
 - DeepSpot repository: [github.com/ratschlab/DeepSpot](https://github.com/ratschlab/DeepSpot)
