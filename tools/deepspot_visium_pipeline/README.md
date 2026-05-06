@@ -106,6 +106,9 @@ If gated Hugging Face weights are unavailable, use **`--foundation-timm-imagenet
 architecture as UNI — **not** the pathology FM from the paper. Alternatively see
 `example_run/README_RUN.md` and `demo_dummy_fm_inference.py` for a random-FM plumbing test.
 
+**Paired Visium benchmark** (measured RNA vs DeepSpot on the same spots): see
+[`example_run/README_ZEN38_PAIRED.md`](example_run/README_ZEN38_PAIRED.md) and `eval_paired_zen38.py`.
+
 ## References
 
 - DeepSpot repository: [github.com/ratschlab/DeepSpot](https://github.com/ratschlab/DeepSpot)
