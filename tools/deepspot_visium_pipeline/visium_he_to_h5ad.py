@@ -21,6 +21,7 @@ Notes
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -32,14 +33,140 @@ import pandas as pd
 import scanpy as sc
 import torch
 import yaml
+from PIL import Image
 from tqdm import tqdm
 
+from deepspot.utils.utils_dataloader import compute_neighbors
+from deepspot.utils.utils_image import compute_mini_tiles, detach_and_convert
 from deepspot.utils.utils_image import (
-    crop_tile,
     get_low_res_image,
     get_morphology_model_and_preprocess,
     predict_spot_spatial_transcriptomics_from_image_path,
 )
+
+
+def _has_pyvips() -> bool:
+    try:
+        import pyvips  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def crop_tile_np(img: np.ndarray, x_pixel: float, y_pixel: float, diameter: int) -> np.ndarray:
+    """Crop square tile; x_pixel = row, y_pixel = col (DeepSpot convention)."""
+    half = int(diameter // 2)
+    r0 = int(x_pixel) - half
+    c0 = int(y_pixel) - half
+    tile = img[r0 : r0 + diameter, c0 : c0 + diameter, :3].astype(np.float32)
+    return tile
+
+
+def load_image_rgb_numpy(image_path: Path) -> np.ndarray:
+    """Load H&E as H×W×3 float32 RGB in [0,255]-ish range for cropping."""
+    return np.asarray(Image.open(image_path).convert("RGB"), dtype=np.float32)
+
+
+def get_low_res_image_pil(image_path: Path, downsample_factor: int) -> np.ndarray:
+    img = Image.open(image_path).convert("RGB")
+    w, h = img.size
+    small = img.resize((max(1, w // downsample_factor), max(1, h // downsample_factor)), Image.BILINEAR)
+    return np.asarray(small)
+
+
+def get_morphology_uni_timm_imagenet(device: torch.device):
+    """UNI-compatible ViT-L/14 architecture with ImageNet-pretrained weights (not pathology FM).
+
+    Use only when official UNI/H-optimus weights are unavailable. Expect domain shift vs paper.
+    """
+    import timm
+    from torchvision import transforms
+
+    morphology_model = timm.create_model(
+        "vit_large_patch16_224",
+        img_size=224,
+        patch_size=16,
+        init_values=1e-5,
+        num_classes=0,
+        dynamic_img_size=True,
+        pretrained=True,
+    )
+    morphology_model.eval()
+    preprocess = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize(224, antialias=True),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ]
+    )
+    return morphology_model, preprocess, 1024
+
+
+def predict_spot_spatial_transcriptomics_pil(
+    image_path: Path,
+    adata: ad.AnnData,
+    spot_diameter: int,
+    n_mini_tiles: int,
+    preprocess,
+    morphology_model,
+    model_expression,
+    device: torch.device,
+    super_resolution: bool = False,
+    neighbor_radius: int = 1,
+) -> np.ndarray:
+    """Same logic as DeepSpot ``predict_spot_spatial_transcriptomics_from_image_path`` using PIL/numpy (no pyvips)."""
+    img_rgb = load_image_rgb_numpy(image_path)
+    counts = []
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if torch.cuda.is_available()
+        else contextlib.nullcontext()
+    )
+    with autocast_ctx:
+        with torch.inference_mode():
+            for _, spot in tqdm(adata.obs.iterrows(), total=len(adata.obs), desc="DeepSpot inference"):
+                neighbors_barcodes = compute_neighbors(spot, adata.obs, radius=neighbor_radius)
+                neighbors_barcodes = [
+                    b for b in neighbors_barcodes.split("___") if b
+                ]
+
+                X_spot = crop_tile_np(img_rgb, spot.x_pixel, spot.y_pixel, spot_diameter).astype(np.uint8)
+                X_subspot = compute_mini_tiles(X_spot, n_mini_tiles, super_resolution)
+                X_neighbors = []
+                for _, spot_neighbor in adata.obs.query("barcode in @neighbors_barcodes").iterrows():
+                    X_neighbors.append(
+                        crop_tile_np(
+                            img_rgb,
+                            spot_neighbor.x_pixel,
+                            spot_neighbor.y_pixel,
+                            spot_diameter,
+                        ).astype(np.uint8)
+                    )
+
+                if len(X_neighbors) == 0:
+                    X_neighbors = [np.zeros_like(X_spot)]
+
+                X_spot = preprocess(X_spot).to(device).float()
+                X_subspot = torch.stack([preprocess(x) for x in X_subspot]).to(device).float()
+                X_neighbors = torch.stack([preprocess(x).to(device) for x in X_neighbors]).to(device).float()
+
+                X_spot = morphology_model(X_spot[None, ])
+                X_subspot = morphology_model(X_subspot)
+                X_neighbors = morphology_model(X_neighbors)
+
+                X_spot = detach_and_convert(X_spot)
+                X_subspot = detach_and_convert(X_subspot)
+                X_neighbors = detach_and_convert(X_neighbors)
+
+                X = [X_spot, X_subspot, X_neighbors]
+                expr = model_expression(X)
+                expr = expr.detach().cpu().numpy()
+                expr = model_expression.inverse_transform(expr)
+                assert np.isnan(expr).sum() == 0, spot
+                counts.append(expr)
+    counts = np.array(counts).squeeze()
+    return counts
 
 
 def _load_scalefactors(spatial_dir: Path) -> dict:
@@ -98,7 +225,8 @@ def build_adata_from_visium_spatial(
     selected_genes_bool: np.ndarray,
     sample_id: str,
     white_cutoff: float,
-) -> ad.AnnData:
+    use_pillow: bool,
+) -> tuple[ad.AnnData, Path, int]:
     """Create an AnnData with spot layout + dummy counts for DeepSpot inference."""
     sf = _load_scalefactors(spatial_dir)
     pos = _read_tissue_positions(spatial_dir)
@@ -142,15 +270,25 @@ def build_adata_from_visium_spatial(
             "Pass --image explicitly."
         )
 
-    import pyvips
+    if use_pillow:
+        img_rgb = load_image_rgb_numpy(image_path)
+        spot_diameter = int(float(sf["spot_diameter_fullres"]))
+        is_white = []
+        for _, row in tqdm(obs.iterrows(), total=len(obs), desc="White-tissue filter"):
+            main_tile = crop_tile_np(img_rgb, row.x_pixel, row.y_pixel, spot_diameter)
+            is_white.append(float(np.mean(main_tile)))
+    else:
+        import pyvips
 
-    image = pyvips.Image.new_from_file(str(image_path))
-    is_white = []
-    spot_diameter = float(sf["spot_diameter_fullres"])
-    for _, row in tqdm(obs.iterrows(), total=len(obs), desc="White-tissue filter"):
-        main_tile = crop_tile(image, row.x_pixel, row.y_pixel, int(spot_diameter))
-        main_tile = main_tile[:, :, :3]
-        is_white.append(float(np.mean(main_tile)))
+        from deepspot.utils.utils_image import crop_tile
+
+        image = pyvips.Image.new_from_file(str(image_path))
+        is_white = []
+        spot_diameter = int(float(sf["spot_diameter_fullres"]))
+        for _, row in tqdm(obs.iterrows(), total=len(obs), desc="White-tissue filter"):
+            main_tile = crop_tile(image, row.x_pixel, row.y_pixel, spot_diameter)
+            main_tile = main_tile[:, :, :3]
+            is_white.append(float(np.mean(main_tile)))
     obs["is_white"] = is_white
     obs["is_white_bool"] = (obs["is_white"].values > white_cutoff).astype(int)
     adata.obs = obs
@@ -166,29 +304,43 @@ def build_adata_grid_from_image(
     spot_diameter: int,
     spot_distance: int,
     white_cutoff: float,
+    use_pillow: bool,
+    max_spots: Optional[int],
 ) -> ad.AnnData:
     """Synthetic square grid (DeepSpot toy notebook pattern)."""
-    import pyvips
+    if use_pillow:
+        image = load_image_rgb_numpy(image_path)
+        height, width = image.shape[0], image.shape[1]
+    else:
+        import pyvips
 
-    image = pyvips.Image.new_from_file(str(image_path))
+        from deepspot.utils.utils_image import crop_tile
+
+        vips_img = pyvips.Image.new_from_file(str(image_path))
+        height, width = vips_img.height, vips_img.width
+
     coord = []
-    for i, x in enumerate(
-        range(spot_diameter + 1, image.height - spot_diameter - 1, spot_distance)
-    ):
-        for j, y in enumerate(
-            range(spot_diameter + 1, image.width - spot_diameter - 1, spot_distance)
-        ):
+    for i, x in enumerate(range(spot_diameter + 1, height - spot_diameter - 1, spot_distance)):
+        for j, y in enumerate(range(spot_diameter + 1, width - spot_diameter - 1, spot_distance)):
             coord.append([i, j, x, y])
-    coord = pd.DataFrame(
-        coord, columns=["x_array", "y_array", "x_pixel", "y_pixel"]
-    )
+            if max_spots is not None and len(coord) >= max_spots:
+                break
+        if max_spots is not None and len(coord) >= max_spots:
+            break
+
+    coord = pd.DataFrame(coord, columns=["x_array", "y_array", "x_pixel", "y_pixel"])
     coord.index = coord.index.astype(str)
 
     is_white = []
-    for _, row in tqdm(coord.iterrows(), total=len(coord), desc="White-tissue filter"):
-        main_tile = crop_tile(image, row.x_pixel, row.y_pixel, spot_diameter)
-        main_tile = main_tile[:, :, :3]
-        is_white.append(float(np.mean(main_tile)))
+    if use_pillow:
+        for _, row in tqdm(coord.iterrows(), total=len(coord), desc="White-tissue filter"):
+            main_tile = crop_tile_np(image, row.x_pixel, row.y_pixel, spot_diameter)
+            is_white.append(float(np.mean(main_tile)))
+    else:
+        for _, row in tqdm(coord.iterrows(), total=len(coord), desc="White-tissue filter"):
+            main_tile = crop_tile(vips_img, row.x_pixel, row.y_pixel, spot_diameter)
+            main_tile = main_tile[:, :, :3]
+            is_white.append(float(np.mean(main_tile)))
 
     counts = np.zeros((len(coord), int(selected_genes_bool.sum())), dtype=np.float32)
     obs = coord.copy()
@@ -207,6 +359,7 @@ def attach_downsampled_hires_for_squidpy(
     adata: ad.AnnData,
     image_path: Path,
     downsample_factor: int,
+    use_pillow: bool,
 ) -> None:
     """Attach a downsampled RGB preview + coordinates scaled to that preview.
 
@@ -214,7 +367,10 @@ def attach_downsampled_hires_for_squidpy(
     Squidpy/Scanpy scatter can use ``spatial_key='spatial_hires'`` together with
     ``uns['spatial']['library_id']['images']['hires']``.
     """
-    img_rgb = get_low_res_image(str(image_path), downsample_factor)
+    if use_pillow:
+        img_rgb = get_low_res_image_pil(image_path, downsample_factor)
+    else:
+        img_rgb = get_low_res_image(str(image_path), downsample_factor)
     if img_rgb.shape[-1] != 3:
         raise ValueError("Expected an RGB H&E image with 3 channels.")
 
@@ -276,8 +432,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument(
         "--foundation-weights",
         type=Path,
-        required=True,
-        help="Path to pathology FM checkpoint file on disk (see DeepSpot README: UNI / Phikon / H-optimus)",
+        default=None,
+        help="Path to pathology FM checkpoint (UNI/Phikon/H-optimus .bin). Not used with --foundation-timm-imagenet.",
+    )
+    p.add_argument(
+        "--foundation-timm-imagenet",
+        action="store_true",
+        help="Use timm ImageNet ViT-L/14 (UNI architecture) instead of a local FM file. "
+        "Use when HF-gated UNI weights are unavailable; expect domain shift vs the paper.",
+    )
+    p.add_argument(
+        "--pillow",
+        action="store_true",
+        help="Load/crop H&E with Pillow instead of pyvips (no libvips required). "
+        "Recommended when pyvips is not installed.",
+    )
+    p.add_argument(
+        "--max-spots",
+        type=int,
+        default=None,
+        help="Grid mode only: stop after this many candidate spots (useful for CPU demos).",
     )
     p.add_argument("--neighbor-radius", type=int, default=1)
     p.add_argument("--white-cutoff", type=float, default=200.0)
@@ -294,6 +468,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = p.parse_args(argv)
 
+    if args.foundation_timm_imagenet and args.foundation_weights is not None:
+        print(
+            "Ignoring --foundation-weights because --foundation-timm-imagenet was set.",
+            file=sys.stderr,
+        )
+    if not args.foundation_timm_imagenet and args.foundation_weights is None:
+        p.error("Either --foundation-weights or --foundation-timm-imagenet is required.")
+
+    use_pillow = bool(args.pillow) or (not _has_pyvips())
+    if use_pillow and not args.pillow and not _has_pyvips():
+        print(
+            "libvips not found; using Pillow for image I/O (pass --pillow to silence).",
+            file=sys.stderr,
+        )
+
     weights_dir: Path = args.weights_dir
     model_weights = weights_dir / "final_model.pkl"
     model_hparam_path = weights_dir / "top_param_overall.yaml"
@@ -308,6 +497,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         model_hparam = yaml.safe_load(fh)
     image_feature_model = model_hparam["image_feature_model"]
 
+    if args.foundation_timm_imagenet:
+        if image_feature_model != "uni":
+            raise ValueError(
+                "--foundation-timm-imagenet only matches checkpoints trained with "
+                f"`image_feature_model: uni` (this bundle uses `{image_feature_model}`)."
+            )
+
     genes = pd.read_csv(gene_path)
     selected_genes_bool = genes["isPredicted"].values
 
@@ -321,6 +517,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             selected_genes_bool,
             args.sample_id,
             args.white_cutoff,
+            use_pillow,
         )
         image_path = args.image if args.image is not None else resolved_image
     else:
@@ -337,6 +534,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             spot_diameter,
             spot_distance,
             args.white_cutoff,
+            use_pillow,
+            args.max_spots,
         )
 
     # Models
@@ -344,27 +543,46 @@ def main(argv: Optional[list[str]] = None) -> int:
     model_expression.to(device)
     model_expression.eval()
 
-    morphology_model, preprocess, _feat_dim = get_morphology_model_and_preprocess(
-        model_name=image_feature_model,
-        device=device,
-        model_path=str(args.foundation_weights),
-    )
-    morphology_model.to(device)
-    morphology_model.eval()
+    if args.foundation_timm_imagenet:
+        morphology_model, preprocess, _feat_dim = get_morphology_uni_timm_imagenet(device)
+        morphology_model.to(device)
+        morphology_model.eval()
+    else:
+        morphology_model, preprocess, _feat_dim = get_morphology_model_and_preprocess(
+            model_name=image_feature_model,
+            device=device,
+            model_path=str(args.foundation_weights),
+        )
+        morphology_model.to(device)
+        morphology_model.eval()
 
     n_mini_tiles = 9
-    counts = predict_spot_spatial_transcriptomics_from_image_path(
-        str(image_path),
-        adata,
-        spot_diameter,
-        n_mini_tiles,
-        preprocess,
-        morphology_model,
-        model_expression,
-        device,
-        super_resolution=False,
-        neighbor_radius=args.neighbor_radius,
-    )
+    if use_pillow:
+        counts = predict_spot_spatial_transcriptomics_pil(
+            Path(image_path),
+            adata,
+            spot_diameter,
+            n_mini_tiles,
+            preprocess,
+            morphology_model,
+            model_expression,
+            device,
+            super_resolution=False,
+            neighbor_radius=args.neighbor_radius,
+        )
+    else:
+        counts = predict_spot_spatial_transcriptomics_from_image_path(
+            str(image_path),
+            adata,
+            spot_diameter,
+            n_mini_tiles,
+            preprocess,
+            morphology_model,
+            model_expression,
+            device,
+            super_resolution=False,
+            neighbor_radius=args.neighbor_radius,
+        )
 
     counts = np.asarray(counts, dtype=np.float32)
     counts[counts < 0] = 0.0
@@ -373,6 +591,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     adata.X = counts
     # Primary gene names from training manifest
     adata.var["gene_symbols"] = adata.var_names
+    if args.foundation_timm_imagenet:
+        adata.uns["morphology_backbone"] = "timm_vit_large_patch16_224_imagenet1k"
+        adata.uns["morphology_note"] = (
+            "ImageNet-pretrained ViT-L/14 (UNI architecture), not official UNI "
+            "weights. Approve https://huggingface.co/MahmoodLab/UNI and use "
+            "--foundation-weights for the pathology FM from the paper."
+        )
 
     # SpaceTravLR contract: use the same units for spatial radii as obsm["spatial"] (here: full-res pixels).
     adata.obsm["spatial"] = adata.obs[["y_pixel", "x_pixel"]].values.astype(float)
@@ -384,7 +609,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.skip_squidpy_image:
         try:
             attach_downsampled_hires_for_squidpy(
-                adata, Path(image_path), args.downsample_factor
+                adata, Path(image_path), args.downsample_factor, use_pillow
             )
         except Exception as exc:  # noqa: BLE001
             print(
