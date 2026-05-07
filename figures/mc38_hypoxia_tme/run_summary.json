@@ -1,0 +1,37 @@
+{
+  "n_spots": 7028,
+  "n_genes": 5003,
+  "species_guess": "mouse",
+  "h5ad_paths": [
+    "/workspace/data/h5ad/Xenium_mouse_skin.h5ad"
+  ],
+  "hypoxia_genes_used": [
+    "Slc2a1",
+    "Vegfa",
+    "Bnip3",
+    "Pgk1",
+    "Ldha",
+    "Eno1",
+    "Hk2",
+    "Egln3",
+    "Slc2a3",
+    "Pim1",
+    "Gpi1",
+    "Tpi1"
+  ],
+  "cd8_genes_used": [
+    "Cd8a",
+    "Cd8b1",
+    "Gzma",
+    "Gzmb",
+    "Prf1",
+    "Ifng",
+    "Fasl",
+    "Klrd1",
+    "Klrk1"
+  ],
+  "knn_k": 15,
+  "crispr_columns_found": [],
+  "spearman_hypoxia_cd8": 0.01998118404613544,
+  "spearman_hypoxia_local_cd8": 0.008193555563928845
+}
