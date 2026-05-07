@@ -48,3 +48,6 @@ data/geo_perturbseq/
 data/hf_perturbmulti/
 perturb_multi_imputation/
 snrna_human_tonsil_2026-04-20/
+
+# Generated MC38 TME analysis artifacts (optional local outputs)
+figures/mc38_hypoxia_tme/processed_with_niches.h5ad
