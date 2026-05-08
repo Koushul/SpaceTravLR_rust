@@ -27,7 +27,10 @@ use spacetravlr::training_hud::{RunConfigSummary, RunConfigSummaryBuildArgs};
 use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
 };
-use spacetravlr::{RunSummaryParams, write_run_summary_html};
+use spacetravlr::{
+    BetadataCollectAggregate, RunSummaryParams, betadata_collect_interactions_all_cell_types,
+    load_obs_for_collect_interactions, write_collected_interactions_feather, write_run_summary_html,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "tui")]
@@ -60,6 +63,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Load spaceship_config.toml from the repo build, install data/ next to the binary, or pass --config, then apply CLI overrides.
 • Use --plain for compact line-oriented logs instead of the full-screen dashboard (when built with `tui`).
 • Subcommand run-summary writes the HTML report without training.
+• Subcommand collect-interactions builds a multi–cell-type interaction database from *_betadata.feather files.
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData."#;
 
@@ -157,6 +161,8 @@ impl From<RctdModeArg> for DeconvMode {
 enum Commands {
     /// Generate spacetravlr_run_summary.html (AnnData summary, config, optional manifest).
     RunSummary(RunSummaryCli),
+    /// Scan *_betadata.feather under a run directory; aggregate β per modulator × target × cell type.
+    CollectInteractions(CollectInteractionsCli),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -201,6 +207,34 @@ struct RunSummaryCli {
         help = "glob for counting betadata Feather files in the output directory"
     )]
     betadata_pattern: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct CollectInteractionsCli {
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "spacetravlr_run_repro.toml from the finished training run"
+    )]
+    run_toml: PathBuf,
+    #[arg(
+        long,
+        default_value = "cell_type",
+        help = "obs column for cell-type grouping"
+    )]
+    annot: String,
+    #[arg(
+        long,
+        default_value = "mean",
+        help = "mean|min|max|sum|positive|negative"
+    )]
+    aggregate: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Output .feather path (default: <[execution].output_dir>/plucked_feathers.feather)"
+    )]
+    out: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -1519,6 +1553,44 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
+    let mode = BetadataCollectAggregate::parse(ci.aggregate.trim()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "aggregate must be mean|min|max|sum|positive|negative (got {:?})",
+            ci.aggregate
+        )
+    })?;
+    let cfg = SpaceshipConfig::from_file(&ci.run_toml)?;
+    let annot_col = ci.annot.trim();
+    anyhow::ensure!(
+        !annot_col.is_empty(),
+        "--annot must be a non-empty obs column name"
+    );
+    let ctx = load_obs_for_collect_interactions(ci.run_toml.as_path(), annot_col)?;
+    let run_output_dir = cfg.resolve_training_output_dir(ci.run_toml.as_path());
+    let dir_s = run_output_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("training output directory path must be UTF-8"))?;
+    let rows = betadata_collect_interactions_all_cell_types(
+        dir_s,
+        &ctx.obs_names,
+        &ctx.cluster_keys,
+        &ctx.cell_type_labels,
+        mode,
+        None,
+    )?;
+    let out_path = ci
+        .out
+        .clone()
+        .unwrap_or_else(|| run_output_dir.join("plucked_feathers.feather"));
+    let out_s = out_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?;
+    write_collected_interactions_feather(out_s, &rows)?;
+    eprintln!("Wrote {} rows to {}", rows.len(), out_path.display());
+    Ok(())
+}
+
 #[cfg(feature = "tui")]
 fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     if cli.plain {
@@ -2316,8 +2388,10 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    if let Some(Commands::RunSummary(rs)) = &cli.command {
-        return run_run_summary(&cli, rs);
+    match &cli.command {
+        Some(Commands::RunSummary(rs)) => return run_run_summary(&cli, rs),
+        Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
+        None => {}
     }
 
     if cli.obs.is_some() && cli.peek.is_none() && cli.plot_umap.is_none() {

@@ -37,6 +37,7 @@ pub mod perturb;
 pub use perturb::{ComputeSplashAllProgressArgs, PerturbWithTargetsInputs};
 pub mod perturb_batch;
 pub mod perturb_mode;
+pub use perturb_mode::{CollectInteractionsObs, load_obs_for_collect_interactions};
 #[cfg(feature = "tui")]
 pub mod perturb_tui;
 pub mod run_summary_html;
@@ -60,8 +61,10 @@ pub mod transition_umap;
 pub mod tui_theme;
 pub use betadata::{
     BetaFrame, BetaFrameFromParts, Betabase, BetadataCollectAggregate, CollectedInteraction,
-    GeneMatrix, TopBetaCoefficient, betadata_collect_interactions_parallel, write_betadata_feather,
-    write_betadata_feather_to_writer,
+    CollectedInteractionRow, GeneMatrix, TopBetaCoefficient,
+    betadata_collect_interactions_all_cell_types,
+    betadata_collect_interactions_all_cell_types_one_gene, betadata_collect_interactions_parallel,
+    write_betadata_feather, write_betadata_feather_to_writer, write_collected_interactions_feather,
 };
 pub use config::{
     CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME,

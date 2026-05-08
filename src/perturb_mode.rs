@@ -1,7 +1,7 @@
 use crate::betadata::{
     Betabase, BetadataProgressPhase, BetadataUiProgress, GeneMatrix,
     betadata_cluster_keys_from_obs_dataframe, clusters_usize_from_obs_dataframe,
-    resolve_betadata_cluster_key_column, write_betadata_feather,
+    obs_series_row_str, resolve_betadata_cluster_key_column, write_betadata_feather,
 };
 use crate::config::{SpaceshipConfig, expand_user_path};
 use crate::ligand::{
@@ -1068,6 +1068,60 @@ pub fn run_interactive(runtime: PerturbRuntime) -> anyhow::Result<()> {
             _ => println!("Unknown command."),
         }
     }
+}
+
+pub struct CollectInteractionsObs {
+    pub obs_names: Vec<String>,
+    pub cluster_keys: Vec<String>,
+    pub cell_type_labels: Vec<String>,
+}
+
+pub fn load_obs_for_collect_interactions(
+    run_toml: &std::path::Path,
+    annot_col: &str,
+) -> anyhow::Result<CollectInteractionsObs> {
+    let cfg = SpaceshipConfig::from_file(run_toml)?;
+    let adata_path = expand_user_path(cfg.resolve_adata_path().as_str());
+    if adata_path.is_empty() {
+        anyhow::bail!("data.adata_path is empty in run TOML");
+    }
+    let adata = AnnData::<H5>::open(H5::open(adata_path.as_str())?)?;
+    let obs_names_full = adata.obs_names().into_vec();
+    let row_idx: Vec<usize> = if let Some(rel) = cfg.data.perturb_obs_subset_file.as_deref() {
+        let p = PathBuf::from(expand_user_path(rel));
+        perturb_obs_indices_from_file(p.as_path(), &obs_names_full)?
+    } else {
+        (0..obs_names_full.len()).collect()
+    };
+    let obs_df = adata.read_obs()?;
+    let betadata_key_col =
+        resolve_betadata_cluster_key_column(&obs_df, cfg.data.cluster_annot.as_str());
+    let cluster_keys_full =
+        betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
+
+    let col = obs_df.column(annot_col).with_context(|| {
+        format!(
+            "obs column {:?} not found (for cell-type grouping)",
+            annot_col
+        )
+    })?;
+    let series = col.as_materialized_series();
+
+    let obs_names: Vec<String> = row_idx.iter().map(|&i| obs_names_full[i].clone()).collect();
+    let cluster_keys: Vec<String> = row_idx
+        .iter()
+        .map(|&i| cluster_keys_full[i].clone())
+        .collect();
+    let mut cell_type_labels = Vec::with_capacity(row_idx.len());
+    for &i in &row_idx {
+        cell_type_labels.push(obs_series_row_str(series, i)?);
+    }
+
+    Ok(CollectInteractionsObs {
+        obs_names,
+        cluster_keys,
+        cell_type_labels,
+    })
 }
 
 #[cfg(test)]

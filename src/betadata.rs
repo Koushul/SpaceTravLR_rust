@@ -1367,6 +1367,16 @@ pub struct CollectedInteraction {
     pub interaction_type: String,
 }
 
+/// One row of the multi–cell-type interactions database (`interaction`, `target_gene`, `beta`, …).
+#[derive(Clone, Debug, Serialize)]
+pub struct CollectedInteractionRow {
+    pub interaction: String,
+    pub target_gene: String,
+    pub beta: f64,
+    pub interaction_type: String,
+    pub cell_type: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BetadataCollectAggregate {
     Mean,
@@ -1428,6 +1438,340 @@ fn aggregate_values(vals: &[f64], mode: BetadataCollectAggregate) -> Option<f64>
             }
         }
     }
+}
+
+fn unique_sorted_cell_types(labels: &[String]) -> Vec<String> {
+    let mut seen = HashSet::with_capacity(labels.len().min(256));
+    for l in labels {
+        seen.insert(l.as_str());
+    }
+    let mut out: Vec<String> = seen.into_iter().map(str::to_string).collect();
+    out.sort();
+    out
+}
+
+/// Precomputed per-cell-type row indices into the feather (through the `mapping`).
+/// Avoids scanning the full `n_obs` boolean mask for every (column × cell_type).
+struct CellTypeIndices {
+    labels: Vec<Arc<str>>,
+    mapped_rows: Vec<Vec<usize>>,
+}
+
+impl CellTypeIndices {
+    fn build(
+        cell_type_labels: &[String],
+        unique_cell_types: &[Arc<str>],
+        mapping: &[usize],
+    ) -> Self {
+        let n_obs = cell_type_labels.len();
+        let mut label_to_idx: HashMap<&str, usize> = HashMap::with_capacity(unique_cell_types.len());
+        for (i, ct) in unique_cell_types.iter().enumerate() {
+            label_to_idx.insert(ct.as_ref(), i);
+        }
+        let mut mapped_rows: Vec<Vec<usize>> = vec![Vec::new(); unique_cell_types.len()];
+        for ci in 0..n_obs {
+            if let Some(&ct_i) = label_to_idx.get(cell_type_labels[ci].as_str()) {
+                mapped_rows[ct_i].push(mapping[ci]);
+            }
+        }
+        CellTypeIndices {
+            labels: unique_cell_types.to_vec(),
+            mapped_rows,
+        }
+    }
+}
+
+#[inline]
+fn aggregate_mapped_column(
+    col_data: &[f64],
+    feather_rows: &[usize],
+    mode: BetadataCollectAggregate,
+) -> Option<f64> {
+    if feather_rows.is_empty() {
+        return None;
+    }
+    match mode {
+        BetadataCollectAggregate::Mean => {
+            let mut sum = 0.0f64;
+            for &r in feather_rows {
+                sum += *col_data.get(r).unwrap_or(&0.0);
+            }
+            Some(sum / feather_rows.len() as f64)
+        }
+        BetadataCollectAggregate::Sum => {
+            let mut sum = 0.0f64;
+            for &r in feather_rows {
+                sum += *col_data.get(r).unwrap_or(&0.0);
+            }
+            Some(sum)
+        }
+        BetadataCollectAggregate::Min => {
+            let mut v = f64::INFINITY;
+            for &r in feather_rows {
+                let x = *col_data.get(r).unwrap_or(&0.0);
+                if x < v { v = x; }
+            }
+            Some(v)
+        }
+        BetadataCollectAggregate::Max => {
+            let mut v = f64::NEG_INFINITY;
+            for &r in feather_rows {
+                let x = *col_data.get(r).unwrap_or(&0.0);
+                if x > v { v = x; }
+            }
+            Some(v)
+        }
+        BetadataCollectAggregate::Positive => {
+            let mut sum = 0.0f64;
+            let mut cnt = 0usize;
+            for &r in feather_rows {
+                let x = *col_data.get(r).unwrap_or(&0.0);
+                if x > 0.0 { sum += x; cnt += 1; }
+            }
+            if cnt == 0 { None } else { Some(sum / cnt as f64) }
+        }
+        BetadataCollectAggregate::Negative => {
+            let mut sum = 0.0f64;
+            let mut cnt = 0usize;
+            for &r in feather_rows {
+                let x = *col_data.get(r).unwrap_or(&0.0);
+                if x < 0.0 { sum += x; cnt += 1; }
+            }
+            if cnt == 0 { None } else { Some(sum / cnt as f64) }
+        }
+    }
+}
+
+/// Like [`betadata_collect_interactions_one_gene`], but emits one row per (coefficient × cell type).
+///
+/// Uses precomputed per-cell-type row-index lists so the inner loop touches only matching cells,
+/// and materializes each Polars column as a contiguous `&[f64]` slice for zero-overhead access.
+pub fn betadata_collect_interactions_all_cell_types_one_gene(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    unique_cell_types: &[Arc<str>],
+    mode: BetadataCollectAggregate,
+) -> Result<Vec<CollectedInteractionRow>> {
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let mapping =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
+
+    let ct_idx = CellTypeIndices::build(cell_type_labels, unique_cell_types, &mapping);
+    let n_ct = ct_idx.labels.len();
+
+    let coef_count = all_names
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| Some(*i) != label_idx && !is_intercept_column(c))
+        .count();
+    let mut out = Vec::with_capacity(coef_count * n_ct / 2);
+    let target_gene_arc: Arc<str> = Arc::from(target_gene);
+
+    for (i, col_name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx {
+            continue;
+        }
+        if is_intercept_column(col_name) {
+            continue;
+        }
+        let col = match df.column(col_name.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let Ok(series) = col.cast(&DataType::Float64) else {
+            continue;
+        };
+        let ca = series.f64()?;
+        let col_data: Vec<f64> = ca.into_no_null_iter().collect();
+        let itype: &'static str = classify_betadata_column_type(col_name);
+
+        for ct_i in 0..n_ct {
+            let rows = &ct_idx.mapped_rows[ct_i];
+            let Some(beta) = aggregate_mapped_column(&col_data, rows, mode) else {
+                continue;
+            };
+            if !beta.is_finite() || beta.abs() <= 1e-15 {
+                continue;
+            }
+            out.push(CollectedInteractionRow {
+                interaction: col_name.clone(),
+                target_gene: target_gene_arc.to_string(),
+                beta,
+                interaction_type: itype.to_string(),
+                cell_type: ct_idx.labels[ct_i].to_string(),
+            });
+        }
+    }
+    drop(ct_idx);
+    Ok(out)
+}
+
+/// Parallel scan of every `*_betadata.feather` under `dir` (Rayon). Corrupt files are skipped with a warning.
+///
+/// Each feather is read exactly once; per-cell-type aggregation uses precomputed row-index lists.
+/// Progress is shown via an `indicatif` bar with ETA and throughput when stderr is a TTY.
+pub fn betadata_collect_interactions_all_cell_types(
+    dir: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    mode: BetadataCollectAggregate,
+    max_genes: Option<usize>,
+) -> Result<Vec<CollectedInteractionRow>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    anyhow::ensure!(
+        obs_names.len() == cell_type_labels.len(),
+        "obs_names len {} != cell_type_labels len {}",
+        obs_names.len(),
+        cell_type_labels.len()
+    );
+
+    let unique_cell_types = unique_sorted_cell_types(cell_type_labels);
+    anyhow::ensure!(
+        !unique_cell_types.is_empty(),
+        "no distinct cell types in labels — check obs annotation column"
+    );
+    let unique_arcs: Vec<Arc<str>> = unique_cell_types.iter().map(|s| Arc::from(s.as_str())).collect();
+    let unique_arcs = Arc::new(unique_arcs);
+    let cell_type_labels_arc = Arc::new(cell_type_labels.to_vec());
+
+    let dir_path = Path::new(dir);
+    let mut paths: Vec<(String, PathBuf)> = std::fs::read_dir(dir_path)
+        .with_context(|| format!("read_dir {}", dir_path.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_str()?;
+            let stem = name.strip_suffix("_betadata.feather")?;
+            if stem.is_empty() {
+                return None;
+            }
+            Some((stem.to_string(), p))
+        })
+        .collect();
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(cap) = max_genes {
+        paths.truncate(cap.min(paths.len()));
+    }
+
+    let n_total = paths.len();
+    let pb = if std::io::stderr().is_terminal() && n_total > 0 {
+        let bar = indicatif::ProgressBar::new(n_total as u64);
+        bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {per_sec} eta {eta} collect-interactions",
+                )?
+                .progress_chars("#>-"),
+        );
+        bar.enable_steady_tick(std::time::Duration::from_millis(200));
+        Some(Arc::new(bar))
+    } else {
+        eprintln!("Scanning {} betadata feathers…", n_total);
+        None
+    };
+
+    let row_counts: Arc<std::sync::atomic::AtomicUsize> =
+        Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let results: Vec<Vec<CollectedInteractionRow>> = paths
+        .par_iter()
+        .filter_map(|(gene, path)| {
+            let ps = path.to_string_lossy();
+            let r = betadata_collect_interactions_all_cell_types_one_gene(
+                &ps,
+                gene.as_str(),
+                obs_names,
+                cluster_keys,
+                cell_type_labels_arc.as_slice(),
+                unique_arcs.as_slice(),
+                mode,
+            );
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
+            match r {
+                Ok(v) => {
+                    row_counts.fetch_add(v.len(), std::sync::atomic::Ordering::Relaxed);
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load {}: {:#}", path.display(), e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if let Some(p) = &pb {
+        p.finish_with_message("Done collecting interactions");
+    }
+
+    let total_rows = row_counts.load(std::sync::atomic::Ordering::Relaxed);
+    let mut merged = Vec::with_capacity(total_rows);
+    for v in results {
+        merged.extend(v);
+    }
+    merged.par_sort_unstable_by(|a, b| {
+        b.beta
+            .abs()
+            .partial_cmp(&a.beta.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cell_type.cmp(&b.cell_type))
+            .then_with(|| a.target_gene.cmp(&b.target_gene))
+            .then_with(|| a.interaction.cmp(&b.interaction))
+    });
+    Ok(merged)
+}
+
+/// Write [`CollectedInteractionRow`] as Feather-compatible Arrow IPC (LZ4).
+pub fn write_collected_interactions_feather(path: &str, rows: &[CollectedInteractionRow]) -> Result<()> {
+    let interaction: Vec<String> = rows.iter().map(|r| r.interaction.clone()).collect();
+    let target_gene: Vec<String> = rows.iter().map(|r| r.target_gene.clone()).collect();
+    let beta: Vec<f64> = rows.iter().map(|r| r.beta).collect();
+    let interaction_type: Vec<String> = rows.iter().map(|r| r.interaction_type.clone()).collect();
+    let cell_type: Vec<String> = rows.iter().map(|r| r.cell_type.clone()).collect();
+
+    let mut df = DataFrame::new(vec![
+        Series::new("interaction".into(), interaction).into(),
+        Series::new("target_gene".into(), target_gene).into(),
+        Series::new("beta".into(), beta).into(),
+        Series::new("interaction_type".into(), interaction_type).into(),
+        Series::new("cell_type".into(), cell_type).into(),
+    ])?;
+
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let f = File::create(path).with_context(|| format!("create {}", path))?;
+    let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
+    w.finish(&mut df).context("write IPC / feather")?;
+    Ok(())
 }
 
 /// Aggregates every β column in one target-gene feather for cells matching `cell_include_mask`.
@@ -1700,5 +2044,61 @@ mod feather_label_tests {
     fn label_index_falls_back_to_cluster_when_no_cellid() {
         let names = vec!["Cluster".into(), "beta0".into()];
         assert_eq!(betadata_feather_label_column_index(&names), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod collect_interactions_all_cell_types_tests {
+    use super::*;
+    use ndarray::array;
+
+    #[test]
+    fn one_gene_cluster_keyed_mean_per_cell_type() {
+        let dir = std::env::temp_dir().join(format!(
+            "betadata_collect_all_ct_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TG_betadata.feather");
+        let cols = vec!["beta0".into(), "beta_MOD".into()];
+        let m = array![[0.0f64, 10.0], [0.0, 30.0]];
+        write_betadata_feather(
+            path.to_str().unwrap(),
+            "Cluster",
+            &["cA".into(), "cB".into()],
+            &cols,
+            &m,
+        )
+        .unwrap();
+
+        let obs_names = vec!["o1".into(), "o2".into(), "o3".into(), "o4".into()];
+        let cluster_keys = vec!["cA".into(), "cA".into(), "cB".into(), "cB".into()];
+        let labels: Vec<String> = vec!["T1".into(), "T1".into(), "T2".into(), "T2".into()];
+        let unique = unique_sorted_cell_types(&labels);
+        let unique_arcs: Vec<Arc<str>> = unique.iter().map(|s| Arc::from(s.as_str())).collect();
+
+        let rows = betadata_collect_interactions_all_cell_types_one_gene(
+            path.to_str().unwrap(),
+            "TG",
+            &obs_names,
+            &cluster_keys,
+            &labels,
+            &unique_arcs,
+            BetadataCollectAggregate::Mean,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        let t1: Vec<_> = rows.iter().filter(|r| r.cell_type == "T1").collect();
+        assert_eq!(t1.len(), 1);
+        assert!((t1[0].beta - 10.0).abs() < 1e-9);
+        assert_eq!(t1[0].target_gene, "TG");
+        assert_eq!(t1[0].interaction, "beta_MOD");
+        assert_eq!(t1[0].interaction_type, "tf");
+        let t2: Vec<_> = rows.iter().filter(|r| r.cell_type == "T2").collect();
+        assert_eq!(t2.len(), 1);
+        assert!((t2[0].beta - 30.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
