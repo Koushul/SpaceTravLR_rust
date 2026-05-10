@@ -1,9 +1,7 @@
-use crate::adata_terminal_scatter::{
-    self as adata_scatter, ratatui_color_for_cell_type_label, sorted_unique_labels_from_counts,
-};
+use crate::adata_terminal_scatter::{self as adata_scatter, sorted_unique_labels_from_counts};
 use crate::estimator::CnnEpochHudSlot;
 use crate::training_hud::{TrainingHud, TrainingHudState};
-use crate::tui_theme::TuiColors;
+use crate::tui_theme::{TuiColors, cell_type_color_for_label};
 use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -1959,7 +1957,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     let ct_disp = truncate_label(ct, label_w);
                     let left = format!("{:<lw$}", ct_disp, lw = label_w);
                     let right = format!("{:>cw$}", count, cw = count_w);
-                    let ct_c = ratatui_color_for_cell_type_label(ct, &sorted_type_labels);
+                    let ct_c = cell_type_color_for_label(theme_slot, ct, &sorted_type_labels);
                     cell_lines.push(Line::from(vec![
                         Span::styled(left, Style::default().fg(ct_c).add_modifier(Modifier::BOLD)),
                         Span::styled(
