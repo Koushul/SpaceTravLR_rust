@@ -82,6 +82,17 @@ impl Default for RustPreprocessParams {
     }
 }
 
+/// umap-rs manifold calibration requires `min_dist <= spread`. Returns a pair that satisfies
+/// this by taking `min_dist = min(min_dist, spread)` and `spread = max(spread, min_dist)` after
+/// clamping away from zero.
+pub fn clamp_umap_min_dist_spread(min_dist: f32, spread: f32) -> (f32, f32) {
+    let md = min_dist.max(1e-6f32);
+    let sp = spread.max(1e-6f32);
+    let md2 = md.min(sp);
+    let sp2 = sp.max(md);
+    (md2, sp2)
+}
+
 #[derive(Clone, Debug)]
 pub struct RustPreprocessSteps {
     pub qc_filter: bool,
@@ -568,11 +579,13 @@ pub fn run_umap_on_pca(
         .n_epochs
         .unwrap_or(if n <= 10_000 { 500 } else { 200 });
 
+    let (min_dist, spread) = clamp_umap_min_dist_spread(params.min_dist, params.spread);
+
     let config = UmapConfig {
         n_components: 2,
         manifold: ManifoldParams {
-            min_dist: params.min_dist,
-            spread: params.spread,
+            min_dist,
+            spread,
             ..Default::default()
         },
         graph: GraphParams {

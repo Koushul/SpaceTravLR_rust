@@ -44,9 +44,9 @@ pub mod run_summary_html;
 pub mod scanpy_preprocess;
 pub mod rust_preprocess;
 pub use rust_preprocess::{
-    rust_preprocess_h5ad, rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps,
-    umap_lab_load_pca_session, umap_lab_run_embedding, RustPreprocessParams, RustPreprocessSteps,
-    UmapLabLoaded,
+    clamp_umap_min_dist_spread, rust_preprocess_h5ad, rust_preprocess_h5ad_to_memory,
+    rust_preprocess_h5ad_with_steps, umap_lab_load_pca_session, umap_lab_run_embedding,
+    RustPreprocessParams, RustPreprocessSteps, UmapLabLoaded,
 };
 #[cfg(feature = "self-update")]
 pub mod self_update;

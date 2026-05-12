@@ -147,6 +147,9 @@ fn merge_umap_params(base: &RustPreprocessParams, req: &UmapRequest) -> RustPrep
     if let Some(v) = req.umap_learning_rate {
         p.umap_learning_rate = v.max(1e-6);
     }
+    let (md, sp) = spacetravlr::rust_preprocess::clamp_umap_min_dist_spread(p.min_dist, p.spread);
+    p.min_dist = md;
+    p.spread = sp;
     p
 }
 

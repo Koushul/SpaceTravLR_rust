@@ -16,11 +16,16 @@ import { Label } from "@/components/ui/label"
 import { Slider } from "@/components/ui/slider"
 import { drawScatter2d } from "@/drawScatter"
 
+function clampMinDistSpread(minDist: number, spread: number): [number, number] {
+  const md = Math.max(minDist, 1e-6)
+  const sp = Math.max(spread, 1e-6)
+  return [Math.min(md, sp), Math.max(sp, md)]
+}
+
 type Phase = "idle" | "loading_file" | "running_umap" | "ready" | "error"
 
 export default function App() {
   const [path, setPath] = useState("")
-  const [loadNonce, setLoadNonce] = useState(0)
   const [phase, setPhase] = useState<Phase>("idle")
   const [error, setError] = useState<string | null>(null)
   const [meta, setMeta] = useState<LoadResponse | null>(null)
@@ -40,16 +45,19 @@ export default function App() {
 
   const runUmap = useCallback(async () => {
     if (!meta) return
+    const [md2, sp2] = clampMinDistSpread(minDist, spread)
+    if (md2 !== minDist) setMinDist(md2)
+    if (sp2 !== spread) setSpread(sp2)
     setPhase("running_umap")
     setError(null)
     try {
       const res = await apiUmap({
         n_neighbors: nNeighbors,
-        min_dist: minDist,
+        min_dist: md2,
         n_epochs: nEpochs,
         ef_construction: efConstruction,
         n_pca_components: Math.min(nPca, meta.n_pca_available),
-        spread,
+        spread: sp2,
         umap_learning_rate: lr,
       })
       setUmap(res)
@@ -68,6 +76,11 @@ export default function App() {
     spread,
     lr,
   ])
+
+  const triggerUmap = useCallback(() => {
+    if (!meta) return
+    void runUmap()
+  }, [meta, runUmap])
 
   const loadFile = async () => {
     const p = path.trim()
@@ -88,7 +101,6 @@ export default function App() {
       })
       setMeta(m)
       setNPca((v) => Math.min(v, m.n_pca_available))
-      setLoadNonce((n) => n + 1)
       setPhase("ready")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -96,24 +108,16 @@ export default function App() {
     }
   }
 
+  const didInitialRun = useRef(false)
   useEffect(() => {
-    if (!meta?.path) return
-    const t = window.setTimeout(() => {
-      void runUmap()
-    }, 140)
-    return () => window.clearTimeout(t)
-  }, [
-    loadNonce,
-    meta?.path,
-    nNeighbors,
-    minDist,
-    nEpochs,
-    efConstruction,
-    nPca,
-    spread,
-    lr,
-    runUmap,
-  ])
+    if (!meta?.path) {
+      didInitialRun.current = false
+      return
+    }
+    if (didInitialRun.current) return
+    didInitialRun.current = true
+    void runUmap()
+  }, [meta?.path, runUmap])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -215,7 +219,10 @@ export default function App() {
         <Card>
           <CardHeader>
             <CardTitle>UMAP parameters</CardTitle>
-            <CardDescription>Adjust and release — UMAP re-runs after a short debounce.</CardDescription>
+            <CardDescription>
+              UMAP re-runs on pointer up. <code className="text-xs">min_dist</code> must be ≤{" "}
+              <code className="text-xs">spread</code> (values auto-adjust to satisfy umap-rs).
+            </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <ParamSlider
@@ -225,6 +232,7 @@ export default function App() {
               max={150}
               step={1}
               onChange={setNNeighbors}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
             <ParamSlider
@@ -234,6 +242,7 @@ export default function App() {
               max={0.99}
               step={0.01}
               onChange={setMinDist}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
             <ParamSlider
@@ -243,6 +252,7 @@ export default function App() {
               max={1200}
               step={10}
               onChange={setNEpochs}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
             <ParamSlider
@@ -252,6 +262,7 @@ export default function App() {
               max={400}
               step={4}
               onChange={setEfConstruction}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
             <ParamSlider
@@ -261,6 +272,7 @@ export default function App() {
               max={Math.max(2, meta?.n_pca_available ?? 50)}
               step={1}
               onChange={(v) => setNPca(v)}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
             <ParamSlider
@@ -270,6 +282,7 @@ export default function App() {
               max={3}
               step={0.05}
               onChange={setSpread}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
             <ParamSlider
@@ -279,6 +292,7 @@ export default function App() {
               max={5}
               step={0.05}
               onChange={setLr}
+              onCommit={triggerUmap}
               disabled={!meta || busy}
             />
           </CardContent>
@@ -329,9 +343,10 @@ function ParamSlider(props: {
   max: number
   step: number
   onChange: (v: number) => void
+  onCommit: () => void
   disabled?: boolean
 }) {
-  const { label, value, min, max, step, onChange, disabled } = props
+  const { label, value, min, max, step, onChange, onCommit, disabled } = props
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
@@ -347,6 +362,7 @@ function ParamSlider(props: {
           const n = typeof v === "number" ? v : (v[0] ?? value)
           onChange(n)
         }}
+        onValueCommitted={onCommit}
       />
     </div>
   )
