@@ -279,8 +279,8 @@ export default function App() {
               label={`spread (${spread.toFixed(2)})`}
               value={spread}
               min={0.1}
-              max={3}
-              step={0.05}
+              max={1}
+              step={0.02}
               onChange={setSpread}
               onCommit={triggerUmap}
               disabled={!meta || busy}

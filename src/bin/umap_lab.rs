@@ -125,6 +125,9 @@ fn merge_preprocess_params(req: &LoadRequest) -> RustPreprocessParams {
 }
 
 fn merge_umap_params(base: &RustPreprocessParams, req: &UmapRequest) -> RustPreprocessParams {
+    const SPREAD_MIN: f32 = 0.1;
+    const SPREAD_MAX: f32 = 1.0;
+
     let mut p = base.clone();
     if let Some(n) = req.n_neighbors {
         p.n_neighbors = n.max(2);
@@ -142,11 +145,12 @@ fn merge_umap_params(base: &RustPreprocessParams, req: &UmapRequest) -> RustPrep
         p.n_pca_components = n.max(2);
     }
     if let Some(v) = req.spread {
-        p.spread = v.max(1e-6);
+        p.spread = v.clamp(SPREAD_MIN, SPREAD_MAX);
     }
     if let Some(v) = req.umap_learning_rate {
         p.umap_learning_rate = v.max(1e-6);
     }
+    p.spread = p.spread.clamp(SPREAD_MIN, SPREAD_MAX);
     let (md, sp) = spacetravlr::rust_preprocess::clamp_umap_min_dist_spread(p.min_dist, p.spread);
     p.min_dist = md;
     p.spread = sp;
