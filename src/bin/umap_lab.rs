@@ -15,7 +15,8 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use spacetravlr::config::expand_user_path;
 use spacetravlr::{
-    umap_lab_load_pca_session, umap_lab_run_embedding, RustPreprocessParams, UmapLabLoaded,
+    FuzzyGraph, leiden_labels_from_graph, umap_lab_load_pca_session, umap_lab_run_embedding,
+    RustPreprocessParams, UmapLabLoaded,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -45,6 +46,7 @@ struct LoadedSession {
     color_column: Option<String>,
     color_categories: Vec<String>,
     color_codes: Vec<u32>,
+    fuzzy_graph: Option<FuzzyGraph>,
 }
 
 fn pack_labels(labels: &[String]) -> (Vec<String>, Vec<u32>) {
@@ -215,6 +217,7 @@ async fn api_load(
         color_column: color_column.clone(),
         color_categories: color_categories.clone(),
         color_codes: color_codes.clone(),
+        fuzzy_graph: None,
     };
     *st.session.lock().unwrap() = Some(sess);
 
@@ -247,7 +250,7 @@ async fn api_umap(
         .max(2)
         .min(pca.ncols());
 
-    let (emb, timings) = tokio::task::spawn_blocking(move || {
+    let (emb, graph, timings) = tokio::task::spawn_blocking(move || {
         umap_lab_run_embedding(&pca, &params).map_err(|e| e.to_string())
     })
     .await
@@ -262,10 +265,86 @@ async fn api_umap(
         y.push(emb[(i, 1)]);
     }
 
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            s.fuzzy_graph = Some(graph);
+        }
+    }
+
     Ok(Json(UmapResponse {
         x,
         y,
         timings_sec: timings,
+    }))
+}
+
+#[derive(Deserialize)]
+struct LeidenRequest {
+    #[serde(default = "default_leiden_resolution")]
+    resolution: f64,
+}
+
+fn default_leiden_resolution() -> f64 {
+    1.0
+}
+
+#[derive(Serialize)]
+struct LeidenResponse {
+    labels: Vec<String>,
+    categories: Vec<String>,
+    codes: Vec<u32>,
+    n_clusters: usize,
+    elapsed_sec: f64,
+}
+
+async fn api_leiden(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<LeidenRequest>,
+) -> Result<Json<LeidenResponse>, (StatusCode, String)> {
+    let graph = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "load a dataset first (POST /api/load)".into(),
+            ));
+        };
+        let Some(ref fg) = s.fuzzy_graph else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run UMAP first to build the fuzzy graph".into(),
+            ));
+        };
+        fg.clone()
+    };
+
+    let resolution = body.resolution.max(0.01);
+
+    let (labels, elapsed) = tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let labels = leiden_labels_from_graph(&graph, resolution, 100);
+        (labels, t.elapsed().as_secs_f64())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let n_clusters = {
+        let mut seen = std::collections::HashSet::new();
+        for l in &labels {
+            seen.insert(l.as_str());
+        }
+        seen.len()
+    };
+
+    let (categories, codes) = pack_labels(&labels);
+
+    Ok(Json(LeidenResponse {
+        labels,
+        categories,
+        codes,
+        n_clusters,
+        elapsed_sec: elapsed,
     }))
 }
 
@@ -328,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/status", get(api_status))
         .route("/load", post(api_load))
         .route("/umap", post(api_umap))
+        .route("/leiden", post(api_leiden))
         .with_state(state.clone());
 
     if cli.allow_cors {

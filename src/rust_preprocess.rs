@@ -49,7 +49,7 @@ use umap_rs::{
     UmapConfig,
 };
 
-type FuzzyGraph = CsMatI<f32, u32, usize>;
+pub type FuzzyGraph = CsMatI<f32, u32, usize>;
 
 const INIT_NOISE_STD: f32 = 1e-4;
 
@@ -750,13 +750,13 @@ pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) ->
 pub fn umap_lab_run_embedding(
     pca: &Array2<f64>,
     params: &RustPreprocessParams,
-) -> Result<(Array2<f32>, Vec<(String, f64)>)> {
+) -> Result<(Array2<f32>, FuzzyGraph, Vec<(String, f64)>)> {
     let mut log = Vec::new();
-    let (emb_umap, _graph) = run_umap_on_pca(pca, params, &mut log)?;
+    let (emb_umap, graph) = run_umap_on_pca(pca, params, &mut log)?;
     let n = emb_umap.nrows();
     let m = emb_umap.ncols();
     let emb = Array2::<f32>::from_shape_fn((n, m), |(i, j)| emb_umap[(i, j)]);
-    Ok((emb, log))
+    Ok((emb, graph, log))
 }
 
 fn ensure_x_csr_for_pca(adata: &IMAnnData) -> Result<()> {
@@ -1166,7 +1166,7 @@ fn obs_column_as_strings(df: &DataFrame, key: &str) -> Result<Option<Vec<String>
     Ok(Some(values))
 }
 
-fn leiden_labels_from_graph(graph: &FuzzyGraph, resolution: f64, max_iter: usize) -> Vec<String> {
+pub fn leiden_labels_from_graph(graph: &FuzzyGraph, resolution: f64, max_iter: usize) -> Vec<String> {
     let n = graph.rows();
     let mut g = Graph::with_capacity(n, graph.nnz() * 2);
     for _ in 0..n {

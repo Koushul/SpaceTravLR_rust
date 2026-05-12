@@ -42,3 +42,24 @@ export async function apiUmap(body: Record<string, number | undefined>): Promise
   }
   return res.json() as Promise<UmapResponse>
 }
+
+export type LeidenResponse = {
+  labels: string[]
+  categories: string[]
+  codes: number[]
+  n_clusters: number
+  elapsed_sec: number
+}
+
+export async function apiLeiden(body: { resolution: number }): Promise<LeidenResponse> {
+  const res = await fetch("/api/leiden", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.json() as Promise<LeidenResponse>
+}

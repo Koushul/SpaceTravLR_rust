@@ -1,6 +1,6 @@
 import { Loader2Icon } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
-import { apiLoad, apiUmap, type LoadResponse, type UmapResponse } from "@/api"
+import { apiLoad, apiLeiden, apiUmap, type LeidenResponse, type LoadResponse, type UmapResponse } from "@/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Slider } from "@/components/ui/slider"
-import { drawScatter2d } from "@/drawScatter"
+import { drawScatter2d, findNearestPoint, hslForCategory, type ScatterState } from "@/drawScatter"
 
 function clampMinDistSpread(minDist: number, spread: number): [number, number] {
   const md = Math.max(minDist, 1e-6)
@@ -22,7 +22,7 @@ function clampMinDistSpread(minDist: number, spread: number): [number, number] {
   return [Math.min(md, sp), Math.max(sp, md)]
 }
 
-type Phase = "idle" | "loading_file" | "running_umap" | "ready" | "error"
+type Phase = "idle" | "loading_file" | "running_umap" | "running_leiden" | "ready" | "error"
 
 export default function App() {
   const [path, setPath] = useState("")
@@ -40,8 +40,43 @@ export default function App() {
   const [lr, setLr] = useState(1)
   const [nTopHvg, setNTopHvg] = useState(2000)
 
+  const [leidenRes, setLeidenRes] = useState(0.5)
+  const [leiden, setLeiden] = useState<LeidenResponse | null>(null)
+  const [useLeidenColors, setUseLeidenColors] = useState(true)
+
+  const [selectedCluster, setSelectedCluster] = useState<number | null>(null)
+  const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; cluster: string; count: number } | null>(null)
+
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const scatterStateRef = useRef<ScatterState | null>(null)
+
+  const activeCategories = leiden && useLeidenColors ? leiden.categories : (meta?.color_categories ?? [])
+  const activeCodes = leiden && useLeidenColors ? leiden.codes : (meta?.color_codes ?? [])
+  const activeNCat = activeCategories.length
+
+  const clusterCounts = useRef<Map<number, number>>(new Map())
+  useEffect(() => {
+    const m = new Map<number, number>()
+    for (const c of activeCodes) {
+      m.set(c, (m.get(c) ?? 0) + 1)
+    }
+    clusterCounts.current = m
+  }, [activeCodes])
+
+  const runLeiden = useCallback(async (resolution: number) => {
+    if (!umap) return
+    setPhase("running_leiden")
+    try {
+      const res = await apiLeiden({ resolution })
+      setLeiden(res)
+      setSelectedCluster(null)
+      setPhase("ready")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setPhase("error")
+    }
+  }, [umap])
 
   const runUmap = useCallback(async () => {
     if (!meta) return
@@ -61,6 +96,7 @@ export default function App() {
         umap_learning_rate: lr,
       })
       setUmap(res)
+      setSelectedCluster(null)
       setPhase("ready")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -93,6 +129,7 @@ export default function App() {
     setError(null)
     setUmap(null)
     setMeta(null)
+    setLeiden(null)
     try {
       const m = await apiLoad({
         path: p,
@@ -119,29 +156,81 @@ export default function App() {
     void runUmap()
   }, [meta?.path, runUmap])
 
+  const prevUmapRef = useRef<UmapResponse | null>(null)
+  useEffect(() => {
+    if (!umap || umap === prevUmapRef.current) return
+    prevUmapRef.current = umap
+    void runLeiden(leidenRes)
+  }, [umap, leidenRes, runLeiden])
+
   useEffect(() => {
     const canvas = canvasRef.current
     const wrap = wrapRef.current
     if (!canvas || !wrap || !umap) return
 
     const paint = () => {
-      const codes = meta?.color_codes ?? []
-      const nCat = meta?.color_categories?.length ?? 0
+      const codes = activeCodes
+      const nCat = activeNCat
       const n = umap.x.length
       const cc = new Uint32Array(n)
       for (let i = 0; i < n; i++) {
         cc[i] = codes[i] ?? 0
       }
-      drawScatter2d(canvas, umap.x, umap.y, cc, nCat)
+      const state = drawScatter2d(canvas, umap.x, umap.y, cc, nCat, selectedCluster)
+      scatterStateRef.current = state
     }
 
-    paint()
-    const ro = new ResizeObserver(() => paint())
+    requestAnimationFrame(paint)
+    const ro = new ResizeObserver(() => requestAnimationFrame(paint))
     ro.observe(wrap)
     return () => ro.disconnect()
-  }, [umap, meta])
+  }, [umap, activeCodes, activeNCat, selectedCluster])
+
+  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    const state = scatterStateRef.current
+    if (!canvas || !state || !umap) {
+      setHoverInfo(null)
+      return
+    }
+    const rect = canvas.getBoundingClientRect()
+    const cx = e.clientX - rect.left
+    const cy = e.clientY - rect.top
+
+    const idx = findNearestPoint(state, umap.x, umap.y, cx, cy, 12)
+    if (idx == null) {
+      setHoverInfo(null)
+      return
+    }
+    const cluster = activeCodes[idx] ?? 0
+    const label = activeCategories[cluster] ?? String(cluster)
+    const count = clusterCounts.current.get(cluster) ?? 0
+    setHoverInfo({ x: e.clientX, y: e.clientY, cluster: label, count })
+  }, [umap, activeCodes, activeCategories])
+
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    const state = scatterStateRef.current
+    if (!canvas || !state || !umap) return
+    const rect = canvas.getBoundingClientRect()
+    const cx = e.clientX - rect.left
+    const cy = e.clientY - rect.top
+
+    const idx = findNearestPoint(state, umap.x, umap.y, cx, cy, 12)
+    if (idx == null) {
+      setSelectedCluster(null)
+      return
+    }
+    const cluster = activeCodes[idx] ?? 0
+    setSelectedCluster((prev) => (prev === cluster ? null : cluster))
+  }, [umap, activeCodes])
+
+  const handleCanvasLeave = useCallback(() => {
+    setHoverInfo(null)
+  }, [])
 
   const busy = phase === "loading_file" || phase === "running_umap"
+  const leidenBusy = phase === "running_leiden"
 
   return (
     <div className="flex h-full min-h-svh min-h-0 flex-col gap-4 p-4 lg:flex-row lg:gap-6">
@@ -297,6 +386,48 @@ export default function App() {
             />
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              Leiden clustering
+              {leidenBusy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+            </CardTitle>
+            <CardDescription>
+              Community detection on the UMAP fuzzy graph. Re-runs on slider commit.
+              {leiden ? (
+                <span className="ml-1 font-medium">
+                  {leiden.n_clusters} clusters · {leiden.elapsed_sec.toFixed(2)}s
+                </span>
+              ) : null}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <ParamSlider
+              label={`resolution (${leidenRes.toFixed(2)})`}
+              value={leidenRes}
+              min={0.1}
+              max={3.0}
+              step={0.05}
+              onChange={setLeidenRes}
+              onCommit={() => void runLeiden(leidenRes)}
+              disabled={!umap || busy || leidenBusy}
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                variant={useLeidenColors ? "default" : "outline"}
+                size="sm"
+                onClick={() => {
+                  setUseLeidenColors(!useLeidenColors)
+                  setSelectedCluster(null)
+                }}
+                disabled={!leiden}
+              >
+                {useLeidenColors ? "Showing Leiden colors" : "Showing file colors"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
@@ -315,11 +446,53 @@ export default function App() {
             </span>
           ) : null}
         </div>
-        <div
-          ref={wrapRef}
-          className="border-border bg-card min-h-[min(72vh,720px)] w-full min-w-0 flex-1 overflow-hidden rounded-xl border"
-        >
-          <canvas ref={canvasRef} className="size-full block" />
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          <div
+            ref={wrapRef}
+            className="border-border bg-card relative min-h-[min(72vh,720px)] w-full min-w-0 flex-1 overflow-hidden rounded-xl border"
+          >
+            <canvas
+              ref={canvasRef}
+              className="size-full block"
+              onMouseMove={handleCanvasMouseMove}
+              onClick={handleCanvasClick}
+              onMouseLeave={handleCanvasLeave}
+            />
+            {hoverInfo ? (
+              <div
+                className="bg-popover text-popover-foreground pointer-events-none fixed z-50 rounded-md border px-3 py-1.5 text-xs shadow-md"
+                style={{ left: hoverInfo.x + 12, top: hoverInfo.y - 8 }}
+              >
+                <span className="font-medium">Cluster {hoverInfo.cluster}</span>
+                <span className="text-muted-foreground ml-2">{hoverInfo.count.toLocaleString()} pts</span>
+              </div>
+            ) : null}
+          </div>
+
+          {activeCategories.length > 0 && umap ? (
+            <div className="mt-2 flex max-h-32 flex-wrap gap-x-3 gap-y-1 overflow-y-auto rounded-lg border p-2">
+              {activeCategories.map((cat, i) => {
+                const count = clusterCounts.current.get(i) ?? 0
+                const isSelected = selectedCluster === i
+                const isDimmed = selectedCluster != null && !isSelected
+                return (
+                  <button
+                    key={`${cat}-${i}`}
+                    className="flex items-center gap-1.5 rounded px-1 py-0.5 text-xs transition-opacity hover:bg-muted"
+                    style={{ opacity: isDimmed ? 0.35 : 1 }}
+                    onClick={() => setSelectedCluster((prev) => (prev === i ? null : i))}
+                  >
+                    <span
+                      className="inline-block size-2.5 shrink-0 rounded-full"
+                      style={{ background: hslForCategory(i, activeNCat) }}
+                    />
+                    <span className="truncate max-w-[120px]">{cat}</span>
+                    <span className="text-muted-foreground tabular-nums">{count.toLocaleString()}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
         </div>
         {!meta ? (
           <p className="text-muted-foreground text-sm">
