@@ -689,7 +689,8 @@ pub struct UmapLabLoaded {
 }
 
 /// Load PCA from `obsm['X_pca']` when present and valid; otherwise runs
-/// [`rust_preprocess_h5ad_to_memory`] with [`RustPreprocessSteps::UMAP_LAB_PCA_ONLY`].
+/// [`rust_preprocess_h5ad_to_memory`] with [`RustPreprocessSteps::UMAP_LAB_PCA_ONLY`], which
+/// writes `obsm['X_pca']` whenever HVG+PCA runs.
 /// The returned `pca` contains all available components (use `params.n_pca_components` when running UMAP).
 pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) -> Result<UmapLabLoaded> {
     let adata = load_h5ad_fast(input).context("load_h5ad_fast")?;
@@ -1550,21 +1551,24 @@ pub fn rust_preprocess_h5ad_to_memory(
         bail!("rust_preprocess: UMAP requires hvg_pca=true");
     }
 
-    if steps.run_umap_and_graph {
-        let (emb_umap, fuzzy_graph) = run_umap_on_pca(&pca, params, &mut log)?;
-
-        let n = emb_umap.nrows();
+    if pca.nrows() > 0 {
         let pca_f64 = ndarray::Array2::<f64>::from_shape_fn((pca.nrows(), pca.ncols()), |(i, j)| {
             pca[(i, j)]
         });
-        let umap_f64 =
-            ndarray::Array2::<f64>::from_shape_fn((n, 2), |(i, j)| emb_umap[(i, j)] as f64);
-
         axis_replace_array(
             &adata.obsm(),
             "X_pca",
             ArrayData::Array(DynArray::from(pca_f64)),
         )?;
+    }
+
+    if steps.run_umap_and_graph {
+        let (emb_umap, fuzzy_graph) = run_umap_on_pca(&pca, params, &mut log)?;
+
+        let n = emb_umap.nrows();
+        let umap_f64 =
+            ndarray::Array2::<f64>::from_shape_fn((n, 2), |(i, j)| emb_umap[(i, j)] as f64);
+
         axis_replace_array(
             &adata.obsm(),
             "X_umap",
