@@ -74,6 +74,7 @@ struct PerturbJobSpec {
     desired_expr: f64,
     n_propagation: usize,
     joint_csv_summary: Option<JointCellsCsvExportSummary>,
+    joint_feather_path: Option<PathBuf>,
     capture_timings: bool,
 }
 
@@ -118,6 +119,9 @@ enum Screen {
     },
     PickCsvColumn {
         list_state: ratatui::widgets::ListState,
+    },
+    EditExportPath {
+        buf: String,
     },
 }
 
@@ -221,6 +225,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
             .checked_sub(SYS_REFRESH_INTERVAL)
             .unwrap_or_else(Instant::now),
         theme_slot: TuiColors::default_theme_slot(),
+        joint_export_feather_path: None,
     };
 
     if let Some(path) = opts.run_toml.clone() {
@@ -384,6 +389,7 @@ struct App {
     sys: System,
     last_sys_refresh: Instant,
     theme_slot: usize,
+    joint_export_feather_path: Option<PathBuf>,
 }
 
 impl App {
@@ -514,6 +520,7 @@ impl App {
                                         selected_cell_types_per_gene: &spec.scopes,
                                         cells_csv_summary: joint_csv,
                                         job_id: Some(id),
+                                        joint_feather_path: spec.joint_feather_path.clone(),
                                     }) {
                                         Ok(p) => (Some(p), None),
                                         Err(e) => (None, Some(e.to_string())),
@@ -725,7 +732,7 @@ impl App {
                     ),
                 ]),
                 vec![Line::from(Span::styled(
-                    "Select a gene (↑/↓) for cluster means (input layer).",
+                    "Select a gene (↑/↓) for mean expression by cell_type / cluster (obs column cell_type when present).",
                     Style::default().fg(p.muted),
                 ))],
             );
@@ -740,21 +747,21 @@ impl App {
             );
         };
         let n = rt.gene_mtx.nrows();
-        if rt.betadata_cluster_key.len() != n {
+        if rt.expression_preview_labels.len() != n {
             return (
                 Line::from(Span::styled(
                     " Expression preview ",
                     Style::default().fg(p.label).add_modifier(Modifier::BOLD),
                 )),
                 vec![Line::from(Span::styled(
-                    "Cluster key length mismatch.",
+                    "Row annotation length mismatch (internal).",
                     Style::default().fg(p.c_fail),
                 ))],
             );
         }
         let mut acc: HashMap<String, (f64, usize)> = HashMap::new();
         for r in 0..n {
-            let k = rt.betadata_cluster_key[r].clone();
+            let k = rt.expression_preview_labels[r].clone();
             let v = rt.gene_mtx[[r, gi]];
             let e = acc.entry(k).or_insert((0.0, 0));
             e.0 += v;
@@ -764,7 +771,11 @@ impl App {
             .into_iter()
             .map(|(k, (s, c))| (k, s / c as f64))
             .collect();
-        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         const CAP: usize = 15;
         pairs.truncate(CAP);
         let vmax = pairs
@@ -1196,6 +1207,45 @@ impl App {
                     );
                 f.render_stateful_widget(list, chunks[1], list_state);
             }
+            Screen::EditExportPath { buf } => {
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled("Joint export ", Style::default().fg(pal.title)),
+                        Span::styled(".feather path", Style::default().fg(pal.value)),
+                        Span::styled(
+                            "  ·  Enter OK  ·  Esc cancel  ·  empty = auto dir",
+                            Style::default().fg(pal.muted),
+                        ),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        buf.as_str(),
+                        Style::default().fg(pal.lilac).add_modifier(Modifier::BOLD),
+                    )),
+                ];
+                if !self.status_line.is_empty() {
+                    let st = if self.status_is_error {
+                        Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(pal.c_wrote)
+                    };
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(self.status_line.as_str(), st)));
+                }
+                f.render_widget(
+                    Paragraph::new(lines)
+                        .block(block_panel(
+                            pal,
+                            Line::from(Span::styled(
+                                " export feather ",
+                                Style::default().fg(pal.label),
+                            )),
+                            pal.work_bord,
+                        ))
+                        .style(Style::default().bg(pal.bg)),
+                    inner,
+                );
+            }
         }
     }
 
@@ -1217,7 +1267,7 @@ impl App {
                 Style::default().fg(pal.muted),
             ),
             Span::styled(
-                "· Ctrl+R queue · Ctrl+X cancel all",
+                "· Ctrl+R queue · Ctrl+N export path · Ctrl+X cancel all",
                 Style::default().fg(pal.muted),
             ),
         ]);
@@ -1358,7 +1408,7 @@ impl App {
                 Paragraph::new(vec![
                     Line::from(""),
                     Line::from(Span::styled(
-                        "Internal error: PerturbRuntime missing on Main screen. Press Ctrl+Q to quit.",
+                        "Internal error: PerturbRuntime missing on Main screen. Press Shift+Q to quit.",
                         Style::default().fg(pal.c_fail).add_modifier(Modifier::BOLD),
                     )),
                 ])
@@ -1521,6 +1571,17 @@ impl App {
                 ),
             ]),
             Line::from(vec![
+                Span::styled("Export .feather ", Style::default().fg(pal.label)),
+                Span::styled("· ", Style::default().fg(pal.muted)),
+                Span::styled(
+                    self.joint_export_feather_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "auto (hashed under run dir)".to_string()),
+                    Style::default().fg(pal.lilac),
+                ),
+            ]),
+            Line::from(vec![
                 Span::styled("desired_expr ", Style::default().fg(pal.label)),
                 Span::styled(
                     format!("{}", self.desired_expr),
@@ -1557,6 +1618,11 @@ impl App {
             Line::from(""),
             Line::from(vec![
                 Span::styled(
+                    "Ctrl+N",
+                    Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" export path  ", Style::default().fg(pal.muted)),
+                Span::styled(
                     "Ctrl+R",
                     Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
@@ -1592,7 +1658,7 @@ impl App {
                 ),
                 Span::styled(" clr  ", Style::default().fg(pal.muted)),
                 Span::styled(
-                    "Ctrl+Q",
+                    "Shift+Q",
                     Style::default().fg(pal.sky).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" quit  ", Style::default().fg(pal.muted)),
@@ -1818,6 +1884,50 @@ impl App {
                     }
                     return Ok(None);
                 }
+                Screen::EditExportPath { buf } => match key.code {
+                    KeyCode::Esc => {
+                        self.clear_status();
+                        self.screen = Screen::Main;
+                    }
+                    KeyCode::Enter => {
+                        let t = buf.trim();
+                        if t.is_empty() {
+                            self.joint_export_feather_path = None;
+                            self.clear_status();
+                            self.screen = Screen::Main;
+                        } else {
+                            let exp = expand_user_path(t);
+                            let p = PathBuf::from(exp);
+                            let resolved =
+                                if p.parent().map_or(true, |par| par.as_os_str().is_empty()) {
+                                    let Some(rt) = self.runtime.as_ref() else {
+                                        self.set_status(
+                                            "Load a run before basename-only export path",
+                                            true,
+                                        );
+                                        return Ok(None);
+                                    };
+                                    match p.file_name() {
+                                        Some(name) => rt.run_dir.join(name),
+                                        None => {
+                                            self.set_status("Invalid export path", true);
+                                            return Ok(None);
+                                        }
+                                    }
+                                } else {
+                                    p
+                                };
+                            self.joint_export_feather_path = Some(resolved);
+                            self.clear_status();
+                            self.screen = Screen::Main;
+                        }
+                    }
+                    KeyCode::Char(c) => buf.push(c),
+                    KeyCode::Backspace => {
+                        buf.pop();
+                    }
+                    _ => {}
+                },
                 Screen::PickCsvColumn { list_state } => {
                     let n = self
                         .cells_csv_data
@@ -1849,6 +1959,14 @@ impl App {
                     return Ok(None);
                 }
                 Screen::Main => {
+                    if key.modifiers.contains(KeyModifiers::SHIFT)
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+                    {
+                        return Ok(Some(()));
+                    }
                     if matches!(key.code, KeyCode::Char('t' | 'T'))
                         && !key
                             .modifiers
@@ -1889,7 +2007,6 @@ impl App {
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(Some(())),
                             KeyCode::Char('e') | KeyCode::Char('E') => {
                                 self.screen = Screen::EditDesired {
                                     buf: format!("{}", self.desired_expr),
@@ -1921,6 +2038,16 @@ impl App {
                             }
                             KeyCode::Char('o') | KeyCode::Char('O') => {
                                 self.open_pick_csv_column();
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                self.screen = Screen::EditExportPath {
+                                    buf: self
+                                        .joint_export_feather_path
+                                        .as_ref()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_default(),
+                                };
+                                self.clear_status();
                             }
                             KeyCode::Char('x') | KeyCode::Char('X') => {
                                 for j in &self.active_jobs {
@@ -2038,6 +2165,7 @@ impl App {
                                     desired_expr: self.desired_expr,
                                     n_propagation: self.n_propagation,
                                     joint_csv_summary,
+                                    joint_feather_path: self.joint_export_feather_path.clone(),
                                     capture_timings,
                                 });
                                 self.set_status(
