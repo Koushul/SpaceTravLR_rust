@@ -12,6 +12,8 @@ cargo build --features umap-lab --bin umap_lab
 ./target/debug/umap_lab --port 8765 --static-dir web/umap_lab/dist
 ```
 
+`--static-dir web/umap_lab/dist` works from the **repo root** or from **`web/umap_lab`** (the binary resolves it against the crate root). From `web/umap_lab` you can also pass `--static-dir dist` after `npm run build`.
+
 Open `http://127.0.0.1:8765/` and enter the path to an `.h5ad` file.
 
 ## Run (dev: Vite HMR + API proxy)

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -262,12 +262,44 @@ async fn api_umap(
     }))
 }
 
-fn resolve_static_dir(p: &PathBuf) -> anyhow::Result<PathBuf> {
-    if p.is_absolute() {
-        return Ok(p.clone());
+fn resolve_static_dir(cli: &Path) -> anyhow::Result<PathBuf> {
+    fn has_index(dir: &Path) -> bool {
+        dir.join("index.html").is_file()
     }
+
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    if cli.is_absolute() {
+        if has_index(cli) {
+            return Ok(cli.to_path_buf());
+        }
+        anyhow::bail!(
+            "missing {}; run `npm ci && npm run build` in web/umap_lab",
+            cli.join("index.html").display()
+        );
+    }
+
     let cwd = std::env::current_dir().context("cwd")?;
-    Ok(cwd.join(p))
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.push(cwd.join(cli));
+    if let Ok(suffix) = cli.strip_prefix("web/umap_lab/") {
+        candidates.push(cwd.join(suffix));
+    }
+    candidates.push(cwd.join("dist"));
+    candidates.push(crate_root.join(cli));
+
+    for c in candidates {
+        if has_index(&c) {
+            return Ok(c);
+        }
+    }
+
+    anyhow::bail!(
+        "could not find index.html for --static-dir {:?} (cwd {}). Tried cwd-relative paths and {}. Run `npm ci && npm run build` in web/umap_lab.",
+        cli,
+        cwd.display(),
+        crate_root.join(cli).display()
+    )
 }
 
 #[tokio::main]
@@ -300,15 +332,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let static_dir = resolve_static_dir(&cli.static_dir)?;
+    let static_dir = resolve_static_dir(cli.static_dir.as_path())?;
     let index = static_dir.join("index.html");
-    if !index.is_file() {
-        anyhow::bail!(
-            "missing {}; run `npm ci && npm run build` in web/umap_lab",
-            index.display()
-        );
-    }
-
     let static_files = ServeDir::new(&static_dir).fallback(ServeFile::new(index.clone()));
     let app = Router::new()
         .nest("/api", api)
