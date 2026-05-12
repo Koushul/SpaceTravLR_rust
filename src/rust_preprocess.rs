@@ -61,6 +61,10 @@ pub struct RustPreprocessParams {
     pub min_dist: f32,
     pub n_epochs: Option<usize>,
     pub ef_construction: usize,
+    /// UMAP manifold `spread` (paired with `min_dist` in umap-rs).
+    pub spread: f32,
+    /// UMAP SGD learning rate passed to [`OptimizationParams::learning_rate`].
+    pub umap_learning_rate: f32,
 }
 
 impl Default for RustPreprocessParams {
@@ -72,6 +76,8 @@ impl Default for RustPreprocessParams {
             min_dist: 0.5,
             n_epochs: None,
             ef_construction: 200,
+            spread: 1.0,
+            umap_learning_rate: 1.0,
         }
     }
 }
@@ -118,6 +124,16 @@ impl RustPreprocessSteps {
             run_magic_impute: rust_magic,
         }
     }
+
+    /// Normalize → HVG → PCA only (no UMAP / Leiden / MAGIC). Used by the UMAP lab UI to build `X_pca` once.
+    pub const UMAP_LAB_PCA_ONLY: Self = Self {
+        qc_filter: false,
+        normalize_log1p: true,
+        hvg_pca: true,
+        run_umap_and_graph: false,
+        write_leiden: false,
+        run_magic_impute: false,
+    };
 }
 
 #[derive(Clone)]
@@ -522,7 +538,7 @@ fn spectral_init_2d(graph: &FuzzyGraph, n_components: usize, seed: u64) -> Array
     init
 }
 
-fn run_umap(
+pub fn run_umap_on_pca(
     pca: &ndarray::Array2<f64>,
     params: &RustPreprocessParams,
     log: &mut Vec<(String, f64)>,
@@ -556,7 +572,7 @@ fn run_umap(
         n_components: 2,
         manifold: ManifoldParams {
             min_dist: params.min_dist,
-            spread: 1.0,
+            spread: params.spread,
             ..Default::default()
         },
         graph: GraphParams {
@@ -566,7 +582,7 @@ fn run_umap(
         },
         optimization: OptimizationParams {
             n_epochs: Some(n_epochs),
-            learning_rate: 1.0,
+            learning_rate: params.umap_learning_rate,
             negative_sample_rate: 5,
             repulsion_strength: 1.0,
         },
@@ -610,6 +626,123 @@ fn run_umap(
     ));
 
     Ok((fitted.into_embedding(), fuzzy_graph))
+}
+
+fn im_obsm_dense_matrix_f64(adata: &IMAnnData, key: &str) -> Result<Option<Array2<f64>>> {
+    let elem = match adata.obsm().get_array(key) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
+    let data = match elem.get_data() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    match data {
+        ArrayData::Array(d) => {
+            let arr_f64: Result<Array2<f64>, _> = d.clone().try_convert();
+            if let Ok(a) = arr_f64 {
+                return Ok(Some(a));
+            }
+            let a32: Array2<f32> = d
+                .try_convert()
+                .map_err(|e| anyhow!("obsm[{key}] dense matrix: {e}"))?;
+            Ok(Some(a32.mapv(|v| v as f64)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn pca_from_im_after_preprocess(adata: &IMAnnData) -> Result<Array2<f64>> {
+    let elem = adata
+        .obsm()
+        .get_array("X_pca")
+        .context("obsm['X_pca'] missing after preprocess")?;
+    let data = elem.get_data().context("X_pca data")?;
+    let arr: Array2<f64> = match data {
+        ArrayData::Array(d) => d
+            .try_convert()
+            .map_err(|e| anyhow!("X_pca to f64 matrix: {e}"))?,
+        _ => bail!("X_pca must be a dense array"),
+    };
+    Ok(arr)
+}
+
+fn umap_lab_color_labels_from_obs(adata: &IMAnnData) -> Result<(Option<String>, Vec<String>)> {
+    let n = adata.n_obs();
+    let obs = adata.obs().get_data();
+    for col in ["leiden", "cell_type", "louvain"] {
+        if let Some(v) = obs_column_as_strings(&obs, col)? {
+            if v.len() == n && n > 0 {
+                return Ok((Some(col.to_string()), v));
+            }
+        }
+    }
+    Ok((None, Vec::new()))
+}
+
+/// PCA matrix and optional per-cell labels (for coloring) after loading an `.h5ad`.
+#[derive(Clone, Debug)]
+pub struct UmapLabLoaded {
+    pub pca: Array2<f64>,
+    pub color_column: Option<String>,
+    pub color_labels: Vec<String>,
+}
+
+/// Load PCA from `obsm['X_pca']` when present and valid; otherwise runs
+/// [`rust_preprocess_h5ad_to_memory`] with [`RustPreprocessSteps::UMAP_LAB_PCA_ONLY`].
+/// The returned `pca` contains all available components (use `params.n_pca_components` when running UMAP).
+pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) -> Result<UmapLabLoaded> {
+    let adata = load_h5ad_fast(input).context("load_h5ad_fast")?;
+    let n_obs = adata.n_obs();
+    let (pca, (color_column, color_labels)) =
+        if let Some(pca) = im_obsm_dense_matrix_f64(&adata, "X_pca")? {
+            if pca.nrows() != n_obs {
+                bail!(
+                    "obsm['X_pca'] rows {} do not match n_obs {}",
+                    pca.nrows(),
+                    n_obs
+                );
+            }
+            if pca.ncols() < 2 {
+                bail!(
+                    "obsm['X_pca'] must have at least 2 columns (got {})",
+                    pca.ncols()
+                );
+            }
+            eprintln!(
+                "umap_lab: using existing obsm['X_pca'] ({}×{})",
+                pca.nrows(),
+                pca.ncols()
+            );
+            let colors = umap_lab_color_labels_from_obs(&adata)?;
+            (pca, colors)
+        } else {
+            drop(adata);
+            eprintln!("umap_lab: no usable X_pca; running normalization + HVG + PCA …");
+            let adata2 =
+                rust_preprocess_h5ad_to_memory(input, params, &RustPreprocessSteps::UMAP_LAB_PCA_ONLY)?;
+            let pca = pca_from_im_after_preprocess(&adata2)?;
+            let colors = umap_lab_color_labels_from_obs(&adata2)?;
+            (pca, colors)
+        };
+    Ok(UmapLabLoaded {
+        pca,
+        color_column,
+        color_labels,
+    })
+}
+
+/// Run UMAP on `pca` (same umap-rs + HNSW path as [`rust_preprocess_h5ad_to_memory`]).
+pub fn umap_lab_run_embedding(
+    pca: &Array2<f64>,
+    params: &RustPreprocessParams,
+) -> Result<(Array2<f32>, Vec<(String, f64)>)> {
+    let mut log = Vec::new();
+    let (emb_umap, _graph) = run_umap_on_pca(pca, params, &mut log)?;
+    let n = emb_umap.nrows();
+    let m = emb_umap.ncols();
+    let emb = Array2::<f32>::from_shape_fn((n, m), |(i, j)| emb_umap[(i, j)]);
+    Ok((emb, log))
 }
 
 fn ensure_x_csr_for_pca(adata: &IMAnnData) -> Result<()> {
@@ -1418,7 +1551,7 @@ pub fn rust_preprocess_h5ad_to_memory(
     }
 
     if steps.run_umap_and_graph {
-        let (emb_umap, fuzzy_graph) = run_umap(&pca, params, &mut log)?;
+        let (emb_umap, fuzzy_graph) = run_umap_on_pca(&pca, params, &mut log)?;
 
         let n = emb_umap.nrows();
         let pca_f64 = ndarray::Array2::<f64>::from_shape_fn((pca.nrows(), pca.ncols()), |(i, j)| {

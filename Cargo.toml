@@ -71,6 +71,13 @@ spatial-viewer = [
     "dep:blake3",
     "dep:tempfile",
 ]
+umap-lab = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
 self-update = [
     "dep:ureq",
     "dep:tar",
@@ -97,6 +104,11 @@ required-features = ["dev-main"]
 name = "spatial_viewer"
 path = "src/bin/spatial_viewer.rs"
 required-features = ["spatial-viewer"]
+
+[[bin]]
+name = "umap_lab"
+path = "src/bin/umap_lab.rs"
+required-features = ["umap-lab"]
 
 [[bin]]
 name = "cnn_train_bench"
