@@ -11,6 +11,11 @@ import os
 import sys
 import tempfile
 
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Subsample query then run MALT")
     p.add_argument("--query", required=True, help="Full query .h5ad path")
@@ -22,26 +27,44 @@ def main() -> None:
     p.add_argument("--no-leiden-map", action="store_true")
     args = p.parse_args()
 
+    _log("=" * 60)
+    _log("MALT subsample helper (umap_lab optimized path)")
+    _log("=" * 60)
+    _log(f"  query (full):     {args.query}")
+    _log(f"  reference:        {args.reference}")
+    _log(f"  subset names JSON: {args.subset_names_json}")
+    _log(f"  outdir:           {args.outdir}")
+    _log(f"  groupby:          {args.groupby!r}")
+    _log(f"  leiden_map:       {not args.no_leiden_map}")
+
     with open(args.subset_names_json) as f:
         keep_names = set(json.load(f))
+    _log(f"  unique obs in subset list: {len(keep_names)}")
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from malt_label_transfer import read_h5ad_compat, run_malt
 
-    print(f"[subsample] Loading query: {args.query}")
+    _log("=" * 60)
+    _log("Subsample: load full query and mask to subset")
+    _log("=" * 60)
+    _log(f"  Loading query: {args.query}")
     query = read_h5ad_compat(args.query)
     mask = query.obs_names.isin(keep_names)
     n_keep = int(mask.sum())
-    print(f"[subsample] Keeping {n_keep}/{query.n_obs} cells "
-          f"({n_keep / query.n_obs * 100:.1f}%)")
+    _log(
+        f"  Keeping {n_keep}/{query.n_obs} cells "
+        f"({n_keep / query.n_obs * 100:.1f}%)"
+    )
     subset = query[mask].copy()
     del query
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".h5ad")
     os.close(tmp_fd)
     try:
+        _log(f"  Writing temp subset h5ad: {tmp_path}")
         subset.write_h5ad(tmp_path)
         del subset
+        _log("  Subset written; calling run_malt() on subset (same verbosity as full MALT)")
 
         gb = [args.groupby] if args.groupby else None
         run_malt(
@@ -51,10 +74,13 @@ def main() -> None:
             outdir=args.outdir,
             leiden_map=not args.no_leiden_map,
         )
+        _log("=" * 60)
+        _log("run_malt() finished on subset")
+        _log("=" * 60)
     finally:
         try:
             os.unlink(tmp_path)
-            print(f"[subsample] Cleaned up temp h5ad")
+            _log(f"[subsample] Cleaned up temp h5ad: {tmp_path}")
         except OSError:
             pass
 

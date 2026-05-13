@@ -688,9 +688,12 @@ async fn api_malt(
     let no_leiden = body.no_leiden_map.unwrap_or(false);
     let outdir2 = outdir.clone();
 
-    let (output, elapsed) = tokio::task::spawn_blocking(move || {
+    let (status, elapsed) = tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new("python");
-        cmd.arg(&script)
+        cmd.env("PYTHONUNBUFFERED", "1")
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .arg(&script)
             .arg("--reference")
             .arg(&ref_path)
             .arg("--query")
@@ -711,28 +714,22 @@ async fn api_malt(
         tracing::info!("Running MALT: {:?}", cmd);
 
         let t0 = std::time::Instant::now();
-        let output = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
+        let status = cmd
+            .status()
             .map_err(|e| format!("failed to spawn MALT python: {e}"))?;
 
-        Ok::<_, String>((output, t0.elapsed().as_secs_f64()))
+        Ok::<_, String>((status, t0.elapsed().as_secs_f64()))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if !status.success() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
-                "MALT exited with code {:?}\n--- stderr ---\n{}\n--- stdout ---\n{}",
-                output.status.code(),
-                stderr,
-                stdout,
+                "MALT exited with code {:?} (stdout/stderr were streamed to this process)",
+                status.code(),
             ),
         ));
     }
@@ -986,7 +983,10 @@ async fn api_malt_optimized(
         .map_err(|e| format!("write names json: {e}"))?;
 
         let mut cmd = std::process::Command::new("python");
-        cmd.arg(&script)
+        cmd.env("PYTHONUNBUFFERED", "1")
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .arg(&script)
             .arg("--query")
             .arg(&query_path)
             .arg("--reference")
@@ -1008,21 +1008,15 @@ async fn api_malt_optimized(
 
         tracing::info!("Running MALT subsample: {:?}", cmd);
         let t0 = std::time::Instant::now();
-        let output = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
+        let status = cmd
+            .status()
             .map_err(|e| format!("spawn: {e}"))?;
         let elapsed = t0.elapsed().as_secs_f64();
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        if !status.success() {
             return Err(format!(
-                "MALT exited {:?}\n--- stderr ---\n{}\n--- stdout ---\n{}",
-                output.status.code(),
-                stderr,
-                stdout,
+                "MALT subsample helper exited {:?} (stdout/stderr were streamed to this process)",
+                status.code(),
             ));
         }
 
