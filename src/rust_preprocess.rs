@@ -1,8 +1,9 @@
 //! Rust-native Scanpy-style preprocessing: optional QC, **`normalize_total` (target_sum=10_000) +
 //! `log1p` on `X`** when `X` looks like raw counts (aligned with `sc.pp.normalize_total` /
-//! `sc.pp.log1p` via `single_rust`). If `uns['log1p']` exists or **`_infer_x_is_log1p`-style**
+//! `sc.pp.log1p` via `single_rust`). Dense **`X`** is converted to **CSR `f64`** when needed because
+//! `normalize_expression` row-sum helpers only support CSR/CSC. If `uns['log1p']` exists or **`_infer_x_is_log1p`-style**
 //! heuristics match Scanpy’s embedded preprocess, **`normalize_total` / `log1p` are skipped** and
-//! `X` is copied into `layers['normalized_count']` and `layers['log1p']` unchanged. Optional
+//! `X` is copied into `layers['normalized_count']` and `layers['log1p']` unchanged. Writable `.h5ad` files are patched before load to **drop `uns/**` datasets whose `encoding-type` is the literal `null`** (e.g. Scanpy `uns['log1p']['base']`), which **anndata-rs 0.6** cannot parse. Optional
 //! HVG → PCA → UMAP → Leiden / MAGIC via [`RustPreprocessSteps`]. HDF5 export (when an output path
 //! is provided) writes `.h5ad` via `anndata-memory` + `AnnData::<H5>` with **`X` and all `layers`**
 //! coerced to CSR `f64` for on-disk layout.
@@ -11,28 +12,31 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use anndata::backend::{AttributeOp, DataContainer, DatasetOp, GroupOp};
 use anndata::data::array::DynArray;
-use anndata::data::{ArrayConvert, SelectInfoElem};
+use anndata::data::index::Interval;
+use anndata::data::{ArrayConvert, DataFrameIndex, SelectInfoElem};
 use anndata::data::{DynCscMatrix, DynCsrMatrix};
-use anndata::{AnnData, AnnDataOp, ArrayData, AxisArraysOp};
-use anndata_hdf5::H5;
+use anndata::{AnnData, AnnDataOp, ArrayData, AxisArraysOp, Backend, Readable};
+use anndata_hdf5::{H5, H5File};
 use anndata_memory::{IMAnnData, IMArrayElement, IMAxisArrays, load_h5ad_fast};
 use anyhow::{Context, Result, anyhow, bail};
-use instant_distance::{Builder, Hnsw, Search};
+use instant_distance::{Builder, Hnsw, PointId, Search};
 use leiden::leiden::Leiden;
 use leiden::{Clustering, Graph, Network, SimpleClustering};
 use magic_impute::{CsrF64, ImputeConfig, impute_magic_f32};
 use nalgebra::{DMatrix, SymmetricEigen};
 use nalgebra_sparse::coo::CooMatrix;
-use nalgebra_sparse::CsrMatrix;
+use nalgebra_sparse::{CsrMatrix, SparseEntry};
 use ndarray::{s, Array2};
 use ndarray_umap::Array2 as Array2Umap;
 use polars::prelude::{Column, DataFrame, DataType, NamedFrom, Series};
+use std::convert::TryInto;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
-use sprs::CsMatI;
+use sprs::{CsMatI, TriMatI};
 
 use crate::betadata::obs_series_row_str;
 use single_algebra::dimred::pca::{PowerIterationNormalizer, SVDMethod};
@@ -75,10 +79,30 @@ impl Default for RustPreprocessParams {
             n_neighbors: 15,
             min_dist: 0.5,
             n_epochs: None,
-            ef_construction: 200,
-            spread: 1.0,
+            ef_construction: 30,
+            spread: 0.5,
             umap_learning_rate: 1.0,
         }
+    }
+}
+
+/// Reusable k-nearest neighbors for UMAP when only manifold or optimization parameters change.
+#[derive(Clone, Debug)]
+pub struct UmapLabKnnCache {
+    pub knn_idx: Array2Umap<u32>,
+    pub knn_dist: Array2Umap<f32>,
+    pub n_neighbors: usize,
+    pub ef_construction: usize,
+    pub n_pca_components: usize,
+}
+
+impl UmapLabKnnCache {
+    fn matches(&self, pca: &ndarray::Array2<f64>, params: &RustPreprocessParams) -> bool {
+        self.knn_idx.nrows() == pca.nrows()
+            && self.knn_idx.ncols() == params.n_neighbors
+            && self.n_neighbors == params.n_neighbors
+            && self.ef_construction == params.ef_construction
+            && self.n_pca_components == params.n_pca_components
     }
 }
 
@@ -155,9 +179,11 @@ impl instant_distance::Point for PcaVec {
         self.0
             .iter()
             .zip(other.0.iter())
-            .map(|(a, b)| (a - b) * (a - b))
+            .map(|(a, b)| {
+                let d = a - b;
+                d * d
+            })
             .sum::<f32>()
-            .sqrt()
     }
 }
 
@@ -237,13 +263,13 @@ fn knn_find_components(
 fn bridge_knn_components(
     knn_idx: &mut Array2Umap<u32>,
     knn_dist: &mut Array2Umap<f32>,
-    points: &[PcaVec],
     n_neighbors: usize,
     hnsw: &Hnsw<PcaVec>,
+    pids: &[PointId],
     pid_to_orig: &[u32],
     ef_search_bridge: usize,
 ) {
-    let n = points.len();
+    let n = knn_idx.nrows();
 
     let sort_row = |knn_idx: &mut Array2Umap<u32>, knn_dist: &mut Array2Umap<f32>, row: usize| {
         let mut pairs: Vec<(u32, f32)> = (1..n_neighbors)
@@ -296,9 +322,14 @@ fn bridge_knn_components(
             let mut best: Option<(usize, usize, f32)> = None;
             'outer: for &p in &sample {
                 let results: Vec<(u32, f32)> = HNSW_SEARCH.with_borrow_mut(|search| {
-                    hnsw.search(&points[p], search)
+                    hnsw.search(&hnsw[pids[p]], search)
                         .take(ef_search_bridge)
-                        .map(|item| (pid_to_orig[item.pid.into_inner() as usize], item.distance))
+                        .map(|item| {
+                            (
+                                pid_to_orig[item.pid.into_inner() as usize],
+                                item.distance.sqrt(),
+                            )
+                        })
                         .collect()
                 });
                 for (q_orig, d) in results {
@@ -329,20 +360,25 @@ fn bridge_knn_components(
 }
 
 fn knn_indices_dists(
-    points: &[PcaVec],
+    points: Vec<PcaVec>,
     n_neighbors: usize,
     ef_construction: usize,
+    log: &mut Vec<(String, f64)>,
 ) -> (Array2Umap<u32>, Array2Umap<f32>) {
     let n = points.len();
     let ef_search = (n_neighbors * 3).max(50);
     let ef_bridge = (n_neighbors * 20).max(300).min(n);
 
     eprintln!("  building HNSW (ef_construction={ef_construction}, ef_search={ef_search})…");
+    let t_build = Instant::now();
     let (hnsw, pids) = Builder::default()
         .ef_construction(ef_construction)
         .ef_search(ef_search)
         .seed(42)
-        .build_hnsw(points.to_vec());
+        .build_hnsw(points);
+    let dt_build = t_build.elapsed().as_secs_f64();
+    eprintln!("  HNSW build: {dt_build:.2} s");
+    log.push(("umap KNN: HNSW build".to_string(), dt_build));
 
     let mut pid_to_orig = vec![0u32; n];
     for (orig, pid) in pids.iter().enumerate() {
@@ -351,13 +387,19 @@ fn knn_indices_dists(
 
     let search_k = n_neighbors + 8;
     eprintln!("  querying {n} points (HNSW ef_search={ef_search})…");
+    let t_query = Instant::now();
     let mut rows: Vec<(usize, Vec<u32>, Vec<f32>)> = (0..n)
         .into_par_iter()
         .map(|i| {
             let results: Vec<(u32, f32)> = HNSW_SEARCH.with_borrow_mut(|search| {
-                hnsw.search(&points[i], search)
+                hnsw.search(&hnsw[pids[i]], search)
                     .take(search_k)
-                    .map(|item| (pid_to_orig[item.pid.into_inner() as usize], item.distance))
+                    .map(|item| {
+                        (
+                            pid_to_orig[item.pid.into_inner() as usize],
+                            item.distance.sqrt(),
+                        )
+                    })
                     .collect()
             });
 
@@ -382,6 +424,9 @@ fn knn_indices_dists(
             (i, idx_row, dist_row)
         })
         .collect();
+    let dt_query = t_query.elapsed().as_secs_f64();
+    eprintln!("  HNSW query all points: {dt_query:.2} s");
+    log.push(("umap KNN: HNSW query".to_string(), dt_query));
     rows.sort_by_key(|(i, _, _)| *i);
 
     let mut idx = Array2Umap::<u32>::zeros((n, n_neighbors));
@@ -394,15 +439,19 @@ fn knn_indices_dists(
     }
 
     eprintln!("  checking KNN graph connectivity…");
+    let t_bridge = Instant::now();
     bridge_knn_components(
         &mut idx,
         &mut dist,
-        points,
         n_neighbors,
         &hnsw,
+        &pids,
         &pid_to_orig,
         ef_bridge,
     );
+    let dt_bridge = t_bridge.elapsed().as_secs_f64();
+    eprintln!("  KNN connectivity / bridge: {dt_bridge:.2} s");
+    log.push(("umap KNN: connectivity".to_string(), dt_bridge));
 
     (idx, dist)
 }
@@ -553,7 +602,8 @@ pub fn run_umap_on_pca(
     pca: &ndarray::Array2<f64>,
     params: &RustPreprocessParams,
     log: &mut Vec<(String, f64)>,
-) -> Result<(Array2Umap<f32>, FuzzyGraph)> {
+    knn_cache_in: Option<&UmapLabKnnCache>,
+) -> Result<(Array2Umap<f32>, FuzzyGraph, UmapLabKnnCache)> {
     let n = pca.nrows();
     let dim = params.n_pca_components;
     if pca.ncols() < dim {
@@ -564,16 +614,56 @@ pub fn run_umap_on_pca(
         );
     }
 
-    let t0 = Instant::now();
-    eprintln!(">>> umap KNN (HNSW)");
-    let points = pca_to_points_f32(pca, dim);
-    let (knn_idx, knn_dist) =
-        knn_indices_dists(&points, params.n_neighbors, params.ef_construction);
-    eprintln!("<<< umap KNN (HNSW): {:.2} s", t0.elapsed().as_secs_f64());
-    log.push(("umap KNN (HNSW)".to_string(), t0.elapsed().as_secs_f64()));
+    let (knn_idx, knn_dist, knn_cache) = match knn_cache_in {
+        Some(cache) if cache.matches(pca, params) => {
+            let t0 = Instant::now();
+            eprintln!(">>> umap KNN (cached HNSW graph)");
+            eprintln!("<<< umap KNN (cached): {:.3} s", t0.elapsed().as_secs_f64());
+            log.push(("umap KNN (cached)".to_string(), t0.elapsed().as_secs_f64()));
+            (
+                cache.knn_idx.clone(),
+                cache.knn_dist.clone(),
+                cache.clone(),
+            )
+        }
+        _ => {
+            let t0 = Instant::now();
+            eprintln!(">>> umap KNN (HNSW)");
+            let t_pts = Instant::now();
+            let points = pca_to_points_f32(pca, dim);
+            log.push((
+                "umap KNN: PCA→f32 points".to_string(),
+                t_pts.elapsed().as_secs_f64(),
+            ));
+            let mut knn_log = Vec::new();
+            let (knn_idx, knn_dist) = knn_indices_dists(
+                points,
+                params.n_neighbors,
+                params.ef_construction,
+                &mut knn_log,
+            );
+            log.extend(knn_log);
+            let dt_total = t0.elapsed().as_secs_f64();
+            eprintln!("<<< umap KNN (HNSW): {dt_total:.2} s");
+            log.push(("umap KNN (HNSW total)".to_string(), dt_total));
+            let knn_cache = UmapLabKnnCache {
+                knn_idx: knn_idx.clone(),
+                knn_dist: knn_dist.clone(),
+                n_neighbors: params.n_neighbors,
+                ef_construction: params.ef_construction,
+                n_pca_components: params.n_pca_components,
+            };
+            (knn_idx, knn_dist, knn_cache)
+        }
+    };
 
-    let data = Array2Umap::from_shape_vec((n, dim), points.into_iter().flat_map(|p| p.0).collect())
-        .map_err(|e| anyhow!("UMAP data shape: {e}"))?;
+    let mut data_vec = Vec::with_capacity(n * dim);
+    for row in pca.outer_iter() {
+        for j in 0..dim {
+            data_vec.push(*row.get(j).unwrap_or(&0.0) as f32);
+        }
+    }
+    let data = Array2Umap::from_shape_vec((n, dim), data_vec).map_err(|e| anyhow!("UMAP data shape: {e}"))?;
 
     let n_epochs = params
         .n_epochs
@@ -638,7 +728,7 @@ pub fn run_umap_on_pca(
         t3.elapsed().as_secs_f64(),
     ));
 
-    Ok((fitted.into_embedding(), fuzzy_graph))
+    Ok((fitted.into_embedding(), fuzzy_graph, knn_cache))
 }
 
 fn im_obsm_dense_matrix_f64(adata: &IMAnnData, key: &str) -> Result<Option<Array2<f64>>> {
@@ -693,12 +783,32 @@ fn umap_lab_color_labels_from_obs(adata: &IMAnnData) -> Result<(Option<String>, 
     Ok((None, Vec::new()))
 }
 
+fn umap_lab_obs_meta(adata: &IMAnnData) -> (Vec<String>, Vec<String>) {
+    let obs = adata.obs().get_data();
+    let obs_columns: Vec<String> = obs.get_column_names().iter().map(|s| s.to_string()).collect();
+    let obs_names: Vec<String> = adata.obs_names().to_vec();
+    (obs_names, obs_columns)
+}
+
+pub fn umap_lab_read_obs_column(path: &Path, column: &str) -> Result<Vec<String>> {
+    prepare_h5ad_path_for_anndata_memory_load(path);
+    let h5 = H5::open(path).context("H5::open for obs column")?;
+    let obs_container = DataContainer::open(&h5, "obs").context("open obs")?;
+    let obs_df: DataFrame = ArrayData::read(&obs_container)?
+        .try_into()
+        .map_err(|e| anyhow!("obs DataFrame: {e}"))?;
+    obs_column_as_strings(&obs_df, column)?
+        .ok_or_else(|| anyhow!("obs column {column:?} not found"))
+}
+
 /// PCA matrix and optional per-cell labels (for coloring) after loading an `.h5ad`.
 #[derive(Clone, Debug)]
 pub struct UmapLabLoaded {
     pub pca: Array2<f64>,
     pub color_column: Option<String>,
     pub color_labels: Vec<String>,
+    pub obs_names: Vec<String>,
+    pub obs_columns: Vec<String>,
 }
 
 /// Load PCA from `obsm['X_pca']` when present and valid; otherwise runs
@@ -706,10 +816,22 @@ pub struct UmapLabLoaded {
 /// writes `obsm['X_pca']` whenever HVG+PCA runs.
 /// The returned `pca` contains all available components (use `params.n_pca_components` when running UMAP).
 pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) -> Result<UmapLabLoaded> {
-    let adata = load_h5ad_fast(input).context("load_h5ad_fast")?;
+    if let Some(loaded) = umap_lab_try_headless_umap_loaded(input)? {
+        return Ok(loaded);
+    }
+    prepare_h5ad_path_for_anndata_memory_load(input);
+    let adata = load_h5ad_fast(input).map_err(|e| {
+        anyhow!(
+            "full in-memory .h5ad load failed (often OOM on huge dense X). \
+             If `obsm['X_pca']` exists, umap_lab uses a headless path; otherwise convert X to CSR in Python or add X_pca. \
+             Caused by: {:#}",
+            e
+        )
+    })?;
     let n_obs = adata.n_obs();
-    let (pca, (color_column, color_labels)) =
-        if let Some(pca) = im_obsm_dense_matrix_f64(&adata, "X_pca")? {
+    let pca_opt = im_obsm_dense_matrix_f64(&adata, "X_pca")?;
+    let (pca, (color_column, color_labels), (obs_names, obs_columns)) =
+        if let Some(pca) = pca_opt {
             if pca.nrows() != n_obs {
                 bail!(
                     "obsm['X_pca'] rows {} do not match n_obs {}",
@@ -729,7 +851,8 @@ pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) ->
                 pca.ncols()
             );
             let colors = umap_lab_color_labels_from_obs(&adata)?;
-            (pca, colors)
+            let meta = umap_lab_obs_meta(&adata);
+            (pca, colors, meta)
         } else {
             drop(adata);
             eprintln!("umap_lab: no usable X_pca; running normalization + HVG + PCA …");
@@ -737,32 +860,410 @@ pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) ->
                 rust_preprocess_h5ad_to_memory(input, params, &RustPreprocessSteps::UMAP_LAB_PCA_ONLY)?;
             let pca = pca_from_im_after_preprocess(&adata2)?;
             let colors = umap_lab_color_labels_from_obs(&adata2)?;
-            (pca, colors)
+            let meta = umap_lab_obs_meta(&adata2);
+            (pca, colors, meta)
         };
     Ok(UmapLabLoaded {
         pca,
         color_column,
         color_labels,
+        obs_names,
+        obs_columns,
     })
 }
 
 /// Run UMAP on `pca` (same umap-rs + HNSW path as [`rust_preprocess_h5ad_to_memory`]).
+///
+/// Pass `knn_cache_in` from a previous run when only manifold or optimization parameters changed;
+/// the neighbor graph is reused without rebuilding HNSW.
 pub fn umap_lab_run_embedding(
     pca: &Array2<f64>,
     params: &RustPreprocessParams,
-) -> Result<(Array2<f32>, FuzzyGraph, Vec<(String, f64)>)> {
+    knn_cache_in: Option<&UmapLabKnnCache>,
+) -> Result<(Array2<f32>, FuzzyGraph, Vec<(String, f64)>, UmapLabKnnCache)> {
     let mut log = Vec::new();
-    let (emb_umap, graph) = run_umap_on_pca(pca, params, &mut log)?;
+    let (emb_umap, graph, knn_cache) = run_umap_on_pca(pca, params, &mut log, knn_cache_in)?;
     let n = emb_umap.nrows();
     let m = emb_umap.ncols();
     let emb = Array2::<f32>::from_shape_fn((n, m), |(i, j)| emb_umap[(i, j)]);
-    Ok((emb, graph, log))
+    Ok((emb, graph, log, knn_cache))
+}
+
+fn csr_col_to_f32(csr: &CsrMatrix<f64>, col: usize, n_obs: usize) -> Vec<f32> {
+    (0..n_obs)
+        .map(|i| match csr.get_entry(i, col) {
+            Some(SparseEntry::NonZero(v)) => *v as f32,
+            Some(SparseEntry::Zero) | None => 0.0,
+        })
+        .collect()
+}
+
+fn csr_col_f32_to_f32(csr: &CsrMatrix<f32>, col: usize, n_obs: usize) -> Vec<f32> {
+    (0..n_obs)
+        .map(|i| match csr.get_entry(i, col) {
+            Some(SparseEntry::NonZero(v)) => *v,
+            Some(SparseEntry::Zero) | None => 0.0,
+        })
+        .collect()
+}
+
+fn x_column_as_f32(x: &ArrayData, col: usize, n_obs: usize, n_vars: usize) -> Result<Vec<f32>> {
+    if col >= n_vars {
+        bail!("gene column index {col} out of range (n_vars={n_vars})");
+    }
+    Ok(match x {
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => csr_col_to_f32(m, col, n_obs),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => csr_col_f32_to_f32(m, col, n_obs),
+        ArrayData::CscMatrix(d) => {
+            let csr = csc_dyn_to_csr_f64(d.clone())?;
+            csr_col_to_f32(&csr, col, n_obs)
+        }
+        ArrayData::CsrNonCanonical(non) => {
+            let d = non
+                .clone()
+                .canonicalize()
+                .map_err(|e| anyhow!("non-canonical CSR X: {e:?}"))?;
+            let csr = csr_dyn_to_csr_f64(d)?;
+            csr_col_to_f32(&csr, col, n_obs)
+        }
+        ArrayData::Array(d) => {
+            let dense: Array2<f64> = d.clone().try_convert().context("X dense to f64")?;
+            if dense.nrows() != n_obs || dense.ncols() != n_vars {
+                bail!(
+                    "dense X shape {}×{} does not match n_obs×n_vars {}×{}",
+                    dense.nrows(),
+                    dense.ncols(),
+                    n_obs,
+                    n_vars
+                );
+            }
+            dense.column(col).iter().map(|v| *v as f32).collect()
+        }
+        _ => bail!("X must be CSR, CSC, or dense matrix to color by gene"),
+    })
+}
+
+fn gene_display_bounds(values: &[f32]) -> (f32, f32) {
+    let mut v: Vec<f32> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return (0.0, 1.0);
+    }
+    if v.len() == 1 {
+        let a = v[0];
+        let pad = a.abs() * 0.05 + 0.05;
+        return (a - pad, a + pad);
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    let lo_i = ((n - 1) as f64 * 0.02).round() as usize;
+    let hi_i = ((n - 1) as f64 * 0.98).round() as usize;
+    let lo_i = lo_i.min(n - 1);
+    let hi_i = hi_i.min(n - 1).max(lo_i);
+    let mut lo = v[lo_i];
+    let mut hi = v[hi_i];
+    if !(lo < hi) {
+        lo = v[0];
+        hi = v[n - 1];
+        if lo >= hi {
+            let pad = lo.abs() * 0.05 + 0.05;
+            hi = lo + pad;
+        }
+    }
+    (lo, hi)
+}
+
+/// Adapted from anndata-memory `read_dataframe_index` (MIT) for umap_lab HDF5 headless loads.
+fn umap_lab_h5_read_dataframe_index(
+    container: &DataContainer<H5>,
+) -> Result<DataFrameIndex> {
+    let index_name: String = container.get_attr("_index")?;
+    let dataset = container.as_group()?.open_dataset(&index_name)?;
+    let index_ty = match dataset.get_attr::<String>("index_type") {
+        Ok(s) => s,
+        Err(_) => "list".to_string(),
+    };
+    match index_ty.as_str() {
+        "list" => {
+            let data = dataset.read_array()?;
+            let mut index: DataFrameIndex = data.to_vec().into();
+            index.index_name = index_name;
+            Ok(index)
+        }
+        "intervals" => {
+            let keys: Vec<String> = dataset.get_attr("names")?;
+            let values: Vec<Vec<u64>> = dataset.get_attr("intervals")?;
+            Ok(keys
+                .into_iter()
+                .zip(values.into_iter().map(|row| Interval {
+                    start: row[0] as usize,
+                    end: row[1] as usize,
+                    size: row[2] as usize,
+                    step: row[3] as usize,
+                }))
+                .collect())
+        }
+        "range" => {
+            let start: u64 = dataset.get_attr("start")?;
+            let end: u64 = dataset.get_attr("end")?;
+            Ok((start as usize..end as usize).into())
+        }
+        x => bail!("Unknown obs/var index type: {}", x),
+    }
+}
+
+fn umap_lab_h5_read_obs_var_dataframes(
+    h5: &H5File,
+) -> Result<(DataFrame, Vec<String>, DataFrame, Vec<String>)> {
+    let obs_container = DataContainer::open(h5, "obs").context("open obs")?;
+    let obs_df: DataFrame = ArrayData::read(&obs_container)?
+        .try_into()
+        .map_err(|e| anyhow!("obs DataFrame: {e}"))?;
+    let obs_names = umap_lab_h5_read_dataframe_index(&obs_container)?.into_vec();
+
+    let var_container = DataContainer::open(h5, "var").context("open var")?;
+    let var_df: DataFrame = ArrayData::read(&var_container)?
+        .try_into()
+        .map_err(|e| anyhow!("var DataFrame: {e}"))?;
+    let var_names = umap_lab_h5_read_dataframe_index(&var_container)?.into_vec();
+
+    Ok((obs_df, obs_names, var_df, var_names))
+}
+
+fn umap_lab_h5_read_obsm_x_pca_matrix(h5: &H5File) -> Result<Option<Array2<f64>>> {
+    if !h5.exists("obsm")? {
+        return Ok(None);
+    }
+    let obsm = h5.open_group("obsm")?;
+    let names = obsm.list()?;
+    if !names.iter().any(|n| n == "X_pca") {
+        return Ok(None);
+    }
+    let cont = DataContainer::open(&obsm, "X_pca").context("open obsm/X_pca")?;
+    let data = ArrayData::read(&cont)?;
+    match data {
+        ArrayData::Array(d) => match ArrayConvert::<Array2<f64>>::try_convert(d.clone()) {
+            Ok(a) => Ok(Some(a)),
+            Err(_) => {
+                let a32: Array2<f32> = ArrayConvert::try_convert(d)
+                    .map_err(|e| anyhow!("obsm['X_pca'] to f32 matrix: {e}"))?;
+                Ok(Some(a32.mapv(|v| v as f64)))
+            }
+        },
+        _ => Ok(None),
+    }
+}
+
+fn umap_lab_try_headless_umap_loaded(path: &Path) -> Result<Option<UmapLabLoaded>> {
+    let h5 = H5::open(path).context("H5::open (headless umap_lab)")?;
+    let Some(pca) = umap_lab_h5_read_obsm_x_pca_matrix(&h5)? else {
+        return Ok(None);
+    };
+    let (obs_df, obs_names, var_df, var_names) = umap_lab_h5_read_obs_var_dataframes(&h5)?;
+    let n_obs = obs_names.len();
+    if pca.nrows() != n_obs || pca.ncols() < 2 {
+        return Ok(None);
+    }
+    let n_vars = var_names.len();
+    if n_vars == 0 {
+        return Ok(None);
+    }
+    let obs_columns: Vec<String> = obs_df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let coo = CooMatrix::new(n_obs, n_vars);
+    let csr = CsrMatrix::from(&coo);
+    let x_data = ArrayData::CsrMatrix(DynCsrMatrix::F64(csr));
+    let adata = IMAnnData::new_extended(x_data, obs_names.clone(), var_names, obs_df, var_df)
+        .context("IMAnnData::new_extended (placeholder X)")?;
+    let colors = umap_lab_color_labels_from_obs(&adata)?;
+    eprintln!(
+        "umap_lab: headless HDF5 load using obsm['X_pca'] ({}×{}) — skipped materializing full X",
+        pca.nrows(),
+        pca.ncols()
+    );
+    Ok(Some(UmapLabLoaded {
+        pca,
+        color_column: colors.0,
+        color_labels: colors.1,
+        obs_names,
+        obs_columns,
+    }))
+}
+
+fn umap_lab_h5_root_x_is_dense_dataset(path: &Path) -> Result<bool> {
+    use hdf5_metno::{File as MetH5File, LocationType};
+    let f = MetH5File::open(path)?;
+    let t = f
+        .loc_type_by_name("X")
+        .map_err(|e| anyhow!("inspect X link: {e}"))?;
+    Ok(t == LocationType::Dataset)
+}
+
+fn h5ad_attr_encoding_type_string(attr: &hdf5_metno::Attribute) -> Option<String> {
+    use hdf5_metno::types::{VarLenAscii, VarLenUnicode};
+    if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {
+        return Some(v.to_string());
+    }
+    if let Ok(v) = attr.read_scalar::<VarLenAscii>() {
+        return Some(v.to_string());
+    }
+    None
+}
+
+fn h5ad_strip_uns_datasets_encoding_null(path: &Path) -> Result<usize> {
+    use hdf5_metno::{Dataset, File as H5File, Group, LocationType};
+
+    fn strip_in_group(g: &Group, removed: &mut usize) -> Result<()> {
+        let names = g.member_names()?;
+        for sub in names {
+            match g.loc_type_by_name(&sub)? {
+                LocationType::Group => strip_in_group(&g.group(&sub)?, removed)?,
+                LocationType::Dataset => {
+                    let ds: Dataset = g.dataset(&sub)?;
+                    let is_null = ds
+                        .attr("encoding-type")
+                        .ok()
+                        .and_then(|a| h5ad_attr_encoding_type_string(&a))
+                        .is_some_and(|s| s == "null");
+                    if is_null {
+                        g.unlink(&sub)?;
+                        *removed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    let f = H5File::open_rw(path).with_context(|| {
+        format!(
+            "open {} read-write to remove uns datasets with encoding-type=null (anndata-rs cannot read them)",
+            path.display()
+        )
+    })?;
+    if !f.link_exists("uns") {
+        f.close().context("HDF5 close")?;
+        return Ok(0);
+    }
+    let uns = f.group("uns")?;
+    let mut removed = 0usize;
+    strip_in_group(&uns, &mut removed)?;
+    if removed > 0 {
+        f.flush()
+            .context("HDF5 flush after stripping encoding-type=null uns datasets")?;
+    }
+    f.close().context("HDF5 close after uns patch")?;
+    Ok(removed)
+}
+
+fn prepare_h5ad_path_for_anndata_memory_load(path: &Path) {
+    match h5ad_strip_uns_datasets_encoding_null(path) {
+        Ok(0) => {}
+        Ok(n) => eprintln!(
+            "rust_preprocess: removed {n} uns dataset(s) with encoding-type=null (e.g. Scanpy uns['log1p']['base']) so anndata-rs can load {}",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "rust_preprocess: warning: could not patch encoding-type=null entries in {}: {:#}. \
+             Open the file read-write once, or re-save in Python without null-encoded uns leaves.",
+            path.display(),
+            e
+        ),
+    }
+}
+
+fn umap_lab_h5_dense_x_column_f32(
+    path: &Path,
+    col: usize,
+    n_obs: usize,
+    n_vars: usize,
+) -> Result<Vec<f32>> {
+    use hdf5_metno::File as H5File;
+    let f = H5File::open(path)?;
+    let ds = f.dataset("X").context("HDF5 dataset X")?;
+    let sh = ds.shape();
+    anyhow::ensure!(sh.len() == 2, "X: expected 2D dataset, got shape {:?}", sh);
+    anyhow::ensure!(
+        sh[0] as usize == n_obs && sh[1] as usize == n_vars,
+        "X shape {:?} does not match obs×var {}×{}",
+        sh,
+        n_obs,
+        n_vars
+    );
+    anyhow::ensure!(col < n_vars, "gene column {} out of range (n_vars={})", col, n_vars);
+    if let Ok(slab) = ds.read_slice_2d::<f32, _>(s![.., col..col + 1]) {
+        return Ok(slab.iter().copied().collect());
+    }
+    let slab = ds
+        .read_slice_2d::<f64, _>(s![.., col..col + 1])
+        .map_err(|e| anyhow!("read X column as f64: {e}"))?;
+    Ok(slab.iter().map(|v| *v as f32).collect())
+}
+
+/// Load `X` from disk and return per-cell values for one gene (`var_names` match, case-insensitive fallback).
+pub fn umap_lab_gene_expression_from_h5ad(
+    path: &Path,
+    gene_query: &str,
+) -> Result<(String, Vec<f32>, f32, f32)> {
+    let q = gene_query.trim();
+    if q.is_empty() {
+        bail!("gene name is empty");
+    }
+
+    let h5 = H5::open(path).context("H5::open (gene)")?;
+    let var_container = DataContainer::open(&h5, "var").context("open var")?;
+    let var_names = umap_lab_h5_read_dataframe_index(&var_container)?.into_vec();
+    let n_vars = var_names.len();
+
+    let obs_container = DataContainer::open(&h5, "obs").context("open obs")?;
+    let n_obs = umap_lab_h5_read_dataframe_index(&obs_container)?.into_vec().len();
+
+    let idx = var_names
+        .iter()
+        .position(|n| n.as_str() == q)
+        .or_else(|| {
+            let ql = q.to_lowercase();
+            var_names
+                .iter()
+                .position(|n| n.to_lowercase() == ql)
+        })
+        .with_context(|| format!("gene {q:?} not found (n_vars={n_vars})"))?;
+    let resolved = var_names
+        .get(idx)
+        .with_context(|| "var_names index")?
+        .clone();
+
+    if umap_lab_h5_root_x_is_dense_dataset(path)? {
+        if let Ok(col) = umap_lab_h5_dense_x_column_f32(path, idx, n_obs, n_vars) {
+            let (vmin, vmax) = gene_display_bounds(&col);
+            return Ok((resolved, col, vmin, vmax));
+        }
+    }
+
+    prepare_h5ad_path_for_anndata_memory_load(path);
+    let adata = load_h5ad_fast(path).map_err(|e| {
+        anyhow!(
+            "loading .h5ad for gene expression failed. Caused by: {:#}",
+            e
+        )
+    })?;
+    anyhow::ensure!(
+        adata.n_obs() == n_obs && adata.n_vars() == n_vars,
+        "obs/var shape mismatch after full load (expected {}×{})",
+        n_obs,
+        n_vars
+    );
+    let x = adata.x().get_data().context("read X")?;
+    let col = x_column_as_f32(&x, idx, n_obs, n_vars)?;
+    let (vmin, vmax) = gene_display_bounds(&col);
+    Ok((resolved, col, vmin, vmax))
 }
 
 fn ensure_x_csr_for_pca(adata: &IMAnnData) -> Result<()> {
     let x = adata.x().get_data()?;
     match x {
-        ArrayData::CsrMatrix(_) => Ok(()),
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(_)) | ArrayData::CsrMatrix(DynCsrMatrix::F32(_)) => {
+            Ok(())
+        }
         ArrayData::CscMatrix(csc) => {
             let csr = match csc {
                 DynCscMatrix::F32(m) => {
@@ -778,8 +1279,41 @@ fn ensure_x_csr_for_pca(adata: &IMAnnData) -> Result<()> {
             adata.x().set_data(csr)?;
             Ok(())
         }
-        _ => {
-            bail!("rust_preprocess: X must be CSR or CSC sparse matrix for PCA (got other layout)")
+        ArrayData::CsrNonCanonical(non) => {
+            let csr_dyn = non
+                .clone()
+                .canonicalize()
+                .map_err(|e| anyhow!("rust_preprocess: X non-canonical CSR: {e:?}"))?;
+            let csr = csr_dyn_to_csr_f64(csr_dyn)?;
+            adata
+                .x()
+                .set_data(ArrayData::CsrMatrix(DynCsrMatrix::F64(csr)))?;
+            Ok(())
+        }
+        ArrayData::Array(d) => {
+            let dense: Array2<f64> = d
+                .try_convert()
+                .context("rust_preprocess: dense X must convert to f64 for CSR layout")?;
+            let nrows = dense.nrows();
+            let ncols = dense.ncols();
+            eprintln!(
+                "rust_preprocess: converting dense X ({nrows}×{ncols}) to CSR f64 (required for normalize_expression / PCA)"
+            );
+            let csr = dense_ndarray_to_csr_f64(&dense)?;
+            adata
+                .x()
+                .set_data(ArrayData::CsrMatrix(DynCsrMatrix::F64(csr)))?;
+            Ok(())
+        }
+        ArrayData::CsrMatrix(other) => {
+            let csr = csr_dyn_to_csr_f64(other)?;
+            adata
+                .x()
+                .set_data(ArrayData::CsrMatrix(DynCsrMatrix::F64(csr)))?;
+            Ok(())
+        }
+        ArrayData::DataFrame(_) => {
+            bail!("rust_preprocess: X as DataFrame is not supported for preprocessing")
         }
     }
 }
@@ -1166,11 +1700,142 @@ fn obs_column_as_strings(df: &DataFrame, key: &str) -> Result<Option<Vec<String>
     Ok(Some(values))
 }
 
+/// Upper-triangular induced subgraph on `subset_global` (unique global row indices in visit order).
+/// Only edges with both endpoints in the subset and `gi < gj` are retained (same convention as
+/// [`leiden_labels_from_graph`]).
+pub fn fuzzy_graph_induced_subgraph(graph: &FuzzyGraph, subset_global: &[usize]) -> Result<FuzzyGraph> {
+    let n = graph.rows();
+    if subset_global.is_empty() {
+        bail!("fuzzy_graph_induced_subgraph: empty subset");
+    }
+    let mut g2l: Vec<Option<usize>> = vec![None; n];
+    for (li, &gi) in subset_global.iter().enumerate() {
+        if gi >= n {
+            bail!(
+                "fuzzy_graph_induced_subgraph: index {} out of range (n={})",
+                gi,
+                n
+            );
+        }
+        if g2l[gi].is_some() {
+            bail!("fuzzy_graph_induced_subgraph: duplicate index {}", gi);
+        }
+        g2l[gi] = Some(li);
+    }
+    let k = subset_global.len();
+    let mut tri = TriMatI::new((k, k));
+    for &gi in subset_global {
+        if let Some(row) = graph.outer_view(gi) {
+            for (&jj, &w) in row.indices().iter().zip(row.data().iter()) {
+                let gj = jj as usize;
+                if w <= 0.0 || gi >= gj {
+                    continue;
+                }
+                let Some(li) = g2l[gi] else {
+                    continue;
+                };
+                let Some(lj) = g2l[gj] else {
+                    continue;
+                };
+                if li < lj {
+                    tri.add_triplet(li, lj, w);
+                }
+            }
+        }
+    }
+    Ok(tri.to_csr())
+}
+
+/// Re-run Leiden on the fuzzy subgraph of cells in `parent_code`, then merge labels:
+/// cells outside the parent keep their current category string; cells inside become
+/// `{parent_name}/{local_leiden_id}`.
+pub fn leiden_labels_subcluster_into(
+    graph: &FuzzyGraph,
+    base_codes: &[u32],
+    categories: &[String],
+    parent_code: u32,
+    resolution: f64,
+    max_iter: usize,
+) -> Result<Vec<String>> {
+    let n = graph.rows();
+    if base_codes.len() != n {
+        bail!(
+            "leiden_labels_subcluster_into: base_codes len {} != graph rows {}",
+            base_codes.len(),
+            n
+        );
+    }
+    let pc = parent_code as usize;
+    if pc >= categories.len() {
+        bail!(
+            "leiden_labels_subcluster_into: parent_code {} out of range ({} categories)",
+            parent_code,
+            categories.len()
+        );
+    }
+    let parent_name = &categories[pc];
+    let subset: Vec<usize> = base_codes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| (c == parent_code).then_some(i))
+        .collect();
+    if subset.is_empty() {
+        bail!("leiden_labels_subcluster_into: no cells with code {}", parent_code);
+    }
+    let subgraph = fuzzy_graph_induced_subgraph(graph, &subset)?;
+    let local = leiden_labels_from_graph(&subgraph, resolution, max_iter);
+    if local.len() != subset.len() {
+        bail!(
+            "leiden_labels_subcluster_into: local labels len {} != subset {}",
+            local.len(),
+            subset.len()
+        );
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut li = 0usize;
+    for global_i in 0..n {
+        if base_codes[global_i] == parent_code {
+            out.push(format!("{}/{}", parent_name, local[li]));
+            li += 1;
+        } else {
+            let c = base_codes[global_i] as usize;
+            out.push(
+                categories
+                    .get(c)
+                    .cloned()
+                    .unwrap_or_else(|| c.to_string()),
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Leiden clustering matching Scanpy's `sc.tl.leiden` (RBConfigurationVertexPartition).
+///
+/// Scanpy's quality increment: `ΔQ = e_{j→c} - γ·k_j·K_c / (2m)`
+/// Rust leiden crate's formula: `ΔQ = e_{j→c} - w_j·W_c·r`
+/// Match when node weight = weighted degree and `r = γ / (2m)`.
 pub fn leiden_labels_from_graph(graph: &FuzzyGraph, resolution: f64, max_iter: usize) -> Vec<String> {
     let n = graph.rows();
+
+    let mut degrees = vec![0.0f32; n];
+    let mut total_edge_weight = 0.0f64;
+    for i in 0..n {
+        if let Some(row) = graph.outer_view(i) {
+            for (&j, &w) in row.indices().iter().zip(row.data().iter()) {
+                let j = j as usize;
+                if i < j && w > 0.0 {
+                    degrees[i] += w;
+                    degrees[j] += w;
+                    total_edge_weight += w as f64;
+                }
+            }
+        }
+    }
+
     let mut g = Graph::with_capacity(n, graph.nnz() * 2);
-    for _ in 0..n {
-        g.add_node(1.0_f32);
+    for i in 0..n {
+        g.add_node(degrees[i]);
     }
     for i in 0..n {
         if let Some(row) = graph.outer_view(i) {
@@ -1183,9 +1848,15 @@ pub fn leiden_labels_from_graph(graph: &FuzzyGraph, resolution: f64, max_iter: u
         }
     }
 
+    let scaled_res = if total_edge_weight > 0.0 {
+        resolution / (2.0 * total_edge_weight)
+    } else {
+        resolution
+    };
+
     let network = Network::new_from_graph(g);
     let mut clustering = SimpleClustering::init_different_clusters(network.nodes());
-    let mut leiden = Leiden::new(resolution, 0.01, Some(42));
+    let mut leiden = Leiden::new(scaled_res, 0.01, Some(42));
     for _ in 0..max_iter {
         if !leiden.iterate(&network, &mut clustering) {
             break;
@@ -1383,6 +2054,7 @@ pub fn rust_preprocess_h5ad_to_memory(
 
     let t0 = Instant::now();
     eprintln!(">>> read_h5ad");
+    prepare_h5ad_path_for_anndata_memory_load(input);
     let mut adata = load_h5ad_fast(input).context("load_h5ad_fast")?;
     eprintln!("  loaded shape=({}, {})", adata.n_obs(), adata.n_vars());
     eprintln!("<<< read_h5ad: {:.2} s", t0.elapsed().as_secs_f64());
@@ -1462,6 +2134,7 @@ pub fn rust_preprocess_h5ad_to_memory(
             layer_replace_if_present(&adata, "log1p", x)?;
             log.push(("skip_normalize_log1p_log_space".to_string(), 0.0));
         } else {
+            ensure_x_csr_for_pca(&adata).context("prepare X as CSR for normalize_total")?;
             let t = Instant::now();
             eprintln!(">>> normalize_total (target_sum=10000, Scanpy-equivalent)");
             normalize_expression(&adata.x(), 10_000, &Direction::ROW, None)
@@ -1576,7 +2249,7 @@ pub fn rust_preprocess_h5ad_to_memory(
     }
 
     if steps.run_umap_and_graph {
-        let (emb_umap, fuzzy_graph) = run_umap_on_pca(&pca, params, &mut log)?;
+        let (emb_umap, fuzzy_graph, _knn_cache) = run_umap_on_pca(&pca, params, &mut log, None)?;
 
         let n = emb_umap.nrows();
         let umap_f64 =

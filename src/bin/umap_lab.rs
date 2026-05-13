@@ -15,8 +15,9 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use spacetravlr::config::expand_user_path;
 use spacetravlr::{
-    FuzzyGraph, leiden_labels_from_graph, umap_lab_load_pca_session, umap_lab_run_embedding,
-    RustPreprocessParams, UmapLabLoaded,
+    FuzzyGraph, leiden_labels_from_graph, leiden_labels_subcluster_into, umap_lab_gene_expression_from_h5ad,
+    umap_lab_load_pca_session, umap_lab_read_obs_column,
+    umap_lab_run_embedding, RustPreprocessParams, UmapLabKnnCache, UmapLabLoaded,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -31,6 +32,9 @@ struct Cli {
     port: u16,
     #[arg(long, default_value = "web/umap_lab/dist")]
     static_dir: PathBuf,
+    /// Serve only `/api` (no static UI). Use with `npm run dev` in `web/umap_lab` for Vite HMR.
+    #[arg(long, default_value_t = false)]
+    api_only: bool,
     #[arg(long, default_value_t = true)]
     allow_cors: bool,
 }
@@ -47,6 +51,18 @@ struct LoadedSession {
     color_categories: Vec<String>,
     color_codes: Vec<u32>,
     fuzzy_graph: Option<FuzzyGraph>,
+    umap_knn_cache: Option<UmapLabKnnCache>,
+    leiden_cache: Option<CachedLeiden>,
+    /// Last **full** `POST /api/leiden` partition (per-cell labels). Subcluster updates `leiden_cache` only.
+    leiden_baseline_labels: Option<Vec<String>>,
+    obs_names: Vec<String>,
+    obs_columns: Vec<String>,
+}
+
+#[derive(Clone)]
+struct CachedLeiden {
+    categories: Vec<String>,
+    codes: Vec<u32>,
 }
 
 fn pack_labels(labels: &[String]) -> (Vec<String>, Vec<u32>) {
@@ -84,6 +100,8 @@ struct LoadResponse {
     color_column: Option<String>,
     color_categories: Vec<String>,
     color_codes: Vec<u32>,
+    ef_construction: usize,
+    obs_columns: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -199,16 +217,17 @@ async fn api_load(
     let loaded: UmapLabLoaded = tokio::task::spawn_blocking({
         let path = path.clone();
         let prep = prep.clone();
-        move || umap_lab_load_pca_session(&path, &prep).map_err(|e| e.to_string())
+        move || umap_lab_load_pca_session(&path, &prep).map_err(|e| format!("{:#}", e))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
     let n_cells = loaded.pca.nrows();
     let n_pca_available = loaded.pca.ncols();
     let color_column = loaded.color_column.clone();
     let (color_categories, color_codes) = pack_labels(&loaded.color_labels);
+    let ef_construction = prep.ef_construction;
+    let obs_columns = loaded.obs_columns.clone();
 
     let sess = LoadedSession {
         path: path.clone(),
@@ -218,6 +237,11 @@ async fn api_load(
         color_categories: color_categories.clone(),
         color_codes: color_codes.clone(),
         fuzzy_graph: None,
+        umap_knn_cache: None,
+        leiden_cache: None,
+        leiden_baseline_labels: None,
+        obs_names: loaded.obs_names,
+        obs_columns: loaded.obs_columns,
     };
     *st.session.lock().unwrap() = Some(sess);
 
@@ -228,6 +252,8 @@ async fn api_load(
         color_column,
         color_categories,
         color_codes,
+        ef_construction,
+        obs_columns,
     }))
 }
 
@@ -235,7 +261,7 @@ async fn api_umap(
     State(st): State<Arc<AppState>>,
     Json(body): Json<UmapRequest>,
 ) -> Result<Json<UmapResponse>, (StatusCode, String)> {
-    let (pca, mut params) = {
+    let (pca, mut params, knn_cache_in) = {
         let g = st.session.lock().unwrap();
         let Some(s) = g.as_ref() else {
             return Err((
@@ -243,15 +269,19 @@ async fn api_umap(
                 "load a dataset first (POST /api/load)".into(),
             ));
         };
-        (s.pca.clone(), merge_umap_params(&s.umap_param_base, &body))
+        (
+            s.pca.clone(),
+            merge_umap_params(&s.umap_param_base, &body),
+            s.umap_knn_cache.clone(),
+        )
     };
     params.n_pca_components = params
         .n_pca_components
         .max(2)
         .min(pca.ncols());
 
-    let (emb, graph, timings) = tokio::task::spawn_blocking(move || {
-        umap_lab_run_embedding(&pca, &params).map_err(|e| e.to_string())
+    let (emb, graph, timings, new_knn_cache) = tokio::task::spawn_blocking(move || {
+        umap_lab_run_embedding(&pca, &params, knn_cache_in.as_ref()).map_err(|e| format!("{:#}", e))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -269,6 +299,9 @@ async fn api_umap(
         let mut g = st.session.lock().unwrap();
         if let Some(s) = g.as_mut() {
             s.fuzzy_graph = Some(graph);
+            s.umap_knn_cache = Some(new_knn_cache);
+            s.leiden_cache = None;
+            s.leiden_baseline_labels = None;
         }
     }
 
@@ -339,12 +372,513 @@ async fn api_leiden(
 
     let (categories, codes) = pack_labels(&labels);
 
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            s.leiden_baseline_labels = Some(labels.clone());
+            s.leiden_cache = Some(CachedLeiden {
+                categories: categories.clone(),
+                codes: codes.clone(),
+            });
+        }
+    }
+
     Ok(Json(LeidenResponse {
         labels,
         categories,
         codes,
         n_clusters,
         elapsed_sec: elapsed,
+    }))
+}
+
+#[derive(Deserialize)]
+struct LeidenSubclusterRequest {
+    parent_code: u32,
+    #[serde(default = "default_leiden_resolution")]
+    resolution: f64,
+}
+
+async fn api_leiden_subcluster(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<LeidenSubclusterRequest>,
+) -> Result<Json<LeidenResponse>, (StatusCode, String)> {
+    let (graph, cache) = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "load a dataset first (POST /api/load)".into(),
+            ));
+        };
+        let Some(ref fg) = s.fuzzy_graph else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run UMAP first to build the fuzzy graph".into(),
+            ));
+        };
+        let Some(ref c) = s.leiden_cache else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run full Leiden first (POST /api/leiden), then pick a cluster".into(),
+            ));
+        };
+        (fg.clone(), c.clone())
+    };
+
+    let resolution = body.resolution.max(0.01);
+    let parent_code = body.parent_code;
+
+    let (labels, elapsed) = tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let out = leiden_labels_subcluster_into(
+            &graph,
+            &cache.codes,
+            &cache.categories,
+            parent_code,
+            resolution,
+            100,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok::<_, String>((out, t.elapsed().as_secs_f64()))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let n_clusters = {
+        let mut seen = std::collections::HashSet::new();
+        for l in &labels {
+            seen.insert(l.as_str());
+        }
+        seen.len()
+    };
+    let (categories, codes) = pack_labels(&labels);
+
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            s.leiden_cache = Some(CachedLeiden {
+                categories: categories.clone(),
+                codes: codes.clone(),
+            });
+        }
+    }
+
+    Ok(Json(LeidenResponse {
+        labels,
+        categories,
+        codes,
+        n_clusters,
+        elapsed_sec: elapsed,
+    }))
+}
+
+async fn api_leiden_reset(
+    State(st): State<Arc<AppState>>,
+) -> Result<Json<LeidenResponse>, (StatusCode, String)> {
+    let (labels, categories, codes, n_clusters) = {
+        let mut g = st.session.lock().unwrap();
+        let Some(s) = g.as_mut() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "load a dataset first (POST /api/load)".into(),
+            ));
+        };
+        let Some(ref baseline) = s.leiden_baseline_labels else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run full Leiden (POST /api/leiden) before reset".into(),
+            ));
+        };
+        let labels = baseline.clone();
+        let (categories, codes) = pack_labels(&labels);
+        let mut seen = std::collections::HashSet::new();
+        for l in &labels {
+            seen.insert(l.as_str());
+        }
+        let n_clusters = seen.len();
+        s.leiden_cache = Some(CachedLeiden {
+            categories: categories.clone(),
+            codes: codes.clone(),
+        });
+        (labels, categories, codes, n_clusters)
+    };
+
+    Ok(Json(LeidenResponse {
+        labels,
+        categories,
+        codes,
+        n_clusters,
+        elapsed_sec: 0.0,
+    }))
+}
+
+#[derive(Deserialize)]
+struct GeneRequest {
+    gene: String,
+}
+
+#[derive(Serialize)]
+struct GeneResponse {
+    gene: String,
+    values: Vec<f32>,
+    vmin: f32,
+    vmax: f32,
+}
+
+async fn api_gene(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<GeneRequest>,
+) -> Result<Json<GeneResponse>, (StatusCode, String)> {
+    let (path, n_expected) = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "load a dataset first (POST /api/load)".into(),
+            ));
+        };
+        (s.path.clone(), s.pca.nrows())
+    };
+    let gene = body.gene.trim().to_string();
+    if gene.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "gene name is empty".into()));
+    }
+    let (resolved, values, vmin, vmax) = tokio::task::spawn_blocking(move || {
+        umap_lab_gene_expression_from_h5ad(&path, &gene).map_err(|e| format!("{:#}", e))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    if values.len() != n_expected {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "gene vector length {} does not match loaded session ({} cells)",
+                values.len(),
+                n_expected
+            ),
+        ));
+    }
+
+    Ok(Json(GeneResponse {
+        gene: resolved,
+        values,
+        vmin,
+        vmax,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ColorByRequest {
+    column: String,
+}
+
+#[derive(Serialize)]
+struct ColorByResponse {
+    column: String,
+    categories: Vec<String>,
+    codes: Vec<u32>,
+}
+
+async fn api_color_by(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<ColorByRequest>,
+) -> Result<Json<ColorByResponse>, (StatusCode, String)> {
+    let (path, obs_columns) = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+        };
+        (s.path.clone(), s.obs_columns.clone())
+    };
+    let column = body.column.trim().to_string();
+    if column.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "column name is empty".into()));
+    }
+    if !obs_columns.contains(&column) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("column {column:?} not in obs; available: {obs_columns:?}"),
+        ));
+    }
+    let col = column.clone();
+    let labels = tokio::task::spawn_blocking(move || {
+        umap_lab_read_obs_column(&path, &col).map_err(|e| format!("{:#}", e))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let (categories, codes) = pack_labels(&labels);
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            s.color_column = Some(column.clone());
+            s.color_categories = categories.clone();
+            s.color_codes = codes.clone();
+        }
+    }
+    Ok(Json(ColorByResponse {
+        column,
+        categories,
+        codes,
+    }))
+}
+
+#[derive(Deserialize)]
+struct MaltRequest {
+    reference_path: String,
+    #[serde(default)]
+    groupby: Option<String>,
+    #[serde(default)]
+    outdir: Option<String>,
+    #[serde(default)]
+    no_leiden_map: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct MaltResponse {
+    outdir: String,
+    csv_path: String,
+    csv_columns: Vec<String>,
+    elapsed_sec: f64,
+}
+
+async fn api_malt(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<MaltRequest>,
+) -> Result<Json<MaltResponse>, (StatusCode, String)> {
+    let query_path = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+        };
+        s.path.clone()
+    };
+
+    let ref_expanded = expand_user_path(body.reference_path.trim());
+    let ref_path = PathBuf::from(&ref_expanded);
+    if !ref_path.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("reference not a file: {}", ref_path.display()),
+        ));
+    }
+
+    let outdir = body
+        .outdir
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| expand_user_path(s))
+        .unwrap_or_else(|| "/tmp/malt_results".to_string());
+
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/malt_label_transfer.py");
+    if !script.is_file() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("MALT script not found at {}", script.display()),
+        ));
+    }
+
+    let groupby = body.groupby.clone();
+    let no_leiden = body.no_leiden_map.unwrap_or(false);
+    let outdir2 = outdir.clone();
+
+    let (output, elapsed) = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("python");
+        cmd.arg(&script)
+            .arg("--reference")
+            .arg(&ref_path)
+            .arg("--query")
+            .arg(&query_path)
+            .arg("--outdir")
+            .arg(&outdir2);
+
+        if let Some(ref gb) = groupby {
+            let gb = gb.trim();
+            if !gb.is_empty() {
+                cmd.arg("--groupby").arg(gb);
+            }
+        }
+        if no_leiden {
+            cmd.arg("--no-leiden-map");
+        }
+
+        tracing::info!("Running MALT: {:?}", cmd);
+
+        let t0 = std::time::Instant::now();
+        let output = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to spawn MALT python: {e}"))?;
+
+        Ok::<_, String>((output, t0.elapsed().as_secs_f64()))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "MALT exited with code {:?}\n--- stderr ---\n{}\n--- stdout ---\n{}",
+                output.status.code(),
+                stderr,
+                stdout,
+            ),
+        ));
+    }
+
+    let csv_path = PathBuf::from(&outdir).join("malt_labels.csv");
+    if !csv_path.is_file() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "MALT completed but malt_labels.csv not found at {}",
+                csv_path.display()
+            ),
+        ));
+    }
+
+    let csv_columns = {
+        let rdr = std::io::BufRead::lines(std::io::BufReader::new(
+            std::fs::File::open(&csv_path).map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("open CSV: {e}"))
+            })?,
+        ));
+        let first_line = rdr
+            .into_iter()
+            .next()
+            .transpose()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("read CSV: {e}")))?
+            .unwrap_or_default();
+        first_line
+            .split(',')
+            .skip(1)
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    tracing::info!(
+        "MALT finished in {:.1}s → {} ({} columns)",
+        elapsed,
+        csv_path.display(),
+        csv_columns.len(),
+    );
+
+    Ok(Json(MaltResponse {
+        outdir,
+        csv_path: csv_path.to_string_lossy().to_string(),
+        csv_columns,
+        elapsed_sec: elapsed,
+    }))
+}
+
+#[derive(Deserialize)]
+struct LoadCsvRequest {
+    csv_path: String,
+    column: String,
+}
+
+#[derive(Serialize)]
+struct LoadCsvResponse {
+    column: String,
+    categories: Vec<String>,
+    codes: Vec<u32>,
+    n_matched: usize,
+    n_missing: usize,
+}
+
+async fn api_load_csv(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<LoadCsvRequest>,
+) -> Result<Json<LoadCsvResponse>, (StatusCode, String)> {
+    let obs_names = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+        };
+        s.obs_names.clone()
+    };
+
+    let csv_path = PathBuf::from(expand_user_path(body.csv_path.trim()));
+    if !csv_path.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("CSV file not found: {}", csv_path.display()),
+        ));
+    }
+    let column = body.column.trim().to_string();
+
+    let (labels, n_matched, n_missing) = tokio::task::spawn_blocking(move || {
+        let content = std::fs::read_to_string(&csv_path)
+            .map_err(|e| format!("read CSV: {e}"))?;
+        let mut lines = content.lines();
+        let header_line = lines.next().ok_or("CSV is empty")?;
+        let headers: Vec<&str> = header_line.split(',').map(|s| s.trim()).collect();
+        let col_idx = headers
+            .iter()
+            .position(|&h| h == column)
+            .ok_or_else(|| {
+                format!(
+                    "column {column:?} not in CSV headers: {headers:?}"
+                )
+            })?;
+        let idx_col = headers.iter().position(|&h| h == "obs_name").unwrap_or(0);
+
+        let mut csv_map: HashMap<String, String> = HashMap::new();
+        for line in lines {
+            let fields: Vec<&str> = line.split(',').collect();
+            let key = fields.get(idx_col).unwrap_or(&"").trim().to_string();
+            let val = fields.get(col_idx).unwrap_or(&"").trim().to_string();
+            if !key.is_empty() {
+                csv_map.insert(key, val);
+            }
+        }
+
+        let mut labels = Vec::with_capacity(obs_names.len());
+        let mut matched = 0usize;
+        let mut missing = 0usize;
+        for name in &obs_names {
+            if let Some(val) = csv_map.get(name) {
+                labels.push(val.clone());
+                matched += 1;
+            } else {
+                labels.push("unmapped".to_string());
+                missing += 1;
+            }
+        }
+        Ok::<_, String>((labels, matched, missing))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let (categories, codes) = pack_labels(&labels);
+    let col_name = body.column.trim().to_string();
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            s.color_column = Some(col_name.clone());
+            s.color_categories = categories.clone();
+            s.color_codes = codes.clone();
+        }
+    }
+
+    Ok(Json(LoadCsvResponse {
+        column: col_name,
+        categories,
+        codes,
+        n_matched,
+        n_missing,
     }))
 }
 
@@ -408,6 +942,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/load", post(api_load))
         .route("/umap", post(api_umap))
         .route("/leiden", post(api_leiden))
+        .route("/leiden/subcluster", post(api_leiden_subcluster))
+        .route("/leiden/reset", post(api_leiden_reset))
+        .route("/gene", post(api_gene))
+        .route("/color_by", post(api_color_by))
+        .route("/malt", post(api_malt))
+        .route("/load_csv", post(api_load_csv))
         .with_state(state.clone());
 
     if cli.allow_cors {
@@ -419,18 +959,31 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let static_dir = resolve_static_dir(cli.static_dir.as_path())?;
-    let index = static_dir.join("index.html");
-    let static_files = ServeDir::new(&static_dir).fallback(ServeFile::new(index.clone()));
-    let app = Router::new()
-        .nest("/api", api)
-        .fallback_service(static_files)
-        .layer(TraceLayer::new_for_http());
+    let app = if cli.api_only {
+        tracing::info!(
+            "API only (no bundled UI). For hot reload: `cd web/umap_lab && npm run dev`, then open the Vite URL (proxies /api to this server)."
+        );
+        Router::new()
+            .nest("/api", api)
+            .layer(TraceLayer::new_for_http())
+    } else {
+        let static_dir = resolve_static_dir(cli.static_dir.as_path())?;
+        tracing::info!(
+            "Serving UI from {}. For hot reload without rebuilds: `cd web/umap_lab && npm run dev` (Vite proxies /api to this port).",
+            static_dir.display()
+        );
+        let index = static_dir.join("index.html");
+        let static_files = ServeDir::new(&static_dir).fallback(ServeFile::new(index));
+        Router::new()
+            .nest("/api", api)
+            .fallback_service(static_files)
+            .layer(TraceLayer::new_for_http())
+    };
 
     let addr: SocketAddr = format!("{}:{}", cli.bind, cli.port)
         .parse()
         .context("bind address")?;
-    tracing::info!("UMAP lab → http://{}", addr);
+    tracing::info!("UMAP lab API → http://{}/api/…", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     serve(listener, app).await?;
     Ok(())
