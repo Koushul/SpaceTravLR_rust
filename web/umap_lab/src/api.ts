@@ -7,6 +7,11 @@ export type LoadResponse = {
   color_codes: number[]
   ef_construction: number
   obs_columns: string[]
+  var_names: string[]
+  has_spatial: boolean
+  spatial_key: string | null
+  spatial_x: number[]
+  spatial_y: number[]
 }
 
 export type UmapResponse = {
@@ -43,6 +48,26 @@ export async function apiUmap(body: Record<string, number | undefined>): Promise
     throw new Error(t || res.statusText)
   }
   return res.json() as Promise<UmapResponse>
+}
+
+export type StatusResponse = {
+  loaded: boolean
+  path: string | null
+  n_cells: number | null
+  n_pca_available: number | null
+  color_column: string | null
+  color_categories: string[] | null
+  color_codes: number[] | null
+  magic_imputed_ready: boolean
+}
+
+export async function apiStatus(): Promise<StatusResponse> {
+  const res = await fetch("/api/status")
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.json() as Promise<StatusResponse>
 }
 
 export type LeidenResponse = {
@@ -98,7 +123,10 @@ export type GeneExpressionResponse = {
   vmax: number
 }
 
-export async function apiGene(body: { gene: string }): Promise<GeneExpressionResponse> {
+export async function apiGene(body: {
+  gene: string
+  source?: "x" | "normalized_count" | "imputed_count"
+}): Promise<GeneExpressionResponse> {
   const res = await fetch("/api/gene", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -109,6 +137,77 @@ export async function apiGene(body: { gene: string }): Promise<GeneExpressionRes
     throw new Error(t || res.statusText)
   }
   return res.json() as Promise<GeneExpressionResponse>
+}
+
+export async function apiMagicLeiden(): Promise<{ elapsed_sec: number; magic_imputed_ready: boolean }> {
+  const res = await fetch("/api/magic_leiden", { method: "POST" })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.json() as Promise<{ elapsed_sec: number; magic_imputed_ready: boolean }>
+}
+
+export type ReferenceSignatureSummary = {
+  id: string
+  label: string
+  category: string
+  description: string
+  genes: string[]
+  present_genes: string[]
+  missing_genes: string[]
+}
+
+export type ReferenceSignatureSet = {
+  species: string
+  version: string | null
+  description: string | null
+  sources: string[]
+  signatures: ReferenceSignatureSummary[]
+}
+
+export type ReferenceSignatureSetsResponse = {
+  sets: ReferenceSignatureSet[]
+}
+
+export async function apiSignatureSets(): Promise<ReferenceSignatureSetsResponse> {
+  const res = await fetch("/api/signature_sets")
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.json() as Promise<ReferenceSignatureSetsResponse>
+}
+
+export type SignatureExpressionResponse = {
+  species: string
+  id: string
+  label: string
+  category: string
+  description: string
+  genes: string[]
+  present_genes: string[]
+  missing_genes: string[]
+  values: number[]
+  vmin: number
+  vmax: number
+}
+
+export async function apiSignatureExpression(body: {
+  species: string
+  id: string
+  expression_source?: "x" | "normalized_count" | "imputed_count"
+}): Promise<SignatureExpressionResponse> {
+  const res = await fetch("/api/signature", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.json() as Promise<SignatureExpressionResponse>
 }
 
 export type ColorByResponse = {

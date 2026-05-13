@@ -44,11 +44,12 @@ pub mod run_summary_html;
 pub mod scanpy_preprocess;
 pub mod rust_preprocess;
 pub use rust_preprocess::{
-    FuzzyGraph, UmapLabKnnCache, clamp_umap_min_dist_spread, fuzzy_graph_induced_subgraph,
-    leiden_labels_from_graph, leiden_labels_subcluster_into, rust_preprocess_h5ad,
-    rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps, umap_lab_gene_expression_from_h5ad,
-    umap_lab_load_pca_session, umap_lab_read_obs_column, umap_lab_run_embedding,
-    RustPreprocessParams, RustPreprocessSteps, UmapLabLoaded,
+    FuzzyGraph, UmapLabKnnCache, RustPreprocessParams, RustPreprocessSteps, UmapLabLoaded,
+    clamp_umap_min_dist_spread, fuzzy_graph_induced_subgraph, leiden_labels_from_graph,
+    leiden_labels_subcluster_into, rust_preprocess_h5ad, rust_preprocess_h5ad_to_memory,
+    rust_preprocess_h5ad_with_steps, umap_lab_gene_expression_from_h5ad,
+    umap_lab_gene_expression_from_h5ad_source, umap_lab_load_pca_session, umap_lab_read_obs_column,
+    umap_lab_run_embedding, umap_lab_run_magic_imputed_leiden,
 };
 #[cfg(feature = "self-update")]
 pub mod self_update;

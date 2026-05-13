@@ -1,0 +1,1308 @@
+{
+  "species": "human",
+  "version": "2026-05-12",
+  "description": "Curated broad reference signatures for quick UMAP coloring. Marker sets are intentionally compact; UMAP Lab filters each set to genes present in the loaded AnnData object before scoring.",
+  "sources": [
+    "CellMarker and CellMarker 2.0 human/mouse marker resources",
+    "Canonical single-cell RNA-seq cell type marker practice",
+    "MSigDB/Hallmark-style cell state and cancer biology signatures"
+  ],
+  "signatures": [
+    {
+      "id": "immune_t_cell",
+      "label": "T cell",
+      "category": "cell_type",
+      "description": "Pan T lymphocyte markers.",
+      "genes": [
+        "CD3D",
+        "CD3E",
+        "CD3G",
+        "TRAC",
+        "TRBC1",
+        "TRBC2",
+        "CD2",
+        "LAT"
+      ]
+    },
+    {
+      "id": "immune_cd4_t_cell",
+      "label": "CD4 T cell",
+      "category": "cell_type",
+      "description": "Helper/naive-memory CD4 T cell markers.",
+      "genes": [
+        "CD3D",
+        "CD3E",
+        "CD4",
+        "IL7R",
+        "CCR7",
+        "LTB",
+        "TCF7",
+        "MAL"
+      ]
+    },
+    {
+      "id": "immune_cd8_t_cell",
+      "label": "CD8 T cell",
+      "category": "cell_type",
+      "description": "Cytotoxic CD8 T cell markers.",
+      "genes": [
+        "CD3D",
+        "CD3E",
+        "CD8A",
+        "CD8B",
+        "GZMK",
+        "NKG7",
+        "CCL5",
+        "CXCR3"
+      ]
+    },
+    {
+      "id": "immune_treg",
+      "label": "Regulatory T cell",
+      "category": "cell_type",
+      "description": "FOXP3-positive regulatory T cell markers.",
+      "genes": [
+        "FOXP3",
+        "IL2RA",
+        "CTLA4",
+        "IKZF2",
+        "TNFRSF18",
+        "TIGIT",
+        "CCR8",
+        "LAYN"
+      ]
+    },
+    {
+      "id": "immune_nk_cell",
+      "label": "NK cell",
+      "category": "cell_type",
+      "description": "Natural killer cell markers.",
+      "genes": [
+        "NKG7",
+        "GNLY",
+        "KLRD1",
+        "KLRF1",
+        "FCGR3A",
+        "PRF1",
+        "GZMB",
+        "TYROBP"
+      ]
+    },
+    {
+      "id": "immune_b_cell",
+      "label": "B cell",
+      "category": "cell_type",
+      "description": "B lymphocyte markers.",
+      "genes": [
+        "MS4A1",
+        "CD79A",
+        "CD79B",
+        "CD19",
+        "BANK1",
+        "CD74",
+        "HLA-DRA",
+        "PAX5"
+      ]
+    },
+    {
+      "id": "immune_plasma_cell",
+      "label": "Plasma cell",
+      "category": "cell_type",
+      "description": "Antibody-secreting plasma cell markers.",
+      "genes": [
+        "MZB1",
+        "XBP1",
+        "JCHAIN",
+        "SDC1",
+        "PRDM1",
+        "IGHG1",
+        "IGKC",
+        "DERL3"
+      ]
+    },
+    {
+      "id": "immune_monocyte",
+      "label": "Monocyte",
+      "category": "cell_type",
+      "description": "Classical and inflammatory monocyte markers.",
+      "genes": [
+        "LYZ",
+        "S100A8",
+        "S100A9",
+        "LST1",
+        "FCN1",
+        "VCAN",
+        "CTSS",
+        "FCGR3A"
+      ]
+    },
+    {
+      "id": "immune_macrophage",
+      "label": "Macrophage",
+      "category": "cell_type",
+      "description": "Tissue macrophage markers.",
+      "genes": [
+        "C1QA",
+        "C1QB",
+        "C1QC",
+        "APOE",
+        "MRC1",
+        "CD68",
+        "MSR1",
+        "MARCO"
+      ]
+    },
+    {
+      "id": "immune_dendritic_cell",
+      "label": "Dendritic cell",
+      "category": "cell_type",
+      "description": "Conventional dendritic cell and antigen presentation markers.",
+      "genes": [
+        "FCER1A",
+        "CLEC10A",
+        "CD1C",
+        "ITGAX",
+        "HLA-DRA",
+        "HLA-DPA1",
+        "CCR7",
+        "LAMP3"
+      ]
+    },
+    {
+      "id": "immune_plasmacytoid_dc",
+      "label": "Plasmacytoid dendritic cell",
+      "category": "cell_type",
+      "description": "Plasmacytoid dendritic cell markers.",
+      "genes": [
+        "GZMB",
+        "IRF7",
+        "TCF4",
+        "IL3RA",
+        "CLEC4C",
+        "LILRA4",
+        "JCHAIN",
+        "IRF8"
+      ]
+    },
+    {
+      "id": "immune_neutrophil",
+      "label": "Neutrophil",
+      "category": "cell_type",
+      "description": "Granulocyte/neutrophil markers.",
+      "genes": [
+        "S100A8",
+        "S100A9",
+        "FCGR3B",
+        "CSF3R",
+        "CXCR2",
+        "MPO",
+        "ELANE",
+        "LCN2"
+      ]
+    },
+    {
+      "id": "immune_mast_cell",
+      "label": "Mast cell",
+      "category": "cell_type",
+      "description": "Mast cell granule and receptor markers.",
+      "genes": [
+        "TPSAB1",
+        "TPSB2",
+        "CPA3",
+        "KIT",
+        "MS4A2",
+        "HPGDS",
+        "GATA2",
+        "HDC"
+      ]
+    },
+    {
+      "id": "blood_erythroid",
+      "label": "Erythroid",
+      "category": "cell_type",
+      "description": "Erythrocyte and erythroid precursor markers.",
+      "genes": [
+        "HBB",
+        "HBA1",
+        "HBA2",
+        "ALAS2",
+        "GYPA",
+        "AHSP",
+        "KLF1",
+        "SLC4A1"
+      ]
+    },
+    {
+      "id": "blood_megakaryocyte",
+      "label": "Megakaryocyte/platelet",
+      "category": "cell_type",
+      "description": "Megakaryocyte and platelet lineage markers.",
+      "genes": [
+        "PPBP",
+        "PF4",
+        "GP9",
+        "ITGA2B",
+        "GP1BA",
+        "NFE2",
+        "TUBB1",
+        "MPL"
+      ]
+    },
+    {
+      "id": "stromal_endothelial",
+      "label": "Endothelial cell",
+      "category": "cell_type",
+      "description": "Vascular endothelial markers.",
+      "genes": [
+        "PECAM1",
+        "VWF",
+        "KDR",
+        "CLDN5",
+        "RAMP2",
+        "ESAM",
+        "FLT1",
+        "ENG"
+      ]
+    },
+    {
+      "id": "stromal_lymphatic_endothelial",
+      "label": "Lymphatic endothelial cell",
+      "category": "cell_type",
+      "description": "Lymphatic endothelial markers.",
+      "genes": [
+        "PROX1",
+        "PDPN",
+        "LYVE1",
+        "FLT4",
+        "CCL21",
+        "MMRN1",
+        "RELN",
+        "TFF3"
+      ]
+    },
+    {
+      "id": "stromal_pericyte",
+      "label": "Pericyte",
+      "category": "cell_type",
+      "description": "Perivascular mural cell markers.",
+      "genes": [
+        "RGS5",
+        "PDGFRB",
+        "CSPG4",
+        "MCAM",
+        "NOTCH3",
+        "KCNJ8",
+        "ABCC9",
+        "COX4I2"
+      ]
+    },
+    {
+      "id": "stromal_smooth_muscle",
+      "label": "Smooth muscle cell",
+      "category": "cell_type",
+      "description": "Contractile smooth muscle markers.",
+      "genes": [
+        "ACTA2",
+        "MYH11",
+        "TAGLN",
+        "CNN1",
+        "MYLK",
+        "TPM2",
+        "DES",
+        "LMOD1"
+      ]
+    },
+    {
+      "id": "stromal_fibroblast",
+      "label": "Fibroblast",
+      "category": "cell_type",
+      "description": "Matrix-producing fibroblast markers.",
+      "genes": [
+        "COL1A1",
+        "COL1A2",
+        "DCN",
+        "LUM",
+        "PDGFRA",
+        "COL3A1",
+        "FBLN1",
+        "THY1"
+      ]
+    },
+    {
+      "id": "stromal_myofibroblast",
+      "label": "Myofibroblast/CAF",
+      "category": "cell_type",
+      "description": "Activated fibroblast and cancer-associated fibroblast markers.",
+      "genes": [
+        "ACTA2",
+        "TAGLN",
+        "POSTN",
+        "COL1A1",
+        "COL1A2",
+        "FAP",
+        "PDPN",
+        "MMP11"
+      ]
+    },
+    {
+      "id": "stromal_adipocyte",
+      "label": "Adipocyte",
+      "category": "cell_type",
+      "description": "Adipocyte lipid metabolism markers.",
+      "genes": [
+        "ADIPOQ",
+        "PLIN1",
+        "FABP4",
+        "LPL",
+        "LEP",
+        "PPARG",
+        "CIDEC",
+        "LIPE"
+      ]
+    },
+    {
+      "id": "stromal_mesothelial",
+      "label": "Mesothelial cell",
+      "category": "cell_type",
+      "description": "Mesothelial lining cell markers.",
+      "genes": [
+        "MSLN",
+        "WT1",
+        "UPK3B",
+        "KRT8",
+        "KRT18",
+        "CALB2",
+        "SLPI",
+        "ITLN1"
+      ]
+    },
+    {
+      "id": "epithelial_pan",
+      "label": "Epithelial cell",
+      "category": "cell_type",
+      "description": "Pan epithelial keratin/EPCAM markers.",
+      "genes": [
+        "EPCAM",
+        "KRT8",
+        "KRT18",
+        "KRT19",
+        "KRT7",
+        "CDH1",
+        "TACSTD2",
+        "CLDN4"
+      ]
+    },
+    {
+      "id": "epithelial_basal",
+      "label": "Basal epithelial cell",
+      "category": "cell_type",
+      "description": "Basal epithelial and squamous progenitor markers.",
+      "genes": [
+        "KRT5",
+        "KRT14",
+        "TP63",
+        "KRT15",
+        "COL17A1",
+        "ITGA6",
+        "NGFR",
+        "DST"
+      ]
+    },
+    {
+      "id": "epithelial_luminal",
+      "label": "Luminal epithelial cell",
+      "category": "cell_type",
+      "description": "Luminal epithelial markers.",
+      "genes": [
+        "KRT8",
+        "KRT18",
+        "KRT19",
+        "MUC1",
+        "EPCAM",
+        "ELF3",
+        "AGR2",
+        "FOXA1"
+      ]
+    },
+    {
+      "id": "epithelial_secretory",
+      "label": "Secretory epithelial cell",
+      "category": "cell_type",
+      "description": "Mucosal/glandular secretory epithelial markers.",
+      "genes": [
+        "SCGB1A1",
+        "SCGB3A2",
+        "MUC5B",
+        "MUC5AC",
+        "BPIFB1",
+        "LTF",
+        "SLPI",
+        "AGR2"
+      ]
+    },
+    {
+      "id": "epithelial_ciliated",
+      "label": "Ciliated epithelial cell",
+      "category": "cell_type",
+      "description": "Motile ciliated epithelial markers.",
+      "genes": [
+        "FOXJ1",
+        "PIFO",
+        "TPPP3",
+        "CAPS",
+        "DNAH5",
+        "DNAI1",
+        "RSPH1",
+        "CETN2"
+      ]
+    },
+    {
+      "id": "epithelial_goblet",
+      "label": "Goblet cell",
+      "category": "cell_type",
+      "description": "Mucus-producing goblet cell markers.",
+      "genes": [
+        "MUC2",
+        "TFF3",
+        "SPINK4",
+        "FCGBP",
+        "CLCA1",
+        "AGR2",
+        "ZG16",
+        "REG4"
+      ]
+    },
+    {
+      "id": "lung_at1",
+      "label": "Alveolar type 1 cell",
+      "category": "cell_type",
+      "description": "Lung alveolar type 1 epithelial markers.",
+      "genes": [
+        "AGER",
+        "PDPN",
+        "CAV1",
+        "AQP5",
+        "CLIC5",
+        "RTKN2",
+        "EMP2",
+        "HOPX"
+      ]
+    },
+    {
+      "id": "lung_at2",
+      "label": "Alveolar type 2 cell",
+      "category": "cell_type",
+      "description": "Surfactant-producing alveolar type 2 markers.",
+      "genes": [
+        "SFTPA1",
+        "SFTPA2",
+        "SFTPB",
+        "SFTPC",
+        "SLC34A2",
+        "ABCA3",
+        "NAPSA",
+        "LAMP3"
+      ]
+    },
+    {
+      "id": "liver_hepatocyte",
+      "label": "Hepatocyte",
+      "category": "cell_type",
+      "description": "Core hepatocyte function markers.",
+      "genes": [
+        "ALB",
+        "APOA1",
+        "TTR",
+        "SERPINA1",
+        "FGA",
+        "CYP3A4",
+        "HP",
+        "ASGR1"
+      ]
+    },
+    {
+      "id": "liver_cholangiocyte",
+      "label": "Cholangiocyte",
+      "category": "cell_type",
+      "description": "Bile duct epithelial markers.",
+      "genes": [
+        "KRT7",
+        "KRT19",
+        "SOX9",
+        "EPCAM",
+        "CFTR",
+        "MUC1",
+        "ANXA4",
+        "SLC4A2"
+      ]
+    },
+    {
+      "id": "kidney_proximal_tubule",
+      "label": "Kidney proximal tubule",
+      "category": "cell_type",
+      "description": "Renal proximal tubule transport markers.",
+      "genes": [
+        "SLC34A1",
+        "SLC5A2",
+        "LRP2",
+        "CUBN",
+        "ALDOB",
+        "AQP1",
+        "SLC13A3",
+        "HAVCR1"
+      ]
+    },
+    {
+      "id": "kidney_podocyte",
+      "label": "Podocyte",
+      "category": "cell_type",
+      "description": "Glomerular podocyte markers.",
+      "genes": [
+        "NPHS1",
+        "NPHS2",
+        "PODXL",
+        "WT1",
+        "SYNPO",
+        "MAFB",
+        "PLA2R1",
+        "PTPRO"
+      ]
+    },
+    {
+      "id": "intestine_enterocyte",
+      "label": "Enterocyte",
+      "category": "cell_type",
+      "description": "Intestinal absorptive epithelial markers.",
+      "genes": [
+        "FABP1",
+        "FABP2",
+        "ALPI",
+        "APOA4",
+        "VIL1",
+        "KRT20",
+        "SLC26A3",
+        "SI"
+      ]
+    },
+    {
+      "id": "pancreas_beta_cell",
+      "label": "Pancreatic beta cell",
+      "category": "cell_type",
+      "description": "Insulin-producing endocrine beta cell markers.",
+      "genes": [
+        "INS",
+        "IAPP",
+        "PCSK1",
+        "PDX1",
+        "NKX6-1",
+        "MAFA",
+        "SLC30A8",
+        "G6PC2"
+      ]
+    },
+    {
+      "id": "pancreas_acinar_cell",
+      "label": "Pancreatic acinar cell",
+      "category": "cell_type",
+      "description": "Digestive enzyme-producing acinar markers.",
+      "genes": [
+        "PRSS1",
+        "PRSS2",
+        "CPA1",
+        "CPB1",
+        "CTRB1",
+        "CTRB2",
+        "CELA3A",
+        "REG1A"
+      ]
+    },
+    {
+      "id": "pancreas_ductal_cell",
+      "label": "Pancreatic ductal cell",
+      "category": "cell_type",
+      "description": "Pancreatic duct epithelial markers.",
+      "genes": [
+        "KRT19",
+        "KRT7",
+        "SOX9",
+        "MUC1",
+        "CFTR",
+        "SPP1",
+        "TSPAN8",
+        "ANXA4"
+      ]
+    },
+    {
+      "id": "neural_neuron",
+      "label": "Neuron",
+      "category": "cell_type",
+      "description": "Pan-neuronal markers.",
+      "genes": [
+        "RBFOX3",
+        "SNAP25",
+        "SYT1",
+        "TUBB3",
+        "MAP2",
+        "ENO2",
+        "SLC17A7",
+        "GAD1"
+      ]
+    },
+    {
+      "id": "neural_excitatory_neuron",
+      "label": "Excitatory neuron",
+      "category": "cell_type",
+      "description": "Glutamatergic excitatory neuron markers.",
+      "genes": [
+        "SLC17A7",
+        "SLC17A6",
+        "CAMK2A",
+        "SATB2",
+        "TBR1",
+        "BCL11B",
+        "RORB",
+        "NEUROD6"
+      ]
+    },
+    {
+      "id": "neural_inhibitory_neuron",
+      "label": "Inhibitory neuron",
+      "category": "cell_type",
+      "description": "GABAergic inhibitory neuron markers.",
+      "genes": [
+        "GAD1",
+        "GAD2",
+        "SLC32A1",
+        "DLX1",
+        "DLX2",
+        "PVALB",
+        "SST",
+        "VIP"
+      ]
+    },
+    {
+      "id": "neural_astrocyte",
+      "label": "Astrocyte",
+      "category": "cell_type",
+      "description": "Astrocyte markers.",
+      "genes": [
+        "AQP4",
+        "GFAP",
+        "ALDH1L1",
+        "SLC1A3",
+        "SLC1A2",
+        "GJA1",
+        "APOE",
+        "CLU"
+      ]
+    },
+    {
+      "id": "neural_oligodendrocyte",
+      "label": "Oligodendrocyte",
+      "category": "cell_type",
+      "description": "Myelinating oligodendrocyte markers.",
+      "genes": [
+        "MBP",
+        "MOG",
+        "PLP1",
+        "MAG",
+        "MOBP",
+        "OLIG1",
+        "OLIG2",
+        "CLDN11"
+      ]
+    },
+    {
+      "id": "neural_opc",
+      "label": "Oligodendrocyte precursor cell",
+      "category": "cell_type",
+      "description": "Oligodendrocyte precursor markers.",
+      "genes": [
+        "PDGFRA",
+        "CSPG4",
+        "VCAN",
+        "OLIG1",
+        "OLIG2",
+        "SOX10",
+        "BCAN",
+        "GPR17"
+      ]
+    },
+    {
+      "id": "neural_microglia",
+      "label": "Microglia",
+      "category": "cell_type",
+      "description": "Resident CNS macrophage/microglial markers.",
+      "genes": [
+        "P2RY12",
+        "TMEM119",
+        "CX3CR1",
+        "AIF1",
+        "CSF1R",
+        "C1QA",
+        "TREM2",
+        "TYROBP"
+      ]
+    },
+    {
+      "id": "melanocyte",
+      "label": "Melanocyte",
+      "category": "cell_type",
+      "description": "Melanocyte and melanoma lineage markers.",
+      "genes": [
+        "MLANA",
+        "PMEL",
+        "TYR",
+        "TYRP1",
+        "DCT",
+        "MITF",
+        "SOX10",
+        "S100B"
+      ]
+    },
+    {
+      "id": "cell_state_proliferation",
+      "label": "Proliferation",
+      "category": "cell_state",
+      "description": "General cycling/proliferation signature.",
+      "genes": [
+        "MKI67",
+        "TOP2A",
+        "PCNA",
+        "MCM2",
+        "MCM5",
+        "TYMS",
+        "STMN1",
+        "UBE2C"
+      ]
+    },
+    {
+      "id": "cell_state_g1s",
+      "label": "G1/S cell cycle",
+      "category": "cell_state",
+      "description": "DNA synthesis and G1/S transition markers.",
+      "genes": [
+        "MCM5",
+        "MCM6",
+        "PCNA",
+        "TYMS",
+        "FEN1",
+        "MCM2",
+        "RRM1",
+        "UNG"
+      ]
+    },
+    {
+      "id": "cell_state_g2m",
+      "label": "G2/M cell cycle",
+      "category": "cell_state",
+      "description": "Mitotic G2/M markers.",
+      "genes": [
+        "HMGB2",
+        "CDK1",
+        "NUSAP1",
+        "UBE2C",
+        "BIRC5",
+        "TPX2",
+        "TOP2A",
+        "CCNB1"
+      ]
+    },
+    {
+      "id": "cell_state_apoptosis",
+      "label": "Apoptosis",
+      "category": "cell_state",
+      "description": "Apoptotic stress and execution markers.",
+      "genes": [
+        "BAX",
+        "BAK1",
+        "BBC3",
+        "PMAIP1",
+        "CASP3",
+        "CASP7",
+        "FAS",
+        "TNFRSF10B"
+      ]
+    },
+    {
+      "id": "cell_state_p53",
+      "label": "p53 pathway",
+      "category": "cell_state",
+      "description": "p53 transcriptional response.",
+      "genes": [
+        "TP53",
+        "CDKN1A",
+        "MDM2",
+        "BBC3",
+        "GADD45A",
+        "RRM2B",
+        "SESN1",
+        "DDB2"
+      ]
+    },
+    {
+      "id": "cell_state_hypoxia",
+      "label": "Hypoxia/HIF response",
+      "category": "cell_state",
+      "description": "Hypoxia and HIF pathway activation markers.",
+      "genes": [
+        "VEGFA",
+        "CA9",
+        "SLC2A1",
+        "LDHA",
+        "ENO1",
+        "NDRG1",
+        "BNIP3",
+        "EGLN3"
+      ]
+    },
+    {
+      "id": "cell_state_glycolysis",
+      "label": "Glycolysis",
+      "category": "cell_state",
+      "description": "Glycolytic metabolism markers.",
+      "genes": [
+        "SLC2A1",
+        "HK2",
+        "PFKP",
+        "ALDOA",
+        "GAPDH",
+        "PGK1",
+        "ENO1",
+        "LDHA"
+      ]
+    },
+    {
+      "id": "cell_state_oxidative_phosphorylation",
+      "label": "Oxidative phosphorylation",
+      "category": "cell_state",
+      "description": "Mitochondrial respiratory chain activity.",
+      "genes": [
+        "NDUFA1",
+        "NDUFB8",
+        "SDHB",
+        "UQCRC1",
+        "COX5A",
+        "COX6C",
+        "ATP5F1A",
+        "ATP5MC3"
+      ]
+    },
+    {
+      "id": "cell_state_interferon_alpha",
+      "label": "Interferon alpha response",
+      "category": "cell_state",
+      "description": "Type I interferon stimulated genes.",
+      "genes": [
+        "ISG15",
+        "IFIT1",
+        "IFIT2",
+        "IFIT3",
+        "MX1",
+        "OAS1",
+        "OAS2",
+        "IFI6"
+      ]
+    },
+    {
+      "id": "cell_state_interferon_gamma",
+      "label": "Interferon gamma response",
+      "category": "cell_state",
+      "description": "IFN-gamma response and antigen presentation.",
+      "genes": [
+        "CXCL9",
+        "CXCL10",
+        "IDO1",
+        "GBP1",
+        "STAT1",
+        "IRF1",
+        "HLA-DRA",
+        "B2M"
+      ]
+    },
+    {
+      "id": "cell_state_inflammation_nfkB",
+      "label": "Inflammation/NF-kB",
+      "category": "cell_state",
+      "description": "Inflammatory NF-kB/TNF response markers.",
+      "genes": [
+        "NFKBIA",
+        "TNFAIP3",
+        "IL6",
+        "CXCL8",
+        "CCL2",
+        "ICAM1",
+        "JUNB",
+        "FOS"
+      ]
+    },
+    {
+      "id": "cell_state_antigen_presentation",
+      "label": "Antigen presentation",
+      "category": "cell_state",
+      "description": "MHC class I/II antigen presentation markers.",
+      "genes": [
+        "B2M",
+        "TAP1",
+        "TAP2",
+        "PSMB8",
+        "PSMB9",
+        "HLA-DRA",
+        "HLA-DPA1",
+        "CD74"
+      ]
+    },
+    {
+      "id": "cell_state_cytotoxicity",
+      "label": "Cytotoxicity",
+      "category": "cell_state",
+      "description": "Cytotoxic lymphocyte effector program.",
+      "genes": [
+        "NKG7",
+        "PRF1",
+        "GZMA",
+        "GZMB",
+        "GNLY",
+        "IFNG",
+        "KLRD1",
+        "CCL5"
+      ]
+    },
+    {
+      "id": "cell_state_t_cell_exhaustion",
+      "label": "T cell exhaustion",
+      "category": "cell_state",
+      "description": "Checkpoint/exhaustion-associated T cell markers.",
+      "genes": [
+        "PDCD1",
+        "CTLA4",
+        "LAG3",
+        "HAVCR2",
+        "TIGIT",
+        "TOX",
+        "ENTPD1",
+        "LAYN"
+      ]
+    },
+    {
+      "id": "cell_state_epithelial_mesenchymal_transition",
+      "label": "EMT",
+      "category": "cell_state",
+      "description": "Epithelial-mesenchymal transition and invasion markers.",
+      "genes": [
+        "VIM",
+        "FN1",
+        "SNAI1",
+        "SNAI2",
+        "ZEB1",
+        "ZEB2",
+        "TWIST1",
+        "CDH2"
+      ]
+    },
+    {
+      "id": "cell_state_angiogenesis",
+      "label": "Angiogenesis",
+      "category": "cell_state",
+      "description": "Pro-angiogenic endothelial/tumor program.",
+      "genes": [
+        "VEGFA",
+        "KDR",
+        "FLT1",
+        "ANGPT2",
+        "TEK",
+        "PECAM1",
+        "VWF",
+        "ESM1"
+      ]
+    },
+    {
+      "id": "cell_state_senescence",
+      "label": "Senescence",
+      "category": "cell_state",
+      "description": "Cellular senescence/SASP-associated markers.",
+      "genes": [
+        "CDKN1A",
+        "CDKN2A",
+        "SERPINE1",
+        "GLB1",
+        "IL6",
+        "CXCL8",
+        "MMP3",
+        "GDF15"
+      ]
+    },
+    {
+      "id": "cell_state_fibrosis",
+      "label": "Fibrosis/ECM remodeling",
+      "category": "cell_state",
+      "description": "Fibrotic extracellular matrix remodeling program.",
+      "genes": [
+        "COL1A1",
+        "COL1A2",
+        "COL3A1",
+        "FN1",
+        "POSTN",
+        "TIMP1",
+        "MMP2",
+        "CTGF"
+      ]
+    },
+    {
+      "id": "cell_state_heat_shock",
+      "label": "Heat shock/stress",
+      "category": "cell_state",
+      "description": "Heat shock and acute stress response.",
+      "genes": [
+        "HSPA1A",
+        "HSPA1B",
+        "HSP90AA1",
+        "HSPB1",
+        "DNAJB1",
+        "HSPD1",
+        "HSPE1",
+        "HSPA5"
+      ]
+    },
+    {
+      "id": "cell_state_unfolded_protein_response",
+      "label": "Unfolded protein response",
+      "category": "cell_state",
+      "description": "ER stress and unfolded protein response.",
+      "genes": [
+        "HSPA5",
+        "DDIT3",
+        "ATF4",
+        "XBP1",
+        "HERPUD1",
+        "DNAJB9",
+        "ERN1",
+        "PPP1R15A"
+      ]
+    },
+    {
+      "id": "cell_state_oxidative_stress",
+      "label": "Oxidative stress",
+      "category": "cell_state",
+      "description": "Reactive oxygen species detoxification and NRF2 response.",
+      "genes": [
+        "HMOX1",
+        "NQO1",
+        "SOD2",
+        "TXN",
+        "PRDX1",
+        "GCLC",
+        "GCLM",
+        "SQSTM1"
+      ]
+    },
+    {
+      "id": "cell_state_dna_damage_repair",
+      "label": "DNA damage/repair",
+      "category": "cell_state",
+      "description": "DNA damage response and repair markers.",
+      "genes": [
+        "GADD45A",
+        "DDB2",
+        "RAD51",
+        "BRCA1",
+        "BRCA2",
+        "MSH2",
+        "CHEK1",
+        "XRCC5"
+      ]
+    },
+    {
+      "id": "cell_state_complement",
+      "label": "Complement",
+      "category": "cell_state",
+      "description": "Complement pathway activation.",
+      "genes": [
+        "C1QA",
+        "C1QB",
+        "C1QC",
+        "C3",
+        "C4A",
+        "CFB",
+        "CFD",
+        "SERPING1"
+      ]
+    },
+    {
+      "id": "disease_cancer_epithelial_tumor",
+      "label": "Epithelial tumor",
+      "category": "disease_cancer",
+      "description": "Broad carcinoma/tumor epithelial identity markers.",
+      "genes": [
+        "EPCAM",
+        "KRT8",
+        "KRT18",
+        "KRT19",
+        "KRT7",
+        "MUC1",
+        "TACSTD2",
+        "CLDN4"
+      ]
+    },
+    {
+      "id": "disease_cancer_stemness",
+      "label": "Cancer stemness",
+      "category": "disease_cancer",
+      "description": "Stem-like tumor/progenitor markers.",
+      "genes": [
+        "PROM1",
+        "ALDH1A1",
+        "SOX2",
+        "NANOG",
+        "POU5F1",
+        "KLF4",
+        "LGR5",
+        "BMI1"
+      ]
+    },
+    {
+      "id": "disease_cancer_tam",
+      "label": "Tumor-associated macrophage",
+      "category": "disease_cancer",
+      "description": "Tumor-associated macrophage/immunosuppressive myeloid program.",
+      "genes": [
+        "C1QA",
+        "C1QB",
+        "APOE",
+        "MRC1",
+        "CD163",
+        "MARCO",
+        "TREM2",
+        "SPP1"
+      ]
+    },
+    {
+      "id": "disease_cancer_caf",
+      "label": "Cancer-associated fibroblast",
+      "category": "disease_cancer",
+      "description": "CAF/myofibroblast matrix remodeling markers.",
+      "genes": [
+        "FAP",
+        "PDPN",
+        "COL1A1",
+        "COL1A2",
+        "POSTN",
+        "ACTA2",
+        "MMP11",
+        "THY1"
+      ]
+    },
+    {
+      "id": "disease_cancer_melanoma_lineage",
+      "label": "Melanoma lineage",
+      "category": "disease_cancer",
+      "description": "Melanocytic tumor lineage markers.",
+      "genes": [
+        "MLANA",
+        "PMEL",
+        "TYR",
+        "TYRP1",
+        "DCT",
+        "MITF",
+        "SOX10",
+        "S100B"
+      ]
+    },
+    {
+      "id": "disease_cancer_neuroendocrine",
+      "label": "Neuroendocrine tumor",
+      "category": "disease_cancer",
+      "description": "Neuroendocrine differentiation markers.",
+      "genes": [
+        "CHGA",
+        "CHGB",
+        "SYP",
+        "NCAM1",
+        "ENO2",
+        "ASCL1",
+        "INSM1",
+        "DLL3"
+      ]
+    },
+    {
+      "id": "disease_injury_kidney",
+      "label": "Kidney injury",
+      "category": "disease_state",
+      "description": "Tubular injury and repair-associated markers.",
+      "genes": [
+        "HAVCR1",
+        "LCN2",
+        "VCAM1",
+        "PROM1",
+        "SOX9",
+        "SPP1",
+        "VIM",
+        "KRT8"
+      ]
+    },
+    {
+      "id": "disease_injury_liver_fibrosis",
+      "label": "Liver fibrosis",
+      "category": "disease_state",
+      "description": "Fibrotic liver/stromal injury markers.",
+      "genes": [
+        "COL1A1",
+        "COL1A2",
+        "ACTA2",
+        "TIMP1",
+        "SPP1",
+        "LGALS3",
+        "TGFB1",
+        "PDGFRB"
+      ]
+    },
+    {
+      "id": "disease_injury_alveolar_damage",
+      "label": "Alveolar damage",
+      "category": "disease_state",
+      "description": "Lung epithelial damage and repair markers.",
+      "genes": [
+        "KRT8",
+        "KRT18",
+        "KRT19",
+        "CLDN4",
+        "KRT17",
+        "MMP7",
+        "SFTPA1",
+        "SFTPC"
+      ]
+    },
+    {
+      "id": "disease_neuro_reactive_microglia",
+      "label": "Reactive/disease microglia",
+      "category": "disease_state",
+      "description": "Reactive microglia and neuroinflammation markers.",
+      "genes": [
+        "APOE",
+        "TREM2",
+        "TYROBP",
+        "LPL",
+        "CST7",
+        "CTSD",
+        "SPP1",
+        "C1QA"
+      ]
+    },
+    {
+      "id": "disease_viral_response",
+      "label": "Viral/interferon response",
+      "category": "disease_state",
+      "description": "Viral infection and interferon-stimulated response markers.",
+      "genes": [
+        "ISG15",
+        "IFIT1",
+        "IFIT3",
+        "MX1",
+        "OAS1",
+        "RSAD2",
+        "IFI44L",
+        "DDX58"
+      ]
+    }
+  ]
+}

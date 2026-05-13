@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,13 +15,16 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use spacetravlr::config::expand_user_path;
 use spacetravlr::{
-    FuzzyGraph, leiden_labels_from_graph, leiden_labels_subcluster_into, umap_lab_gene_expression_from_h5ad,
-    umap_lab_load_pca_session, umap_lab_read_obs_column,
-    umap_lab_run_embedding, RustPreprocessParams, UmapLabKnnCache, UmapLabLoaded,
+    FuzzyGraph, RustPreprocessParams, UmapLabKnnCache, UmapLabLoaded, leiden_labels_from_graph,
+    leiden_labels_subcluster_into, umap_lab_gene_expression_from_h5ad_source, umap_lab_load_pca_session, umap_lab_read_obs_column,
+    umap_lab_run_embedding, umap_lab_run_magic_imputed_leiden,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
+
+const HUMAN_SIGNATURES_JSON: &str = include_str!("../../assets/reference_signatures/human.json");
+const MOUSE_SIGNATURES_JSON: &str = include_str!("../../assets/reference_signatures/mouse.json");
 
 #[derive(Parser, Debug)]
 #[command(name = "umap_lab")]
@@ -57,12 +60,39 @@ struct LoadedSession {
     leiden_baseline_labels: Option<Vec<String>>,
     obs_names: Vec<String>,
     obs_columns: Vec<String>,
+    #[allow(dead_code)]
+    var_names: Vec<String>,
+    #[allow(dead_code)]
+    spatial: Option<(String, Vec<f32>, Vec<f32>)>,
+    /// Temp `.h5ad` with `layers['imputed_count']` after cluster-wise MAGIC (same `obs`/`var` as loaded file).
+    magic_imputed_h5ad: Option<PathBuf>,
 }
 
 #[derive(Clone)]
 struct CachedLeiden {
     categories: Vec<String>,
     codes: Vec<u32>,
+}
+
+/// OpenBLAS may warn if the runtime thread count exceeds its compile-time limit; a large
+/// inherited `OMP_NUM_THREADS` can trigger that. Cap both for MALT Python children.
+fn apply_blas_thread_caps_for_python(cmd: &mut std::process::Command) {
+    const MAX: u32 = 128;
+    const DEFAULT: u32 = 32;
+
+    let openblas = std::env::var("OPENBLAS_NUM_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(DEFAULT)
+        .clamp(1, MAX);
+    cmd.env("OPENBLAS_NUM_THREADS", openblas.to_string());
+
+    let omp = std::env::var("OMP_NUM_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|n| n.clamp(1, MAX))
+        .unwrap_or(openblas);
+    cmd.env("OMP_NUM_THREADS", omp.to_string());
 }
 
 fn pack_labels(labels: &[String]) -> (Vec<String>, Vec<u32>) {
@@ -102,6 +132,11 @@ struct LoadResponse {
     color_codes: Vec<u32>,
     ef_construction: usize,
     obs_columns: Vec<String>,
+    var_names: Vec<String>,
+    has_spatial: bool,
+    spatial_key: Option<String>,
+    spatial_x: Vec<f32>,
+    spatial_y: Vec<f32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -131,6 +166,7 @@ struct StatusResponse {
     color_column: Option<String>,
     color_categories: Option<Vec<String>>,
     color_codes: Option<Vec<u32>>,
+    magic_imputed_ready: bool,
 }
 
 fn merge_preprocess_params(req: &LoadRequest) -> RustPreprocessParams {
@@ -188,6 +224,7 @@ async fn api_status(State(st): State<Arc<AppState>>) -> Json<StatusResponse> {
             color_column: None,
             color_categories: None,
             color_codes: None,
+            magic_imputed_ready: false,
         });
     };
     Json(StatusResponse {
@@ -198,6 +235,7 @@ async fn api_status(State(st): State<Arc<AppState>>) -> Json<StatusResponse> {
         color_column: s.color_column.clone(),
         color_categories: Some(s.color_categories.clone()),
         color_codes: Some(s.color_codes.clone()),
+        magic_imputed_ready: s.magic_imputed_h5ad.is_some(),
     })
 }
 
@@ -228,6 +266,22 @@ async fn api_load(
     let (color_categories, color_codes) = pack_labels(&loaded.color_labels);
     let ef_construction = prep.ef_construction;
     let obs_columns = loaded.obs_columns.clone();
+    let var_names = loaded.var_names.clone();
+    let (spatial_key, spatial_x, spatial_y, has_spatial) = match &loaded.spatial {
+        Some((k, sx, sy)) if sx.len() == n_cells && sy.len() == n_cells => {
+            (Some(k.clone()), sx.clone(), sy.clone(), true)
+        }
+        _ => (None, Vec::new(), Vec::new(), false),
+    };
+
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(old) = g.as_mut() {
+            if let Some(p) = old.magic_imputed_h5ad.take() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
 
     let sess = LoadedSession {
         path: path.clone(),
@@ -242,6 +296,9 @@ async fn api_load(
         leiden_baseline_labels: None,
         obs_names: loaded.obs_names,
         obs_columns: loaded.obs_columns,
+        var_names: var_names.clone(),
+        spatial: loaded.spatial.clone(),
+        magic_imputed_h5ad: None,
     };
     *st.session.lock().unwrap() = Some(sess);
 
@@ -254,6 +311,11 @@ async fn api_load(
         color_codes,
         ef_construction,
         obs_columns,
+        var_names,
+        has_spatial,
+        spatial_key,
+        spatial_x,
+        spatial_y,
     }))
 }
 
@@ -275,10 +337,7 @@ async fn api_umap(
             s.umap_knn_cache.clone(),
         )
     };
-    params.n_pca_components = params
-        .n_pca_components
-        .max(2)
-        .min(pca.ncols());
+    params.n_pca_components = params.n_pca_components.max(2).min(pca.ncols());
 
     let (emb, graph, timings, new_knn_cache) = tokio::task::spawn_blocking(move || {
         umap_lab_run_embedding(&pca, &params, knn_cache_in.as_ref()).map_err(|e| format!("{:#}", e))
@@ -298,6 +357,9 @@ async fn api_umap(
     {
         let mut g = st.session.lock().unwrap();
         if let Some(s) = g.as_mut() {
+            if let Some(p) = s.magic_imputed_h5ad.take() {
+                let _ = std::fs::remove_file(p);
+            }
             s.fuzzy_graph = Some(graph);
             s.umap_knn_cache = Some(new_knn_cache);
             s.leiden_cache = None;
@@ -375,6 +437,9 @@ async fn api_leiden(
     {
         let mut g = st.session.lock().unwrap();
         if let Some(s) = g.as_mut() {
+            if let Some(p) = s.magic_imputed_h5ad.take() {
+                let _ = std::fs::remove_file(p);
+            }
             s.leiden_baseline_labels = Some(labels.clone());
             s.leiden_cache = Some(CachedLeiden {
                 categories: categories.clone(),
@@ -458,6 +523,9 @@ async fn api_leiden_subcluster(
     {
         let mut g = st.session.lock().unwrap();
         if let Some(s) = g.as_mut() {
+            if let Some(p) = s.magic_imputed_h5ad.take() {
+                let _ = std::fs::remove_file(p);
+            }
             s.leiden_cache = Some(CachedLeiden {
                 categories: categories.clone(),
                 codes: codes.clone(),
@@ -498,6 +566,9 @@ async fn api_leiden_reset(
             seen.insert(l.as_str());
         }
         let n_clusters = seen.len();
+        if let Some(p) = s.magic_imputed_h5ad.take() {
+            let _ = std::fs::remove_file(p);
+        }
         s.leiden_cache = Some(CachedLeiden {
             categories: categories.clone(),
             codes: codes.clone(),
@@ -517,6 +588,9 @@ async fn api_leiden_reset(
 #[derive(Deserialize)]
 struct GeneRequest {
     gene: String,
+    /// `x` (default): root `X` on the loaded file. `normalized_count` / `imputed_count`: AnnData layers on the MAGIC artifact or on-disk file.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -527,11 +601,143 @@ struct GeneResponse {
     vmax: f32,
 }
 
+#[derive(Clone, Deserialize)]
+struct SignatureFile {
+    species: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    sources: Vec<String>,
+    signatures: Vec<ReferenceSignature>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ReferenceSignature {
+    id: String,
+    label: String,
+    category: String,
+    description: String,
+    genes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SignatureSetsResponse {
+    sets: Vec<SignatureSetResponse>,
+}
+
+#[derive(Serialize)]
+struct SignatureSetResponse {
+    species: String,
+    version: Option<String>,
+    description: Option<String>,
+    sources: Vec<String>,
+    signatures: Vec<SignatureSummary>,
+}
+
+#[derive(Serialize)]
+struct SignatureSummary {
+    id: String,
+    label: String,
+    category: String,
+    description: String,
+    genes: Vec<String>,
+    present_genes: Vec<String>,
+    missing_genes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SignatureScoreRequest {
+    species: String,
+    id: String,
+    #[serde(default)]
+    expression_source: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SignatureScoreResponse {
+    species: String,
+    id: String,
+    label: String,
+    category: String,
+    description: String,
+    genes: Vec<String>,
+    present_genes: Vec<String>,
+    missing_genes: Vec<String>,
+    values: Vec<f32>,
+    vmin: f32,
+    vmax: f32,
+}
+
+fn reference_signature_files() -> Result<Vec<SignatureFile>, String> {
+    [HUMAN_SIGNATURES_JSON, MOUSE_SIGNATURES_JSON]
+        .into_iter()
+        .map(|s| {
+            serde_json::from_str::<SignatureFile>(s)
+                .map_err(|e| format!("parse reference signatures: {e}"))
+        })
+        .collect()
+}
+
+fn genes_present_in_dataset(var_names: &[String], genes: &[String]) -> (Vec<String>, Vec<String>) {
+    let exact: HashSet<&str> = var_names.iter().map(String::as_str).collect();
+    let mut lower_to_var: HashMap<String, &str> = HashMap::with_capacity(var_names.len());
+    for name in var_names {
+        lower_to_var
+            .entry(name.to_lowercase())
+            .or_insert_with(|| name.as_str());
+    }
+
+    let mut seen_present = HashSet::new();
+    let mut seen_missing = HashSet::new();
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for gene in genes {
+        if exact.contains(gene.as_str()) {
+            if seen_present.insert(gene.clone()) {
+                present.push(gene.clone());
+            }
+            continue;
+        }
+        let lower = gene.to_lowercase();
+        if let Some(resolved) = lower_to_var.get(&lower) {
+            let resolved = (*resolved).to_string();
+            if seen_present.insert(resolved.clone()) {
+                present.push(resolved);
+            }
+        } else if seen_missing.insert(gene.clone()) {
+            missing.push(gene.clone());
+        }
+    }
+    (present, missing)
+}
+
+fn display_bounds(values: &[f32]) -> (f32, f32) {
+    let mut finite: Vec<f32> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return (0.0, 1.0);
+    }
+    finite.sort_by(|a, b| a.total_cmp(b));
+    let q = |p: f32| -> f32 {
+        let idx = ((finite.len().saturating_sub(1)) as f32 * p).round() as usize;
+        finite[idx.min(finite.len() - 1)]
+    };
+    let mut vmin = q(0.02);
+    let mut vmax = q(0.98);
+    if (vmax - vmin).abs() < f32::EPSILON {
+        let pad = vmax.abs().max(1.0) * 0.05;
+        vmin -= pad;
+        vmax += pad;
+    }
+    (vmin, vmax)
+}
+
 async fn api_gene(
     State(st): State<Arc<AppState>>,
     Json(body): Json<GeneRequest>,
 ) -> Result<Json<GeneResponse>, (StatusCode, String)> {
-    let (path, n_expected) = {
+    let (primary_path, magic_path, n_expected, source) = {
         let g = st.session.lock().unwrap();
         let Some(s) = g.as_ref() else {
             return Err((
@@ -539,14 +745,33 @@ async fn api_gene(
                 "load a dataset first (POST /api/load)".into(),
             ));
         };
-        (s.path.clone(), s.pca.nrows())
+        (
+            s.path.clone(),
+            s.magic_imputed_h5ad.clone(),
+            s.pca.nrows(),
+            body
+                .source
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x")
+                .to_string(),
+        )
     };
     let gene = body.gene.trim().to_string();
     if gene.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "gene name is empty".into()));
     }
+    let magic_owned = magic_path.clone();
+    let src = source.clone();
     let (resolved, values, vmin, vmax) = tokio::task::spawn_blocking(move || {
-        umap_lab_gene_expression_from_h5ad(&path, &gene).map_err(|e| format!("{:#}", e))
+        umap_lab_gene_expression_from_h5ad_source(
+            &primary_path,
+            magic_owned.as_deref(),
+            &src,
+            &gene,
+        )
+        .map_err(|e| format!("{:#}", e))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -565,6 +790,263 @@ async fn api_gene(
 
     Ok(Json(GeneResponse {
         gene: resolved,
+        values,
+        vmin,
+        vmax,
+    }))
+}
+
+#[derive(Serialize)]
+struct MagicLeidenResponse {
+    elapsed_sec: f64,
+    magic_imputed_ready: bool,
+}
+
+async fn api_magic_leiden(
+    State(st): State<Arc<AppState>>,
+) -> Result<Json<MagicLeidenResponse>, (StatusCode, String)> {
+    let (primary, graph, categories, codes) = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "load a dataset first (POST /api/load)".into(),
+            ));
+        };
+        let Some(ref fg) = s.fuzzy_graph else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run UMAP first to build the neighbor graph".into(),
+            ));
+        };
+        let Some(ref lc) = s.leiden_cache else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run Leiden (POST /api/leiden) before MAGIC".into(),
+            ));
+        };
+        if lc.codes.len() != s.pca.nrows() {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal: Leiden cache length does not match n_cells".into(),
+            ));
+        }
+        (
+            s.path.clone(),
+            fg.clone(),
+            lc.categories.clone(),
+            lc.codes.clone(),
+        )
+    };
+
+    let labels: Vec<String> = codes
+        .iter()
+        .map(|&c| {
+            categories
+                .get(c as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("cluster_{c}"))
+        })
+        .collect();
+
+    let out_path = std::env::temp_dir().join(format!(
+        "umap_lab_magic_{}_{}.h5ad",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+
+    let elapsed_sec = tokio::task::spawn_blocking({
+        let graph = graph;
+        let labels = labels;
+        let primary = primary.clone();
+        let out_path = out_path.clone();
+        move || {
+            let t = std::time::Instant::now();
+            umap_lab_run_magic_imputed_leiden(&primary, &graph, &labels, &out_path)
+                .map_err(|e| format!("{:#}", e))?;
+            Ok::<_, String>(t.elapsed().as_secs_f64())
+        }
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            if let Some(old) = s.magic_imputed_h5ad.take() {
+                let _ = std::fs::remove_file(old);
+            }
+            s.magic_imputed_h5ad = Some(out_path);
+        }
+    }
+
+    Ok(Json(MagicLeidenResponse {
+        elapsed_sec,
+        magic_imputed_ready: true,
+    }))
+}
+
+async fn api_signature_sets(
+    State(st): State<Arc<AppState>>,
+) -> Result<Json<SignatureSetsResponse>, (StatusCode, String)> {
+    let var_names = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+        };
+        s.var_names.clone()
+    };
+
+    let files = reference_signature_files().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let sets = files
+        .into_iter()
+        .map(|file| {
+            let signatures = file
+                .signatures
+                .into_iter()
+                .map(|sig| {
+                    let (present_genes, missing_genes) =
+                        genes_present_in_dataset(&var_names, &sig.genes);
+                    SignatureSummary {
+                        id: sig.id,
+                        label: sig.label,
+                        category: sig.category,
+                        description: sig.description,
+                        genes: sig.genes,
+                        present_genes,
+                        missing_genes,
+                    }
+                })
+                .collect();
+            SignatureSetResponse {
+                species: file.species,
+                version: file.version,
+                description: file.description,
+                sources: file.sources,
+                signatures,
+            }
+        })
+        .collect();
+    Ok(Json(SignatureSetsResponse { sets }))
+}
+
+async fn api_signature_score(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<SignatureScoreRequest>,
+) -> Result<Json<SignatureScoreResponse>, (StatusCode, String)> {
+    let (primary_path, magic_path, n_expected, var_names, expr_src) = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+        };
+        let src = body
+            .expression_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("x")
+            .to_string();
+        (
+            s.path.clone(),
+            s.magic_imputed_h5ad.clone(),
+            s.pca.nrows(),
+            s.var_names.clone(),
+            src,
+        )
+    };
+
+    let species = body.species.trim().to_lowercase();
+    let id = body.id.trim().to_string();
+    if species.is_empty() || id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "species and id are required".into(),
+        ));
+    }
+
+    let files = reference_signature_files().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let file = files
+        .into_iter()
+        .find(|f| f.species.eq_ignore_ascii_case(&species))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unknown signature species {species:?}"),
+            )
+        })?;
+    let sig = file
+        .signatures
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unknown signature id {id:?} for species {species:?}"),
+            )
+        })?;
+
+    let (present_genes, missing_genes) = genes_present_in_dataset(&var_names, &sig.genes);
+    if present_genes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signature {:?} has no genes present in the loaded dataset",
+                sig.label
+            ),
+        ));
+    }
+
+    let genes_for_score = present_genes.clone();
+    let magic_opt = magic_path.clone();
+    let expr_src_clone = expr_src.clone();
+    let (resolved_genes, values) = tokio::task::spawn_blocking(move || {
+        let mut sums = vec![0.0_f32; n_expected];
+        let mut resolved = Vec::with_capacity(genes_for_score.len());
+        let magic_ref = magic_opt.as_deref();
+        for gene in genes_for_score {
+            let (resolved_gene, vals, _, _) = umap_lab_gene_expression_from_h5ad_source(
+                &primary_path,
+                magic_ref,
+                &expr_src_clone,
+                &gene,
+            )
+            .map_err(|e| format!("signature gene {gene:?}: {e:#}"))?;
+            if vals.len() != n_expected {
+                return Err(format!(
+                    "gene {resolved_gene:?} vector length {} does not match loaded session ({} cells)",
+                    vals.len(),
+                    n_expected
+                ));
+            }
+            for (sum, value) in sums.iter_mut().zip(vals) {
+                *sum += value;
+            }
+            resolved.push(resolved_gene);
+        }
+        let denom = resolved.len() as f32;
+        for sum in &mut sums {
+            *sum /= denom;
+        }
+        Ok::<_, String>((resolved, sums))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let (vmin, vmax) = display_bounds(&values);
+    Ok(Json(SignatureScoreResponse {
+        species: file.species,
+        id: sig.id,
+        label: sig.label,
+        category: sig.category,
+        description: sig.description,
+        genes: sig.genes,
+        present_genes: resolved_genes,
+        missing_genes,
         values,
         vmin,
         vmax,
@@ -690,8 +1172,9 @@ async fn api_malt(
 
     let (status, elapsed) = tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new("python");
-        cmd.env("PYTHONUNBUFFERED", "1")
-            .stdout(std::process::Stdio::inherit())
+        cmd.env("PYTHONUNBUFFERED", "1");
+        apply_blas_thread_caps_for_python(&mut cmd);
+        cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .arg(&script)
             .arg("--reference")
@@ -747,9 +1230,8 @@ async fn api_malt(
 
     let csv_columns = {
         let rdr = std::io::BufRead::lines(std::io::BufReader::new(
-            std::fs::File::open(&csv_path).map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("open CSV: {e}"))
-            })?,
+            std::fs::File::open(&csv_path)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("open CSV: {e}")))?,
         ));
         let first_line = rdr
             .into_iter()
@@ -816,19 +1298,14 @@ async fn api_load_csv(
     let column = body.column.trim().to_string();
 
     let (labels, n_matched, n_missing) = tokio::task::spawn_blocking(move || {
-        let content = std::fs::read_to_string(&csv_path)
-            .map_err(|e| format!("read CSV: {e}"))?;
+        let content = std::fs::read_to_string(&csv_path).map_err(|e| format!("read CSV: {e}"))?;
         let mut lines = content.lines();
         let header_line = lines.next().ok_or("CSV is empty")?;
         let headers: Vec<&str> = header_line.split(',').map(|s| s.trim()).collect();
         let col_idx = headers
             .iter()
             .position(|&h| h == column)
-            .ok_or_else(|| {
-                format!(
-                    "column {column:?} not in CSV headers: {headers:?}"
-                )
-            })?;
+            .ok_or_else(|| format!("column {column:?} not in CSV headers: {headers:?}"))?;
         let idx_col = headers.iter().position(|&h| h == "obs_name").unwrap_or(0);
 
         let mut csv_map: HashMap<String, String> = HashMap::new();
@@ -905,11 +1382,7 @@ async fn api_malt_optimized(
                 "run Leiden first — the optimized path subsamples per cluster".into(),
             ));
         };
-        (
-            s.path.clone(),
-            s.obs_names.clone(),
-            lc.clone(),
-        )
+        (s.path.clone(), s.obs_names.clone(), lc.clone())
     };
 
     let ref_expanded = expand_user_path(body.reference_path.trim());
@@ -956,7 +1429,10 @@ async fn api_malt_optimized(
     }
     subsample_indices.sort_unstable();
 
-    let subset_names: Vec<String> = subsample_indices.iter().map(|&i| obs_names[i].clone()).collect();
+    let subset_names: Vec<String> = subsample_indices
+        .iter()
+        .map(|&i| obs_names[i].clone())
+        .collect();
     let n_subsample = subset_names.len();
     tracing::info!(
         "MALT optimized: subsampling {n_subsample}/{n_total} cells (min cluster = {min_count}, {n_cats} clusters)"
@@ -983,8 +1459,9 @@ async fn api_malt_optimized(
         .map_err(|e| format!("write names json: {e}"))?;
 
         let mut cmd = std::process::Command::new("python");
-        cmd.env("PYTHONUNBUFFERED", "1")
-            .stdout(std::process::Stdio::inherit())
+        cmd.env("PYTHONUNBUFFERED", "1");
+        apply_blas_thread_caps_for_python(&mut cmd);
+        cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .arg(&script)
             .arg("--query")
@@ -1008,9 +1485,7 @@ async fn api_malt_optimized(
 
         tracing::info!("Running MALT subsample: {:?}", cmd);
         let t0 = std::time::Instant::now();
-        let status = cmd
-            .status()
-            .map_err(|e| format!("spawn: {e}"))?;
+        let status = cmd.status().map_err(|e| format!("spawn: {e}"))?;
         let elapsed = t0.elapsed().as_secs_f64();
 
         if !status.success() {
@@ -1024,8 +1499,8 @@ async fn api_malt_optimized(
         if !csv_path.is_file() {
             return Err("MALT produced no malt_labels.csv".into());
         }
-        let csv_content = std::fs::read_to_string(&csv_path)
-            .map_err(|e| format!("read CSV: {e}"))?;
+        let csv_content =
+            std::fs::read_to_string(&csv_path).map_err(|e| format!("read CSV: {e}"))?;
 
         // tmpdir drops here, cleaning up everything
         Ok::<_, String>((csv_content, elapsed))
@@ -1121,7 +1596,14 @@ struct ExportCsvRequest {
 async fn api_export_csv(
     State(st): State<Arc<AppState>>,
     Json(body): Json<ExportCsvRequest>,
-) -> Result<(StatusCode, [(axum::http::header::HeaderName, String); 2], String), (StatusCode, String)> {
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::header::HeaderName, String); 2],
+        String,
+    ),
+    (StatusCode, String),
+> {
     let g = st.session.lock().unwrap();
     let Some(s) = g.as_ref() else {
         return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
@@ -1178,7 +1660,10 @@ async fn api_export_csv(
     Ok((
         StatusCode::OK,
         [
-            (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
             (
                 axum::http::header::CONTENT_DISPOSITION,
                 "attachment; filename=\"umap_lab_export.csv\"".to_string(),
@@ -1251,6 +1736,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/leiden/subcluster", post(api_leiden_subcluster))
         .route("/leiden/reset", post(api_leiden_reset))
         .route("/gene", post(api_gene))
+        .route("/magic_leiden", post(api_magic_leiden))
+        .route("/signature_sets", get(api_signature_sets))
+        .route("/signature", post(api_signature_score))
         .route("/color_by", post(api_color_by))
         .route("/malt", post(api_malt))
         .route("/malt_optimized", post(api_malt_optimized))

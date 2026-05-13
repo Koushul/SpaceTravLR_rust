@@ -28,15 +28,15 @@ use magic_impute::{CsrF64, ImputeConfig, impute_magic_f32};
 use nalgebra::{DMatrix, SymmetricEigen};
 use nalgebra_sparse::coo::CooMatrix;
 use nalgebra_sparse::{CsrMatrix, SparseEntry};
-use ndarray::{s, Array2};
+use ndarray::{Array2, s};
 use ndarray_umap::Array2 as Array2Umap;
 use polars::prelude::{Column, DataFrame, DataType, NamedFrom, Series};
-use std::convert::TryInto;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
 use sprs::{CsMatI, TriMatI};
+use std::convert::TryInto;
 
 use crate::betadata::obs_series_row_str;
 use single_algebra::dimred::pca::{PowerIterationNormalizer, SVDMethod};
@@ -620,11 +620,7 @@ pub fn run_umap_on_pca(
             eprintln!(">>> umap KNN (cached HNSW graph)");
             eprintln!("<<< umap KNN (cached): {:.3} s", t0.elapsed().as_secs_f64());
             log.push(("umap KNN (cached)".to_string(), t0.elapsed().as_secs_f64()));
-            (
-                cache.knn_idx.clone(),
-                cache.knn_dist.clone(),
-                cache.clone(),
-            )
+            (cache.knn_idx.clone(), cache.knn_dist.clone(), cache.clone())
         }
         _ => {
             let t0 = Instant::now();
@@ -663,7 +659,8 @@ pub fn run_umap_on_pca(
             data_vec.push(*row.get(j).unwrap_or(&0.0) as f32);
         }
     }
-    let data = Array2Umap::from_shape_vec((n, dim), data_vec).map_err(|e| anyhow!("UMAP data shape: {e}"))?;
+    let data = Array2Umap::from_shape_vec((n, dim), data_vec)
+        .map_err(|e| anyhow!("UMAP data shape: {e}"))?;
 
     let n_epochs = params
         .n_epochs
@@ -785,7 +782,11 @@ fn umap_lab_color_labels_from_obs(adata: &IMAnnData) -> Result<(Option<String>, 
 
 fn umap_lab_obs_meta(adata: &IMAnnData) -> (Vec<String>, Vec<String>) {
     let obs = adata.obs().get_data();
-    let obs_columns: Vec<String> = obs.get_column_names().iter().map(|s| s.to_string()).collect();
+    let obs_columns: Vec<String> = obs
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let obs_names: Vec<String> = adata.obs_names().to_vec();
     (obs_names, obs_columns)
 }
@@ -809,13 +810,19 @@ pub struct UmapLabLoaded {
     pub color_labels: Vec<String>,
     pub obs_names: Vec<String>,
     pub obs_columns: Vec<String>,
+    pub var_names: Vec<String>,
+    /// When `obsm['spatial']` (or `X_spatial` / `spatial_loc`) exists with ≥2 columns and `n_obs` rows.
+    pub spatial: Option<(String, Vec<f32>, Vec<f32>)>,
 }
 
 /// Load PCA from `obsm['X_pca']` when present and valid; otherwise runs
 /// [`rust_preprocess_h5ad_to_memory`] with [`RustPreprocessSteps::UMAP_LAB_PCA_ONLY`], which
 /// writes `obsm['X_pca']` whenever HVG+PCA runs.
 /// The returned `pca` contains all available components (use `params.n_pca_components` when running UMAP).
-pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) -> Result<UmapLabLoaded> {
+pub fn umap_lab_load_pca_session(
+    input: &Path,
+    params: &RustPreprocessParams,
+) -> Result<UmapLabLoaded> {
     if let Some(loaded) = umap_lab_try_headless_umap_loaded(input)? {
         return Ok(loaded);
     }
@@ -830,45 +837,49 @@ pub fn umap_lab_load_pca_session(input: &Path, params: &RustPreprocessParams) ->
     })?;
     let n_obs = adata.n_obs();
     let pca_opt = im_obsm_dense_matrix_f64(&adata, "X_pca")?;
-    let (pca, (color_column, color_labels), (obs_names, obs_columns)) =
-        if let Some(pca) = pca_opt {
-            if pca.nrows() != n_obs {
-                bail!(
-                    "obsm['X_pca'] rows {} do not match n_obs {}",
-                    pca.nrows(),
-                    n_obs
-                );
-            }
-            if pca.ncols() < 2 {
-                bail!(
-                    "obsm['X_pca'] must have at least 2 columns (got {})",
-                    pca.ncols()
-                );
-            }
-            eprintln!(
-                "umap_lab: using existing obsm['X_pca'] ({}×{})",
+    let (pca, (color_column, color_labels), (obs_names, obs_columns)) = if let Some(pca) = pca_opt {
+        if pca.nrows() != n_obs {
+            bail!(
+                "obsm['X_pca'] rows {} do not match n_obs {}",
                 pca.nrows(),
+                n_obs
+            );
+        }
+        if pca.ncols() < 2 {
+            bail!(
+                "obsm['X_pca'] must have at least 2 columns (got {})",
                 pca.ncols()
             );
-            let colors = umap_lab_color_labels_from_obs(&adata)?;
-            let meta = umap_lab_obs_meta(&adata);
-            (pca, colors, meta)
-        } else {
-            drop(adata);
-            eprintln!("umap_lab: no usable X_pca; running normalization + HVG + PCA …");
-            let adata2 =
-                rust_preprocess_h5ad_to_memory(input, params, &RustPreprocessSteps::UMAP_LAB_PCA_ONLY)?;
-            let pca = pca_from_im_after_preprocess(&adata2)?;
-            let colors = umap_lab_color_labels_from_obs(&adata2)?;
-            let meta = umap_lab_obs_meta(&adata2);
-            (pca, colors, meta)
-        };
+        }
+        eprintln!(
+            "umap_lab: using existing obsm['X_pca'] ({}×{})",
+            pca.nrows(),
+            pca.ncols()
+        );
+        let colors = umap_lab_color_labels_from_obs(&adata)?;
+        let meta = umap_lab_obs_meta(&adata);
+        (pca, colors, meta)
+    } else {
+        drop(adata);
+        eprintln!("umap_lab: no usable X_pca; running normalization + HVG + PCA …");
+        let adata2 =
+            rust_preprocess_h5ad_to_memory(input, params, &RustPreprocessSteps::UMAP_LAB_PCA_ONLY)?;
+        let pca = pca_from_im_after_preprocess(&adata2)?;
+        let colors = umap_lab_color_labels_from_obs(&adata2)?;
+        let meta = umap_lab_obs_meta(&adata2);
+        (pca, colors, meta)
+    };
+    let h5_meta = H5::open(input).context("H5::open (var names / spatial)")?;
+    let (_, _, _, var_names) = umap_lab_h5_read_obs_var_dataframes(&h5_meta)?;
+    let spatial = umap_lab_h5_read_obsm_spatial_xy(&h5_meta, pca.nrows())?;
     Ok(UmapLabLoaded {
         pca,
         color_column,
         color_labels,
         obs_names,
         obs_columns,
+        var_names,
+        spatial,
     })
 }
 
@@ -973,9 +984,7 @@ fn gene_display_bounds(values: &[f32]) -> (f32, f32) {
 }
 
 /// Adapted from anndata-memory `read_dataframe_index` (MIT) for umap_lab HDF5 headless loads.
-fn umap_lab_h5_read_dataframe_index(
-    container: &DataContainer<H5>,
-) -> Result<DataFrameIndex> {
+fn umap_lab_h5_read_dataframe_index(container: &DataContainer<H5>) -> Result<DataFrameIndex> {
     let index_name: String = container.get_attr("_index")?;
     let dataset = container.as_group()?.open_dataset(&index_name)?;
     let index_ty = match dataset.get_attr::<String>("index_type") {
@@ -1053,6 +1062,48 @@ fn umap_lab_h5_read_obsm_x_pca_matrix(h5: &H5File) -> Result<Option<Array2<f64>>
     }
 }
 
+fn umap_lab_h5_read_obsm_spatial_xy(
+    h5: &H5File,
+    n_obs: usize,
+) -> Result<Option<(String, Vec<f32>, Vec<f32>)>> {
+    if !h5.exists("obsm")? {
+        return Ok(None);
+    }
+    let obsm = h5.open_group("obsm")?;
+    for key in ["spatial", "X_spatial", "spatial_loc"] {
+        if !obsm.exists(key)? {
+            continue;
+        }
+        let cont = match DataContainer::open(&obsm, key) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let data = match ArrayData::read(&cont) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let arr = match data {
+            ArrayData::Array(d) => {
+                if let Ok(a) = ArrayConvert::<Array2<f64>>::try_convert(d.clone()) {
+                    a
+                } else if let Ok(a32) = ArrayConvert::<Array2<f32>>::try_convert(d) {
+                    a32.mapv(|v| v as f64)
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        if arr.nrows() != n_obs || arr.ncols() < 2 {
+            continue;
+        }
+        let sx: Vec<f32> = (0..n_obs).map(|i| arr[[i, 0]] as f32).collect();
+        let sy: Vec<f32> = (0..n_obs).map(|i| arr[[i, 1]] as f32).collect();
+        return Ok(Some((key.to_string(), sx, sy)));
+    }
+    Ok(None)
+}
+
 fn umap_lab_try_headless_umap_loaded(path: &Path) -> Result<Option<UmapLabLoaded>> {
     let h5 = H5::open(path).context("H5::open (headless umap_lab)")?;
     let Some(pca) = umap_lab_h5_read_obsm_x_pca_matrix(&h5)? else {
@@ -1067,24 +1118,32 @@ fn umap_lab_try_headless_umap_loaded(path: &Path) -> Result<Option<UmapLabLoaded
     if n_vars == 0 {
         return Ok(None);
     }
-    let obs_columns: Vec<String> = obs_df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let obs_columns: Vec<String> = obs_df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let coo = CooMatrix::new(n_obs, n_vars);
     let csr = CsrMatrix::from(&coo);
     let x_data = ArrayData::CsrMatrix(DynCsrMatrix::F64(csr));
-    let adata = IMAnnData::new_extended(x_data, obs_names.clone(), var_names, obs_df, var_df)
-        .context("IMAnnData::new_extended (placeholder X)")?;
+    let adata =
+        IMAnnData::new_extended(x_data, obs_names.clone(), var_names.clone(), obs_df, var_df)
+            .context("IMAnnData::new_extended (placeholder X)")?;
     let colors = umap_lab_color_labels_from_obs(&adata)?;
     eprintln!(
         "umap_lab: headless HDF5 load using obsm['X_pca'] ({}×{}) — skipped materializing full X",
         pca.nrows(),
         pca.ncols()
     );
+    let spatial = umap_lab_h5_read_obsm_spatial_xy(&h5, n_obs)?;
     Ok(Some(UmapLabLoaded {
         pca,
         color_column: colors.0,
         color_labels: colors.1,
         obs_names,
         obs_columns,
+        var_names,
+        spatial,
     }))
 }
 
@@ -1095,6 +1154,145 @@ fn umap_lab_h5_root_x_is_dense_dataset(path: &Path) -> Result<bool> {
         .loc_type_by_name("X")
         .map_err(|e| anyhow!("inspect X link: {e}"))?;
     Ok(t == LocationType::Dataset)
+}
+
+fn umap_lab_h5_root_x_is_sparse_group(path: &Path) -> Result<bool> {
+    use hdf5_metno::{File as MetH5File, LocationType};
+    let f = MetH5File::open(path)?;
+    let t = f
+        .loc_type_by_name("X")
+        .map_err(|e| anyhow!("inspect X link: {e}"))?;
+    Ok(t == LocationType::Group)
+}
+
+fn h5_read_1d_usize(ds: &hdf5_metno::Dataset) -> Result<Vec<usize>> {
+    let sh = ds.shape();
+    anyhow::ensure!(sh.len() == 1, "expected 1d dataset, got shape {:?}", sh);
+    if let Ok(a) = ds.read_1d::<i64>() {
+        return Ok(a.iter().map(|&v| v.max(0) as usize).collect());
+    }
+    if let Ok(a) = ds.read_1d::<u64>() {
+        return Ok(a.iter().map(|&v| v as usize).collect());
+    }
+    if let Ok(a) = ds.read_1d::<i32>() {
+        return Ok(a.iter().map(|&v| v.max(0) as usize).collect());
+    }
+    if let Ok(a) = ds.read_1d::<u32>() {
+        return Ok(a.iter().map(|&v| v as usize).collect());
+    }
+    bail!("unsupported integer dtype for sparse X indptr/indices")
+}
+
+fn h5_read_1d_f64_as_vec(ds: &hdf5_metno::Dataset) -> Result<Vec<f64>> {
+    let sh = ds.shape();
+    anyhow::ensure!(sh.len() == 1, "expected 1d data array");
+    if let Ok(a) = ds.read_1d::<f64>() {
+        return Ok(a.to_vec());
+    }
+    if let Ok(a) = ds.read_1d::<f32>() {
+        return Ok(a.iter().map(|&v| v as f64).collect());
+    }
+    if let Ok(a) = ds.read_1d::<i32>() {
+        return Ok(a.iter().map(|&v| v as f64).collect());
+    }
+    if let Ok(a) = ds.read_1d::<i64>() {
+        return Ok(a.iter().map(|&v| v as f64).collect());
+    }
+    bail!("unsupported dtype for sparse X data")
+}
+
+/// Read one gene column from on-disk CSR/CSC `X` without requiring canonical sorted lanes
+/// (avoids `Minor indices are not monotonically increasing` when loading the full AnnData).
+fn umap_lab_h5_sparse_x_column_f32(
+    path: &Path,
+    col: usize,
+    n_obs: usize,
+    n_vars: usize,
+) -> Result<Vec<f32>> {
+    use hdf5_metno::{File as H5F, LocationType};
+    let f = H5F::open(path)?;
+    anyhow::ensure!(
+        f.loc_type_by_name("X")? == LocationType::Group,
+        "X is not an HDF5 group"
+    );
+    let g = f.group("X")?;
+    let shape_a = g
+        .attr("shape")
+        .context("sparse X: missing shape attribute")?;
+    let (nr, nc) = if let Ok(v) = shape_a.read_1d::<u64>() {
+        anyhow::ensure!(v.len() >= 2, "sparse X shape attr");
+        (v[0] as usize, v[1] as usize)
+    } else if let Ok(v) = shape_a.read_1d::<i64>() {
+        anyhow::ensure!(v.len() >= 2, "sparse X shape attr");
+        (v[0] as usize, v[1] as usize)
+    } else if let Ok(v) = shape_a.read_1d::<u32>() {
+        anyhow::ensure!(v.len() >= 2, "sparse X shape attr");
+        (v[0] as usize, v[1] as usize)
+    } else {
+        bail!("sparse X: unsupported shape attribute dtype");
+    };
+    anyhow::ensure!(
+        nr == n_obs && nc == n_vars,
+        "sparse X shape {}×{} does not match obs×var {}×{}",
+        nr,
+        nc,
+        n_obs,
+        n_vars
+    );
+    anyhow::ensure!(
+        col < n_vars,
+        "gene column {col} out of range (n_vars={n_vars})"
+    );
+
+    let indptr = h5_read_1d_usize(&g.dataset("indptr").context("sparse X indptr")?)?;
+    let indices = h5_read_1d_usize(&g.dataset("indices").context("sparse X indices")?)?;
+    let data = h5_read_1d_f64_as_vec(&g.dataset("data").context("sparse X data")?)?;
+    anyhow::ensure!(
+        indices.len() == data.len(),
+        "sparse X indices/data length mismatch"
+    );
+
+    let enc = g
+        .attr("encoding-type")
+        .ok()
+        .and_then(|a| h5ad_attr_encoding_type_string(&a))
+        .unwrap_or_default();
+
+    let is_csr = enc == "csr_matrix" || (enc.is_empty() && indptr.len() == n_obs + 1);
+    let is_csc = enc == "csc_matrix" || (enc.is_empty() && indptr.len() == n_vars + 1);
+    if is_csr {
+        anyhow::ensure!(indptr.len() == n_obs + 1, "csr indptr len");
+        let mut out = vec![0f32; n_obs];
+        for row in 0..n_obs {
+            let s = indptr[row];
+            let e = indptr[row + 1];
+            let mut acc = 0f32;
+            for k in s..e {
+                if indices[k] == col {
+                    acc += data[k] as f32;
+                }
+            }
+            out[row] = acc;
+        }
+        return Ok(out);
+    }
+    if is_csc {
+        anyhow::ensure!(indptr.len() == n_vars + 1, "csc indptr len");
+        let mut out = vec![0f32; n_obs];
+        let s = indptr[col];
+        let e = indptr[col + 1];
+        for k in s..e {
+            let row = indices[k];
+            if row < n_obs {
+                out[row] += data[k] as f32;
+            }
+        }
+        return Ok(out);
+    }
+    bail!(
+        "X sparse group: encoding-type {enc:?}, indptr len {} (expected csr n_obs+1 or csc n_vars+1)",
+        indptr.len()
+    )
 }
 
 fn h5ad_attr_encoding_type_string(attr: &hdf5_metno::Attribute) -> Option<String> {
@@ -1189,7 +1387,12 @@ fn umap_lab_h5_dense_x_column_f32(
         n_obs,
         n_vars
     );
-    anyhow::ensure!(col < n_vars, "gene column {} out of range (n_vars={})", col, n_vars);
+    anyhow::ensure!(
+        col < n_vars,
+        "gene column {} out of range (n_vars={})",
+        col,
+        n_vars
+    );
     if let Ok(slab) = ds.read_slice_2d::<f32, _>(s![.., col..col + 1]) {
         return Ok(slab.iter().copied().collect());
     }
@@ -1215,16 +1418,16 @@ pub fn umap_lab_gene_expression_from_h5ad(
     let n_vars = var_names.len();
 
     let obs_container = DataContainer::open(&h5, "obs").context("open obs")?;
-    let n_obs = umap_lab_h5_read_dataframe_index(&obs_container)?.into_vec().len();
+    let n_obs = umap_lab_h5_read_dataframe_index(&obs_container)?
+        .into_vec()
+        .len();
 
     let idx = var_names
         .iter()
         .position(|n| n.as_str() == q)
         .or_else(|| {
             let ql = q.to_lowercase();
-            var_names
-                .iter()
-                .position(|n| n.to_lowercase() == ql)
+            var_names.iter().position(|n| n.to_lowercase() == ql)
         })
         .with_context(|| format!("gene {q:?} not found (n_vars={n_vars})"))?;
     let resolved = var_names
@@ -1234,6 +1437,11 @@ pub fn umap_lab_gene_expression_from_h5ad(
 
     if umap_lab_h5_root_x_is_dense_dataset(path)? {
         if let Ok(col) = umap_lab_h5_dense_x_column_f32(path, idx, n_obs, n_vars) {
+            let (vmin, vmax) = gene_display_bounds(&col);
+            return Ok((resolved, col, vmin, vmax));
+        }
+    } else if umap_lab_h5_root_x_is_sparse_group(path)? {
+        if let Ok(col) = umap_lab_h5_sparse_x_column_f32(path, idx, n_obs, n_vars) {
             let (vmin, vmax) = gene_display_bounds(&col);
             return Ok((resolved, col, vmin, vmax));
         }
@@ -1256,6 +1464,316 @@ pub fn umap_lab_gene_expression_from_h5ad(
     let col = x_column_as_f32(&x, idx, n_obs, n_vars)?;
     let (vmin, vmax) = gene_display_bounds(&col);
     Ok((resolved, col, vmin, vmax))
+}
+
+fn umap_lab_ensure_normalized_count_for_magic(adata: &IMAnnData) -> Result<()> {
+    let n_obs = adata.n_obs();
+    let n_vars = adata.n_vars();
+    let mut shape_ok = false;
+    if let Ok(elem) = adata.layers().get_array("normalized_count") {
+        if let Ok(d) = elem.get_data() {
+            if let Ok(csr) = normalized_layer_to_csr_f64(d.clone()) {
+                if csr.nrows() == n_obs && csr.ncols() == n_vars {
+                    shape_ok = true;
+                }
+            }
+        }
+    }
+    if shape_ok {
+        return Ok(());
+    }
+
+    ensure_x_csr_for_pca(adata).context("prepare X as CSR for MAGIC normalized_count")?;
+    let log_like = infer_x_is_log1p_space(adata)?;
+    if log_like {
+        let x = adata.x().get_data().context("x for normalized_count")?;
+        layer_replace_if_present(adata, "normalized_count", x.clone())?;
+        return Ok(());
+    }
+
+    let t0 = Instant::now();
+    normalize_expression(&adata.x(), 10_000, &Direction::ROW, None)
+        .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
+    let norm_data = adata.x().get_data().context("x after normalize")?;
+    layer_replace_if_present(adata, "normalized_count", norm_data)?;
+    log1p_expression(&adata.x(), None).map_err(|e| anyhow!("log1p_expression: {e:?}"))?;
+    eprintln!(
+        "umap_lab MAGIC prep: built layers['normalized_count'] in {:.2}s",
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Leiden-cluster-wise MAGIC (same as [`add_magic_imputed_count`]) on the AnnData at `h5ad_path`,
+/// writing a full `.h5ad` copy (including `layers['normalized_count']` and `layers['imputed_count']`)
+/// to `out_h5ad_path`. Requires `layers['normalized_count']` as CSR/CSC matching `n_obs × n_vars`,
+/// or builds it from `X` when missing.
+pub fn umap_lab_run_magic_imputed_leiden(
+    h5ad_path: &Path,
+    graph: &FuzzyGraph,
+    leiden_labels: &[String],
+    out_h5ad_path: &Path,
+) -> Result<()> {
+    prepare_h5ad_path_for_anndata_memory_load(h5ad_path);
+    let adata = load_h5ad_fast(h5ad_path).map_err(|e| {
+        anyhow!(
+            "loading .h5ad for MAGIC failed. Caused by: {:#}",
+            e
+        )
+    })?;
+    anyhow::ensure!(
+        leiden_labels.len() == adata.n_obs(),
+        "Leiden labels length {} does not match n_obs {}",
+        leiden_labels.len(),
+        adata.n_obs()
+    );
+
+    umap_lab_ensure_normalized_count_for_magic(&adata)?;
+    let _ = adata.layers().remove_array("imputed_count");
+    let mut log = Vec::new();
+    add_magic_imputed_count(&adata, graph, leiden_labels, &mut log)?;
+    write_adata_h5ad(&adata, out_h5ad_path)?;
+    Ok(())
+}
+
+fn umap_lab_h5_sparse_layer_column_f32(
+    path: &Path,
+    layer: &str,
+    col: usize,
+    n_obs: usize,
+    n_vars: usize,
+) -> Result<Vec<f32>> {
+    use hdf5_metno::{File as H5F, LocationType};
+    let f = H5F::open(path)?;
+    let layers = f
+        .group("layers")
+        .with_context(|| format!("HDF5 missing layers group (layer {layer:?})"))?;
+    anyhow::ensure!(
+        layers.loc_type_by_name(layer)? == LocationType::Group,
+        "layers/{layer} is not a sparse matrix group"
+    );
+    let g = layers.group(layer)?;
+    let shape_a = g
+        .attr("shape")
+        .context("sparse layer: missing shape attribute")?;
+    let (nr, nc) = if let Ok(v) = shape_a.read_1d::<u64>() {
+        anyhow::ensure!(v.len() >= 2, "sparse layer shape attr");
+        (v[0] as usize, v[1] as usize)
+    } else if let Ok(v) = shape_a.read_1d::<i64>() {
+        anyhow::ensure!(v.len() >= 2, "sparse layer shape attr");
+        (v[0] as usize, v[1] as usize)
+    } else if let Ok(v) = shape_a.read_1d::<u32>() {
+        anyhow::ensure!(v.len() >= 2, "sparse layer shape attr");
+        (v[0] as usize, v[1] as usize)
+    } else {
+        bail!("sparse layer: unsupported shape attribute dtype");
+    };
+    anyhow::ensure!(
+        nr == n_obs && nc == n_vars,
+        "sparse layer {layer} shape {}×{} does not match obs×var {}×{}",
+        nr,
+        nc,
+        n_obs,
+        n_vars
+    );
+    anyhow::ensure!(
+        col < n_vars,
+        "gene column {col} out of range (n_vars={n_vars})"
+    );
+
+    let indptr = h5_read_1d_usize(&g.dataset("indptr").context("sparse layer indptr")?)?;
+    let indices = h5_read_1d_usize(&g.dataset("indices").context("sparse layer indices")?)?;
+    let data = h5_read_1d_f64_as_vec(&g.dataset("data").context("sparse layer data")?)?;
+    anyhow::ensure!(
+        indices.len() == data.len(),
+        "sparse layer indices/data length mismatch"
+    );
+
+    let enc = g
+        .attr("encoding-type")
+        .ok()
+        .and_then(|a| h5ad_attr_encoding_type_string(&a))
+        .unwrap_or_default();
+
+    let is_csr = enc == "csr_matrix" || (enc.is_empty() && indptr.len() == n_obs + 1);
+    let is_csc = enc == "csc_matrix" || (enc.is_empty() && indptr.len() == n_vars + 1);
+    if is_csr {
+        anyhow::ensure!(indptr.len() == n_obs + 1, "csr indptr len");
+        let mut out = vec![0f32; n_obs];
+        for row in 0..n_obs {
+            let s = indptr[row];
+            let e = indptr[row + 1];
+            let mut acc = 0f32;
+            for k in s..e {
+                if indices[k] == col {
+                    acc += data[k] as f32;
+                }
+            }
+            out[row] = acc;
+        }
+        return Ok(out);
+    }
+    if is_csc {
+        anyhow::ensure!(indptr.len() == n_vars + 1, "csc indptr len");
+        let mut out = vec![0f32; n_obs];
+        let s = indptr[col];
+        let e = indptr[col + 1];
+        for k in s..e {
+            let row = indices[k];
+            if row < n_obs {
+                out[row] += data[k] as f32;
+            }
+        }
+        return Ok(out);
+    }
+    bail!(
+        "layers/{layer} sparse: encoding-type {enc:?}, indptr len {} (expected csr n_obs+1 or csc n_vars+1)",
+        indptr.len()
+    )
+}
+
+fn umap_lab_h5_dense_layer_column_f32(
+    path: &Path,
+    layer: &str,
+    col: usize,
+    n_obs: usize,
+    n_vars: usize,
+) -> Result<Vec<f32>> {
+    use hdf5_metno::File as H5File;
+    let f = H5File::open(path)?;
+    let layers = f.group("layers").context("HDF5 missing layers group")?;
+    let ds = layers
+        .dataset(layer)
+        .with_context(|| format!("layers/{layer} dataset"))?;
+    let sh = ds.shape();
+    anyhow::ensure!(sh.len() == 2, "layer {layer}: expected 2D dataset, got shape {:?}", sh);
+    anyhow::ensure!(
+        sh[0] as usize == n_obs && sh[1] as usize == n_vars,
+        "layer {layer} shape {:?} does not match obs×var {}×{}",
+        sh,
+        n_obs,
+        n_vars
+    );
+    anyhow::ensure!(
+        col < n_vars,
+        "gene column {col} out of range (n_vars={n_vars})"
+    );
+    if let Ok(slab) = ds.read_slice_2d::<f32, _>(s![.., col..col + 1]) {
+        return Ok(slab.iter().copied().collect());
+    }
+    let slab = ds
+        .read_slice_2d::<f64, _>(s![.., col..col + 1])
+        .map_err(|e| anyhow!("read layer column as f64: {e}"))?;
+    Ok(slab.iter().map(|v| *v as f32).collect())
+}
+
+/// Read one gene column from `layers/{layer}` (CSR/CSC group or dense dataset), with full-load fallback.
+pub fn umap_lab_gene_expression_from_h5ad_layer(
+    path: &Path,
+    layer: &str,
+    gene_query: &str,
+) -> Result<(String, Vec<f32>, f32, f32)> {
+    let q = gene_query.trim();
+    if q.is_empty() {
+        bail!("gene name is empty");
+    }
+
+    let h5 = H5::open(path).context("H5::open (gene layer)")?;
+    let var_container = DataContainer::open(&h5, "var").context("open var")?;
+    let var_names = umap_lab_h5_read_dataframe_index(&var_container)?.into_vec();
+    let n_vars = var_names.len();
+
+    let obs_container = DataContainer::open(&h5, "obs").context("open obs")?;
+    let n_obs = umap_lab_h5_read_dataframe_index(&obs_container)?
+        .into_vec()
+        .len();
+
+    let idx = var_names
+        .iter()
+        .position(|n| n.as_str() == q)
+        .or_else(|| {
+            let ql = q.to_lowercase();
+            var_names.iter().position(|n| n.to_lowercase() == ql)
+        })
+        .with_context(|| format!("gene {q:?} not found (n_vars={n_vars})"))?;
+    let resolved = var_names
+        .get(idx)
+        .with_context(|| "var_names index")?
+        .clone();
+
+    use hdf5_metno::{File as H5F, LocationType};
+    let f = H5F::open(path)?;
+    if f.link_exists("layers") {
+        let layers_g = f.group("layers")?;
+        if layers_g.link_exists(layer) {
+            match layers_g.loc_type_by_name(layer).context("layers entry type")? {
+                LocationType::Dataset => {
+                    if let Ok(colv) =
+                        umap_lab_h5_dense_layer_column_f32(path, layer, idx, n_obs, n_vars)
+                    {
+                        let (vmin, vmax) = gene_display_bounds(&colv);
+                        return Ok((resolved, colv, vmin, vmax));
+                    }
+                }
+                LocationType::Group => {
+                    if let Ok(colv) =
+                        umap_lab_h5_sparse_layer_column_f32(path, layer, idx, n_obs, n_vars)
+                    {
+                        let (vmin, vmax) = gene_display_bounds(&colv);
+                        return Ok((resolved, colv, vmin, vmax));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    prepare_h5ad_path_for_anndata_memory_load(path);
+    let adata = load_h5ad_fast(path).map_err(|e| {
+        anyhow!(
+            "loading .h5ad for layer {layer} expression failed. Caused by: {:#}",
+            e
+        )
+    })?;
+    anyhow::ensure!(
+        adata.n_obs() == n_obs && adata.n_vars() == n_vars,
+        "obs/var shape mismatch after full load (expected {}×{})",
+        n_obs,
+        n_vars
+    );
+    let layer_data = adata
+        .layers()
+        .get_array(layer)
+        .with_context(|| format!("layers[{layer}] missing"))?
+        .get_data()
+        .with_context(|| format!("read layers[{layer}]"))?;
+    let col = x_column_as_f32(&layer_data, idx, n_obs, n_vars)?;
+    let (vmin, vmax) = gene_display_bounds(&col);
+    Ok((resolved, col, vmin, vmax))
+}
+
+/// `source`: `"x"` (root `X` on `primary_h5ad`), `"normalized_count"`, or `"imputed_count"`.
+/// `magic_artifact` is the temp `.h5ad` written by [`umap_lab_run_magic_imputed_leiden`]; required for `imputed_count`.
+pub fn umap_lab_gene_expression_from_h5ad_source(
+    primary_h5ad: &Path,
+    magic_artifact: Option<&Path>,
+    source: &str,
+    gene_query: &str,
+) -> Result<(String, Vec<f32>, f32, f32)> {
+    let s = source.trim();
+    match s {
+        "" | "x" => umap_lab_gene_expression_from_h5ad(primary_h5ad, gene_query),
+        "normalized_count" => {
+            let p = magic_artifact.unwrap_or(primary_h5ad);
+            umap_lab_gene_expression_from_h5ad_layer(p, "normalized_count", gene_query)
+        }
+        "imputed_count" => {
+            let p = magic_artifact
+                .ok_or_else(|| anyhow!("imputed_count requires MAGIC; run cluster-wise MAGIC first"))?;
+            umap_lab_gene_expression_from_h5ad_layer(p, "imputed_count", gene_query)
+        }
+        _ => bail!("unknown gene expression source {s:?}; expected x, normalized_count, or imputed_count"),
+    }
 }
 
 fn ensure_x_csr_for_pca(adata: &IMAnnData) -> Result<()> {
@@ -1377,33 +1895,23 @@ fn sample_matrix_values_for_log1p_infer(
     rng: &mut StdRng,
 ) -> Result<Vec<f64>> {
     Ok(match x {
-        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => reservoir_sample_f64_from_iter(
-            m.triplet_iter().map(|(_, _, v)| *v),
-            limit,
-            rng,
-        ),
-        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => reservoir_sample_f64_from_iter(
-            m.triplet_iter().map(|(_, _, v)| *v as f64),
-            limit,
-            rng,
-        ),
-        ArrayData::CscMatrix(DynCscMatrix::F64(m)) => reservoir_sample_f64_from_iter(
-            m.triplet_iter().map(|(_, _, v)| *v),
-            limit,
-            rng,
-        ),
-        ArrayData::CscMatrix(DynCscMatrix::F32(m)) => reservoir_sample_f64_from_iter(
-            m.triplet_iter().map(|(_, _, v)| *v as f64),
-            limit,
-            rng,
-        ),
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => {
+            reservoir_sample_f64_from_iter(m.triplet_iter().map(|(_, _, v)| *v), limit, rng)
+        }
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => {
+            reservoir_sample_f64_from_iter(m.triplet_iter().map(|(_, _, v)| *v as f64), limit, rng)
+        }
+        ArrayData::CscMatrix(DynCscMatrix::F64(m)) => {
+            reservoir_sample_f64_from_iter(m.triplet_iter().map(|(_, _, v)| *v), limit, rng)
+        }
+        ArrayData::CscMatrix(DynCscMatrix::F32(m)) => {
+            reservoir_sample_f64_from_iter(m.triplet_iter().map(|(_, _, v)| *v as f64), limit, rng)
+        }
         ArrayData::CsrNonCanonical(non) => match non.clone().canonicalize() {
             Ok(csr_dyn) => match csr_dyn {
-                DynCsrMatrix::F64(m) => reservoir_sample_f64_from_iter(
-                    m.triplet_iter().map(|(_, _, v)| *v),
-                    limit,
-                    rng,
-                ),
+                DynCsrMatrix::F64(m) => {
+                    reservoir_sample_f64_from_iter(m.triplet_iter().map(|(_, _, v)| *v), limit, rng)
+                }
                 DynCsrMatrix::F32(m) => reservoir_sample_f64_from_iter(
                     m.triplet_iter().map(|(_, _, v)| *v as f64),
                     limit,
@@ -1477,10 +1985,7 @@ fn temp_h5ad_path(output: &Path) -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    Ok(dir.join(format!(
-        ".{}.{t}.part.h5ad",
-        name.to_string_lossy()
-    )))
+    Ok(dir.join(format!(".{}.{t}.part.h5ad", name.to_string_lossy())))
 }
 
 fn attach_dataframe_index(df: DataFrame, names: &[String]) -> Result<DataFrame> {
@@ -1593,9 +2098,9 @@ fn csr_dyn_to_csr_f64(d: DynCsrMatrix) -> Result<CsrMatrix<f64>> {
         DynCsrMatrix::U16(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
         DynCsrMatrix::U32(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
         DynCsrMatrix::U64(m) => Ok(csr_typed_to_f64_csr(&m, |v| *v as f64)),
-        DynCsrMatrix::Bool(_) | DynCsrMatrix::String(_) => bail!(
-            "HDF5 export: CSR matrix has bool/string dtype; cannot coerce to f64 CSR"
-        ),
+        DynCsrMatrix::Bool(_) | DynCsrMatrix::String(_) => {
+            bail!("HDF5 export: CSR matrix has bool/string dtype; cannot coerce to f64 CSR")
+        }
     }
 }
 
@@ -1622,9 +2127,9 @@ fn csc_dyn_to_csr_f64(d: DynCscMatrix) -> Result<CsrMatrix<f64>> {
         DynCscMatrix::U16(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
         DynCscMatrix::U32(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
         DynCscMatrix::U64(m) => Ok(csr_typed_to_f64_csr(&CsrMatrix::from(&m), |v| *v as f64)),
-        DynCscMatrix::Bool(_) | DynCscMatrix::String(_) => bail!(
-            "HDF5 export: CSC matrix has bool/string dtype; cannot coerce to f64 CSR"
-        ),
+        DynCscMatrix::Bool(_) | DynCscMatrix::String(_) => {
+            bail!("HDF5 export: CSC matrix has bool/string dtype; cannot coerce to f64 CSR")
+        }
     }
 }
 
@@ -1633,17 +2138,20 @@ fn array_data_to_csr_f64_for_h5_export(data: ArrayData) -> Result<ArrayData> {
         ArrayData::CsrMatrix(d) => csr_dyn_to_csr_f64(d)?,
         ArrayData::CscMatrix(d) => csc_dyn_to_csr_f64(d)?,
         ArrayData::CsrNonCanonical(non) => {
-            let d = non
-                .clone()
-                .canonicalize()
-                .map_err(|_| anyhow!("HDF5 export: non-canonical CSR could not be canonicalized"))?;
+            let d = non.clone().canonicalize().map_err(|_| {
+                anyhow!("HDF5 export: non-canonical CSR could not be canonicalized")
+            })?;
             csr_dyn_to_csr_f64(d)?
         }
         ArrayData::Array(d) => {
-            let dense: Array2<f64> = d.try_convert().context("HDF5 export: dense matrix to f64")?;
+            let dense: Array2<f64> = d
+                .try_convert()
+                .context("HDF5 export: dense matrix to f64")?;
             dense_ndarray_to_csr_f64(&dense)?
         }
-        ArrayData::DataFrame(_) => bail!("HDF5 export: expected matrix for X or layer, got DataFrame"),
+        ArrayData::DataFrame(_) => {
+            bail!("HDF5 export: expected matrix for X or layer, got DataFrame")
+        }
     };
     Ok(ArrayData::CsrMatrix(DynCsrMatrix::F64(csr)))
 }
@@ -1655,10 +2163,9 @@ fn normalized_layer_to_csr_f64(nc: ArrayData) -> Result<CsrMatrix<f64>> {
         ArrayData::CscMatrix(DynCscMatrix::F64(m)) => Ok(CsrMatrix::from(&m)),
         ArrayData::CscMatrix(DynCscMatrix::F32(m)) => Ok(csr_f32_to_csr_f64(&CsrMatrix::from(&m))),
         ArrayData::CsrNonCanonical(non) => {
-            let csr_dyn = non
-                .clone()
-                .canonicalize()
-                .map_err(|_| anyhow!("normalized_count: non-canonical CSR could not be canonicalized"))?;
+            let csr_dyn = non.clone().canonicalize().map_err(|_| {
+                anyhow!("normalized_count: non-canonical CSR could not be canonicalized")
+            })?;
             match csr_dyn {
                 DynCsrMatrix::F64(m) => Ok(m),
                 DynCsrMatrix::F32(m) => Ok(csr_f32_to_csr_f64(&m)),
@@ -1703,7 +2210,10 @@ fn obs_column_as_strings(df: &DataFrame, key: &str) -> Result<Option<Vec<String>
 /// Upper-triangular induced subgraph on `subset_global` (unique global row indices in visit order).
 /// Only edges with both endpoints in the subset and `gi < gj` are retained (same convention as
 /// [`leiden_labels_from_graph`]).
-pub fn fuzzy_graph_induced_subgraph(graph: &FuzzyGraph, subset_global: &[usize]) -> Result<FuzzyGraph> {
+pub fn fuzzy_graph_induced_subgraph(
+    graph: &FuzzyGraph,
+    subset_global: &[usize],
+) -> Result<FuzzyGraph> {
     let n = graph.rows();
     if subset_global.is_empty() {
         bail!("fuzzy_graph_induced_subgraph: empty subset");
@@ -1780,7 +2290,10 @@ pub fn leiden_labels_subcluster_into(
         .filter_map(|(i, &c)| (c == parent_code).then_some(i))
         .collect();
     if subset.is_empty() {
-        bail!("leiden_labels_subcluster_into: no cells with code {}", parent_code);
+        bail!(
+            "leiden_labels_subcluster_into: no cells with code {}",
+            parent_code
+        );
     }
     let subgraph = fuzzy_graph_induced_subgraph(graph, &subset)?;
     let local = leiden_labels_from_graph(&subgraph, resolution, max_iter);
@@ -1799,12 +2312,7 @@ pub fn leiden_labels_subcluster_into(
             li += 1;
         } else {
             let c = base_codes[global_i] as usize;
-            out.push(
-                categories
-                    .get(c)
-                    .cloned()
-                    .unwrap_or_else(|| c.to_string()),
-            );
+            out.push(categories.get(c).cloned().unwrap_or_else(|| c.to_string()));
         }
     }
     Ok(out)
@@ -1815,7 +2323,11 @@ pub fn leiden_labels_subcluster_into(
 /// Scanpy's quality increment: `ΔQ = e_{j→c} - γ·k_j·K_c / (2m)`
 /// Rust leiden crate's formula: `ΔQ = e_{j→c} - w_j·W_c·r`
 /// Match when node weight = weighted degree and `r = γ / (2m)`.
-pub fn leiden_labels_from_graph(graph: &FuzzyGraph, resolution: f64, max_iter: usize) -> Vec<String> {
+pub fn leiden_labels_from_graph(
+    graph: &FuzzyGraph,
+    resolution: f64,
+    max_iter: usize,
+) -> Vec<String> {
     let n = graph.rows();
 
     let mut degrees = vec![0.0f32; n];
@@ -2120,7 +2632,9 @@ pub fn rust_preprocess_h5ad_to_memory(
         || steps.run_umap_and_graph
         || steps.run_magic_impute;
     if !needs_expr_pipeline {
-        bail!("rust_preprocess: at least one of normalize_log1p, hvg_pca, run_umap_and_graph, run_magic_impute must be true");
+        bail!(
+            "rust_preprocess: at least one of normalize_log1p, hvg_pca, run_umap_and_graph, run_magic_impute must be true"
+        );
     }
 
     if steps.normalize_log1p {
@@ -2141,10 +2655,7 @@ pub fn rust_preprocess_h5ad_to_memory(
                 .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
             let norm_data = adata.x().get_data().context("x after normalize")?;
             layer_replace_if_present(&adata, "normalized_count", norm_data)?;
-            eprintln!(
-                "<<< normalize_total: {:.2} s",
-                t.elapsed().as_secs_f64()
-            );
+            eprintln!("<<< normalize_total: {:.2} s", t.elapsed().as_secs_f64());
             log.push(("normalize_total".to_string(), t.elapsed().as_secs_f64()));
 
             let t = Instant::now();
@@ -2156,7 +2667,9 @@ pub fn rust_preprocess_h5ad_to_memory(
             log.push(("log1p".to_string(), t.elapsed().as_secs_f64()));
         }
     } else if steps.hvg_pca || steps.run_umap_and_graph || steps.run_magic_impute {
-        bail!("rust_preprocess: HVG/PCA/UMAP/impute require normalize_log1p=true (Scanpy normalize_total + log1p on X)");
+        bail!(
+            "rust_preprocess: HVG/PCA/UMAP/impute require normalize_log1p=true (Scanpy normalize_total + log1p on X)"
+        );
     }
 
     let mut pca = ndarray::Array2::<f64>::zeros((0, 0));
@@ -2204,10 +2717,7 @@ pub fn rust_preprocess_h5ad_to_memory(
         let t = Instant::now();
         eprintln!(">>> convert X to CSR (for PCA)");
         ensure_x_csr_for_pca(&adata)?;
-        eprintln!(
-            "<<< convert X to CSR: {:.2} s",
-            t.elapsed().as_secs_f64()
-        );
+        eprintln!("<<< convert X to CSR: {:.2} s", t.elapsed().as_secs_f64());
         log.push(("convert X to CSR".to_string(), t.elapsed().as_secs_f64()));
 
         let t = Instant::now();
@@ -2238,9 +2748,8 @@ pub fn rust_preprocess_h5ad_to_memory(
     }
 
     if pca.nrows() > 0 {
-        let pca_f64 = ndarray::Array2::<f64>::from_shape_fn((pca.nrows(), pca.ncols()), |(i, j)| {
-            pca[(i, j)]
-        });
+        let pca_f64 =
+            ndarray::Array2::<f64>::from_shape_fn((pca.nrows(), pca.ncols()), |(i, j)| pca[(i, j)]);
         axis_replace_array(
             &adata.obsm(),
             "X_pca",
@@ -2338,10 +2847,9 @@ fn write_adata_h5ad(adata: &IMAnnData, output: &Path) -> Result<()> {
             .set_var(var_with_index)
             .context("write var (with _index)")?;
 
-        let x_export = array_data_to_csr_f64_for_h5_export(
-            adata.x().get_data().context("read X for export")?,
-        )
-        .context("coerce X to CSR f64 for HDF5 export")?;
+        let x_export =
+            array_data_to_csr_f64_for_h5_export(adata.x().get_data().context("read X for export")?)
+                .context("coerce X to CSR f64 for HDF5 export")?;
         written.set_x(x_export).context("write X")?;
         for key in adata.obsm().keys() {
             let elem = adata
@@ -2358,9 +2866,8 @@ fn write_adata_h5ad(adata: &IMAnnData, output: &Path) -> Result<()> {
                 .layers()
                 .get_array(&key)
                 .with_context(|| format!("read layers[{key}]"))?;
-            let layer_export = array_data_to_csr_f64_for_h5_export(elem.get_data()?).with_context(
-                || format!("coerce layers[{key}] to CSR f64 for HDF5 export"),
-            )?;
+            let layer_export = array_data_to_csr_f64_for_h5_export(elem.get_data()?)
+                .with_context(|| format!("coerce layers[{key}] to CSR f64 for HDF5 export"))?;
             written
                 .layers()
                 .add(&key, layer_export)
@@ -2372,9 +2879,8 @@ fn write_adata_h5ad(adata: &IMAnnData, output: &Path) -> Result<()> {
     if write_result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    write_result.context(
-        "rust_preprocess: HDF5 export failed; partial temp file was removed if present",
-    )?;
+    write_result
+        .context("rust_preprocess: HDF5 export failed; partial temp file was removed if present")?;
     std::fs::rename(&tmp, output).with_context(|| {
         format!(
             "rename temp HDF5 {:?} -> {:?}",

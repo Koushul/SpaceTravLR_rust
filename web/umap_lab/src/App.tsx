@@ -1,5 +1,5 @@
 import { CheckIcon, ChevronDownIcon, DownloadIcon, Loader2Icon, PencilIcon } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   apiColorBy,
   apiExportCsv,
@@ -9,13 +9,20 @@ import {
   apiLeiden,
   apiLeidenReset,
   apiLeidenSubcluster,
+  apiMagicLeiden,
   apiMalt,
   apiMaltOptimized,
+  apiSignatureExpression,
+  apiSignatureSets,
+  apiStatus,
   apiUmap,
   type LeidenResponse,
   type LoadResponse,
   type MaltResponse,
   type MaltOptimizedResponse,
+  type ReferenceSignatureSet,
+  type ReferenceSignatureSummary,
+  type SignatureExpressionResponse,
   type UmapResponse,
 } from "@/api"
 import { Badge } from "@/components/ui/badge"
@@ -35,6 +42,12 @@ import { buildClusterPalette, type ClusterPalette } from "@/clusterPalette"
 import { drawScatter2d, findNearestPoint, hslForCategory, type ClusterCentroid, type ClusterLabel, type DrawScatterOpts, type ScatterState } from "@/drawScatter"
 
 const EMPTY_CLUSTER_PALETTE: ClusterPalette = { fillCss: [], rgb: [] }
+
+const EXPRESSION_SOURCE_LABEL: Record<"x" | "normalized_count" | "imputed_count", string> = {
+  x: "X",
+  normalized_count: "normalized_count",
+  imputed_count: "MAGIC imputed",
+}
 
 function SubtlePanel(props: {
   title: string
@@ -95,6 +108,8 @@ export default function App() {
   const [useLeidenColors, setUseLeidenColors] = useState(true)
 
   const [geneQuery, setGeneQuery] = useState("")
+  const [geneListOpen, setGeneListOpen] = useState(false)
+  const [plotSpace, setPlotSpace] = useState<"umap" | "spatial">("umap")
   const [geneColor, setGeneColor] = useState<{
     gene: string
     values: number[]
@@ -103,6 +118,18 @@ export default function App() {
   } | null>(null)
   const [colorByGene, setColorByGene] = useState(false)
   const [geneBusy, setGeneBusy] = useState(false)
+  const [signatureSets, setSignatureSets] = useState<ReferenceSignatureSet[]>([])
+  const [signatureSpecies, setSignatureSpecies] = useState("human")
+  const [signatureId, setSignatureId] = useState("")
+  const [signatureSearch, setSignatureSearch] = useState("")
+  const [signatureSearchOpen, setSignatureSearchOpen] = useState(false)
+  const [signatureBusy, setSignatureBusy] = useState(false)
+  const [magicBusy, setMagicBusy] = useState(false)
+  const [magicImputedReady, setMagicImputedReady] = useState(false)
+  type GeneExpressionSource = "x" | "normalized_count" | "imputed_count"
+  const [geneExpressionSource, setGeneExpressionSource] =
+    useState<GeneExpressionSource>("x")
+  const [signatureColor, setSignatureColor] = useState<SignatureExpressionResponse | null>(null)
   const [plotJitter, setPlotJitter] = useState(false)
   const [jitterAmp, setJitterAmp] = useState(40)
   const [pointSizePx, setPointSizePx] = useState(1)
@@ -139,6 +166,140 @@ export default function App() {
   const activeCategories = leiden && useLeidenColors ? leiden.categories : (meta?.color_categories ?? [])
   const activeCodes = leiden && useLeidenColors ? leiden.codes : (meta?.color_codes ?? [])
   const activeNCat = activeCategories.length
+
+  const embedXY = useMemo(() => {
+    if (
+      plotSpace === "spatial" &&
+      meta?.has_spatial &&
+      meta.spatial_x.length === meta.n_cells &&
+      meta.spatial_y.length === meta.n_cells
+    ) {
+      return { x: meta.spatial_x, y: meta.spatial_y, kind: "spatial" as const }
+    }
+    if (umap) {
+      return { x: umap.x, y: umap.y, kind: "umap" as const }
+    }
+    return null
+  }, [plotSpace, meta, umap])
+
+  useEffect(() => {
+    if (!meta?.has_spatial && plotSpace === "spatial") {
+      setPlotSpace("umap")
+    }
+  }, [meta?.has_spatial, plotSpace])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!meta) {
+      setSignatureSets([])
+      setSignatureId("")
+      setSignatureColor(null)
+      return
+    }
+    setSignatureBusy(true)
+    apiSignatureSets()
+      .then((res) => {
+        if (cancelled) return
+        setSignatureSets(res.sets)
+        const best = res.sets.reduce<ReferenceSignatureSet | null>((acc, set) => {
+          const n = set.signatures.reduce((sum, sig) => sum + sig.present_genes.length, 0)
+          const accN = acc?.signatures.reduce((sum, sig) => sum + sig.present_genes.length, 0) ?? -1
+          return n > accN ? set : acc
+        }, null)
+        setSignatureSpecies((prev) =>
+          best && !res.sets.some((set) => set.species === prev) ? best.species : prev,
+        )
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!cancelled) setSignatureBusy(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [meta?.path, meta?.n_cells])
+
+  const activeSignatureSet = useMemo(
+    () => signatureSets.find((set) => set.species === signatureSpecies) ?? signatureSets[0] ?? null,
+    [signatureSets, signatureSpecies],
+  )
+
+  const activeSignatureOptions = useMemo<ReferenceSignatureSummary[]>(() => {
+    return activeSignatureSet?.signatures.filter((sig) => sig.present_genes.length > 0) ?? []
+  }, [activeSignatureSet])
+
+  useEffect(() => {
+    if (activeSignatureOptions.length === 0) {
+      setSignatureId("")
+      return
+    }
+    if (signatureId && !activeSignatureOptions.some((sig) => sig.id === signatureId)) {
+      setSignatureId("")
+    }
+  }, [activeSignatureOptions, signatureId])
+
+  const selectedSignature = useMemo(() => {
+    return activeSignatureOptions.find((sig) => sig.id === signatureId) ?? null
+  }, [activeSignatureOptions, signatureId])
+
+  const signatureSearchResults = useMemo(() => {
+    const q = signatureSearch.trim().toLowerCase()
+    const tokens = q.split(/\s+/).filter(Boolean)
+    const hits: Array<{
+      set: ReferenceSignatureSet
+      sig: ReferenceSignatureSummary
+      score: number
+    }> = []
+    for (const set of signatureSets) {
+      for (const sig of set.signatures) {
+        if (sig.present_genes.length === 0) continue
+        const haystack = [
+          set.species,
+          sig.id,
+          sig.label,
+          sig.category,
+          sig.description,
+          sig.present_genes.join(" "),
+        ].join(" ").toLowerCase()
+        if (tokens.length > 0 && !tokens.every((token) => haystack.includes(token))) continue
+        const label = sig.label.toLowerCase()
+        const score =
+          (q && label.startsWith(q) ? 1000 : 0) +
+          (q && label.includes(q) ? 250 : 0) +
+          Math.min(sig.present_genes.length, 50)
+        hits.push({ set, sig, score })
+      }
+    }
+    return hits
+      .sort((a, b) => b.score - a.score || a.sig.label.localeCompare(b.sig.label))
+      .slice(0, 40)
+  }, [signatureSearch, signatureSets])
+
+  const selectSignature = useCallback((set: ReferenceSignatureSet, sig: ReferenceSignatureSummary) => {
+    setSignatureSpecies(set.species)
+    setSignatureId(sig.id)
+    setSignatureSearch(`${sig.label} (${set.species})`)
+    setSignatureSearchOpen(false)
+    setGeneQuery("")
+  }, [])
+
+  const geneSuggestions = useMemo(() => {
+    const names = selectedSignature?.present_genes ?? meta?.var_names ?? []
+    const q = geneQuery.trim().toLowerCase()
+    if (!q) {
+      return names.slice(0, selectedSignature ? 100 : 40)
+    }
+    const out: string[] = []
+    for (const n of names) {
+      if (n.toLowerCase().includes(q)) {
+        out.push(n)
+        if (out.length >= 50) break
+      }
+    }
+    return out
+  }, [meta?.var_names, geneQuery, selectedSignature])
 
   const [clusterPalette, setClusterPalette] = useState<ClusterPalette>(EMPTY_CLUSTER_PALETTE)
   useEffect(() => {
@@ -203,6 +364,30 @@ export default function App() {
     }))
   }, [activeCategories, activeNCat, clusterPalette, getDisplayLabel, showLabelsOnPlot])
 
+  const refreshMagicStatus = useCallback(async () => {
+    try {
+      const s = await apiStatus()
+      setMagicImputedReady(s.magic_imputed_ready)
+    } catch {
+      setMagicImputedReady(false)
+    }
+  }, [])
+
+  const runMagicLeiden = useCallback(async () => {
+    if (!umap || !leiden) return
+    setMagicBusy(true)
+    setError(null)
+    try {
+      const res = await apiMagicLeiden()
+      setMagicImputedReady(res.magic_imputed_ready)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setPhase("error")
+    } finally {
+      setMagicBusy(false)
+    }
+  }, [umap, leiden])
+
   const runLeiden = useCallback(async (resolution: number) => {
     if (!umap) return
     setPhase("running_leiden")
@@ -212,11 +397,12 @@ export default function App() {
       setLeidenBaselineReady(true)
       setSelectedCluster(null)
       setPhase("ready")
+      void refreshMagicStatus()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPhase("error")
     }
-  }, [umap])
+  }, [umap, refreshMagicStatus])
 
   const runLeidenSubcluster = useCallback(async () => {
     if (!umap || selectedCluster == null) return
@@ -229,11 +415,12 @@ export default function App() {
       })
       setLeiden(res)
       setPhase("ready")
+      void refreshMagicStatus()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPhase("error")
     }
-  }, [umap, selectedCluster, subclusterRes])
+  }, [umap, selectedCluster, subclusterRes, refreshMagicStatus])
 
   const resetLeidenSubclusters = useCallback(async () => {
     if (!umap || !leidenBaselineReady) return
@@ -242,11 +429,12 @@ export default function App() {
       const res = await apiLeidenReset()
       setLeiden(res)
       setSelectedCluster(null)
+      void refreshMagicStatus()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPhase("error")
     }
-  }, [umap, leidenBaselineReady])
+  }, [umap, leidenBaselineReady, refreshMagicStatus])
 
   const getScatterOpts = useCallback(
     (jitterT: number): DrawScatterOpts => ({
@@ -263,30 +451,73 @@ export default function App() {
     [pointSizePx, plotJitter, jitterAmp, colorByGene, geneColor, clusterLabelsForCanvas],
   )
 
-  const fetchGeneExpression = useCallback(async () => {
-    const g = geneQuery.trim()
-    if (!g || !umap) return
-    setGeneBusy(true)
-    setError(null)
-    try {
-      const res = await apiGene({ gene: g })
-      if (res.values.length !== umap.x.length) {
-        throw new Error("Gene vector length does not match embedding")
+  const fetchGeneExpression = useCallback(
+    async (explicitGene?: string, sourceOverride?: GeneExpressionSource) => {
+      const g = (explicitGene ?? geneQuery).trim()
+      if (!g || !meta) return
+      const src = sourceOverride ?? geneExpressionSource
+      setGeneBusy(true)
+      setError(null)
+      try {
+        const res = await apiGene({
+          gene: g,
+          source: src === "x" ? undefined : src,
+        })
+        if (res.values.length !== meta.n_cells) {
+          throw new Error("Gene vector length does not match number of cells")
+        }
+        setGeneColor({
+          gene: res.gene,
+          values: res.values,
+          vmin: res.vmin,
+          vmax: res.vmax,
+        })
+        setSignatureColor(null)
+        setColorByGene(true)
+        setGeneListOpen(false)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+        setPhase("error")
+      } finally {
+        setGeneBusy(false)
       }
-      setGeneColor({
-        gene: res.gene,
-        values: res.values,
-        vmin: res.vmin,
-        vmax: res.vmax,
-      })
-      setColorByGene(true)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-      setPhase("error")
-    } finally {
-      setGeneBusy(false)
-    }
-  }, [geneQuery, umap])
+    },
+    [geneQuery, meta, geneExpressionSource],
+  )
+
+  const fetchSignatureExpression = useCallback(
+    async (sourceOverride?: GeneExpressionSource) => {
+      if (!meta || !activeSignatureSet || !selectedSignature) return
+      const src = sourceOverride ?? geneExpressionSource
+      setSignatureBusy(true)
+      setError(null)
+      try {
+        const res = await apiSignatureExpression({
+          species: activeSignatureSet.species,
+          id: selectedSignature.id,
+          expression_source: src === "x" ? undefined : src,
+        })
+        if (res.values.length !== meta.n_cells) {
+          throw new Error("Signature vector length does not match number of cells")
+        }
+        setGeneColor({
+          gene: res.label,
+          values: res.values,
+          vmin: res.vmin,
+          vmax: res.vmax,
+        })
+        setSignatureColor(res)
+        setColorByGene(true)
+        setGeneListOpen(false)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+        setPhase("error")
+      } finally {
+        setSignatureBusy(false)
+      }
+    },
+    [activeSignatureSet, meta, selectedSignature, geneExpressionSource],
+  )
 
   const switchColorColumn = useCallback(async (column: string) => {
     if (!meta) return
@@ -303,6 +534,7 @@ export default function App() {
       setActiveColorColumn(res.column)
       setUseLeidenColors(false)
       setColorByGene(false)
+      setSignatureColor(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -340,6 +572,7 @@ export default function App() {
         setActiveColorColumn(csvRes.column)
         setUseLeidenColors(false)
         setColorByGene(false)
+        setSignatureColor(null)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -377,6 +610,7 @@ export default function App() {
       setActiveColorColumn(res.column)
       setUseLeidenColors(false)
       setColorByGene(false)
+      setSignatureColor(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -400,6 +634,7 @@ export default function App() {
       setActiveColorColumn(res.column)
       setUseLeidenColors(false)
       setColorByGene(false)
+      setSignatureColor(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -447,7 +682,10 @@ export default function App() {
       setSelectedCluster(null)
       setGeneColor(null)
       setColorByGene(false)
+      setSignatureColor(null)
+      setGeneExpressionSource("x")
       setPhase("ready")
+      void refreshMagicStatus()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPhase("error")
@@ -461,6 +699,7 @@ export default function App() {
     nPca,
     spread,
     lr,
+    refreshMagicStatus,
   ],
 )
 
@@ -487,6 +726,9 @@ export default function App() {
     setLeidenBaselineReady(false)
     setGeneColor(null)
     setColorByGene(false)
+    setSignatureColor(null)
+    setGeneExpressionSource("x")
+    setMagicImputedReady(false)
     try {
       const m = await apiLoad({
         path: p,
@@ -495,6 +737,7 @@ export default function App() {
       })
       setMeta(m)
       setUmap(null)
+      setPlotSpace("umap")
       setNPca((v) => Math.min(v, m.n_pca_available))
       setEfConstruction(m.ef_construction)
       setObsColumns(m.obs_columns)
@@ -510,6 +753,27 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    if (magicImputedReady) return
+    if (geneExpressionSource !== "imputed_count") return
+    if (!geneColor) return
+    setGeneExpressionSource("x")
+    if (signatureColor && activeSignatureSet && selectedSignature) {
+      void fetchSignatureExpression("x")
+    } else if (!signatureColor) {
+      void fetchGeneExpression(geneColor.gene, "x")
+    }
+  }, [
+    magicImputedReady,
+    geneExpressionSource,
+    geneColor,
+    signatureColor,
+    activeSignatureSet,
+    selectedSignature,
+    fetchGeneExpression,
+    fetchSignatureExpression,
+  ])
+
   const prevUmapRef = useRef<UmapResponse | null>(null)
   useEffect(() => {
     if (!umap || umap === prevUmapRef.current) return
@@ -520,21 +784,21 @@ export default function App() {
   useEffect(() => {
     const canvas = canvasRef.current
     const wrap = wrapRef.current
-    if (!canvas || !wrap || !umap) return
+    if (!canvas || !wrap || !embedXY) return
 
     let raf = 0
 
     const paintFrame = (jitterT: number) => {
       lastJitterTRef.current = jitterT
-      const n = umap.x.length
+      const n = embedXY.x.length
       const cc = new Uint32Array(n)
       for (let i = 0; i < n; i++) {
         cc[i] = activeCodes[i] ?? 0
       }
       const state = drawScatter2d(
         canvas,
-        umap.x,
-        umap.y,
+        embedXY.x,
+        embedXY.y,
         cc,
         activeNCat,
         selectedCluster,
@@ -572,7 +836,7 @@ export default function App() {
       if (raf) cancelAnimationFrame(raf)
     }
   }, [
-    umap,
+    embedXY,
     activeCodes,
     activeNCat,
     selectedCluster,
@@ -584,7 +848,7 @@ export default function App() {
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     const state = scatterStateRef.current
-    if (!canvas || !state || !umap) {
+    if (!canvas || !state || !embedXY) {
       setHoverInfo(null)
       return
     }
@@ -594,8 +858,8 @@ export default function App() {
 
     const idx = findNearestPoint(
       state,
-      umap.x,
-      umap.y,
+      embedXY.x,
+      embedXY.y,
       cx,
       cy,
       12,
@@ -617,20 +881,20 @@ export default function App() {
       }
     }
     setHoverInfo({ x: e.clientX, y: e.clientY, cluster: detail, count })
-  }, [umap, activeCodes, activeCategories, colorByGene, geneColor, getScatterOpts, getDisplayLabel])
+  }, [embedXY, activeCodes, activeCategories, colorByGene, geneColor, getScatterOpts, getDisplayLabel])
 
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     const state = scatterStateRef.current
-    if (!canvas || !state || !umap) return
+    if (!canvas || !state || !embedXY) return
     const rect = canvas.getBoundingClientRect()
     const cx = e.clientX - rect.left
     const cy = e.clientY - rect.top
 
     const idx = findNearestPoint(
       state,
-      umap.x,
-      umap.y,
+      embedXY.x,
+      embedXY.y,
       cx,
       cy,
       12,
@@ -642,7 +906,7 @@ export default function App() {
     }
     const cluster = activeCodes[idx] ?? 0
     setSelectedCluster((prev) => (prev === cluster ? null : cluster))
-  }, [umap, activeCodes, getScatterOpts])
+  }, [embedXY, activeCodes, getScatterOpts])
 
   const handleCanvasLeave = useCallback(() => {
     setHoverInfo(null)
@@ -653,7 +917,7 @@ export default function App() {
 
   const showPlotBusyOverlay =
     phase === "loading_file" ||
-    (meta != null && umap == null && phase !== "error")
+    (meta != null && embedXY == null && phase !== "error")
 
   return (
     <div className="flex h-full min-h-svh flex-col gap-4 p-4 lg:flex-row lg:gap-6">
@@ -705,6 +969,11 @@ export default function App() {
             <CardFooter className="flex flex-col items-start gap-1.5 border-t">
               <div className="text-muted-foreground flex flex-wrap gap-1.5 text-xs">
                 <Badge variant="secondary">{meta.n_cells.toLocaleString()} cells</Badge>
+                {meta.has_spatial ? (
+                  <Badge variant="outline" className="border-dashed">
+                    {meta.spatial_key ?? "spatial"}
+                  </Badge>
+                ) : null}
                 <Badge variant="secondary">
                   PCA {meta.n_pca_available}D
                   {meta.color_column ? ` · ${meta.color_column}` : null}
@@ -877,6 +1146,29 @@ export default function App() {
           >
             Reset subclusters
           </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="xs"
+            className="w-full"
+            title="Run within-cluster MAGIC (rust_preprocess) and write imputed_count to a temp copy for coloring."
+            onClick={() => void runMagicLeiden()}
+            disabled={!umap || busy || leidenBusy || magicBusy || !leiden}
+          >
+            {magicBusy ? (
+              <span className="flex items-center justify-center gap-1.5">
+                <Loader2Icon className="size-3.5 animate-spin" />
+                MAGIC…
+              </span>
+            ) : (
+              "Run MAGIC (Leiden clusters)"
+            )}
+          </Button>
+          {magicImputedReady ? (
+            <p className="text-muted-foreground text-[10px] leading-snug">
+              MAGIC layer ready — use expression layer in plot appearance to color by imputed counts.
+            </p>
+          ) : null}
           <Button
             variant={useLeidenColors ? "default" : "outline"}
             size="xs"
@@ -1064,40 +1356,171 @@ export default function App() {
           ) : null}
         </SubtlePanel>
 
-        <SubtlePanel title="Plot appearance">
+        <SubtlePanel title="Color UMAP / plot appearance">
           <p className="text-muted-foreground text-[11px] leading-snug">
-            Gene values are read from <code className="text-[10px]">X</code> (reloads file). Color scale uses 2–98% percentiles.
+            Gene and signature values default to <code className="text-[10px]">X</code>. After running MAGIC, choose{" "}
+            <code className="text-[10px]">normalized_count</code> or <code className="text-[10px]">imputed_count</code>{" "}
+            from the expression layer control. Color scales use 2–98% percentiles.
           </p>
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-1">
               <Label htmlFor="gene" className="text-[11px] text-muted-foreground">
                 Gene symbol
               </Label>
-              <ParamHint text="Fetches expression from X on the server (can re-read the h5ad). Does not change UMAP positions; only the color overlay." />
+              <ParamHint text="Type to filter var_names; pick from suggestions or press Enter. Uses the selected expression layer (X, normalized_count, or imputed_count after MAGIC)." />
             </div>
-            <div className="flex gap-1.5">
+            <div className="relative flex gap-1.5">
               <Input
                 id="gene"
                 placeholder="e.g. CD3E"
                 value={geneQuery}
-                onChange={(e) => setGeneQuery(e.target.value)}
+                onChange={(e) => {
+                  setGeneQuery(e.target.value)
+                  setGeneListOpen(true)
+                }}
+                onFocus={() => setGeneListOpen(true)}
+                onBlur={() => {
+                  window.setTimeout(() => setGeneListOpen(false), 180)
+                }}
                 disabled={!meta || busy || geneBusy}
                 className="h-8 min-w-0 flex-1 text-xs"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void fetchGeneExpression()
                 }}
+                autoComplete="off"
               />
               <Button
                 type="button"
                 size="xs"
                 variant="secondary"
                 className="h-8 shrink-0 px-2"
-                disabled={!umap || busy || geneBusy || !geneQuery.trim()}
+                disabled={!meta || busy || geneBusy || !geneQuery.trim()}
                 onClick={() => void fetchGeneExpression()}
               >
                 {geneBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : "Load"}
               </Button>
+              {geneListOpen && geneSuggestions.length > 0 ? (
+                <ul className="border-border bg-popover text-popover-foreground absolute top-full right-0 left-0 z-40 mt-0.5 max-h-48 overflow-y-auto rounded-md border py-0.5 text-xs shadow-md">
+                  {geneSuggestions.map((name) => (
+                    <li key={name}>
+                      <button
+                        type="button"
+                        className="hover:bg-muted/80 block w-full px-2 py-1 text-left"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          setGeneQuery(name)
+                          void fetchGeneExpression(name)
+                        }}
+                      >
+                        {name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
+          </div>
+          <div className="flex flex-col gap-1.5 rounded-md border border-border/50 p-2">
+            <div className="flex items-center gap-1">
+              <Label htmlFor="signature-search" className="text-[11px] text-muted-foreground">
+                Reference signature search
+              </Label>
+              <ParamHint text="Fuzzy-search all human and mouse signatures. Selecting a signature limits the gene autocomplete above to genes from that signature that are present in var_names." />
+            </div>
+            <div className="relative">
+              <Input
+                id="signature-search"
+                placeholder="e.g. hypoxia, T cell, apoptosis, kidney"
+                value={signatureSearch}
+                disabled={!meta || busy || signatureBusy || signatureSets.length === 0}
+                className="h-8 text-xs"
+                onChange={(e) => {
+                  setSignatureSearch(e.target.value)
+                  setSignatureSearchOpen(true)
+                }}
+                onFocus={() => setSignatureSearchOpen(true)}
+                onBlur={() => {
+                  window.setTimeout(() => setSignatureSearchOpen(false), 180)
+                }}
+                autoComplete="off"
+              />
+              {signatureSearchOpen && signatureSearchResults.length > 0 ? (
+                <ul className="border-border bg-popover text-popover-foreground absolute top-full right-0 left-0 z-40 mt-0.5 max-h-56 overflow-y-auto rounded-md border py-0.5 text-xs shadow-md">
+                  {signatureSearchResults.map(({ set, sig }) => (
+                    <li key={`${set.species}:${sig.id}`}>
+                      <button
+                        type="button"
+                        className="hover:bg-muted/80 block w-full px-2 py-1.5 text-left"
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          selectSignature(set, sig)
+                        }}
+                      >
+                        <span className="block text-foreground">{sig.label}</span>
+                        <span className="text-muted-foreground block text-[10px]">
+                          {set.species} · {sig.category.replaceAll("_", " ")} · {sig.present_genes.length}/{sig.genes.length} genes
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+            <Button
+              type="button"
+              size="xs"
+              variant="secondary"
+              className="h-8 w-full"
+              disabled={!meta || busy || signatureBusy || !selectedSignature}
+              onClick={() => void fetchSignatureExpression()}
+            >
+              {signatureBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : "Load signature"}
+            </Button>
+            {selectedSignature ? (
+              <div className="space-y-1">
+                <p className="text-muted-foreground text-[10px] leading-snug">
+                  {activeSignatureSet?.species} · {selectedSignature.category.replaceAll("_", " ")} ·{" "}
+                  {selectedSignature.present_genes.length} present, {selectedSignature.missing_genes.length} missing.{" "}
+                  {selectedSignature.description}
+                </p>
+                <div className="flex max-h-20 flex-wrap gap-1 overflow-y-auto">
+                  {selectedSignature.present_genes.map((gene) => (
+                    <button
+                      key={gene}
+                      type="button"
+                      className="border-border bg-muted/40 hover:bg-muted rounded border px-1.5 py-0.5 text-[10px] text-foreground/85"
+                      disabled={!meta || busy || geneBusy}
+                      onClick={() => {
+                        setGeneQuery(gene)
+                        void fetchGeneExpression(gene)
+                      }}
+                    >
+                      {gene}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="text-muted-foreground text-[10px] underline-offset-2 hover:text-foreground hover:underline"
+                  onClick={() => {
+                    setSignatureId("")
+                    setSignatureSearch("")
+                  }}
+                >
+                  Clear signature gene filter
+                </button>
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-[10px] leading-snug">
+                Search and select a signature to restrict the gene dropdown to its present marker genes.
+              </p>
+            )}
+            {signatureColor ? (
+              <p className="text-muted-foreground text-[10px] leading-snug">
+                Active signature: <span className="text-foreground/80">{signatureColor.label}</span>{" "}
+                using {signatureColor.present_genes.length}/{signatureColor.genes.length} genes.
+              </p>
+            ) : null}
           </div>
           <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">
             <input
@@ -1107,27 +1530,58 @@ export default function App() {
               disabled={!geneColor}
               onChange={(e) => setColorByGene(e.target.checked)}
             />
-            <span>Color by gene</span>
-            <ParamHint text="Toggles the gene color scale on or off without reloading expression from disk." />
+            <span>Color by expression</span>
+            <ParamHint text="Toggles the current gene or signature color scale on or off without reloading expression from disk." />
           </label>
           {geneColor ? (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-1">
+                <Label htmlFor="expr-source" className="text-[11px] text-muted-foreground">
+                  Expression layer
+                </Label>
+                <ParamHint text="X is the AnnData matrix. normalized_count and imputed_count are read from layers; imputed_count requires Run MAGIC (Leiden clusters) first." />
+              </div>
+              <select
+                id="expr-source"
+                className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs"
+                value={geneExpressionSource}
+                disabled={busy || geneBusy || signatureBusy}
+                onChange={(e) => {
+                  const v = e.target.value as GeneExpressionSource
+                  setGeneExpressionSource(v)
+                  if (signatureColor && activeSignatureSet && selectedSignature) {
+                    void fetchSignatureExpression(v)
+                  } else if (!signatureColor) {
+                    void fetchGeneExpression(geneColor.gene, v)
+                  }
+                }}
+              >
+                <option value="x">X</option>
+                <option value="normalized_count">normalized_count</option>
+                <option value="imputed_count" disabled={!magicImputedReady}>
+                  imputed_count (MAGIC)
+                </option>
+              </select>
             <button
               type="button"
               className="text-muted-foreground self-start text-[11px] underline-offset-2 hover:text-foreground hover:underline"
               onClick={() => {
                 setGeneColor(null)
                 setColorByGene(false)
+                setSignatureColor(null)
+                setGeneExpressionSource("x")
               }}
             >
-              Clear gene
+              Clear expression color
             </button>
+          </div>
           ) : null}
           <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">
             <input
               type="checkbox"
               className="border-muted-foreground/50 accent-foreground size-3.5 rounded border"
               checked={plotJitter}
-              disabled={!umap}
+              disabled={!embedXY}
               onChange={(e) => setPlotJitter(e.target.checked)}
             />
             <span>Subtle jitter (spatial-viewer style)</span>
@@ -1142,7 +1596,7 @@ export default function App() {
             step={5}
             onChange={setJitterAmp}
             onCommit={() => {}}
-            disabled={!umap || !plotJitter}
+            disabled={!embedXY || !plotJitter}
           />
           <ParamSlider
             label={`Point size (×${pointSizePx.toFixed(2)})`}
@@ -1153,7 +1607,7 @@ export default function App() {
             step={0.05}
             onChange={setPointSizePx}
             onCommit={() => {}}
-            disabled={!umap}
+            disabled={!embedXY}
           />
         </SubtlePanel>
       </div>
@@ -1179,6 +1633,26 @@ export default function App() {
             ref={wrapRef}
             className="border-border bg-card relative min-h-[min(72vh,720px)] w-full min-w-0 flex-1 overflow-hidden rounded-xl border"
           >
+            {meta?.has_spatial ? (
+              <div className="absolute top-2 left-2 z-30 flex rounded-md bg-background/80 p-0.5 text-[10px] shadow-sm ring-1 ring-border backdrop-blur">
+                <button
+                  type="button"
+                  className={`rounded px-2 py-1 transition-colors ${plotSpace === "umap" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => setPlotSpace("umap")}
+                  title="UMAP embedding"
+                >
+                  UMAP
+                </button>
+                <button
+                  type="button"
+                  className={`rounded px-2 py-1 transition-colors ${plotSpace === "spatial" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => setPlotSpace("spatial")}
+                  title={`obsm['${meta.spatial_key ?? "spatial"}']`}
+                >
+                  Spatial
+                </button>
+              </div>
+            ) : null}
             <canvas
               ref={canvasRef}
               className="size-full block"
@@ -1197,7 +1671,7 @@ export default function App() {
                 Export CSV
               </button>
             ) : null}
-            {showLabelsOnPlot && centroidsForOverlay.length > 0 && umap && !showPlotBusyOverlay ? (
+            {showLabelsOnPlot && centroidsForOverlay.length > 0 && embedXY && !showPlotBusyOverlay ? (
               <div className="pointer-events-none absolute inset-0 z-20">
                 {centroidsForOverlay.map((c) => {
                   const cat = activeCategories[c.code]
@@ -1287,7 +1761,7 @@ export default function App() {
             ) : null}
           </div>
 
-          {activeCategories.length > 0 && umap ? (
+          {activeCategories.length > 0 && embedXY ? (
             <div className="mt-2 flex max-h-24 flex-wrap gap-x-3 gap-y-1 overflow-y-auto rounded-lg border p-2">
               <label className="text-muted-foreground flex w-full cursor-pointer items-center gap-1.5 text-[10px]">
                 <input
@@ -1323,9 +1797,15 @@ export default function App() {
               })}
             </div>
           ) : null}
-          {colorByGene && geneColor && umap ? (
+          {colorByGene && geneColor && embedXY ? (
             <div className="text-muted-foreground mt-2 flex flex-wrap items-center gap-2 border-t border-transparent pt-1 text-[10px]">
-              <span className="shrink-0 font-medium text-foreground/80">{geneColor.gene}</span>
+              <span className="shrink-0 font-medium text-foreground/80">
+                {geneColor.gene}
+                <span className="text-muted-foreground font-normal">
+                  {" "}
+                  · {EXPRESSION_SOURCE_LABEL[geneExpressionSource]}
+                </span>
+              </span>
               <div
                 className="h-2 min-w-[100px] flex-1 rounded-sm border border-foreground/10"
                 style={{
