@@ -155,6 +155,46 @@ export async function apiMalt(body: {
   return res.json() as Promise<MaltResponse>
 }
 
+export type MaltOptimizedResponse = {
+  column: string
+  categories: string[]
+  codes: number[]
+  n_subsample: number
+  n_total: number
+  min_cluster_count: number
+  elapsed_sec: number
+}
+
+export async function apiMaltOptimized(body: {
+  reference_path: string
+  groupby?: string
+  no_leiden_map?: boolean
+}): Promise<MaltOptimizedResponse> {
+  const res = await fetch("/api/malt_optimized", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.json() as Promise<MaltOptimizedResponse>
+}
+
+export async function apiExportCsv(annotations: Record<string, string>): Promise<Blob> {
+  const res = await fetch("/api/export_csv", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ annotations }),
+  })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(t || res.statusText)
+  }
+  return res.blob()
+}
+
 export type LoadCsvResponse = {
   column: string
   categories: string[]

@@ -882,6 +882,318 @@ async fn api_load_csv(
     }))
 }
 
+#[derive(Serialize)]
+struct MaltOptimizedResponse {
+    column: String,
+    categories: Vec<String>,
+    codes: Vec<u32>,
+    n_subsample: usize,
+    n_total: usize,
+    min_cluster_count: usize,
+    elapsed_sec: f64,
+}
+
+async fn api_malt_optimized(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<MaltRequest>,
+) -> Result<Json<MaltOptimizedResponse>, (StatusCode, String)> {
+    let (query_path, obs_names, leiden) = {
+        let g = st.session.lock().unwrap();
+        let Some(s) = g.as_ref() else {
+            return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+        };
+        let Some(ref lc) = s.leiden_cache else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "run Leiden first — the optimized path subsamples per cluster".into(),
+            ));
+        };
+        (
+            s.path.clone(),
+            s.obs_names.clone(),
+            lc.clone(),
+        )
+    };
+
+    let ref_expanded = expand_user_path(body.reference_path.trim());
+    let ref_path = PathBuf::from(&ref_expanded);
+    if !ref_path.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("reference not a file: {}", ref_path.display()),
+        ));
+    }
+
+    let groupby = body.groupby.clone();
+    let no_leiden = body.no_leiden_map.unwrap_or(true);
+
+    let n_total = obs_names.len();
+    let n_cats = leiden.categories.len();
+
+    let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_cats];
+    for (i, &code) in leiden.codes.iter().enumerate() {
+        cluster_indices[code as usize].push(i);
+    }
+    let min_count = cluster_indices
+        .iter()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.len())
+        .min()
+        .unwrap_or(0);
+
+    if min_count == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Leiden produced an empty cluster — cannot subsample".into(),
+        ));
+    }
+
+    let mut subsample_indices: Vec<usize> = Vec::with_capacity(min_count * n_cats);
+    {
+        use rand::seq::SliceRandom;
+        let mut rng = rand::thread_rng();
+        for idxs in &mut cluster_indices {
+            idxs.shuffle(&mut rng);
+            subsample_indices.extend_from_slice(&idxs[..min_count]);
+        }
+    }
+    subsample_indices.sort_unstable();
+
+    let subset_names: Vec<String> = subsample_indices.iter().map(|&i| obs_names[i].clone()).collect();
+    let n_subsample = subset_names.len();
+    tracing::info!(
+        "MALT optimized: subsampling {n_subsample}/{n_total} cells (min cluster = {min_count}, {n_cats} clusters)"
+    );
+
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/malt_subsample_helper.py");
+    if !script.is_file() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("subsample helper not found at {}", script.display()),
+        ));
+    }
+
+    let (subset_csv_content, elapsed) = tokio::task::spawn_blocking(move || {
+        let tmpdir = tempfile::tempdir().map_err(|e| format!("tmpdir: {e}"))?;
+        let names_json = tmpdir.path().join("subset_names.json");
+        let outdir = tmpdir.path().join("malt_out");
+        std::fs::create_dir_all(&outdir).map_err(|e| format!("mkdir: {e}"))?;
+
+        std::fs::write(
+            &names_json,
+            serde_json::to_string(&subset_names).map_err(|e| format!("json: {e}"))?,
+        )
+        .map_err(|e| format!("write names json: {e}"))?;
+
+        let mut cmd = std::process::Command::new("python");
+        cmd.arg(&script)
+            .arg("--query")
+            .arg(&query_path)
+            .arg("--reference")
+            .arg(&ref_path)
+            .arg("--subset-names-json")
+            .arg(&names_json)
+            .arg("--outdir")
+            .arg(&outdir);
+
+        if let Some(ref gb) = groupby {
+            let gb = gb.trim();
+            if !gb.is_empty() {
+                cmd.arg("--groupby").arg(gb);
+            }
+        }
+        if no_leiden {
+            cmd.arg("--no-leiden-map");
+        }
+
+        tracing::info!("Running MALT subsample: {:?}", cmd);
+        let t0 = std::time::Instant::now();
+        let output = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("spawn: {e}"))?;
+        let elapsed = t0.elapsed().as_secs_f64();
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "MALT exited {:?}\n--- stderr ---\n{}\n--- stdout ---\n{}",
+                output.status.code(),
+                stderr,
+                stdout,
+            ));
+        }
+
+        let csv_path = outdir.join("malt_labels.csv");
+        if !csv_path.is_file() {
+            return Err("MALT produced no malt_labels.csv".into());
+        }
+        let csv_content = std::fs::read_to_string(&csv_path)
+            .map_err(|e| format!("read CSV: {e}"))?;
+
+        // tmpdir drops here, cleaning up everything
+        Ok::<_, String>((csv_content, elapsed))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Parse subset CSV into a map: obs_name → label
+    let (subset_label_map, label_col_name) = {
+        let mut lines = subset_csv_content.lines();
+        let header = lines.next().unwrap_or("");
+        let headers: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
+        let malt_col = headers
+            .iter()
+            .position(|h| h.starts_with("malt_label"))
+            .unwrap_or(1);
+        let idx_col = headers.iter().position(|&h| h == "obs_name").unwrap_or(0);
+        let col_name = headers.get(malt_col).unwrap_or(&"malt_label").to_string();
+
+        let mut map: HashMap<String, String> = HashMap::new();
+        for line in lines {
+            let fields: Vec<&str> = line.split(',').collect();
+            let key = fields.get(idx_col).unwrap_or(&"").trim().to_string();
+            let val = fields.get(malt_col).unwrap_or(&"").trim().to_string();
+            if !key.is_empty() {
+                map.insert(key, val);
+            }
+        }
+        (map, col_name)
+    };
+
+    // Project labels to all cells via Leiden cluster majority vote
+    let mut cluster_label_votes: Vec<HashMap<&str, usize>> = vec![HashMap::new(); n_cats];
+    for &i in &subsample_indices {
+        let cluster = leiden.codes[i] as usize;
+        let label = subset_label_map
+            .get(&obs_names[i])
+            .map(|s| s.as_str())
+            .unwrap_or("unmapped");
+        *cluster_label_votes[cluster].entry(label).or_insert(0) += 1;
+    }
+    let cluster_majority: Vec<String> = cluster_label_votes
+        .iter()
+        .map(|votes| {
+            votes
+                .iter()
+                .max_by_key(|(_, count)| **count)
+                .map(|(label, _)| label.to_string())
+                .unwrap_or_else(|| "unmapped".to_string())
+        })
+        .collect();
+
+    let labels: Vec<String> = leiden
+        .codes
+        .iter()
+        .map(|&code| cluster_majority[code as usize].clone())
+        .collect();
+
+    let (categories, codes) = pack_labels(&labels);
+    {
+        let mut g = st.session.lock().unwrap();
+        if let Some(s) = g.as_mut() {
+            s.color_column = Some(label_col_name.clone());
+            s.color_categories = categories.clone();
+            s.color_codes = codes.clone();
+        }
+    }
+
+    tracing::info!(
+        "MALT optimized done in {:.1}s: {n_subsample} subset → {n_total} projected ({} categories)",
+        elapsed,
+        categories.len(),
+    );
+
+    Ok(Json(MaltOptimizedResponse {
+        column: label_col_name,
+        categories,
+        codes,
+        n_subsample,
+        n_total,
+        min_cluster_count: min_count,
+        elapsed_sec: elapsed,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ExportCsvRequest {
+    #[serde(default)]
+    annotations: HashMap<String, String>,
+}
+
+async fn api_export_csv(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<ExportCsvRequest>,
+) -> Result<(StatusCode, [(axum::http::header::HeaderName, String); 2], String), (StatusCode, String)> {
+    let g = st.session.lock().unwrap();
+    let Some(s) = g.as_ref() else {
+        return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+    };
+
+    let n = s.obs_names.len();
+    let mut csv = String::with_capacity(n * 80);
+
+    let has_leiden = s.leiden_cache.is_some();
+    let has_color = !s.color_categories.is_empty() && s.color_codes.len() == n;
+    let color_col_name = s.color_column.as_deref().unwrap_or("color_label");
+    let has_annotations = !body.annotations.is_empty();
+
+    csv.push_str("obs_name");
+    if has_leiden {
+        csv.push_str(",leiden");
+    }
+    if has_color {
+        csv.push(',');
+        csv.push_str(color_col_name);
+    }
+    if has_annotations {
+        csv.push_str(",annotation");
+    }
+    csv.push('\n');
+
+    let leiden_ref = s.leiden_cache.as_ref();
+    for i in 0..n {
+        csv.push_str(&s.obs_names[i]);
+        if let Some(lc) = leiden_ref {
+            csv.push(',');
+            csv.push_str(&lc.categories[lc.codes[i] as usize]);
+        }
+        if has_color {
+            csv.push(',');
+            csv.push_str(&s.color_categories[s.color_codes[i] as usize]);
+        }
+        if has_annotations {
+            csv.push(',');
+            let raw_label = if let Some(lc) = leiden_ref {
+                &lc.categories[lc.codes[i] as usize]
+            } else if has_color {
+                &s.color_categories[s.color_codes[i] as usize]
+            } else {
+                ""
+            };
+            if let Some(ann) = body.annotations.get(raw_label) {
+                csv.push_str(ann);
+            }
+        }
+        csv.push('\n');
+    }
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"umap_lab_export.csv\"".to_string(),
+            ),
+        ],
+        csv,
+    ))
+}
+
 fn resolve_static_dir(cli: &Path) -> anyhow::Result<PathBuf> {
     fn has_index(dir: &Path) -> bool {
         dir.join("index.html").is_file()
@@ -947,7 +1259,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/gene", post(api_gene))
         .route("/color_by", post(api_color_by))
         .route("/malt", post(api_malt))
+        .route("/malt_optimized", post(api_malt_optimized))
         .route("/load_csv", post(api_load_csv))
+        .route("/export_csv", post(api_export_csv))
         .with_state(state.clone());
 
     if cli.allow_cors {

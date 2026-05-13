@@ -1,7 +1,8 @@
-import { CheckIcon, ChevronDownIcon, Loader2Icon, PencilIcon } from "lucide-react"
+import { CheckIcon, ChevronDownIcon, DownloadIcon, Loader2Icon, PencilIcon } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   apiColorBy,
+  apiExportCsv,
   apiGene,
   apiLoad,
   apiLoadCsv,
@@ -9,10 +10,12 @@ import {
   apiLeidenReset,
   apiLeidenSubcluster,
   apiMalt,
+  apiMaltOptimized,
   apiUmap,
   type LeidenResponse,
   type LoadResponse,
   type MaltResponse,
+  type MaltOptimizedResponse,
   type UmapResponse,
 } from "@/api"
 import { Badge } from "@/components/ui/badge"
@@ -345,6 +348,42 @@ export default function App() {
     }
   }, [meta, maltRefPath, maltGroupby, maltOutdir])
 
+  const runMaltOptimized = useCallback(async () => {
+    if (!meta) return
+    const ref = maltRefPath.trim()
+    if (!ref) {
+      setError("Enter a reference .h5ad path for MALT")
+      return
+    }
+    setMaltBusy(true)
+    setError(null)
+    try {
+      const res: MaltOptimizedResponse = await apiMaltOptimized({
+        reference_path: ref,
+        groupby: maltGroupby.trim() || undefined,
+      })
+      setMaltResult({
+        outdir: "(in-memory)",
+        csv_path: "(projected)",
+        csv_columns: [res.column],
+        elapsed_sec: res.elapsed_sec,
+      })
+      setMeta((prev) => prev ? {
+        ...prev,
+        color_column: res.column,
+        color_categories: res.categories,
+        color_codes: res.codes,
+      } : prev)
+      setActiveColorColumn(res.column)
+      setUseLeidenColors(false)
+      setColorByGene(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMaltBusy(false)
+    }
+  }, [meta, maltRefPath, maltGroupby])
+
   const loadCsvColumn = useCallback(async (column: string) => {
     const cp = csvPath.trim()
     if (!cp || !meta) return
@@ -367,6 +406,24 @@ export default function App() {
       setColorBusy(false)
     }
   }, [csvPath, meta])
+
+  const handleExportCsv = useCallback(async () => {
+    try {
+      const annotations: Record<string, string> = {}
+      annotationsRef.current.forEach((v, k) => { annotations[k] = v })
+      const blob = await apiExportCsv(annotations)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = "umap_lab_export.csv"
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
 
   const fetchUmapForMeta = useCallback(
     async (m: LoadResponse, snap?: { ef_construction?: number }) => {
@@ -950,22 +1007,48 @@ export default function App() {
               className="h-8 text-xs"
             />
           </div>
-          <Button
-            type="button"
-            size="sm"
-            className="w-full"
-            onClick={() => void runMalt()}
-            disabled={maltBusy || !meta || !maltRefPath.trim()}
-          >
-            {maltBusy ? (
-              <>
-                <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                Running MALT…
-              </>
-            ) : (
-              "Run MALT"
-            )}
-          </Button>
+          <div className="flex gap-1.5">
+            {leiden ? (
+              <Button
+                type="button"
+                size="sm"
+                className="flex-1"
+                onClick={() => void runMaltOptimized()}
+                disabled={maltBusy || !meta || !maltRefPath.trim()}
+              >
+                {maltBusy ? (
+                  <>
+                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                    Running…
+                  </>
+                ) : (
+                  "Run MALT (optimized)"
+                )}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant={leiden ? "outline" : "default"}
+              className={leiden ? "flex-1" : "w-full"}
+              onClick={() => void runMalt()}
+              disabled={maltBusy || !meta || !maltRefPath.trim()}
+            >
+              {maltBusy && !leiden ? (
+                <>
+                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                  Running…
+                </>
+              ) : (
+                leiden ? "Full MALT" : "Run MALT"
+              )}
+            </Button>
+          </div>
+          {leiden ? (
+            <p className="text-muted-foreground text-[10px]">
+              Optimized: subsamples to min cluster size ({leiden.categories.length} clusters), maps via PCA-KNN
+            </p>
+          ) : null}
           {maltResult ? (
             <div className="text-muted-foreground space-y-1 text-[11px]">
               <p>
@@ -1103,6 +1186,17 @@ export default function App() {
               onClick={handleCanvasClick}
               onMouseLeave={handleCanvasLeave}
             />
+            {meta ? (
+              <button
+                type="button"
+                className="absolute top-2 right-2 z-30 flex items-center gap-1 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground shadow-sm ring-1 ring-border backdrop-blur hover:bg-background hover:text-foreground transition-colors"
+                onClick={() => void handleExportCsv()}
+                title="Download annotations as CSV"
+              >
+                <DownloadIcon className="size-3.5" />
+                Export CSV
+              </button>
+            ) : null}
             {showLabelsOnPlot && centroidsForOverlay.length > 0 && umap && !showPlotBusyOverlay ? (
               <div className="pointer-events-none absolute inset-0 z-20">
                 {centroidsForOverlay.map((c) => {
