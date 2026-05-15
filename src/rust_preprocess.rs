@@ -2121,7 +2121,17 @@ fn polars_series_dtype_ann_dataframe_hdf5(dt: &DataType) -> bool {
 }
 
 fn strip_supplemental_axis_arrays_for_h5_export(adata: &IMAnnData) -> Result<()> {
-    const KEEP_OBSM: &[&str] = &["X_pca", "X_umap"];
+    /// Embeddings for UMAP/PCA training plus coordinate `obsm` used by spatial viewers and
+    /// [`crate::adata_query::spatial_xy_from_obsm`] (anything else in `obsm` is dropped to shrink exports).
+    const KEEP_OBSM: &[&str] = &[
+        "X_pca",
+        "X_umap",
+        "umap",
+        "spatial",
+        "X_spatial",
+        "spatial_loc",
+        "unscaled_spatial",
+    ];
     let obsm = adata.obsm();
     for k in obsm.keys() {
         if !KEEP_OBSM.contains(&k.as_str()) {
