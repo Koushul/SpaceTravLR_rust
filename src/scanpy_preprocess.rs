@@ -56,7 +56,8 @@
 //!
 //! **Training:** [`ensure_training_adata_ready`] uses [`plan_training_prep`] to pick the minimal
 //! fix; **`FullPreprocess`** / **`LayersLeidenAnnotate`** run the Rust pipeline ([`crate::rust_preprocess`]),
-//! except **`FullPreprocess`** still uses Scanpy when a non-empty MAGIC **batch** obs column is set (Rust MAGIC is not batch-aware yet).
+//! which **subsets to HVG (or all non-MT genes when `n_vars ≤ n_top_hvg`) before PCA and MAGIC** so prep outputs are HVG-wide for training.
+//! Except **`FullPreprocess`** still uses Scanpy when a non-empty MAGIC **batch** obs column is set (Rust MAGIC is not batch-aware yet).
 //! Patch / impute-only branches still use small **`uv`** Python steps. Derived `.h5ad` files go under **`spacetravlr_prep/`** (content-keyed from the source path + mtime). When **`[data].condition`** is set, imputation uses it as the MAGIC batch column. Opt out with **`--skip-auto-adata-prep`**.
 //!
 //! **Spatial coordinates:** After cell/gene filtering, when **`obsm['unscaled_spatial']`** is absent

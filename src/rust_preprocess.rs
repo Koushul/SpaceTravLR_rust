@@ -3,12 +3,14 @@
 //! `sc.pp.log1p` via `single_rust`). Dense **`X`** is converted to **CSR `f64`** when needed because
 //! `normalize_expression` row-sum helpers only support CSR/CSC. If `uns['log1p']` exists or **`_infer_x_is_log1p`-style**
 //! heuristics match Scanpy’s embedded preprocess, **`normalize_total` / `log1p` are skipped** and
-//! `X` is copied into `layers['normalized_count']` and `layers['log1p']` unchanged. Writable `.h5ad` files are patched before load to **drop `uns/**` datasets whose `encoding-type` is the literal `null`** (e.g. Scanpy `uns['log1p']['base']`), which **anndata-rs 0.6** cannot parse. Optional
-//! HVG → PCA → UMAP → Leiden / MAGIC via [`RustPreprocessSteps`]. HDF5 export (when an output path
-//! is provided) writes `.h5ad` via `anndata-memory` + `AnnData::<H5>` with **`X` and all `layers`**
-//! coerced to CSR `f64` for on-disk layout.
+//! `X` is copied into `layers['normalized_count']` and `layers['log1p']` unchanged. Writable `.h5ad` files are patched before load to **drop `uns/**` datasets whose `encoding-type` is the literal `null`** (e.g. Scanpy `uns['log1p']['base']`), which **anndata-rs 0.6** cannot parse. If **`var` index** is digit-like (`"0"`…`"n"`) but symbols live in **`var` columns** (e.g. `feature_name`, `gene_symbols`), those are copied onto the variable index after load. Optional
+//! **HVG** (dispersion-based when `n_vars > n_top_hvg`, else all non-MT genes) → **gene subset to that mask**
+//! → PCA → UMAP → Leiden / MAGIC via [`RustPreprocessSteps`]. Subsetting runs **before** PCA and MAGIC so
+//! saved objects only carry HVG columns in `X` and `layers`. HDF5 export (when an output path is provided)
+//! writes `.h5ad` via `anndata-memory` + `AnnData::<H5>` with **`X` and all `layers`** coerced to CSR `f64` for on-disk layout.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -59,6 +61,8 @@ const INIT_NOISE_STD: f32 = 1e-4;
 
 #[derive(Clone, Debug)]
 pub struct RustPreprocessParams {
+    /// Max highly-variable genes when `n_vars` exceeds this; when `n_vars <= n_top_hvg`, dispersion
+    /// ranking is skipped and **all non-MT genes** are used (nothing to trim to a smaller top-N).
     pub n_top_hvg: usize,
     pub n_pca_components: usize,
     pub n_neighbors: usize,
@@ -138,7 +142,8 @@ impl RustPreprocessSteps {
     };
 
     /// Training auto-prep when `normalized_count` and `imputed_count` exist but neither `leiden` nor `cell_type`.
-    /// No QC subsetting (row alignment with existing layers); HVG → PCA → UMAP → Leiden → `cell_type` from labels.
+    /// No QC subsetting (row alignment with existing layers); HVG (or all non-MT if `n_vars <= n_top_hvg`)
+    /// → **gene subset** → PCA → UMAP → Leiden → `cell_type` from labels.
     pub const TRAINING_LAYERS_LEIDEN_ANNOTATE: Self = Self {
         qc_filter: false,
         normalize_log1p: true,
@@ -196,6 +201,158 @@ fn mask_to_indices(mask: &[bool]) -> Vec<usize> {
         .enumerate()
         .filter_map(|(i, &b)| b.then_some(i))
         .collect()
+}
+
+const VAR_SYMBOL_COLUMN_CANDIDATES: &[&str] = &[
+    "gene_symbols",
+    "gene_symbol",
+    "feature_name",
+    "feature_names",
+    "names",
+    "name",
+    "symbol",
+    "genesymbol",
+    "gene_name",
+    "gene",
+    "genes",
+    "gene_ids",
+];
+
+fn var_name_is_digit_placeholder(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+}
+
+fn var_names_placeholder_ratio(names: &[String]) -> f64 {
+    let n = names.len();
+    if n == 0 {
+        return 0.0;
+    }
+    names
+        .iter()
+        .filter(|s| var_name_is_digit_placeholder(s))
+        .count() as f64
+        / n as f64
+}
+
+fn find_var_df_column_ci(df: &DataFrame, want: &str) -> Option<String> {
+    df.get_column_names()
+        .into_iter()
+        .find(|c| c.as_str().eq_ignore_ascii_case(want))
+        .map(|c| c.to_string())
+}
+
+fn series_non_digit_label_ratio(series: &Series) -> Result<f64> {
+    let n = series.len();
+    if n == 0 {
+        return Ok(0.0);
+    }
+    let mut good = 0usize;
+    for i in 0..n {
+        let s = obs_series_row_str(series, i)?.trim().to_string();
+        if s.is_empty() || s.eq_ignore_ascii_case("nan") || s.eq_ignore_ascii_case("null") {
+            continue;
+        }
+        if var_name_is_digit_placeholder(&s) {
+            continue;
+        }
+        good += 1;
+    }
+    Ok(good as f64 / n as f64)
+}
+
+fn pick_var_symbol_column(df: &DataFrame) -> Option<(String, f64)> {
+    let mut best: Option<(String, f64)> = None;
+    for cand in VAR_SYMBOL_COLUMN_CANDIDATES {
+        let Some(col) = find_var_df_column_ci(df, cand) else {
+            continue;
+        };
+        let Ok(col_handle) = df.column(&col) else {
+            continue;
+        };
+        let series = col_handle.as_materialized_series();
+        let Ok(score) = series_non_digit_label_ratio(series) else {
+            continue;
+        };
+        if score < 0.5 {
+            continue;
+        }
+        match &best {
+            None => best = Some((col, score)),
+            Some((_, s0)) if score > *s0 => best = Some((col, score)),
+            _ => {}
+        }
+    }
+    best
+}
+
+fn dedupe_var_names_scanpy_style(names: Vec<String>) -> Vec<String> {
+    let mut counts = HashMap::<String, usize>::new();
+    let mut out = Vec::with_capacity(names.len());
+    for n in names {
+        let c = counts.entry(n.clone()).or_insert(0);
+        let label = if *c == 0 {
+            n.clone()
+        } else {
+            format!("{}-{}", n, *c)
+        };
+        *c += 1;
+        out.push(label);
+    }
+    out
+}
+
+/// When `var_names` look like `"0"`…`"n"` but symbols live in `var` (e.g. `feature_name`), return
+/// deduplicated names for the AnnData variable index.
+fn restore_var_names_if_placeholder(names: &[String], df: &DataFrame) -> Result<Option<Vec<String>>> {
+    const MIN_PH: f64 = 0.9;
+    if var_names_placeholder_ratio(names) < MIN_PH {
+        return Ok(None);
+    }
+    let Some((col_name, score)) = pick_var_symbol_column(df) else {
+        eprintln!(
+            "rust_preprocess: var index ~{:.0}% digit-like; no suitable symbol column in `var`",
+            var_names_placeholder_ratio(names) * 100.0
+        );
+        return Ok(None);
+    };
+    let series = df
+        .column(&col_name)
+        .with_context(|| format!("var column {col_name}"))?
+        .as_materialized_series();
+    let mut new_names = Vec::with_capacity(names.len());
+    for i in 0..names.len() {
+        new_names.push(obs_series_row_str(series, i)?.trim().to_string());
+    }
+    if new_names.len() != names.len() {
+        bail!("rust_preprocess: symbol column row count mismatch");
+    }
+    if var_names_placeholder_ratio(&new_names) >= MIN_PH {
+        eprintln!(
+            "rust_preprocess: skipped var restore from var[{col_name}] (still mostly digit-like)"
+        );
+        return Ok(None);
+    }
+    let new_names = dedupe_var_names_scanpy_style(new_names);
+    eprintln!(
+        "rust_preprocess: var index was digit-like ({:.0}%); restored from var[{col_name}] ({:.0}% non-digit labels)",
+        var_names_placeholder_ratio(names) * 100.0,
+        score * 100.0
+    );
+    Ok(Some(new_names))
+}
+
+fn maybe_restore_var_names_in_memory(adata: &IMAnnData) -> Result<()> {
+    let cur = adata.var_names();
+    let df = adata.var().get_data();
+    if let Some(names) = restore_var_names_if_placeholder(&cur, &df)? {
+        let idx: DataFrameIndex = names.into();
+        adata
+            .var()
+            .set_index(idx)
+            .context("var.set_index after symbol restore")?;
+    }
+    Ok(())
 }
 
 fn pca_to_points_f32(pca: &ndarray::Array2<f64>, dim: usize) -> Vec<PcaVec> {
@@ -835,6 +992,7 @@ pub fn umap_lab_load_pca_session(
             e
         )
     })?;
+    maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     let n_obs = adata.n_obs();
     let pca_opt = im_obsm_dense_matrix_f64(&adata, "X_pca")?;
     let (pca, (color_column, color_labels), (obs_names, obs_columns)) = if let Some(pca) = pca_opt {
@@ -1033,7 +1191,10 @@ fn umap_lab_h5_read_obs_var_dataframes(
     let var_df: DataFrame = ArrayData::read(&var_container)?
         .try_into()
         .map_err(|e| anyhow!("var DataFrame: {e}"))?;
-    let var_names = umap_lab_h5_read_dataframe_index(&var_container)?.into_vec();
+    let mut var_names = umap_lab_h5_read_dataframe_index(&var_container)?.into_vec();
+    if let Some(new_names) = restore_var_names_if_placeholder(&var_names, &var_df)? {
+        var_names = new_names;
+    }
 
     Ok((obs_df, obs_names, var_df, var_names))
 }
@@ -1454,6 +1615,7 @@ pub fn umap_lab_gene_expression_from_h5ad(
             e
         )
     })?;
+    maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     anyhow::ensure!(
         adata.n_obs() == n_obs && adata.n_vars() == n_vars,
         "obs/var shape mismatch after full load (expected {}×{})",
@@ -1521,6 +1683,7 @@ pub fn umap_lab_run_magic_imputed_leiden(
             e
         )
     })?;
+    maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     anyhow::ensure!(
         leiden_labels.len() == adata.n_obs(),
         "Leiden labels length {} does not match n_obs {}",
@@ -1735,6 +1898,7 @@ pub fn umap_lab_gene_expression_from_h5ad_layer(
             e
         )
     })?;
+    maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     anyhow::ensure!(
         adata.n_obs() == n_obs && adata.n_vars() == n_vars,
         "obs/var shape mismatch after full load (expected {}×{})",
@@ -2045,6 +2209,19 @@ fn read_var_hvg_mask(adata: &IMAnnData) -> Result<Vec<bool>> {
         .into_iter()
         .map(|o: Option<bool>| o.unwrap_or(false))
         .collect())
+}
+
+fn mark_all_var_highly_variable(adata: &IMAnnData) -> Result<()> {
+    let var = adata.var();
+    if var.get_data().column("highly_variable").is_ok() {
+        var.remove_column_from_df("highly_variable")?;
+    }
+    let n = adata.n_vars();
+    var.attach_column_to_df(Series::new(
+        "highly_variable".into(),
+        vec![true; n],
+    ))?;
+    Ok(())
 }
 
 fn axis_replace_array(axis: &IMAxisArrays, key: &str, data: ArrayData) -> Result<()> {
@@ -2568,6 +2745,7 @@ pub fn rust_preprocess_h5ad_to_memory(
     eprintln!(">>> read_h5ad");
     prepare_h5ad_path_for_anndata_memory_load(input);
     let mut adata = load_h5ad_fast(input).context("load_h5ad_fast")?;
+    maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     eprintln!("  loaded shape=({}, {})", adata.n_obs(), adata.n_vars());
     eprintln!("<<< read_h5ad: {:.2} s", t0.elapsed().as_secs_f64());
     log.push(("read_h5ad".to_string(), t0.elapsed().as_secs_f64()));
@@ -2674,45 +2852,80 @@ pub fn rust_preprocess_h5ad_to_memory(
 
     let mut pca = ndarray::Array2::<f64>::zeros((0, 0));
     if steps.hvg_pca {
-        let hvg_target = params
-            .n_top_hvg
-            .min(adata.n_vars().saturating_sub(50).max(1));
-        let t = Instant::now();
-        eprintln!(">>> highly_variable_genes({hvg_target})");
-        compute_highly_variable_genes(
-            &adata,
-            Some(HVGParams {
-                n_top_genes: Some(hvg_target),
-                ..Default::default()
-            }),
-        )
-        .map_err(|e| anyhow!("compute_highly_variable_genes: {e:?}"))?;
-        eprintln!(
-            "<<< highly_variable_genes({hvg_target}): {:.2} s",
-            t.elapsed().as_secs_f64()
-        );
-        log.push((
-            format!("highly_variable_genes({hvg_target})"),
-            t.elapsed().as_secs_f64(),
-        ));
+        let n_total = adata.n_vars();
+        let skip_dispersion_hvg = n_total <= params.n_top_hvg;
 
-        let t = Instant::now();
-        eprintln!(">>> subset HVG & drop mt");
-        let hvg_mask = read_var_hvg_mask(&adata)?;
-        let var_names = adata.var_names();
-        let combined_mask: Vec<bool> = hvg_mask
-            .iter()
-            .zip(var_names.iter())
-            .map(|(&hv, name)| hv && !name.to_lowercase().starts_with("mt"))
-            .collect();
-        eprintln!(
-            "<<< subset HVG & drop mt: {:.2} s",
-            t.elapsed().as_secs_f64()
-        );
-        log.push((
-            "subset HVG & drop mt".to_string(),
-            t.elapsed().as_secs_f64(),
-        ));
+        let combined_mask: Vec<bool> = if skip_dispersion_hvg {
+            eprintln!(
+                "rust_preprocess: n_vars={n_total} <= n_top_hvg={} — skipping dispersion HVG; using all non-MT genes",
+                params.n_top_hvg
+            );
+            let var_names = adata.var_names();
+            var_names
+                .iter()
+                .map(|name| !name.to_lowercase().starts_with("mt"))
+                .collect()
+        } else {
+            let hvg_target = params
+                .n_top_hvg
+                .min(n_total.saturating_sub(50).max(1));
+            let t = Instant::now();
+            eprintln!(">>> highly_variable_genes({hvg_target})");
+            compute_highly_variable_genes(
+                &adata,
+                Some(HVGParams {
+                    n_top_genes: Some(hvg_target),
+                    ..Default::default()
+                }),
+            )
+            .map_err(|e| anyhow!("compute_highly_variable_genes: {e:?}"))?;
+            eprintln!(
+                "<<< highly_variable_genes({hvg_target}): {:.2} s",
+                t.elapsed().as_secs_f64()
+            );
+            log.push((
+                format!("highly_variable_genes({hvg_target})"),
+                t.elapsed().as_secs_f64(),
+            ));
+
+            let hvg_mask = read_var_hvg_mask(&adata)?;
+            let var_names = adata.var_names();
+            hvg_mask
+                .iter()
+                .zip(var_names.iter())
+                .map(|(&hv, name)| hv && !name.to_lowercase().starts_with("mt"))
+                .collect()
+        };
+
+        let n_keep = combined_mask.iter().filter(|&&x| x).count();
+        if n_keep == 0 {
+            bail!("rust_preprocess: after HVG / MT filter, zero genes remain");
+        }
+
+        if n_keep < n_total {
+            let t = Instant::now();
+            eprintln!(
+                ">>> subset AnnData to {n_keep} genes (HVG ∩ ¬MT of {n_total}) before PCA / MAGIC"
+            );
+            let gene_idx = mask_to_indices(&combined_mask);
+            let obs_idx: Vec<usize> = (0..adata.n_obs()).collect();
+            adata = adata
+                .subset(&[&SelectInfoElem::from(obs_idx), &SelectInfoElem::from(gene_idx)])
+                .map_err(|e| anyhow!("HVG gene subset: {e:?}"))?;
+            eprintln!(
+                "<<< subset genes: {:.2} s (shape now {} × {})",
+                t.elapsed().as_secs_f64(),
+                adata.n_obs(),
+                adata.n_vars()
+            );
+            log.push(("subset HVG genes".to_string(), t.elapsed().as_secs_f64()));
+        } else {
+            eprintln!(
+                "rust_preprocess: retaining all {n_keep} genes (no column subset; matches HVG mask)"
+            );
+        }
+
+        mark_all_var_highly_variable(&adata).context("var highly_variable after HVG subset")?;
 
         let t = Instant::now();
         eprintln!(">>> convert X to CSR (for PCA)");
@@ -2720,12 +2933,13 @@ pub fn rust_preprocess_h5ad_to_memory(
         eprintln!("<<< convert X to CSR: {:.2} s", t.elapsed().as_secs_f64());
         log.push(("convert X to CSR".to_string(), t.elapsed().as_secs_f64()));
 
+        let pca_feature_mask = vec![true; adata.n_vars()];
         let t = Instant::now();
         eprintln!(">>> pca");
         let pca_res = run_pca_sparse_masked::<f64>(
             &adata.x(),
             Some(FeatureSelectionMethod::HighlyVariableSelection(
-                combined_mask,
+                pca_feature_mask,
             )),
             Some(true),
             Some(false),
@@ -2898,4 +3112,56 @@ pub fn rust_preprocess_h5ad(
     params: &RustPreprocessParams,
 ) -> Result<Option<PathBuf>> {
     rust_preprocess_h5ad_with_steps(input, Some(output), params, &RustPreprocessSteps::FULL)
+}
+
+#[cfg(test)]
+mod preprocess_tests {
+    use super::*;
+
+    #[test]
+    fn var_restore_digit_index_uses_feature_name() {
+        let names: Vec<String> = (0..5).map(|i| i.to_string()).collect();
+        let s = Series::new(
+            "feature_name".into(),
+            vec!["TP53", "EGFR", "MALAT1", "X", "Y"],
+        );
+        let df = DataFrame::new(vec![s.into()]).expect("dataframe");
+        let got = restore_var_names_if_placeholder(&names, &df)
+            .expect("restore")
+            .expect("expected restore");
+        assert_eq!(got, vec!["TP53", "EGFR", "MALAT1", "X", "Y"]);
+    }
+
+    #[test]
+    fn var_restore_skips_when_index_already_symbolic() {
+        let names = vec!["A".to_string(), "B".to_string()];
+        let s = Series::new("feature_name".into(), vec!["x", "y"]);
+        let df = DataFrame::new(vec![s.into()]).unwrap();
+        assert!(restore_var_names_if_placeholder(&names, &df)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn var_restore_dedupes_duplicate_symbols() {
+        let names: Vec<String> = (0..3).map(|i| i.to_string()).collect();
+        let s = Series::new("feature_name".into(), vec!["G", "G", "H"]);
+        let df = DataFrame::new(vec![s.into()]).unwrap();
+        let got = restore_var_names_if_placeholder(&names, &df)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, vec!["G", "G-1", "H"]);
+    }
+
+    #[test]
+    fn var_restore_respects_column_priority_feature_name_before_gene_ids() {
+        let names: Vec<String> = (0..2).map(|i| i.to_string()).collect();
+        let sym = Series::new("feature_name".into(), vec!["RealA", "RealB"]);
+        let ens = Series::new("gene_ids".into(), vec!["ENS1", "ENS2"]);
+        let df = DataFrame::new(vec![ens.into(), sym.into()]).unwrap();
+        let got = restore_var_names_if_placeholder(&names, &df)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, vec!["RealA", "RealB"]);
+    }
 }

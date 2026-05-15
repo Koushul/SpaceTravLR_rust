@@ -214,6 +214,7 @@ fs4 = "0.13"
 approx = "0.5"
 anndata = "0.6"
 anndata-hdf5 = "0.5"
+anndata-memory = "1.0"
 burn = { version = "0.16.1", features = ["ndarray", "train"] }
 burn-autodiff = { version = "0.16.1" }
 ndarray = "0.16"

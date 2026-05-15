@@ -27,8 +27,12 @@ CLI:
   and ``malt_labels.csv`` use suffixes derived
   from the column name (e.g. ``malt_label_cell_type``, ``malt_label_annotation``). A single
   explicit or inferred grouping keeps the legacy names ``malt_label``, ``malt_confidence``,
-  ``knn_label``. Legacy h5ad files whose ``var`` is a 1D dataset of gene names are repacked
+  ``knn_label``.   Legacy h5ad files whose ``var`` is a 1D dataset of gene names are repacked
   on read for anndata 0.12+.
+
+  When ``var_names`` are numeric placeholders (``'0'``..``'n'``) but gene symbols live in
+  ``adata.var`` (e.g. ``feature_name``, ``gene_symbols``), those names are copied to
+  ``var_names`` on load so overlap with the other dataset resolves correctly.
 
   Writes ``malt_labels.csv`` with ``obs_name`` (``adata.obs_names``) as the row index and
   all MALT output columns for every grouping in one file.
@@ -124,7 +128,11 @@ def read_h5ad_compat(path: str) -> sc.AnnData:
     path = os.path.abspath(path)
     legacy_var, bad_log1p = _h5ad_needs_compat_patch(path)
     if not legacy_var and not bad_log1p:
-        return sc.read_h5ad(path)
+        ad = sc.read_h5ad(path)
+        _restore_var_names_from_var_if_placeholder(
+            ad, label=os.path.basename(path)
+        )
+        return ad
 
     if legacy_var:
         print(
@@ -165,7 +173,11 @@ def read_h5ad_compat(path: str) -> sc.AnnData:
                 vg.attrs["encoding-version"] = "0.2.0"
                 idx.attrs["encoding-type"] = "string-array"
                 idx.attrs["encoding-version"] = "0.2.0"
-        return sc.read_h5ad(tmp_path)
+        ad = sc.read_h5ad(tmp_path)
+        _restore_var_names_from_var_if_placeholder(
+            ad, label=os.path.basename(path)
+        )
+        return ad
     finally:
         try:
             os.unlink(tmp_path)
@@ -179,6 +191,98 @@ def _placeholder_var_names_ratio(var_names) -> float:
         return 0.0
     k = sum(1 for x in var_names if str(x).isdigit())
     return float(k) / float(n)
+
+
+_VAR_SYMBOL_COLUMN_CANDIDATES = (
+    "gene_symbols",
+    "gene_symbol",
+    "feature_name",
+    "feature_names",
+    "names",
+    "name",
+    "symbol",
+    "GeneSymbol",
+    "gene_name",
+    "Gene",
+    "Feature",
+    "genes",
+    "gene",
+    "gene_ids",
+)
+
+
+def _var_column_ci(columns: list[str], target: str) -> str | None:
+    t = target.lower()
+    for c in columns:
+        if str(c).lower() == t:
+            return str(c)
+    return None
+
+
+def _symbol_like_ratio(values) -> float:
+    s = pd.Series(values).astype(str)
+    n = int(s.shape[0])
+    if n == 0:
+        return 0.0
+    good = 0
+    for x in s:
+        xs = str(x).strip()
+        if not xs or xs.lower() in ("nan", "none", "<na>"):
+            continue
+        if xs.isdigit():
+            continue
+        good += 1
+    return float(good) / float(n)
+
+
+def _restore_var_names_from_var_if_placeholder(
+    adata: sc.AnnData,
+    *,
+    label: str,
+    min_placeholder_ratio: float = 0.9,
+    min_symbol_like_ratio: float = 0.5,
+) -> None:
+    n_var = int(adata.shape[1])
+    if n_var == 0:
+        return
+    ph = _placeholder_var_names_ratio(adata.var_names)
+    if ph < min_placeholder_ratio:
+        return
+    cols = [str(c) for c in adata.var.columns]
+    best_col, best_score = None, -1.0
+    for cand in _VAR_SYMBOL_COLUMN_CANDIDATES:
+        actual = _var_column_ci(cols, cand)
+        if actual is None:
+            continue
+        slr = _symbol_like_ratio(adata.var[actual])
+        if slr < min_symbol_like_ratio:
+            continue
+        if slr > best_score:
+            best_score, best_col = slr, actual
+    if best_col is None:
+        if cols:
+            print(
+                f"  [var_names] {label}: index looks numeric ({ph:.0%} digit-like) but no "
+                f"adata.var column passed sanity checks; keep index or pass "
+                f"--reference-gene-list for reference.",
+                file=sys.stderr,
+            )
+        return
+    new_names = [str(x).strip() for x in adata.var[best_col].tolist()]
+    if len(new_names) != n_var:
+        return
+    if _placeholder_var_names_ratio(new_names) >= min_placeholder_ratio:
+        print(
+            f"  [var_names] {label}: skipped adata.var[{best_col!r}] (still mostly digit-like).",
+            file=sys.stderr,
+        )
+        return
+    adata.var_names = new_names
+    adata.var_names_make_unique()
+    print(
+        f"  [var_names] {label}: index was numeric placeholders ({ph:.0%}); "
+        f"set var_names from adata.var[{best_col!r}] ({best_score:.0%} non-numeric labels)."
+    )
 
 
 def _read_gene_symbols_one_per_line(list_path: str) -> list[str]:

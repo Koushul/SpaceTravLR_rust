@@ -32,6 +32,7 @@ use spacetravlr::{
     load_obs_for_collect_interactions, write_collected_interactions_feather, write_run_summary_html,
 };
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 #[cfg(feature = "tui")]
 use std::sync::Mutex;
@@ -64,6 +65,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Use --plain for compact line-oriented logs instead of the full-screen dashboard (when built with `tui`).
 • Subcommand run-summary writes the HTML report without training.
 • Subcommand collect-interactions builds a multi–cell-type interaction database from *_betadata.feather files.
+• Subcommand gui runs `npm run build` in web/umap_lab, then starts the UMAP lab server and prints the URL.
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData."#;
 
@@ -163,6 +165,8 @@ enum Commands {
     RunSummary(RunSummaryCli),
     /// Scan *_betadata.feather under a run directory; aggregate β per modulator × target × cell type.
     CollectInteractions(CollectInteractionsCli),
+    /// UMAP lab: build the web UI, start the API + static server, print the URL.
+    Gui(GuiCli),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -235,6 +239,30 @@ struct CollectInteractionsCli {
         help = "Output .feather path (default: <[execution].output_dir>/plucked_feathers.feather)"
     )]
     out: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct GuiCli {
+    #[arg(
+        long,
+        default_value = "127.0.0.1",
+        help = "Listen address for the UMAP lab HTTP server"
+    )]
+    bind: String,
+    #[arg(long, default_value_t = 8765, help = "TCP port")]
+    port: u16,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Do not run npm (use existing web/umap_lab/dist)"
+    )]
+    skip_npm: bool,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Passed through to umap_lab --static-dir (default: web/umap_lab/dist)"
+    )]
+    static_dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -2373,6 +2401,134 @@ fn run_rctd_from_cli(cli: &Cli) -> anyhow::Result<()> {
     })
 }
 
+fn umap_lab_executable_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "umap_lab.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "umap_lab"
+    }
+}
+
+fn spacetravlr_workspace_root() -> PathBuf {
+    std::env::var_os("SPACETRAVLR_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn resolve_umap_lab_binary(workspace: &Path) -> anyhow::Result<PathBuf> {
+    let name = umap_lab_executable_name();
+    if let Ok(me) = std::env::current_exe() {
+        if let Some(dir) = me.parent() {
+            let cand = dir.join(name);
+            if cand.is_file() {
+                return Ok(cand);
+            }
+        }
+    }
+    let mut profiles = vec!["release", "debug"];
+    if let Ok(me) = std::env::current_exe() {
+        let s = me.to_string_lossy();
+        if s.contains("target/debug") {
+            profiles = vec!["debug", "release"];
+        }
+    }
+    for p in &profiles {
+        let cand = workspace.join("target").join(p).join(name);
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+    eprintln!(
+        "spacetravlr gui: umap_lab not found; building with cargo (release, --features umap-lab) …"
+    );
+    let st = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--features",
+            "umap-lab",
+            "--bin",
+            "umap_lab",
+        ])
+        .current_dir(workspace)
+        .status()
+        .context("spawn cargo to build umap_lab")?;
+    anyhow::ensure!(
+        st.success(),
+        "cargo build --release --features umap-lab --bin umap_lab failed with status {:?}",
+        st.code()
+    );
+    let cand = workspace.join("target/release").join(name);
+    anyhow::ensure!(
+        cand.is_file(),
+        "expected umap_lab at {} after cargo build",
+        cand.display()
+    );
+    Ok(cand)
+}
+
+fn run_spacetravlr_gui(gui: &GuiCli) -> anyhow::Result<()> {
+    let root = spacetravlr_workspace_root();
+    let web = root.join("web/umap_lab");
+    anyhow::ensure!(
+        web.join("package.json").is_file(),
+        "missing {}; set SPACETRAVLR_ROOT to the SpaceTravLR_rust repo root (contains web/umap_lab/package.json). Current root: {}",
+        web.join("package.json").display(),
+        root.display()
+    );
+
+    if !gui.skip_npm {
+        if !web.join("node_modules").is_dir() {
+            eprintln!("spacetravlr gui: npm install (first-time dependencies) …");
+            let st = Command::new("npm")
+                .arg("install")
+                .current_dir(&web)
+                .status()
+                .context("spawn npm install")?;
+            anyhow::ensure!(
+                st.success(),
+                "npm install failed with status {:?}",
+                st.code()
+            );
+        }
+        eprintln!("spacetravlr gui: npm run build …");
+        let st = Command::new("npm")
+            .args(["run", "build"])
+            .current_dir(&web)
+            .status()
+            .context("spawn npm run build")?;
+        anyhow::ensure!(
+            st.success(),
+            "npm run build failed with status {:?}",
+            st.code()
+        );
+    }
+
+    let umap_bin = resolve_umap_lab_binary(&root)?;
+    let bind = gui.bind.trim();
+    anyhow::ensure!(!bind.is_empty(), "--bind must not be empty");
+    let url = format!("http://{bind}:{}/", gui.port);
+    println!("{url}");
+
+    let mut cmd = Command::new(&umap_bin);
+    cmd.arg("--bind").arg(bind).arg("--port").arg(gui.port.to_string());
+    cmd.current_dir(&root);
+    if let Some(sd) = gui.static_dir.as_ref() {
+        cmd.arg("--static-dir").arg(sd);
+    }
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let st = cmd
+        .status()
+        .with_context(|| format!("failed to run {}", umap_bin.display()))?;
+    std::process::exit(st.code().unwrap_or(1));
+}
+
 fn main() -> anyhow::Result<()> {
     spacetravlr::ensure_hdf5_no_file_locking();
     let cli = Cli::parse();
@@ -2391,6 +2547,7 @@ fn main() -> anyhow::Result<()> {
     match &cli.command {
         Some(Commands::RunSummary(rs)) => return run_run_summary(&cli, rs),
         Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
+        Some(Commands::Gui(g)) => return run_spacetravlr_gui(g),
         None => {}
     }
 

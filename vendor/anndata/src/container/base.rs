@@ -127,13 +127,17 @@ impl<B: Backend> InnerDataFrameElem<B> {
         index: Option<DataFrameIndex>,
         df: &DataFrame,
     ) -> Result<Self> {
-        let index = index.unwrap_or(df.height().into());
+        let mut container = df.write(location, name)?;
+        let index = if let Some(idx) = index {
+            idx.overwrite(&mut container)?;
+            idx
+        } else {
+            DataFrameIndex::read(&container)?
+        };
         ensure!(
             df.height() == 0 || index.len() == df.height(),
             "cannot create dataframe element as lengths of index and dataframe differ"
         );
-        let mut container = df.write(location, name)?;
-        index.overwrite(&mut container)?;
 
         let column_names = df
             .get_column_names()
