@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name = "spacetravlr"
-version = "2.6.5"
+version = "2.6.6"
 edition = "2024"
 description = "Spatial gene regulatory network inference and in-silico perturbation (Rust port of SpaceTravLR)"
 readme = "README.md"
