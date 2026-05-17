@@ -1,6 +1,6 @@
 # Installing SpaceTravLR (Rust)
 
-Prebuilt binaries include **`spacetravlr`** (training), **`spacetravlr-perturb`** (perturbation / batch), and **`spatial_viewer`** (local web viewer + cache). All three are built together for each supported platform.
+Prebuilt binaries include **`spacetravlr`** (training), **`spacetravlr-perturb`** (perturbation / batch), and **`spatial_viewer`** (local web viewer + cache). All three are built together for each supported platform. The standalone **`umap_lab`** server and the **`spacetravlr-celloracle`** binary are **not** in release tarballs — build them from source (see below and [README.md](README.md)).
 
 ## Supported platforms (prebuilt)
 
@@ -72,8 +72,9 @@ If your binary was built without `self-update`, reinstall with the curl installe
 
 Same as a source build: the CLIs may use **WebGPU** when available. For a stable **CPU** path:
 
-- `SPACETRAVLR_FORCE_CPU=1` or `SPACETRAVLR_DISABLE_WGPU=1`  
- See the main [README](README.md) for details.
+- `SPACETRAVLR_FORCE_CPU=1` or `SPACETRAVLR_DISABLE_WGPU=1`
+
+**GRN parquet resolution:** training needs `mouse_network.parquet` / `human_network.parquet` (see `[grn].network_data_dir` in config, then **`SPACETRAVLR_DATA_DIR`**, then `data/` search paths). Details: [README.md](README.md) and [scripts/details.md](scripts/details.md).
 
 ## macOS: Gatekeeper / quarantine
 
@@ -101,7 +102,13 @@ Default **`cargo install`** includes the training/perturb TUIs and **`self-updat
 cargo install spacetravlr --locked --features spatial-viewer
 ```
 
-The package name is **`spacetravlr`**; binaries are **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** when **`spatial-viewer`** is enabled.
+UMAP lab HTTP server (same UI as **`spacetravlr gui`**, but as a dedicated binary):
+
+```bash
+cargo install spacetravlr --locked --features "spatial-viewer,umap-lab"
+```
+
+The package name is **`spacetravlr`**; binaries are **`spacetravlr`**, **`spacetravlr-perturb`**, and **`spatial_viewer`** when **`spatial-viewer`** is enabled, plus **`umap_lab`** when **`umap-lab`** is enabled.
 
 ## Install from source (developers)
 
@@ -124,6 +131,14 @@ That installs **`spacetravlr`** and **`spacetravlr-perturb`** with TUIs and **`s
 cargo install --path . --locked --features spatial-viewer
 ```
 
+Standalone **`umap_lab`** (not shipped in release tarballs):
+
+```bash
+cargo install --path . --locked --features umap-lab
+```
+
+Combine features as needed, e.g. **`--features "spatial-viewer,umap-lab"`**.
+
 Lean build (no Ratatui dashboard or self-update):
 
 ```bash
@@ -138,6 +153,16 @@ cargo install --path . --locked --no-default-features --features self-update
 
 (Full parity with release tarballs: default features plus **`spatial-viewer`** — the line above with **`--features spatial-viewer`**.)
 
+### CellOracle-style CLI (`spacetravlr-celloracle`)
+
+From a clone of the repository (workspace member **`celloracle/`**):
+
+```bash
+cargo install --path celloracle --locked
+```
+
+Installs **`spacetravlr-celloracle`** on your `PATH`. See [README.md](README.md) for the workspace layout.
+
 ## Troubleshooting
 
 | Issue | What to try |
@@ -147,6 +172,7 @@ cargo install --path . --locked --no-default-features --features self-update
 | Unwritable install directory | Choose a user-owned `SPACETRAVLR_INSTALL_DIR`, or fix permissions. |
 | GitHub API rate limit | Rare for install/self-update; retry later or download manually from Releases. |
 | SHA256 mismatch | Re-download; verify you picked the tarball for the correct tag and triple. |
+| GPU / Vulkan panic or autotune errors on Linux | Use **`SPACETRAVLR_FORCE_CPU=1`** (see [README.md](README.md)); update GPU drivers or ICD if you need GPU. |
 
 ## Scripts in this repo
 

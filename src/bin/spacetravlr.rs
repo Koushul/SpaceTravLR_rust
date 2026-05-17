@@ -67,7 +67,8 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Subcommand collect-interactions builds a multi–cell-type interaction database from *_betadata.feather files.
 • Subcommand gui runs `npm run build` in web/umap_lab, then starts the UMAP lab server and prints the URL.
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
-• Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData."#;
+• Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
+• Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74, require WebGPU CNN backend unless SPACETRAVLR_VERIFY_ALLOW_CPU=1; confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
 
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
@@ -297,6 +298,14 @@ struct Cli {
         help = "With --update: install a specific release tag (e.g. v0.2.0) instead of latest"
     )]
     update_version: Option<String>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Smoke test: curl SlideTags_human_tonsil.h5ad from GitHub (override with SPACETRAVLR_VERIFY_H5AD=…), copy with stripped normalized_count/imputed_count layers so training auto-prep runs Rust full preprocess (QC → normalize → HVG → PCA → UMAP → Leiden → MAGIC). Verify sets SPACETRAVLR_FORCE_KEEP_GENES=AICDA,CD74 on the subprocess so the target genes survive dispersion HVG. Full-mode training on AICDA and CD74 with --parallel 2 (2 epochs, spatial_dim 8 — minimum safe for three 2×2 max-pools). Captures training stderr: requires `CNN/compute backend = WebGPU` unless SPACETRAVLR_VERIFY_ALLOW_CPU=1. Confirms each gene’s *_betadata.feather with real β values. DB ligand cap defaults to 256 (`--max-lr`); set SPACETRAVLR_VERIFY_MAX_LR to override. SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips the layer strip and the Rust prep/MAGIC log checks (uses raw .h5ad as-is). Writes a plain-text log (host CPU/RAM/swap, wgpu adapter, SPACETRAVLR_* env, checklist); default log under $TMPDIR, or SPACETRAVLR_VERIFY_LOG=/path/verify.log. Uses spaceship_config.toml under SPACETRAVLR_ROOT or the crate manifest dir; needs curl."
+    )]
+    verify: bool,
 
     #[arg(
         short = 'c',
@@ -2532,6 +2541,16 @@ fn run_spacetravlr_gui(gui: &GuiCli) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     spacetravlr::ensure_hdf5_no_file_locking();
     let cli = Cli::parse();
+
+    if cli.verify {
+        if cli.command.is_some() {
+            anyhow::bail!("--verify cannot be combined with a subcommand");
+        }
+        if cli.update {
+            anyhow::bail!("--verify cannot be combined with --update");
+        }
+        return spacetravlr::verify_bundle::run_spacetravlr_verify();
+    }
 
     if cli.update {
         #[cfg(feature = "self-update")]

@@ -58,6 +58,8 @@ struct LoadedSession {
     leiden_cache: Option<CachedLeiden>,
     /// Last **full** `POST /api/leiden` partition (per-cell labels). Subcluster updates `leiden_cache` only.
     leiden_baseline_labels: Option<Vec<String>>,
+    umap_x: Vec<f32>,
+    umap_y: Vec<f32>,
     obs_names: Vec<String>,
     obs_columns: Vec<String>,
     #[allow(dead_code)]
@@ -294,6 +296,8 @@ async fn api_load(
         umap_knn_cache: None,
         leiden_cache: None,
         leiden_baseline_labels: None,
+        umap_x: Vec::new(),
+        umap_y: Vec::new(),
         obs_names: loaded.obs_names,
         obs_columns: loaded.obs_columns,
         var_names: var_names.clone(),
@@ -364,6 +368,8 @@ async fn api_umap(
             s.umap_knn_cache = Some(new_knn_cache);
             s.leiden_cache = None;
             s.leiden_baseline_labels = None;
+            s.umap_x.clone_from(&x);
+            s.umap_y.clone_from(&y);
         }
     }
 
@@ -1616,6 +1622,7 @@ async fn api_export_csv(
     let has_color = !s.color_categories.is_empty() && s.color_codes.len() == n;
     let color_col_name = s.color_column.as_deref().unwrap_or("color_label");
     let has_annotations = !body.annotations.is_empty();
+    let umap_xy_ok = s.umap_x.len() == n && s.umap_y.len() == n;
 
     csv.push_str("obs_name");
     if has_leiden {
@@ -1626,7 +1633,7 @@ async fn api_export_csv(
         csv.push_str(color_col_name);
     }
     if has_annotations {
-        csv.push_str(",annotation");
+        csv.push_str(",annotation,umap_x,umap_y");
     }
     csv.push('\n');
 
@@ -1652,6 +1659,14 @@ async fn api_export_csv(
             };
             if let Some(ann) = body.annotations.get(raw_label) {
                 csv.push_str(ann);
+            }
+            csv.push(',');
+            if umap_xy_ok {
+                csv.push_str(&s.umap_x[i].to_string());
+            }
+            csv.push(',');
+            if umap_xy_ok {
+                csv.push_str(&s.umap_y[i].to_string());
             }
         }
         csv.push('\n');

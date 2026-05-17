@@ -203,6 +203,55 @@ fn mask_to_indices(mask: &[bool]) -> Vec<usize> {
         .collect()
 }
 
+/// Env-driven escape hatch: gene symbols listed in **`SPACETRAVLR_FORCE_KEEP_GENES`** (comma-separated,
+/// case-insensitive, optional whitespace) are OR-ed into the HVG ∩ ¬MT mask before subsetting so
+/// downstream callers (notably **`spacetravlr --verify`**) can guarantee that target symbols survive
+/// dispersion HVG even when they fall below the top-N. Returns the count actually flipped from
+/// `false` to `true`.
+fn apply_force_keep_genes_env(adata: &IMAnnData, mask: &mut [bool]) -> usize {
+    let raw = match std::env::var("SPACETRAVLR_FORCE_KEEP_GENES") {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let wanted: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return 0;
+    }
+    let var_names = adata.var_names();
+    let mut added = 0usize;
+    let mut hit_names: Vec<String> = Vec::new();
+    for (i, name) in var_names.iter().enumerate() {
+        if i >= mask.len() {
+            break;
+        }
+        if mask[i] {
+            continue;
+        }
+        let lc = name.to_ascii_lowercase();
+        if wanted.iter().any(|w| w == &lc) {
+            mask[i] = true;
+            added += 1;
+            hit_names.push(name.clone());
+        }
+    }
+    if added > 0 {
+        eprintln!(
+            "rust_preprocess: SPACETRAVLR_FORCE_KEEP_GENES preserved {added} gene(s) through HVG ∩ ¬MT subset: {}",
+            hit_names.join(", ")
+        );
+    } else {
+        eprintln!(
+            "rust_preprocess: SPACETRAVLR_FORCE_KEEP_GENES set ({} symbol(s)) but no new matches in var_names (already kept or absent)",
+            wanted.len()
+        );
+    }
+    added
+}
+
 const VAR_SYMBOL_COLUMN_CANDIDATES: &[&str] = &[
     "gene_symbols",
     "gene_symbol",
@@ -2865,7 +2914,7 @@ pub fn rust_preprocess_h5ad_to_memory(
         let n_total = adata.n_vars();
         let skip_dispersion_hvg = n_total <= params.n_top_hvg;
 
-        let combined_mask: Vec<bool> = if skip_dispersion_hvg {
+        let mut combined_mask: Vec<bool> = if skip_dispersion_hvg {
             eprintln!(
                 "rust_preprocess: n_vars={n_total} <= n_top_hvg={} — skipping dispersion HVG; using all non-MT genes",
                 params.n_top_hvg
@@ -2906,6 +2955,8 @@ pub fn rust_preprocess_h5ad_to_memory(
                 .map(|(&hv, name)| hv && !name.to_lowercase().starts_with("mt"))
                 .collect()
         };
+
+        let _force_kept = apply_force_keep_genes_env(&adata, &mut combined_mask);
 
         let n_keep = combined_mask.iter().filter(|&&x| x).count();
         if n_keep == 0 {

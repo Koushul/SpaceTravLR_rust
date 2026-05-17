@@ -32,6 +32,10 @@ fn help_lists_process_h5ad_and_impute() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(
+        s.contains("--verify"),
+        "expected --verify in help:\n{s}"
+    );
+    assert!(
         s.contains("--plot-umap-backend"),
         "expected --plot-umap-backend in help:\n{s}"
     );

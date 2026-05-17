@@ -54,6 +54,7 @@ pub use rust_preprocess::{
 #[cfg(feature = "self-update")]
 pub mod self_update;
 pub mod spatial_estimator;
+pub mod verify_bundle;
 #[cfg(feature = "tui")]
 pub mod training_demo;
 pub mod training_hud;

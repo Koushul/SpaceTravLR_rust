@@ -1152,6 +1152,34 @@ pub fn strip_heavy_training_artifacts_from_h5ad(path: &Path) -> anyhow::Result<(
     Ok(())
 }
 
+/// Copy **`src`** → **`dst`**, then remove **`layers["normalized_count"]`** and **`layers["imputed_count"]`**
+/// when present (does not modify **`src`**). Training auto-prep then chooses
+/// [`TrainingPrepPlan::FullPreprocess`] so Rust QC → normalize → HVG → … → MAGIC runs — used by **`--verify`**.
+pub fn copy_h5ad_for_verify_forcing_rust_full_prep(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    crate::ensure_hdf5_no_file_locking();
+    anyhow::ensure!(
+        src.is_file(),
+        "copy_h5ad_for_verify_forcing_rust_full_prep: source not a file: {}",
+        src.display()
+    );
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let _ = std::fs::remove_file(dst);
+    std::fs::copy(src, dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+    let adata = AnnData::<H5>::open(H5::open_rw(dst)?)
+        .with_context(|| format!("open verify .h5ad rw: {}", dst.display()))?;
+    let keys: Vec<String> = adata.layers().keys();
+    for key in keys {
+        if key == "normalized_count" || key == "imputed_count" {
+            adata.layers().remove(&key)?;
+        }
+    }
+    adata.close()?;
+    Ok(())
+}
+
 /// `{stem}_imputed.h5ad` under **`output_dir`**.
 pub fn training_imputed_h5ad_path(output_dir: &Path, stem: &str) -> PathBuf {
     output_dir.join(format!("{stem}_imputed.h5ad"))
