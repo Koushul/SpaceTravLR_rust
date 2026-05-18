@@ -370,7 +370,7 @@ async function main() {
         <p class="transition-hint">
           Same pipeline as Python <code>VirtualTissue.plot_arrows</code> →
           <code>Cartography.plot_umap_quiver</code> (<a
-            href="https://spacetravlr.readthedocs.io/en/latest/ligand_perturbation.html"
+            href="https://github.com/Koushul/SpaceTravLR_rust/blob/main/docs/perturbation.md"
             target="_blank"
             rel="noopener"
             >tutorial</a
@@ -840,7 +840,7 @@ async function main() {
           Rust + Rayon scans <code>*_betadata.feather</code> like Python
           <code>Betabase.collect_interactions</code> — see
           <a
-            href="https://spacetravlr.readthedocs.io/en/latest/ligand_receptor_interactions.html"
+            href="https://github.com/Koushul/SpaceTravLR_rust/blob/main/docs/ligand-receptor.md"
             target="_blank"
             rel="noopener"
             >ligand–receptor tutorial</a

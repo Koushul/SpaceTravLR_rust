@@ -1,0 +1,115 @@
+/*
+ * Rosé Pine for Material for MkDocs — https://rosepinetheme.com/
+ * Palette: https://github.com/rose-pine/palette (Main + Dawn)
+ * Light: header uses Rosé Pine Love (pink); dark: full Rosé Pine Main on slate.
+ */
+
+/* ----- Light — Rosé Pine Love banner (Material “default”) ----- */
+[data-md-color-scheme="default"] {
+  --rp-love: #eb6f92;
+  --rp-dawn-base: #faf4ed;
+  --md-header-bg-color: var(--rp-love);
+  --md-header-fg-color: var(--rp-dawn-base);
+}
+
+[data-md-color-scheme="default"] .md-header,
+[data-md-color-scheme="default"] .md-tabs {
+  background-color: var(--md-header-bg-color);
+  color: var(--md-header-fg-color);
+}
+
+[data-md-color-scheme="default"] .md-search__form {
+  background-color: color-mix(in srgb, var(--rp-dawn-base) 22%, var(--rp-love));
+}
+
+/* ----- Rosé Pine Main (dark) — Material “slate” ----- */
+[data-md-color-scheme="slate"] {
+  color-scheme: dark;
+
+  --rp-base: #191724;
+  --rp-surface: #1f1d2e;
+  --rp-overlay: #26233a;
+  --rp-muted: #6e6a86;
+  --rp-subtle: #908caa;
+  --rp-text: #e0def4;
+  --rp-love: #eb6f92;
+  --rp-gold: #f6c177;
+  --rp-rose: #ebbcba;
+  --rp-pine: #31748f;
+  --rp-foam: #9ccfd8;
+  --rp-iris: #c4a7e7;
+  --rp-hl-low: #21202e;
+  --rp-hl-med: #403d52;
+
+  --md-default-bg-color: var(--rp-base);
+  --md-default-fg-color: var(--rp-text);
+  --md-default-fg-color--light: var(--rp-subtle);
+  --md-default-fg-color--lighter: var(--rp-muted);
+  --md-default-fg-color--lightest: var(--rp-hl-med);
+
+  --md-typeset-color: var(--rp-text);
+  --md-typeset-a-color: var(--rp-foam);
+  --md-typeset-mark-color: color-mix(in srgb, var(--rp-gold) 35%, transparent);
+
+  --md-code-fg-color: var(--rp-text);
+  --md-code-bg-color: var(--rp-overlay);
+
+  --md-code-hl-number-color: var(--rp-gold);
+  --md-code-hl-special-color: var(--rp-love);
+  --md-code-hl-function-color: var(--rp-rose);
+  --md-code-hl-constant-color: var(--rp-iris);
+  --md-code-hl-keyword-color: var(--rp-pine);
+  --md-code-hl-string-color: var(--rp-foam);
+  --md-code-hl-name-color: var(--rp-text);
+  --md-code-hl-operator-color: var(--rp-subtle);
+  --md-code-hl-punctuation-color: var(--rp-subtle);
+  --md-code-hl-comment-color: var(--rp-muted);
+
+  --md-accent-fg-color: var(--rp-rose);
+  --md-accent-bg-color: var(--rp-overlay);
+
+  --md-primary-fg-color: var(--rp-text);
+  --md-primary-bg-color: var(--rp-surface);
+  --md-primary-fg-color--light: var(--rp-subtle);
+  --md-primary-fg-color--lighter: var(--rp-muted);
+
+  --md-footer-bg-color: var(--rp-base);
+  --md-footer-fg-color: var(--rp-subtle);
+
+  --md-header-bg-color: var(--rp-surface);
+  --md-header-fg-color: var(--rp-text);
+
+  --md-nav-bg-color: var(--rp-base);
+  --md-nav-border-color: var(--rp-hl-med);
+
+  --md-typeset-table-color: var(--rp-overlay);
+  --md-typeset-del-color: color-mix(in srgb, var(--rp-love) 45%, transparent);
+  --md-typeset-ins-color: color-mix(in srgb, var(--rp-foam) 40%, transparent);
+
+  --md-shadow-z1: 0 0.2rem 0.5rem #00000055;
+  --md-shadow-z2: 0 0.35rem 0.9rem #00000066;
+
+  --md-typeset-kbd-color: var(--rp-overlay);
+  --md-typeset-kbd-border-color: var(--rp-hl-med);
+  --md-typeset-kbd-accent-color: var(--rp-hl-low);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: var(--rp-surface);
+  color: var(--rp-text);
+}
+
+[data-md-color-scheme="slate"] .md-search__form {
+  background-color: var(--rp-overlay);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .admonition,
+[data-md-color-scheme="slate"] .md-typeset details {
+  border-color: var(--rp-hl-med);
+  background-color: color-mix(in srgb, var(--rp-surface) 88%, transparent);
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  background-color: var(--rp-overlay);
+}

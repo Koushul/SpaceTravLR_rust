@@ -1,0 +1,73 @@
+site_name: SpaceTravLR
+site_description: Characterizing Functional Microniches
+repo_url: https://github.com/Koushul/SpaceTravLR_rust
+repo_name: SpaceTravLR_rust
+edit_uri: edit/main/docs/
+copyright: >-
+  © 2026, Koushul &amp; Ally @
+  <a href="https://jishnulab.org" target="_blank" rel="noopener">jishnulab.org</a>
+  <span class="st-footer-sheep" aria-hidden="true">🐑&#xfe0f;🐑&#xfe0f;</span>
+
+docs_dir: docs
+site_dir: site
+
+validation:
+  links:
+    not_found: ignore
+
+theme:
+  name: material
+  favicon: assets/favicon.svg
+  icon:
+    logo: material/rocket
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: pink
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Dark (Rosé Pine)
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: purple
+      accent: pink
+      toggle:
+        icon: material/brightness-4
+        name: Light
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.expand
+    - search.suggest
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - attr_list
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/extra.css
+  - stylesheets/rose-pine.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Koushul/SpaceTravLR_rust
+
+nav:
+  - Installation: index.md
+  - Usage: usage.md

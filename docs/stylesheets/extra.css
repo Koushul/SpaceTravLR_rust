@@ -1,0 +1,237 @@
+.md-copyright .st-footer-sheep {
+  display: inline-block;
+  margin-left: 0.35em;
+  font-size: 0.82em;
+  line-height: 1;
+  vertical-align: 0.08em;
+  letter-spacing: 0.06em;
+}
+
+/* Snippet HTML (--8<--) terminal blocks: follow Material light/dark toggle */
+.md-typeset .st-terminal {
+  border-radius: 8px;
+  padding: 16px 20px;
+  overflow-x: auto;
+  font-family:
+    "JetBrains Mono",
+    "Fira Code",
+    "SF Mono",
+    "Cascadia Code",
+    "Source Code Pro",
+    ui-monospace,
+    Menlo,
+    Monaco,
+    monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 1em 0;
+  border: 1px solid transparent;
+}
+
+.md-typeset .st-terminal pre {
+  margin: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal {
+  background: #1d2021;
+  color: #ebdbb2;
+  border-color: color-mix(in srgb, #ebdbb2 14%, transparent);
+}
+
+[data-md-color-scheme="default"] .md-typeset .st-terminal {
+  background: #f2e9e1;
+  color: #575279;
+  border-color: color-mix(in srgb, #797593 22%, transparent);
+}
+
+.md-typeset .st-terminal .st-fw-b {
+  font-weight: 700;
+}
+
+.md-typeset .st-terminal .st-op-06 {
+  opacity: 0.65;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-928374 {
+  color: #928374 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-928374 {
+  color: #6e6a86 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-fabd2f {
+  color: #fabd2f !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-fabd2f {
+  color: #b57614 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-8ec07c {
+  color: #8ec07c !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-8ec07c {
+  color: #3d7a4a !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-bdae93 {
+  color: #bdae93 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-bdae93 {
+  color: #575279 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-fb4934 {
+  color: #fb4934 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-fb4934 {
+  color: #c41f1f !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-83a598 {
+  color: #83a598 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-83a598 {
+  color: #286983 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-d3869b {
+  color: #d3869b !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-d3869b {
+  color: #883a86 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-61d6d6 {
+  color: #61d6d6 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-61d6d6 {
+  color: #0a7a7a !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-d661d6 {
+  color: #d661d6 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-d661d6 {
+  color: #7b3b9a !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-ff6969 {
+  color: #ff6969 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-ff6969 {
+  color: #d14a4a !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-ffdc64 {
+  color: #ffdc64 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-ffdc64 {
+  color: #a67a00 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-81f181 {
+  color: #81f181 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-81f181 {
+  color: #2a7a32 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-61a0ff {
+  color: #61a0ff !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-61a0ff {
+  color: #2563c7 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-ffd700 {
+  color: #ffd700 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-ffd700 {
+  color: #9a7200 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-ff7b00 {
+  color: #ff7b00 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-ff7b00 {
+  color: #c45f00 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-00d6d6 {
+  color: #00d6d6 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-00d6d6 {
+  color: #0a6e6e !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-d600d6 {
+  color: #d600d6 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-d600d6 {
+  color: #751c75 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-4a7a03 {
+  color: #4a7a03 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-4a7a03 {
+  color: #3d6604 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-1aa41a {
+  color: #1aa41a !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-1aa41a {
+  color: #0f7a0f !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-e74c3c {
+  color: #e74c3c !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-e74c3c {
+  color: #b03028 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-2ecc71 {
+  color: #2ecc71 !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-2ecc71 {
+  color: #1e8a52 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-3498db {
+  color: #3498db !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-3498db {
+  color: #2171a8 !important;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-terminal .st-c-ffffff {
+  color: #ffffff !important;
+}
+[data-md-color-scheme="default"] .md-typeset .st-terminal .st-c-ffffff {
+  color: #26233a !important;
+}
+
+/* Main title: Helvetica stack (NASA technical / identity typography) */
+.md-typeset h1.st-brand {
+  font-family:
+    "Helvetica Neue",
+    Helvetica,
+    Arial,
+    "Liberation Sans",
+    "Nimbus Sans L",
+    sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0.45em;
+}

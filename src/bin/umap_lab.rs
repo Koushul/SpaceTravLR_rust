@@ -1599,29 +1599,14 @@ struct ExportCsvRequest {
     annotations: HashMap<String, String>,
 }
 
-async fn api_export_csv(
-    State(st): State<Arc<AppState>>,
-    Json(body): Json<ExportCsvRequest>,
-) -> Result<
-    (
-        StatusCode,
-        [(axum::http::header::HeaderName, String); 2],
-        String,
-    ),
-    (StatusCode, String),
-> {
-    let g = st.session.lock().unwrap();
-    let Some(s) = g.as_ref() else {
-        return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
-    };
-
+fn build_export_csv(s: &LoadedSession, annotations: &HashMap<String, String>) -> String {
     let n = s.obs_names.len();
     let mut csv = String::with_capacity(n * 80);
 
     let has_leiden = s.leiden_cache.is_some();
     let has_color = !s.color_categories.is_empty() && s.color_codes.len() == n;
     let color_col_name = s.color_column.as_deref().unwrap_or("color_label");
-    let has_annotations = !body.annotations.is_empty();
+    let has_annotations = !annotations.is_empty();
     let umap_xy_ok = s.umap_x.len() == n && s.umap_y.len() == n;
 
     csv.push_str("obs_name");
@@ -1657,7 +1642,7 @@ async fn api_export_csv(
             } else {
                 ""
             };
-            if let Some(ann) = body.annotations.get(raw_label) {
+            if let Some(ann) = annotations.get(raw_label) {
                 csv.push_str(ann);
             }
             csv.push(',');
@@ -1671,6 +1656,27 @@ async fn api_export_csv(
         }
         csv.push('\n');
     }
+
+    csv
+}
+
+async fn api_export_csv(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<ExportCsvRequest>,
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::header::HeaderName, String); 2],
+        String,
+    ),
+    (StatusCode, String),
+> {
+    let g = st.session.lock().unwrap();
+    let Some(s) = g.as_ref() else {
+        return Err((StatusCode::BAD_REQUEST, "load a dataset first".into()));
+    };
+
+    let csv = build_export_csv(s, &body.annotations);
 
     Ok((
         StatusCode::OK,
@@ -1686,6 +1692,115 @@ async fn api_export_csv(
         ],
         csv,
     ))
+}
+
+#[cfg(test)]
+mod export_csv_tests {
+    use super::*;
+
+    fn minimal_session(
+        obs_names: Vec<String>,
+        leiden_cache: Option<CachedLeiden>,
+        color_categories: Vec<String>,
+        color_codes: Vec<u32>,
+        umap_x: Vec<f32>,
+        umap_y: Vec<f32>,
+    ) -> LoadedSession {
+        let n = obs_names.len().max(1);
+        LoadedSession {
+            path: PathBuf::from("dummy.h5ad"),
+            pca: Array2::zeros((n, 2)),
+            umap_param_base: RustPreprocessParams::default(),
+            color_column: Some("cell_type".into()),
+            color_categories,
+            color_codes,
+            fuzzy_graph: None,
+            umap_knn_cache: None,
+            leiden_cache,
+            leiden_baseline_labels: None,
+            umap_x,
+            umap_y,
+            obs_names,
+            obs_columns: Vec::new(),
+            var_names: Vec::new(),
+            spatial: None,
+            magic_imputed_h5ad: None,
+        }
+    }
+
+    #[test]
+    fn export_with_annotations_includes_umap_columns_and_values() {
+        let lc = CachedLeiden {
+            categories: vec!["0".into(), "1".into()],
+            codes: vec![0, 1, 0],
+        };
+        let mut annotations = HashMap::new();
+        annotations.insert("0".into(), "Alpha".into());
+        annotations.insert("1".into(), "Beta".into());
+        let s = minimal_session(
+            vec!["c0".into(), "c1".into(), "c2".into()],
+            Some(lc),
+            Vec::new(),
+            Vec::new(),
+            vec![1.5, 2.5, 3.5],
+            vec![-1.0, -2.0, -3.0],
+        );
+        let csv = build_export_csv(&s, &annotations);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "obs_name,leiden,annotation,umap_x,umap_y",
+            "header: {lines:?}"
+        );
+        assert_eq!(lines.len(), 4, "header + 3 rows");
+        let p1: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(p1, vec!["c0", "0", "Alpha", "1.5", "-1"]);
+        let p2: Vec<&str> = lines[2].split(',').collect();
+        assert_eq!(p2, vec!["c1", "1", "Beta", "2.5", "-2"]);
+        let p3: Vec<&str> = lines[3].split(',').collect();
+        assert_eq!(p3, vec!["c2", "0", "Alpha", "3.5", "-3"]);
+    }
+
+    #[test]
+    fn export_with_annotations_umap_mismatch_leaves_umap_cells_empty() {
+        let lc = CachedLeiden {
+            categories: vec!["0".into()],
+            codes: vec![0, 0],
+        };
+        let mut annotations = HashMap::new();
+        annotations.insert("0".into(), "X".into());
+        let s = minimal_session(
+            vec!["a".into(), "b".into()],
+            Some(lc),
+            Vec::new(),
+            Vec::new(),
+            vec![1.0],
+            vec![2.0],
+        );
+        let csv = build_export_csv(&s, &annotations);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "obs_name,leiden,annotation,umap_x,umap_y");
+        let p1: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(p1, vec!["a", "0", "X", "", ""]);
+    }
+
+    #[test]
+    fn export_without_annotations_has_no_umap_columns() {
+        let lc = CachedLeiden {
+            categories: vec!["0".into()],
+            codes: vec![0],
+        };
+        let s = minimal_session(
+            vec!["a".into()],
+            Some(lc),
+            Vec::new(),
+            Vec::new(),
+            vec![9.0],
+            vec![8.0],
+        );
+        let csv = build_export_csv(&s, &HashMap::new());
+        assert_eq!(csv, "obs_name,leiden\na,0\n");
+    }
 }
 
 fn resolve_static_dir(cli: &Path) -> anyhow::Result<PathBuf> {

@@ -9,7 +9,12 @@
 //! Verify sets **`SPACETRAVLR_FORCE_KEEP_GENES=AICDA,CD74`** on the training subprocess so target genes
 //! survive dispersion HVG (top-N by default) and reach Lasso/CNN — both betadata feathers are emitted
 //! even when CD74 falls below the HVG cut. The env var is honored by [`crate::rust_preprocess`].
+//!
+//! **`spaceship_config.toml`** is located via **`SPACETRAVLR_ROOT`**, the compile-time manifest when that file
+//! still exists, walking up from **cwd** and from the **executable directory**, then the install layout from
+//! [`resolve_spaceship_config_toml_path`] — so release binaries built on CI do not require the builder’s path.
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,7 +26,7 @@ use colored::Colorize;
 use polars::prelude::*;
 
 use crate::condition_split::CONDITION_RUNS_SUBDIR;
-use crate::config::expand_user_path;
+use crate::config::{expand_user_path, resolve_spaceship_config_toml_path};
 use crate::read_h5ad_var_names;
 use crate::scanpy_preprocess::copy_h5ad_for_verify_forcing_rust_full_prep;
 
@@ -70,10 +75,68 @@ fn read_file_utf8_lossy_capped(path: &Path, max_bytes: usize) -> anyhow::Result<
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn workspace_root() -> PathBuf {
-    std::env::var_os("SPACETRAVLR_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+/// Workspace directory (`current_dir` for the training subprocess) and absolute `--config` path.
+///
+/// Release binaries embed `CARGO_MANIFEST_DIR` from the **build** machine (often a CI path that does
+/// not exist on the user’s machine), so we never rely on that alone: walk up from cwd and from the
+/// executable location, then fall back to [`resolve_spaceship_config_toml_path`] (install `data/` layout).
+fn verify_workspace_and_config() -> Option<(PathBuf, PathBuf)> {
+    fn walk_up_for_repo_spaceship(mut dir: PathBuf) -> Option<(PathBuf, PathBuf)> {
+        for _ in 0..24 {
+            let cfg = dir.join("spaceship_config.toml");
+            if cfg.is_file() {
+                return Some((dir, cfg));
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    if let Ok(raw) = std::env::var("SPACETRAVLR_ROOT") {
+        let root = PathBuf::from(expand_user_path(raw.trim()));
+        let cfg = root.join("spaceship_config.toml");
+        if cfg.is_file() {
+            return Some((root, cfg));
+        }
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let man_cfg = manifest.join("spaceship_config.toml");
+    if man_cfg.is_file() {
+        return Some((manifest, man_cfg));
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(pair) = walk_up_for_repo_spaceship(cwd) {
+            return Some(pair);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if let Some(pair) = walk_up_for_repo_spaceship(parent.to_path_buf()) {
+                return Some(pair);
+            }
+        }
+    }
+
+    let mut cfg = resolve_spaceship_config_toml_path()?;
+    if cfg.is_relative() {
+        cfg = std::env::current_dir().ok()?.join(cfg);
+    }
+    let cfg = std::fs::canonicalize(&cfg).unwrap_or(cfg);
+    if !cfg.is_file() {
+        return None;
+    }
+
+    let parent = cfg.parent()?;
+    if parent.file_name() == Some(OsStr::new("data")) {
+        let workspace = parent.parent()?.to_path_buf();
+        return Some((workspace, cfg));
+    }
+    Some((parent.to_path_buf(), cfg))
 }
 
 fn wgpu_probe_section() -> String {
@@ -510,7 +573,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     println!(
         "{}",
         format!(
-            "Tip: SPACETRAVLR_VERIFY_H5AD=…  ·  SPACETRAVLR_ROOT for spaceship_config.toml  ·  SPACETRAVLR_VERIFY_ALLOW_CPU=1 on CPU-only  ·  SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips prep-layer strip + prep log checks  ·  log → {}",
+            "Tip: SPACETRAVLR_VERIFY_H5AD=…  ·  SPACETRAVLR_ROOT or run from repo / beside data/spaceship_config.toml  ·  SPACETRAVLR_VERIFY_ALLOW_CPU=1 on CPU-only  ·  SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips prep-layer strip + prep log checks  ·  log → {}",
             log_path.display()
         )
         .dimmed()
@@ -526,44 +589,50 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     log.writeln_str("")?;
     log.flush()?;
 
-    let workspace = workspace_root();
-    let config_path = workspace.join("spaceship_config.toml");
     let mut all_ok = true;
+
+    let resolved = verify_workspace_and_config();
+    let (workspace, config_path) = match resolved {
+        Some(pair) => pair,
+        None => {
+            let hint = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spaceship_config.toml");
+            log.writeln_str(&rule(w))?;
+            log.writeln_str(" Checklist")?;
+            log.writeln_str(&rule(w))?;
+            emit_check(
+                &mut log,
+                &mut all_ok,
+                false,
+                &format!(
+                    "spaceship_config.toml (set SPACETRAVLR_ROOT, cd into SpaceTravLR_rust, or install data/spaceship_config.toml next to the binary; compile-time path {} is often wrong on release builds)",
+                    hint.display()
+                ),
+            )?;
+            log.writeln_str("")?;
+            log.writeln_str(&hr(w))?;
+            log.writeln_str(" RESULT: FAIL (missing config)")?;
+            log.writeln_str(&hr(w))?;
+            log.flush()?;
+            check_line_stdout(
+                false,
+                &format!(
+                    "spaceship_config.toml (see log; compile-time fallback was {})",
+                    hint.display()
+                ),
+            );
+            println!(
+                "{}",
+                format!("Verify log written to: {}", log_path.display()).green().bold()
+            );
+            bail!(
+                "missing spaceship_config.toml — set SPACETRAVLR_ROOT to your SpaceTravLR_rust repo, cd into that repo, or install data/spaceship_config.toml next to this binary (same layout as install.sh). This binary was built with CARGO_MANIFEST_DIR={} (only valid on the builder machine).",
+                env!("CARGO_MANIFEST_DIR")
+            );
+        }
+    };
 
     let work_path = std::env::temp_dir().join(format!("spacetravlr_verify_{stamp}"));
     std::fs::create_dir_all(&work_path).with_context(|| format!("mkdir {}", work_path.display()))?;
-
-    if !config_path.is_file() {
-        log.writeln_str(&rule(w))?;
-        log.writeln_str(" Checklist")?;
-        log.writeln_str(&rule(w))?;
-        emit_check(
-            &mut log,
-            &mut all_ok,
-            false,
-            &format!(
-                "spaceship_config.toml at {} (set SPACETRAVLR_ROOT to repo root)",
-                config_path.display()
-            ),
-        )?;
-        log.writeln_str("")?;
-        log.writeln_str(&hr(w))?;
-        log.writeln_str(" RESULT: FAIL (missing config)")?;
-        log.writeln_str(&hr(w))?;
-        log.flush()?;
-        check_line_stdout(false, &format!(
-            "spaceship_config.toml at {} (set SPACETRAVLR_ROOT to repo root)",
-            config_path.display()
-        ));
-        println!(
-            "{}",
-            format!("Verify log written to: {}", log_path.display()).green().bold()
-        );
-        bail!(
-            "missing spaceship_config.toml at {} — set SPACETRAVLR_ROOT to the SpaceTravLR_rust repo root",
-            config_path.display()
-        );
-    }
 
     let skip_prep_strip = env_flag("SPACETRAVLR_VERIFY_SKIP_PREP_STRIP");
     let allow_cpu = env_flag("SPACETRAVLR_VERIFY_ALLOW_CPU");
