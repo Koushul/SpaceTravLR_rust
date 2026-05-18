@@ -38,7 +38,6 @@ theme:
   features:
     - navigation.instant
     - navigation.tracking
-    - navigation.expand
     - search.suggest
     - content.code.copy
 
@@ -70,4 +69,42 @@ extra:
 
 nav:
   - Installation: index.md
+
   - Usage: usage.md
+
+  - Parameters: params.md
+
+  - Output: output.md
+
+  - Tutorials:
+      - Introduction: tutorial.md
+
+  - Examples:
+    - Atera:
+      - Cervical Cancer (Human): examples/atera-cervical-cancer-human.md
+      - Breast Cancer (Human): examples/atera-breast-cancer-human.md
+    - Xenium:
+      - Skin (Mouse): examples/xenium-skin-mouse.md
+      - Small Intestine (Mouse): examples/xenium-small-intestine-mouse.md
+    - VisiumHD:
+      - Lymph Node (Mouse): examples/visiumhd-lymph-node-mouse.md
+      - Small Intestine (Mouse): examples/visiumhd-small-intestine-mouse.md
+      - Kidney (Mouse): examples/visiumhd-kidney-mouse.md
+    - XYZeqv2:
+      - Kidney (Mouse): examples/xyzeqv2-kidney-mouse.md
+      - Liver (Mouse): examples/xyzeqv2-liver-mouse.md
+      - MC38 Tumor (Mouse): examples/xyzeqv2-mc38-tumor-mouse.md
+    - SlideTags:
+      - Tonsil (Human): examples/slidetags-tonsil-human.md
+      - Melanoma (Human): examples/slidetags-melanoma-human.md
+      - Kidney (Mouse): examples/slidetags-kidney-mouse.md
+    - Stereoseq:
+      - Liver (Mouse): examples/stereoseq-liver-mouse.md
+      - Kidney (Mouse): examples/stereoseq-kidney-mouse.md
+      - Hippocampus (Mouse): examples/stereoseq-hippocampus-mouse.md
+    - SlideSeqv2:
+      - Lymph Node (Mouse): examples/slideseqv2-lymph-node-mouse.md
+      - Hippocampus (Mouse): examples/slideseqv2-hippocampus-mouse.md
+      - Embryo (Mouse): examples/slideseqv2-embryo-mouse.md
+    - Merfish:
+      - Liver (Mouse): examples/merfish-liver-mouse.md
