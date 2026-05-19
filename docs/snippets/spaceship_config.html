@@ -1,0 +1,145 @@
+<div class="st-config" role="region" aria-label="spaceship_config.toml">
+  <header class="st-config-header">
+    <p class="st-config-title">SpaceTravLR — Spaceship Config</p>
+    <p class="st-config-sub">All training hyperparameters in one place. CLI flags (<code>--epochs</code>, <code>--parallel</code>, …) override values here.</p>
+  </header>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[data]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr class="st-config-opt"><td><code>adata_path</code></td><td class="st-config-comment">optional path to .h5ad</td></tr>
+        <tr><td><code>layer</code></td><td><code>imputed_count</code></td></tr>
+        <tr><td><code>cluster_annot</code></td><td><code>cell_type</code></td></tr>
+        <tr class="st-config-opt"><td><code>condition</code></td><td class="st-config-comment">optional; split training by obs column (e.g. batch)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[spatial]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>radius</code></td><td><code>300</code></td></tr>
+        <tr><td><code>spatial_dim</code></td><td><code>64</code></td></tr>
+        <tr><td><code>contact_distance</code></td><td><code>30</code></td></tr>
+        <tr><td><code>weighted_ligand_scale_factor</code></td><td><code>1.0</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[grn]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr class="st-config-opt"><td><code>network_data_dir</code></td><td class="st-config-comment">optional; overrides SPACETRAVLR_DATA_DIR</td></tr>
+        <tr class="st-config-opt"><td><code>tf_priors_feather</code></td><td class="st-config-comment">optional prior links feather</td></tr>
+        <tr><td><code>tf_ligand_cutoff</code></td><td><code>0.1</code></td></tr>
+        <tr><td><code>celloracle_p_max</code></td><td><code>0.05</code></td></tr>
+        <tr><td><code>max_lr</code></td><td><code>200</code></td></tr>
+        <tr><td><code>use_tf_modulators</code></td><td><code>true</code></td></tr>
+        <tr><td><code>use_lr_modulators</code></td><td><code>true</code></td></tr>
+        <tr><td><code>use_tfl_modulators</code></td><td><code>true</code></td></tr>
+        <tr class="st-config-opt"><td><code>train_modulators</code></td><td class="st-config-comment">e.g. <code>"tf,lr"</code> — shorthand for ablations</td></tr>
+        <tr class="st-config-opt"><td><code>extra_modulators</code> / <code>extra_lr</code></td><td class="st-config-comment">optional lists or files</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[cnn]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>adam_beta_1</code></td><td><code>0.9</code></td></tr>
+        <tr><td><code>adam_beta_2</code></td><td><code>0.999</code></td></tr>
+        <tr><td><code>adam_epsilon</code></td><td><code>1e-5</code></td></tr>
+        <tr class="st-config-opt"><td><code>weight_decay</code></td><td class="st-config-comment">optional L2</td></tr>
+        <tr class="st-config-opt"><td><code>grad_clip_norm</code></td><td class="st-config-comment">default in code: 3.0</td></tr>
+        <tr><td><code>spatial_feature_radius</code></td><td><code>300.0</code></td></tr>
+        <tr><td><code>output_activation</code></td><td><code>sigmoidx2</code></td></tr>
+        <tr><td><code>cnn_minibatch_size</code></td><td><code>256</code></td></tr>
+        <tr><td><code>cnn_inference_batch_size</code></td><td><code>512</code></td></tr>
+        <tr class="st-config-opt"><td><code>cnn_max_batches_per_epoch</code></td><td class="st-config-comment">optional cap on optimizer steps / epoch</td></tr>
+        <tr><td><code>cnn_max_cells_per_epoch</code></td><td><code>1000</code></td></tr>
+        <tr class="st-config-opt"><td><code>min_cells_for_cnn</code></td><td class="st-config-comment">default in code: 0 (off)</td></tr>
+        <tr class="st-config-opt"><td><code>mean_beta_lasso_prior_weight</code></td><td class="st-config-comment">default in code: 0.005</td></tr>
+        <tr class="st-config-opt"><td><code>lr_schedule</code></td><td class="st-config-comment">constant | cosine</td></tr>
+        <tr class="st-config-opt"><td><code>cnn_early_stop_*</code></td><td class="st-config-comment">optional early stopping</td></tr>
+        <tr><td><code>lasso_pred_align_weight</code></td><td><code>0.05</code></td></tr>
+        <tr><td><code>lasso_pred_align_linear_decay</code></td><td><code>true</code></td></tr>
+        <tr><td><code>drop_cnn_if_insample_worse_than_lasso</code></td><td><code>true</code></td></tr>
+        <tr><td><code>cnn_vs_lasso_arbitration_margin</code></td><td><code>0.2</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[lasso]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>l1_reg</code></td><td><code>1e-4</code></td></tr>
+        <tr><td><code>group_reg</code></td><td><code>1e-5</code></td></tr>
+        <tr><td><code>n_iter</code></td><td><code>500</code></td></tr>
+        <tr><td><code>tol</code></td><td><code>1e-4</code></td></tr>
+        <tr><td><code>scale_modulators</code></td><td><code>true</code></td></tr>
+        <tr><td><code>unscale_betas_on_export</code></td><td><code>false</code></td></tr>
+        <tr><td><code>parallel_lasso_clusters</code></td><td><code>false</code></td></tr>
+        <tr><td><code>gram_override</code></td><td><code>true</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[training]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>mode</code></td><td><code>full</code></td></tr>
+        <tr><td><code>epochs</code></td><td><code>100</code></td></tr>
+        <tr><td><code>learning_rate</code></td><td><code>4e-4</code></td></tr>
+        <tr><td><code>score_threshold</code></td><td><code>0.1</code></td></tr>
+        <tr class="st-config-opt"><td><code>genes</code> / <code>max_genes</code></td><td class="st-config-comment">optional subset</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[execution]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr class="st-config-opt"><td><code>random_seed</code></td><td class="st-config-comment">default in code: 42</td></tr>
+        <tr><td><code>n_parallel</code></td><td><code>9</code></td></tr>
+        <tr class="st-config-opt"><td><code>output_dir</code></td><td class="st-config-comment">empty → dated folder next to .h5ad</td></tr>
+        <tr class="st-config-opt"><td><code>write_minimal_repro_h5ad</code></td><td class="st-config-comment">default false</td></tr>
+        <tr><td><code>stale_lock_secs</code></td><td><code>3600</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[perturbation]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>beta_scale_factor</code></td><td><code>1.0</code></td></tr>
+        <tr class="st-config-opt"><td><code>beta_cap</code></td><td class="st-config-comment">optional clamp</td></tr>
+        <tr><td><code>n_propagation</code></td><td><code>4</code></td></tr>
+        <tr class="st-config-opt"><td><code>ligand_grid_factor</code></td><td class="st-config-comment">optional fast approximate ligands</td></tr>
+        <tr class="st-config-opt"><td><code>cells_csv</code></td><td class="st-config-comment">default perturb cell scope</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[model_export]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>save_cnn_weights</code></td><td><code>false</code></td></tr>
+        <tr><td><code>compressed_npz</code></td><td><code>true</code></td></tr>
+        <tr><td><code>output_subdir</code></td><td><code>CNN_weights</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer class="st-config-footer">
+  <p>Source: <a href="https://github.com/Koushul/SpaceTravLR_rust/blob/main/spaceship_config.toml"><code>spaceship_config.toml</code></a> at the repo root. After a run, the effective config is written to <code>spacetravlr_run_repro.toml</code> in the output directory.</p>
+  </footer>
+</div>

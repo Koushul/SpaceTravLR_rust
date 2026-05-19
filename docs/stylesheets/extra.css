@@ -219,6 +219,99 @@
   color: #26233a !important;
 }
 
+/* Spaceship config panel (params.md) */
+.md-typeset .st-config {
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem 0.85rem;
+  margin: 1.25em 0 1.75em;
+  border: 1px solid transparent;
+  font-size: 0.92rem;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .st-config {
+  background: #1e1e2e;
+  border-color: color-mix(in srgb, #cba6f7 18%, transparent);
+}
+
+[data-md-color-scheme="default"] .md-typeset .st-config {
+  background: #faf4ed;
+  border-color: color-mix(in srgb, #797593 20%, transparent);
+}
+
+.md-typeset .st-config-header {
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.md-typeset .st-config-title {
+  margin: 0 0 0.35em;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+}
+
+.md-typeset .st-config-sub {
+  margin: 0;
+  opacity: 0.82;
+  line-height: 1.45;
+}
+
+.md-typeset .st-config-section {
+  margin: 0.85rem 0;
+}
+
+.md-typeset .st-config-sec-h {
+  margin: 0 0 0.4em;
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.md-typeset .st-config-kv {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.md-typeset .st-config-kv td {
+  padding: 0.22rem 0.5rem 0.22rem 0;
+  vertical-align: top;
+  border: none;
+}
+
+.md-typeset .st-config-kv td:first-child {
+  width: 42%;
+  white-space: nowrap;
+  font-family: var(--md-code-font, ui-monospace, monospace);
+}
+
+.md-typeset .st-config-kv td code {
+  font-size: 0.92em;
+}
+
+.md-typeset .st-config-kv tr.st-config-opt td {
+  opacity: 0.78;
+}
+
+.md-typeset .st-config-comment {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.md-typeset .st-config-footer {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  font-size: 0.82rem;
+  opacity: 0.88;
+}
+
+.md-typeset .st-config-footer p {
+  margin: 0;
+}
+
 /* Main title: Helvetica stack (NASA technical / identity typography) */
 .md-typeset h1.st-brand {
   font-family:

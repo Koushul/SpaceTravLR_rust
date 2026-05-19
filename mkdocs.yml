@@ -43,9 +43,14 @@ theme:
 
 plugins:
   - search
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
 
 markdown_extensions:
   - attr_list
+  - pymdownx.arithmatex:
+      generic: true
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
@@ -61,6 +66,10 @@ extra_css:
   - stylesheets/extra.css
   - stylesheets/rose-pine.css
 
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
 extra:
   generator: false
   social:
@@ -68,16 +77,25 @@ extra:
       link: https://github.com/Koushul/SpaceTravLR_rust
 
 nav:
-  - Installation: index.md
+  - Overview: index.md
+
+  - Installation: install.md
 
   - Usage: usage.md
 
   - Parameters: params.md
 
+  - How it works: math.md
+
   - Output: output.md
 
+
+
   - Tutorials:
-      - Introduction: tutorial.md
+      # - Find Functional Microniches: tutorials/find-functional-microniches.ipynb
+      - Perturb Genes Spatially: tutorials/perturb-genes-spatially.ipynb
+      - Screen Ligand-Receptors: tutorials/screen-ligand-receptors.ipynb
+
 
   - Examples:
     - Atera:
