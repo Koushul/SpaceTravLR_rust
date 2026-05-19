@@ -1,5 +1,7 @@
 site_name: SpaceTravLR
 site_description: Characterizing Functional Microniches
+# Canonical URL on Read the Docs (READTHEDOCS_CANONICAL_URL); local fallback for mkdocs serve / CI.
+site_url: !ENV [READTHEDOCS_CANONICAL_URL, 'http://127.0.0.1:8000/']
 repo_url: https://github.com/Koushul/SpaceTravLR_rust
 repo_name: SpaceTravLR_rust
 edit_uri: edit/main/docs/

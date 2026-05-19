@@ -53,4 +53,22 @@ spacetravlr --verify
 
 This will download a tiny .h5ad from github and train two genes in parallel to confirm that SpaceTravLR is able to see and use any CPUs and GPUs.
 
+## Documentation site
+
+Public HTML docs are built on [Read the Docs](https://readthedocs.org/) from [`mkdocs.yml`](../mkdocs.yml) and [`.readthedocs.yaml`](../.readthedocs.yaml) (no `koushul` in the URL — e.g. `https://spacetravlr.readthedocs.io/`).
+
+**One-time setup (maintainers):**
+
+1. Sign in at [readthedocs.org](https://readthedocs.org/) and **Import a Project** → GitHub → `Koushul/SpaceTravLR_rust`.
+2. Set the project **slug** to `spacetravlr` (Admin → Settings → name/slug) so the URL matches the links above.
+3. Enable **Build pull requests** if you want preview builds on PRs.
+
+Local build:
+
+```bash
+python3 -m venv .venv-docs && source .venv-docs/bin/activate
+pip install -r docs/requirements.txt
+mkdocs serve
+```
+
 

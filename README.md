@@ -11,7 +11,9 @@ Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR) 
 curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 ```
 
-For supported platforms, PATH setup, self-updates, and troubleshooting, see **[install.md](install.md)** (recommended over piping `curl` directly to `sh`: use `-o` then `sh` as shown there). **HTML docs** (Material for MkDocs; install page pulls in the same `install.md`): `pip install -r docs/requirements.txt && mkdocs serve` from the repo root.
+For supported platforms, PATH setup, self-updates, and troubleshooting, see **[install.md](install.md)** (recommended over piping `curl` directly to `sh`: use `-o` then `sh` as shown there).
+
+**Documentation:** [spacetravlr.readthedocs.io](https://spacetravlr.readthedocs.io/) via [Read the Docs](https://docs.readthedocs.com/platform/stable/intro/mkdocs.html) ([`.readthedocs.yaml`](.readthedocs.yaml)). Local preview: `pip install -r docs/requirements.txt && mkdocs serve`.
 
 ![SpaceTravLR training dashboard UI](data/demo.gif)
 
