@@ -13,7 +13,7 @@ curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 
 For supported platforms, PATH setup, self-updates, and troubleshooting, see **[install.md](install.md)** (recommended over piping `curl` directly to `sh`: use `-o` then `sh` as shown there).
 
-**Documentation:** [spacetravlr.readthedocs.io](https://spacetravlr.readthedocs.io/) via [Read the Docs](https://docs.readthedocs.com/platform/stable/intro/mkdocs.html) ([`.readthedocs.yaml`](.readthedocs.yaml)). Local preview: `pip install -r docs/requirements.txt && mkdocs serve`.
+**Documentation:** [koushul.github.io/SpaceTravLR_rust](https://koushul.github.io/SpaceTravLR_rust/) (GitHub Pages, live). Read the Docs target: [spacetravlr-rust.readthedocs.io](https://spacetravlr-rust.readthedocs.io/en/latest/) — requires a [one-time import](docs/install.md#documentation-site) on readthedocs.org ([`.readthedocs.yaml`](.readthedocs.yaml)). Local: `pip install -r docs/requirements.txt && mkdocs serve`.
 
 ![SpaceTravLR training dashboard UI](data/demo.gif)
 

@@ -8,4 +8,4 @@ The 10x Genomics in situ multimodal cell segmentation solution was used to gener
 
 [Source](https://www.10xgenomics.com/datasets/atera-wta-ffpe-human-cervical-cancer)
 
---8<-- "docs/placeholder.md"
+![Atera](../assets/atera.png)

@@ -91,7 +91,10 @@ nav:
 
   - Output: output.md
 
-
+  - Validation:
+    - CCR4 Knockout: ccr4.md
+    - CCR5 Knockout: ccr5.md
+    - Spatial Perturbseq: validation.md
 
   - Tutorials:
       # - Find Functional Microniches: tutorials/find-functional-microniches.ipynb

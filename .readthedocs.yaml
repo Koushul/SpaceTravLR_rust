@@ -1,4 +1,5 @@
 # Read the Docs — https://docs.readthedocs.com/platform/stable/intro/mkdocs.html
+# Must live at the repository root on branch `main` (this repo has no `master` branch).
 version: 2
 
 build:

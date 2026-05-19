@@ -55,13 +55,33 @@ This will download a tiny .h5ad from github and train two genes in parallel to c
 
 ## Documentation site
 
-Public HTML docs are built on [Read the Docs](https://readthedocs.org/) from [`mkdocs.yml`](../mkdocs.yml) and [`.readthedocs.yaml`](../.readthedocs.yaml) (no `koushul` in the URL — e.g. `https://spacetravlr.readthedocs.io/`).
+| Host | URL | Status |
+|------|-----|--------|
+| **GitHub Pages** | https://koushul.github.io/SpaceTravLR_rust/ | Live (deployed from `main` via [`.github/workflows/docs.yml`](../.github/workflows/docs.yml)) |
+| **Read the Docs** | https://spacetravlr-rust.readthedocs.io/en/latest/ | **404 until you import the project** (see below). Do **not** use `spacetravlr.readthedocs.io` — that slug is another project (“SpaceDocs”). |
 
-**One-time setup (maintainers):**
+Pushing [`.readthedocs.yaml`](../.readthedocs.yaml) to GitHub does **not** create the RTD site by itself. You must import the repo once on [readthedocs.org](https://readthedocs.org/).
 
-1. Sign in at [readthedocs.org](https://readthedocs.org/) and **Import a Project** → GitHub → `Koushul/SpaceTravLR_rust`.
-2. Set the project **slug** to `spacetravlr` (Admin → Settings → name/slug) so the URL matches the links above.
-3. Enable **Build pull requests** if you want preview builds on PRs.
+**One-time Read the Docs setup (maintainers):**
+
+1. Sign in at [readthedocs.org](https://readthedocs.org/) → **Import a Project** → **Import manually** or GitHub → select **`Koushul/SpaceTravLR_rust`**.
+2. Set **Project slug** to **`spacetravlr-rust`** (Admin → Settings). The URL must be exactly `https://spacetravlr-rust.readthedocs.io/`.
+3. **Repository URL** must be `https://github.com/Koushul/SpaceTravLR_rust` (no `/tree/main` suffix).
+4. **Versions → `latest` (or default)** → set **Git ref** / branch to **`main`**. This repo has **no `master` branch**; if RTD builds `master`, you get *“Config file not found at default path”* even though [`.readthedocs.yaml`](../.readthedocs.yaml) exists on `main`.
+5. Admin → **Settings → Advanced settings** → enable **“Use .readthedocs.yaml configuration file”** (Config file v2). Leave **Configuration file** empty or set exactly `.readthedocs.yaml` (repo root, not `docs/`).
+6. Click **Build** for the `main` / `latest` version. A green build means https://spacetravlr-rust.readthedocs.io/en/latest/ will work.
+7. Optional: Admin → **Integrations** → enable GitHub webhooks so every push to `main` rebuilds.
+
+**“Config file not found at default path”** — checklist:
+
+| Check | Expected |
+|-------|----------|
+| File on GitHub `main` | https://github.com/Koushul/SpaceTravLR_rust/blob/main/.readthedocs.yaml |
+| RTD version branch | **`main`**, not `master` |
+| Config file path in RTD UI | empty (default) or `.readthedocs.yaml` |
+| Repository | `Koushul/SpaceTravLR_rust` |
+
+Other build failures: open the RTD log (e.g. missing deps → this repo uses `pip install -r docs/requirements.txt` in `.readthedocs.yaml`).
 
 Local build:
 
