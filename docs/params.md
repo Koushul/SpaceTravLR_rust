@@ -10,21 +10,21 @@ See also [How it works](math.md) for the math behind spatial and GRN terms, and 
 
 Values below match the checked-in [`spaceship_config.toml`](https://github.com/Koushul/SpaceTravLR_rust/blob/main/spaceship_config.toml).
 
---8<-- "docs/snippets/spaceship_config.html"
+<!-- --8<-- "docs/snippets/spaceship_config.html"
 
 ??? tip "Raw TOML"
     Copy the template from the repo or pass `--config path/to/override.toml` to merge only the sections you need.
 
----
+--- -->
 
 ## `[data]` — AnnData inputs
 
 | Parameter | Template | What it does | Increase / enable | Decrease / disable |
 |-----------|----------|--------------|-------------------|---------------------|
-| `adata_path` | (commented) | Path to the spatial `.h5ad`. Usually set via CLI `--h5ad` instead. | — | — |
+| `adata_path` |  | Path to the spatial `.h5ad`. Usually set via CLI `--h5ad` instead. | — | — |
 | `layer` | `imputed_count` | Expression matrix used for means, Lasso targets, and ligand ranking. | Use denoised / imputed layers when raw counts are sparse. | Use `X` or normalized layers only if you intentionally want raw-scale fitting. |
 | `cluster_annot` | `cell_type` | `obs` column for cluster labels. **Seed mode**: one β row per label. **Full mode**: still used for cluster-stratified CNN and Lasso. | Finer labels → more rows per gene, more spatial heterogeneity captured per type. | Coarser labels → stabler Lasso, fewer CNN runs, less resolution. |
-| `condition` | (commented) | Split training into `output_dir/conditions/<value>/` per unique `obs` value. | Use for batches, patients, or slides you must not pool. | Omit when a single joint model is OK. |
+| `condition` |  | Split training into `output_dir/conditions/<value>/` per unique `obs` value. | Use for batches, patients, or slides you must not pool. | Omit when a single joint model is OK. |
 
 ---
 
@@ -47,17 +47,17 @@ Each target gene is predicted from modulator groups: **TFs**, **ligand–recepto
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
-| `network_data_dir` | (commented) | Folder with `mouse_network.parquet` / `human_network.parquet`. Overrides `SPACETRAVLR_DATA_DIR`. | Point at a custom curated network bundle. | Rely on install / env search path. |
-| `tf_priors_feather` | (commented) | Precomputed TF→target links (`source`, `target`, `cell_type`). Skips auto CellOracle inference when set. | Reuse stable priors across runs. | Let training infer `celloracle_tf_priors.feather` once per output dir. |
+| `network_data_dir` |  | Folder with `mouse_network.parquet` / `human_network.parquet`. Overrides `SPACETRAVLR_DATA_DIR`. | Point at a custom curated network bundle. | Rely on install / env search path. |
+| `tf_priors_feather` |  | Precomputed TF→target links (`source`, `target`, `cell_type`). Skips auto CellOracle inference when set. | Reuse stable priors across runs. | Let training infer `celloracle_tf_priors.feather` once per output dir. |
 | `tf_ligand_cutoff` | `0.1` | Minimum NicheNet-style score for a TF to regulate via ligand mediation. | More TF–ligand links; richer but noisier TFL channel. | Stricter TFL edges; sparser, more conservative graph. |
 | `celloracle_p_max` | `0.05` | Max p-value for auto-inferred CellOracle ridge edges in the TF prior feather. | (Not usually increased.) | Lower (e.g. `0.01`) → fewer inferred TF edges. |
 | `max_lr` | `200` | Keep only L–R pairs whose **ligand** is in the top *N* by mean expression on `[data].layer`. | More receptor channels; slower, more collinearity. | Fewer, high-abundance ligand axes; faster, sparser LR block. |
 | `use_tf_modulators` | `true` | Include TF targets from priors. | — | Set `false` or use `train_modulators = "lr"` for LR-only ablation. |
 | `use_lr_modulators` | `true` | Include `LIG$REC` columns. | — | Disable for intracellular-only models. |
 | `use_tfl_modulators` | `true` | Include `TF#LIG` columns. | — | Disable to drop ligand-mediated TF terms. |
-| `train_modulators` | (commented) | Shorthand: `"tf,lr,tfl"` replaces the three `use_*` flags. | Combine only the families you need for an ablation. | Must leave at least one family enabled. |
-| `extra_modulators` / `extra_modulators_file` | (commented) | Add raw-expression predictors (fourth Lasso group). | Force inclusion of known covariates (e.g. ambient RNA proxies). | — |
-| `extra_lr` / `extra_lr_file` | (commented) | Add `LIG$REC` pairs beyond the database screen. | Hypothesis-driven pairs (e.g. `CXCL13$CXCR5`). | — |
+| `train_modulators` |  | Shorthand: `"tf,lr,tfl"` replaces the three `use_*` flags. | Combine only the families you need for an ablation. | Must leave at least one family enabled. |
+| `extra_modulators` / `extra_modulators_file` |  | Add raw-expression predictors (fourth Lasso group). | Force inclusion of known covariates (e.g. ambient RNA proxies). | — |
+| `extra_lr` / `extra_lr_file` |  | Add `LIG$REC` pairs beyond the database screen. | Hypothesis-driven pairs (e.g. `CXCL13$CXCR5`). | — |
 
 ---
 
@@ -86,8 +86,8 @@ Lasso runs **per target gene × cluster** (or per cell in export semantics) befo
 | `epochs` | `100` | CNN training epochs per cluster (full mode). | More time to fit spatial residuals; watch overfit. | Quicker runs; may underfit complex niches. |
 | `learning_rate` | `4e-4` | Adam step size for CNN. | Faster convergence if loss is smooth; may diverge. | Safer optimization; slower training. |
 | `score_threshold` | `0.1` | Minimum in-sample R² for a cluster to **keep** Lasso (and CNN in full mode). Failed clusters export as zeros / orphans. | More clusters kept (noisier fits included). | Stricter gate; fewer but higher-confidence rows. |
-| `genes` | (commented) | Subset of `var` to train (persisted in repro TOML for join). | Focused screens. | — |
-| `max_genes` | (commented) | Cap count after `genes` filter (order preserved). | — | Limit cost on pilot runs. |
+| `genes` |  | Subset of `var` to train (persisted in repro TOML for join). | Focused screens. | — |
+| `max_genes` |  | Cap count after `genes` filter (order preserved). | — | Limit cost on pilot runs. |
 
 ---
 
@@ -99,17 +99,17 @@ Only used when `mode = full`. The CNN predicts a **spatial map of multipliers** 
 |-----------|----------|--------------|---------|-----------|
 | `adam_beta_1` / `adam_beta_2` | `0.9` / `0.999` | Adam momentum decay rates. | Rarely changed; lower `beta_2` if loss is non-stationary. | Standard deep-learning defaults. |
 | `adam_epsilon` | `1e-5` | Adam numerical stabilizer. | — | — |
-| `weight_decay` | (commented) | L2 on CNN weights. | Mild regularization against overfit. | Omit for maximum flexibility. |
-| `grad_clip_norm` | (commented) | Clip gradient L2 norm each step; set `null` to disable. | Tighter clip if loss spikes. | Looser or off if training is stable. |
+| `weight_decay` |  | L2 on CNN weights. | Mild regularization against overfit. | Omit for maximum flexibility. |
+| `grad_clip_norm` |  | Clip gradient L2 norm each step; set `null` to disable. | Tighter clip if loss spikes. | Looser or off if training is stable. |
 | `spatial_feature_radius` | `300` | Gaussian radius for **CNN input** spatial feature maps (can differ from `[spatial].radius`). | Match biological niche size in coordinate units. | Smaller local context in CNN patches. |
 | `output_activation` | `sigmoidx2` | Maps CNN logits before anchor scaling: `identity`, `sigmoid`, `tanh`, `sigmoidx2` (0–2). | `sigmoidx2` bounds effective multipliers. | `identity` if you need unconstrained scale (riskier). |
 | `cnn_minibatch_size` | `256` | Cells per optimizer step within a cluster; `0` = full batch each epoch. | Smaller batches → noisier gradients, more steps. | Larger batches → smoother, fewer updates. |
 | `cnn_inference_batch_size` | `512` | Chunk size for **export** and post-train R² only. | Lower if GPU/RAM limited during export. | Larger for faster inference passes. |
-| `cnn_max_batches_per_epoch` | (commented) | Cap optimizer steps per epoch. | Limit wall time on huge clusters. | Omit for full pass each epoch. |
+| `cnn_max_batches_per_epoch` |  | Cap optimizer steps per epoch. | Limit wall time on huge clusters. | Omit for full pass each epoch. |
 | `cnn_max_cells_per_epoch` | `1000` | Random cell subsample per epoch when cluster is larger. | Faster epochs; still explores space over many epochs. | Set `null` for full-cluster sweeps each epoch (slower). |
-| `min_cells_for_cnn` | (commented) | Skip CNN when cluster size is below this (Lasso kept if it passed). | Require more cells per CNN fit. | Set `0` to always attempt CNN. |
-| `mean_beta_lasso_prior_weight` | (commented) | Pull batch-mean effective β toward Lasso anchors. | Stronger tie to cluster-average Lasso. | Weaker prior → more per-cell deviation. |
-| `lr_schedule` | (commented) | `constant` or `cosine` decay after warmup. | Cosine for long runs. | `constant` for short pilots. |
+| `min_cells_for_cnn` |  | Skip CNN when cluster size is below this (Lasso kept if it passed). | Require more cells per CNN fit. | Set `0` to always attempt CNN. |
+| `mean_beta_lasso_prior_weight` |  | Pull batch-mean effective β toward Lasso anchors. | Stronger tie to cluster-average Lasso. | Weaker prior → more per-cell deviation. |
+| `lr_schedule` |  | `constant` or `cosine` decay after warmup. | Cosine for long runs. | `constant` for short pilots. |
 | `lasso_pred_align_weight` | `0.05` | Extra loss: match CNN prediction to Lasso prediction. | Keeps CNN close to Lasso early; use small values. | `0` to let spatial terms dominate immediately. |
 | `lasso_pred_align_linear_decay` | `true` | Ramp alignment weight down over epochs. | Recommended when `lasso_pred_align_weight > 0`. | Fixed alignment pressure all epochs. |
 | `drop_cnn_if_insample_worse_than_lasso` | `true` | Revert to Lasso export when CNN in-sample R² loses to Lasso. | — | `false` to always keep CNN outputs. |
@@ -121,10 +121,10 @@ Only used when `mode = full`. The CNN predicts a **spatial map of multipliers** 
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
-| `random_seed` | (commented) | Base seed; mixed per target gene for Lasso and CNN shuffles. | Change to reproduce a different subsample. | Fixed seed for reproducibility. |
+| `random_seed` |  | Base seed; mixed per target gene for Lasso and CNN shuffles. | Change to reproduce a different subsample. | Fixed seed for reproducibility. |
 | `n_parallel` | `9` | Concurrent **genes** trained in parallel. | Faster wall clock if CPU/GPU allows. | `1` for debugging or limited RAM. |
-| `output_dir` | (commented) | Where `*_betadata.feather` and repro TOML are written. Empty → `{adata_stem}_{date}` in cwd. | Set explicit path for shared storage. | — |
-| `write_minimal_repro_h5ad` | (commented) | Write a slim `.h5ad` for offline replay (heavy I/O). | Enable for archival reproducibility. | Leave off on huge slides. |
+| `output_dir` |  | Where `*_betadata.feather` and repro TOML are written. Empty → `{adata_stem}_{date}` in cwd. | Set explicit path for shared storage. | — |
+| `write_minimal_repro_h5ad` |  | Write a slim `.h5ad` for offline replay (heavy I/O). | Enable for archival reproducibility. | Leave off on huge slides. |
 | `stale_lock_secs` | `3600` | Multi-host: delete gene `*.lock` older than this before claiming. | Safer crash recovery on NFS (`3600` = 1 h). | `0` = never auto-remove locks. |
 
 ---
@@ -136,10 +136,10 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
 | `beta_scale_factor` | `1.0` | Global multiplier on all β before propagation. | Stronger perturbation amplitudes. | Weaker systemic response. |
-| `beta_cap` | (commented) | Clamp β to `[-cap, cap]` after scaling. | Prevent extreme coefficients from dominating. | Omit for uncapped dynamics. |
+| `beta_cap` |  | Clamp β to `[-cap, cap]` after scaling. | Prevent extreme coefficients from dominating. | Omit for uncapped dynamics. |
 | `n_propagation` | `4` | Rounds of ligand / GRN signal propagation in `splash()`. | Deeper equilibration; more neighbor feedback. | Shallower, more local effects. |
-| `ligand_grid_factor` | (commented) | Grid spacing as fraction of `radius` for approximate received ligands. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |
-| `cells_csv` / `cells_csv_column` | (commented) | Default ROI for perturb export. | Restrict splash to a cell list. | — |
+| `ligand_grid_factor` |  | Grid spacing as fraction of `radius` for approximate received ligands. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |
+| `cells_csv` / `cells_csv_column` |  | Default ROI for perturb export. | Restrict splash to a cell list. | — |
 
 ---
 
@@ -152,43 +152,3 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 | `output_subdir` | `CNN_weights` | Subfolder under `output_dir`. | — | — |
 
 ---
-
-## CLI overrides (common)
-
-| CLI | Config section / key |
-|-----|----------------------|
-| `--h5ad` | sets `data.adata_path` |
-| `--config` | merges overlay TOML |
-| `--output-dir` | `execution.output_dir` |
-| `--parallel` | `execution.n_parallel` |
-| `--epochs` | `training.epochs` |
-| `--mode seed\|full` | `training.mode` |
-| `--genes`, `--max-genes` | `training.genes`, `training.max_genes` |
-| `--max-lr` | `grn.max_lr` / `max_ligands` |
-| `--join-output-dir` | reads repro TOML; only `--parallel` overrides |
-
-Full flag list: `spacetravlr --help`.
-
----
-
-## Suggested tuning workflows
-
-**Pilot on one slide**
-
-- `mode = seed`, lower `epochs`, set `genes` or `max_genes`, `n_parallel` modest.
-- Raise `score_threshold` slightly if too many orphan genes.
-
-**Production microniche maps**
-
-- `mode = full`, align `spatial_feature_radius` with `[spatial].radius` in the same units as coordinates.
-- Tune `cnn_max_cells_per_epoch` vs wall time; keep `drop_cnn_if_insample_worse_than_lasso = true`.
-
-**Perturbation-heavy studies**
-
-- After training, rely on repro TOML; adjust `n_propagation` and `beta_scale_factor` in `[perturbation]` or via the viewer.
-- Set `ligand_grid_factor` when splashing on 5k+ cells.
-
-**Ablations**
-
-- `train_modulators = "lr"` for communication-only models.
-- `use_tf_modulators = false` etc. for family-specific comparisons.

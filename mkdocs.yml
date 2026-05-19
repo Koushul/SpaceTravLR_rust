@@ -23,19 +23,18 @@ theme:
   icon:
     logo: material/rocket
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
+    # First palette = default on first visit (light), regardless of OS theme.
+    - scheme: default
       primary: pink
       accent: purple
       toggle:
-        icon: material/brightness-7
+        icon: material/brightness-4
         name: Dark (Rosé Pine)
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
+    - scheme: slate
       primary: purple
       accent: pink
       toggle:
-        icon: material/brightness-4
+        icon: material/brightness-7
         name: Light
   features:
     - navigation.instant

@@ -5,14 +5,12 @@ Spatially perturbing Transcription factors, Ligands & Receptors.
 ```bash
 curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 ```
-This will download the latest precompiled binaries and config files from github. Default install path: `\$HOME/.local/bin`
+This will download the latest precompiled binaries and config files from github.
 
 > SpaceTravLR works straight out of the box and requires **no virtual environment** or extra dependencies setup. And no CUDA. :)
 
 
 SpaceTravLR ships with two binaries: `spacetravlr` and `spacetravlr-perturb`. Prebuilt binaries are available for `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`.
-
-
 
 
 For updates:

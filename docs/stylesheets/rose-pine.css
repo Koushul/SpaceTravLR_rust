@@ -6,7 +6,7 @@
 
 /* ----- Light — Rosé Pine Love banner (Material “default”) ----- */
 [data-md-color-scheme="default"] {
-  --rp-love: #eb6f92;
+  --rp-love: #6F90EB;
   --rp-dawn-base: #faf4ed;
   --md-header-bg-color: var(--rp-love);
   --md-header-fg-color: var(--rp-dawn-base);
