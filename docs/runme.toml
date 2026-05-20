@@ -1,0 +1,164 @@
+# ╔════════════════════════════════════════════╗
+#           We're going on a trip 
+#        in our favorite rocket ship
+#       
+#            __  _
+#        .-.'  `; `-._  __  _
+#       (_,         .-:'  `; `-._
+#     ,'o"(        (_,           )
+#    (__,-'      ,'o"(            )>
+#       (       (__,-'            )
+#        `-'._.--._(             )
+#           |||  |||`-'._.--._.-'
+#                      |||  |||
+#
+# ╚════════════════════════════════════════════╝
+
+                       
+
+[data]
+# adata_path      = "/Unhinged/soul/slideseq_brain_processed.h5ad"
+# Expression layer to read from AnnData
+layer           = "imputed_count"
+# obs column holding integer cluster labels
+cluster_annot   = "cell_type"
+# Optional: split training by this condition
+# condition      = "batch"
+
+[execution]
+output_dir = "/tmp/spacetravlr"
+random_seed = 42
+n_parallel  = 9
+# delete gene *.lock files older than this many seconds
+stale_lock_secs = 3600
+
+[spatial]
+# Distance threshold for secreted signaling
+radius           = 300
+# Grid resolution for spatial convolution kernel
+spatial_dim      = 64
+# Distance threshold for contact-based signaling
+contact_distance = 30
+# Linear scale on Gaussian weights in received-ligand aggregation
+weighted_ligand_scale_factor = 1.0
+
+[grn]
+# Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
+# network_data_dir = "/path/to/your/data"
+# tf_priors_feather = "/prior_links.feather"
+# Minimum score for a TF to be included as a ligand-mediated regulator
+tf_ligand_cutoff = 0.1
+# Max p-value for CellOracle Bayesian ridge edges to enter the TF priors feather (default 0.05).
+celloracle_p_max = 0.05
+max_lr = 200
+use_tf_modulators = true
+use_lr_modulators = true
+use_tfl_modulators = true
+# Shorthand (overwrites the three flags when set): comma-separated tf, lr, tfl (alias ltf). Example LR-only ablation:
+# train_modulators = "tf,lr"
+# extra_modulators = ["GENE1", "GENE2"]
+# extra_modulators_file = "path/to/extra_genes.txt"
+# extra_lr = ["LIG1$REC1"]
+# extra_lr_file = "path/to/extra_lr.txt"
+
+[cnn]
+# Adam hyperparameters (CNN fine-tuning when seed_only = false)
+adam_beta_1 = 0.9
+adam_beta_2 = 0.999
+adam_epsilon = 1e-5
+# Optional L2 on CNN parameters (omit = off)
+# weight_decay = 1e-5
+# Clip gradient L2 norm each step (default in code: 3.0; set null to disable)
+# grad_clip_norm = 3.0
+# Radius passed to create_spatial_features for CNN inputs (coordinate units)
+spatial_feature_radius = 300.0
+# After final head linear, before lasso-anchor scaling: identity | sigmoid | tanh | sigmoidx2 (2·sigmoid, (0,2))
+output_activation = "sigmoidx2"
+# Per-optimizer-step batch size over cells within a cluster (0 = full batch per epoch)
+cnn_minibatch_size = 256
+# CNN forward chunk size for per-cell beta export and post-train in-sample R² only (not training)
+cnn_inference_batch_size = 512
+# Cap optimizer steps per epoch (omit or null = full pass over all cells each epoch).
+# Example: 32 with minibatch 512 processes at most ~16k cells per epoch (rest next epoch).
+# cnn_max_batches_per_epoch = 32
+# Smart subsampling cell limit: when a cluster has more cells than this, each epoch
+# trains on a uniform random subset of `cnn_max_cells_per_epoch` cells (translates to
+# ceil(cnn_max_cells_per_epoch / cnn_minibatch_size) optimizer steps). Smaller clusters
+# train on the full cluster. Per-epoch reshuffle gives uniform spatial coverage in
+# expectation across epochs. Combined with cnn_max_batches_per_epoch via min.
+# Default: 3000. Set null to disable (legacy full-sweep behavior).
+cnn_max_cells_per_epoch = 1000
+# Skip CNN when a cluster has fewer than this many cells (Lasso kept if it passed the score threshold). 0 = off.
+# min_cells_for_cnn = 32
+# Weak prior: MSE between batch-mean effective betas and Lasso anchors (default in code ~1e-3–1e-2 range; keeps mean near Lasso while allowing per-cell spatial variation)
+# mean_beta_lasso_prior_weight = 0.005
+# LR schedule: constant | cosine (cosine decays to learning_rate * cosine_lr_min_ratio after optional warmup)
+# lr_schedule = "cosine"
+# cosine_lr_min_ratio = 0.01
+# lr_warmup_epochs = 0
+# Early stop on train MSE if no improvement for cnn_early_stop_patience epochs (after cnn_early_stop_min_epochs)
+# cnn_early_stop_patience = 8
+# cnn_early_stop_min_epochs = 12
+# Optional Lasso prediction alignment: MSE(y_pred, y_lasso); use small weight; linear_decay ramps weight down over epochs
+lasso_pred_align_weight = 0.05
+lasso_pred_align_linear_decay = true
+# If CNN in-sample R² is worse than Lasso, drop CNN for that cluster (export uses Lasso); margin relaxes the comparison
+drop_cnn_if_insample_worse_than_lasso = true
+cnn_vs_lasso_arbitration_margin = 0.2
+
+[lasso]
+# Element-wise L1 penalty
+l1_reg    = 1e-4
+# Group-L2 penalty
+group_reg = 1e-5
+# Max FISTA iterations
+n_iter    = 500
+# Relative convergence tolerance
+tol       = 1e-4
+# Column-wise scaling of modulator features (divide by std, no mean subtraction).
+# Matches CellOracle StandardScaler(with_mean=false). Default true.
+scale_modulators = true
+# When scale_modulators is true, divide exported betas by column std (original expression units).
+# Set false to export scaled-space betas (CellOracle-style). Default true.
+unscale_betas_on_export = false
+# Parallel in-sample group Lasso across clusters per gene (Rayon; independent of [execution].n_parallel).
+# Default false (sequential). Set true for faster Lasso when many clusters per gene.
+parallel_lasso_clusters = false
+# Group Lasso backend: omit or null = auto (Gram path when n > p on augmented design).
+gram_override = true
+
+[training]
+# Default when omitted: seed. Use full to enable per-cell CNN refinement.
+mode            = "full"
+epochs          = 100
+# Learning rate for CNN Adam (see [cnn] for beta/epsilon/decay/clip)
+learning_rate   = 4e-4
+# Minimum mean Lasso R² per cluster to count as passing the Lasso gate (CNN uses the same threshold in full mode).
+score_threshold = 0.1
+# Optional target subset (CLI: --genes / --max-genes). Persisted in spacetravlr_run_repro.toml for --join-output-dir.
+# genes = ["GENE1", "GENE2"]
+# max_genes = 500
+
+
+
+
+
+[perturbation]
+# Multiplier applied to all betas in splash()
+beta_scale_factor = 1.0
+# Clamp betas to [-cap, cap] after scaling (comment out or omit for no cap)
+# beta_cap        = 10.0
+# Number of signal propagation rounds
+n_propagation     = 4
+# Approximate received ligands using a spatial grid for faster perturbation.
+# Value is grid_spacing / radius (smaller = more accurate, larger = faster).
+#   0.5 → ~3% error, ~12x faster at 5000+ cells
+#   0.3 → ~1% error, ~6x faster
+# ligand_grid_factor = 0.2
+# cells_csv = "cell_scope.csv"
+# cells_csv_column = "my_cells"
+
+[model_export]
+save_cnn_weights = false
+compressed_npz = true
+output_subdir = "CNN_weights"
