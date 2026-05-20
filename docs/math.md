@@ -148,7 +148,48 @@ To prevent bad coefficients from polluting the network, cell types below a thres
 
 ## Step 4 — Convolutional Neural Networks
 
+In `full` mode, clusters that pass the Lasso \(R^2\) gate are refined with a
+**CellularNicheNetwork**: a small CNN on inverse-distance spatial maps plus an MLP
+over cluster context features. The network outputs **effective coefficients**
+\(\boldsymbol{\beta}_i\) per cell by scaling Lasso **anchors**; expression is then
+read out linearly from modulators \(\mathbf{x}_i\):
 
+\[
+\hat{y}_i = \beta_{i,0} + \sum_{j>0} \beta_{i,j}\, x_{i,j}.
+\]
+
+### Loss function
+
+Training minimizes **mean squared error (MSE)** on the target expression layer
+(default `imputed_count`), plus optional weak terms that keep the CNN near Lasso:
+
+\[
+\mathcal{L}
+  = \underbrace{\mathrm{MSE}(\hat{y}, y)}_{\text{primary}}
+  + \lambda_{\mathrm{prior}}\,
+    \mathrm{MSE}\!\left(\mathbb{E}_{\text{batch}}[\boldsymbol{\beta}],\,
+      \boldsymbol{\beta}^{\mathrm{lasso}}\right)
+  + \lambda_{\mathrm{align}}\,
+    \mathrm{MSE}(\hat{y}, \hat{y}^{\mathrm{lasso}}).
+\]
+
+| Term | Config key | Default |
+|------|------------|---------|
+| Primary fit | — | always on |
+| Mean-β prior | `mean_beta_lasso_prior_weight` | off (`null`) |
+| Lasso alignment | `lasso_pred_align_weight` | `0.05` (ramps down if `lasso_pred_align_linear_decay`) |
+
+Optimization uses **Adam** on CNN weights. After training, in-sample \(R^2\) is
+compared to Lasso; the CNN export is dropped when it loses to Lasso unless
+`drop_cnn_if_insample_worse_than_lasso` is disabled (see [Parameters](params.md)).
+
+```rust
+// src/estimator.rs — CNN training loss (Burn MseLoss, mean reduction)
+let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), b.x_tensor);
+let y_loss = mse_loss.forward(y_pred.clone(), b.y_tensor, Reduction::Mean);
+let mut total = y_loss.clone();
+// optional: prior on batch-mean betas vs anchors; align y_pred to y_lasso
+```
 
 ---
 

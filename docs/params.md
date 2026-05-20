@@ -93,7 +93,7 @@ Lasso runs **per target gene × cluster** (or per cell in export semantics) befo
 
 ## `[cnn]` — spatial refinement (full mode)
 
-Only used when `mode = full`. The CNN predicts a **spatial map of multipliers** on Lasso anchors; see [How it works](math.md) Step 2–3.
+Only used when `mode = full`. The CNN predicts a **spatial map of multipliers** on Lasso anchors; see [How it works](math.md) Steps 2–4.
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|

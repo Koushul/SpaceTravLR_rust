@@ -1,0 +1,165 @@
+.md-typeset .st-runtime-estimator {
+  --st-re-accent: #eb6f92;
+  --st-re-accent-2: #c4a7e7;
+  --st-re-surface: #1f1d2e;
+  --st-re-overlay: #26233a;
+  --st-re-muted: #908caa;
+  --st-re-text: #e0def4;
+  --st-re-glow: color-mix(in srgb, var(--st-re-accent) 35%, transparent);
+  margin: 1.5rem 0 2rem;
+  font-size: 0.9rem;
+}
+
+[data-md-color-scheme="default"] .md-typeset .st-runtime-estimator {
+  --st-re-accent: #6f90eb;
+  --st-re-accent-2: #907aa9;
+  --st-re-surface: #faf4ed;
+  --st-re-overlay: #fffaf3;
+  --st-re-muted: #797593;
+  --st-re-text: #575279;
+  --st-re-glow: color-mix(in srgb, var(--st-re-accent) 22%, transparent);
+}
+
+.st-runtime-estimator__card {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--st-re-accent) 28%, transparent);
+  background: linear-gradient(
+    145deg,
+    var(--st-re-overlay) 0%,
+    var(--st-re-surface) 55%,
+    color-mix(in srgb, var(--st-re-surface) 88%, var(--st-re-accent)) 100%
+  );
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--st-re-text) 6%, transparent),
+    0 12px 40px var(--st-re-glow);
+  overflow: hidden;
+}
+
+.st-runtime-estimator__hero {
+  padding: 1.25rem 1.5rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--st-re-muted) 25%, transparent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--st-re-accent) 12%, transparent),
+    transparent 55%,
+    color-mix(in srgb, var(--st-re-accent-2) 10%, transparent)
+  );
+}
+
+.st-runtime-estimator__label {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--st-re-muted);
+  margin: 0 0 0.35rem;
+}
+
+.st-runtime-estimator__time {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  font-weight: 700;
+  color: var(--st-re-text);
+  line-height: 1.15;
+  margin: 0;
+}
+
+.st-runtime-estimator__subtime {
+  margin: 0.45rem 0 0;
+  color: var(--st-re-muted);
+  font-size: 0.88rem;
+}
+
+.st-runtime-estimator__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.85rem 1.25rem;
+  padding: 1.15rem 1.5rem 1.35rem;
+}
+
+.st-runtime-estimator__control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.st-runtime-estimator__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.st-runtime-estimator__name {
+  font-weight: 600;
+  color: var(--st-re-text);
+  font-size: 0.82rem;
+}
+
+.st-runtime-estimator__name code {
+  font-size: 0.78em;
+  font-weight: 500;
+}
+
+.st-runtime-estimator__val {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.8rem;
+  color: var(--st-re-accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.st-runtime-estimator input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--st-re-muted) 35%, transparent);
+  outline: none;
+}
+
+.st-runtime-estimator input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--st-re-accent);
+  border: 2px solid var(--st-re-overlay);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-re-accent) 40%, transparent);
+  cursor: pointer;
+}
+
+.st-runtime-estimator input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--st-re-accent);
+  border: 2px solid var(--st-re-overlay);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-re-accent) 40%, transparent);
+  cursor: pointer;
+}
+
+.st-runtime-estimator__toggle {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding-top: 0.25rem;
+}
+
+.st-runtime-estimator__toggle input {
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: var(--st-re-accent);
+}
+
+.st-runtime-estimator__foot {
+  padding: 0.65rem 1.5rem 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--st-re-muted) 20%, transparent);
+  font-size: 0.78rem;
+  color: var(--st-re-muted);
+}
+
+.st-runtime-estimator__foot strong {
+  color: var(--st-re-text);
+}
