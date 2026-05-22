@@ -27,7 +27,7 @@ use burn::tensor::backend::AutodiffBackend;
 use fs4::fs_std::FileExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
-use ndarray::{Array1, Array2, Array4};
+use ndarray::{Array1, Array2, Array4, s};
 use ndarray_npy::NpzWriter;
 use polars::datatypes::DataType;
 use polars::io::ipc::IpcCompression;
@@ -358,8 +358,9 @@ pub(crate) fn try_read_expression_csr_f64<AnB: Backend>(
     }
 }
 
-/// Read `obsm[key]` as a dense matrix in `f64`. HDF5 may store the same logical array as `f32` or
-/// `f64`; requesting the wrong Rust element type returns `Err` from anndata, so we try both.
+/// Read `obsm[key]` as a dense matrix in `f64`. HDF5 may store coordinates as `f32`, `f64`, or
+/// integer dtypes; `get_item::<Array2<f32>>` fails on mismatched types without a useful error, so
+/// we also read via [`ArrayConvert`] on [`ArrayData`].
 pub(crate) fn obsm_get_dense_matrix_f64<AnB: Backend>(
     adata: &AnnData<AnB>,
     key: &str,
@@ -370,23 +371,61 @@ pub(crate) fn obsm_get_dense_matrix_f64<AnB: Backend>(
     if let Ok(Some(arr)) = adata.obsm().get_item::<Array2<f64>>(key) {
         return Ok(Some(arr));
     }
-    Ok(None)
+    let elem = match adata.obsm().get(key) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    let data = match elem.get::<ArrayData>() {
+        Ok(Some(d)) => d,
+        _ => return Ok(None),
+    };
+    match data {
+        ArrayData::Array(d) => {
+            if let Ok(a) = ArrayConvert::<Array2<f64>>::try_convert(d.clone()) {
+                return Ok(Some(a));
+            }
+            if let Ok(a32) = ArrayConvert::<Array2<f32>>::try_convert(d) {
+                return Ok(Some(a32.mapv(|v| v as f64)));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `(n_obs, ≥2)` layout; transpose `(2, n_obs)` when detected.
+fn normalize_obsm_xy_two_cols(arr: Array2<f64>, n_obs: usize) -> Option<Array2<f64>> {
+    let mut a = arr;
+    if a.nrows() == 2 && a.ncols() == n_obs && n_obs > 0 {
+        a = a.reversed_axes();
+    }
+    if a.nrows() == 0 || a.ncols() < 2 {
+        return None;
+    }
+    if a.nrows() != n_obs {
+        return None;
+    }
+    if a.ncols() > 2 {
+        a = a.slice(s![.., ..2]).to_owned();
+    }
+    Some(a)
 }
 
 pub(crate) fn load_spatial_coords_f64<AnB: Backend>(
     adata: &AnnData<AnB>,
 ) -> anyhow::Result<Array2<f64>> {
     const KEYS: [&str; 3] = ["spatial", "X_spatial", "spatial_loc"];
+    let n_obs = adata.n_obs();
     for key in KEYS {
         if let Some(arr) = obsm_get_dense_matrix_f64(adata, key)? {
-            if arr.nrows() > 0 && arr.ncols() >= 2 {
-                return Ok(arr);
+            if let Some(xy) = normalize_obsm_xy_two_cols(arr, n_obs) {
+                return Ok(xy);
             }
         }
     }
     let obsm_keys = adata.obsm().keys();
     anyhow::bail!(
-        "No usable 2D spatial coordinates in obsm (tried {:?}, need ≥2 columns). obsm keys: {:?}.",
+        "No usable 2D spatial coordinates in obsm (tried {:?}, need ≥2 columns and n_obs={n_obs} rows). obsm keys: {:?}.",
         KEYS.as_slice(),
         obsm_keys
     );
@@ -4167,6 +4206,55 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     pub fn get_gene_expression(&self, gene: &str) -> anyhow::Result<Array1<f64>> {
         self.get_multiple_gene_expressions(&[gene.to_string()])
             .map(|data: Array2<f64>| data.column(0).to_owned())
+    }
+}
+
+#[cfg(test)]
+mod obsm_spatial_read_tests {
+    use super::{load_spatial_coords_f64, obsm_get_dense_matrix_f64};
+    use anndata::{AnnData, AnnDataOp, ArrayData, AxisArraysOp, Backend};
+    use anndata_hdf5::H5;
+    use ndarray::Array2;
+    use std::path::PathBuf;
+
+    fn temp_h5ad(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("spacetravlr_obsm_{name}_{}.h5ad", std::process::id()))
+    }
+
+    fn write_minimal_h5ad(path: &PathBuf, spatial: Array2<i32>) {
+        let n_obs = spatial.nrows();
+        let n_vars = 3usize;
+        let a = AnnData::<H5>::new(path).expect("create h5ad");
+        let x = Array2::<f64>::from_elem((n_obs, n_vars), 1.0);
+        let csr = super::dense_to_csr_f64(&x).expect("csr");
+        a.set_x(ArrayData::from(csr)).expect("set x");
+        let obs_df = polars::prelude::df![
+            "leiden" => vec!["0"; n_obs],
+            "cell_type" => vec!["T"; n_obs],
+        ]
+        .expect("obs df");
+        a.set_obs(obs_df).expect("set obs");
+        a.obsm()
+            .add("spatial", ArrayData::from(spatial))
+            .expect("obsm spatial");
+        a.close().expect("close");
+    }
+
+    #[test]
+    fn obsm_get_dense_reads_int32_spatial() {
+        let path = temp_h5ad("i32");
+        let _ = std::fs::remove_file(&path);
+        let spatial = Array2::from_shape_vec((12, 2), (0..24).collect()).expect("spatial");
+        write_minimal_h5ad(&path, spatial);
+        let adata = AnnData::<H5>::open(H5::open(&path).expect("h5")).expect("open");
+        let m = obsm_get_dense_matrix_f64(&adata, "spatial")
+            .expect("read")
+            .expect("some");
+        assert_eq!(m.shape(), [12, 2]);
+        let xy = load_spatial_coords_f64(&adata).expect("load spatial");
+        assert_eq!(xy.shape(), [12, 2]);
+        adata.close().ok();
+        let _ = std::fs::remove_file(&path);
     }
 }
 
