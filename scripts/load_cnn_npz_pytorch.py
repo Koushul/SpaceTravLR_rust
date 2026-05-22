@@ -24,6 +24,8 @@ _ACT_TANH = 2
 _ACT_SIGMOID_X2 = 3
 _PRELU_INIT = 0.1
 _CNN_SPP_FLAT = 64 * (1 + 4 + 16)
+# Must match Rust `CNN_BATCH_NORM_EPS` in src/model.rs (Burn trainer; PyTorch default is 1e-5).
+_BN_EPS = 1e-3
 
 
 class CellularNicheNetworkTorch(nn.Module):
@@ -40,13 +42,13 @@ class CellularNicheNetworkTorch(nn.Module):
         ic = int(input_channels)
 
         self.conv1 = nn.Conv2d(ic, 16, kernel_size=3, padding=1, bias=True)
-        self.bn1 = nn.BatchNorm2d(16, eps=1e-5, momentum=0.1)
+        self.bn1 = nn.BatchNorm2d(16, eps=_BN_EPS, momentum=0.1)
         self.prelu_conv1 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1, bias=True)
-        self.bn2 = nn.BatchNorm2d(32, eps=1e-5, momentum=0.1)
+        self.bn2 = nn.BatchNorm2d(32, eps=_BN_EPS, momentum=0.1)
         self.prelu_conv2 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=True)
-        self.bn3 = nn.BatchNorm2d(64, eps=1e-5, momentum=0.1)
+        self.bn3 = nn.BatchNorm2d(64, eps=_BN_EPS, momentum=0.1)
         self.prelu_conv3 = nn.PReLU(num_parameters=1, init=_PRELU_INIT)
 
         self.spatial_l1 = nn.Linear(n_clusters, 16)
