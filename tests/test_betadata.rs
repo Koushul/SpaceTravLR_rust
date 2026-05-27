@@ -125,11 +125,9 @@ fn test_splash_expanded_cells() {
         "cell3".into(),
     ];
     let cluster_keys = cluster_keys_from_usize(&[0usize, 0, 1, 1]);
-    let mapping = Arc::new(BetaFrame::compute_cell_mapping(
-        &bf.row_labels,
-        &obs,
-        &cluster_keys,
-    ));
+    let mapping = Arc::new(
+        BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &cluster_keys).0,
+    );
     bf.expand_to_cells(Arc::new(obs), mapping);
     assert_eq!(bf.n_cells, 4);
     assert_eq!(*bf.cell_to_beta_row, vec![0, 0, 1, 1]);
@@ -174,13 +172,38 @@ fn test_splash_with_scale_and_cap() {
     let result = bf.splash(&rw_lig, &rw_tfl, &gex, 2.0, Some(0.5));
     let eps = 1e-10;
 
+    // TF + unscaled TFL-reg: 0.5 + 0.1*2 = 0.7 → cap 0.5
     let a = result.col("beta_A").unwrap();
     assert!((a[0] - 0.5).abs() < eps);
+    // 0.8 + 0.4*0.5 = 1.0 → cap 0.5
     assert!((a[1] - 0.5).abs() < eps);
 
     let b = result.col("beta_B").unwrap();
     assert!((b[0] - (-0.3)).abs() < eps);
     assert!((b[1] - 0.1).abs() < eps);
+}
+
+#[test]
+fn splash_beta_scale_affects_ligands_not_tfs() {
+    let bf = make_test_betaframe();
+    let (rw_lig, rw_tfl, gex) = make_test_matrices();
+    let s1 = bf.splash(&rw_lig, &rw_tfl, &gex, 1.0, None);
+    let s2 = bf.splash(&rw_lig, &rw_tfl, &gex, 2.0, None);
+    let eps = 1e-10;
+
+    let b1 = s1.col("beta_B").unwrap();
+    let b2 = s2.col("beta_B").unwrap();
+    assert!((b1[0] - b2[0]).abs() < eps);
+    assert!((b1[1] - b2[1]).abs() < eps);
+
+    let a1 = s1.col("beta_A").unwrap();
+    let a2 = s2.col("beta_A").unwrap();
+    assert!((a1[0] - a2[0]).abs() < eps);
+    assert!((a1[1] - a2[1]).abs() < eps);
+
+    let c1 = s1.col("beta_C").unwrap()[0];
+    let c2 = s2.col("beta_C").unwrap()[0];
+    assert!(c2 > c1 + eps, "ligand channel should grow with beta_scale_factor");
 }
 
 #[test]
@@ -301,6 +324,28 @@ fn betadata_per_cell_column_cellid_ignores_cluster_key_collisions() {
 }
 
 #[test]
+fn splash_empty_modulators_does_not_panic() {
+    let bf = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "intercept_only".to_string(),
+        row_labels: vec!["c0".to_string()],
+        intercepts: array![0.0],
+        tf_betas: Array2::zeros((1, 0)),
+        tfs: vec![],
+        lr_betas: Array2::zeros((1, 0)),
+        ligands: vec![],
+        receptors: vec![],
+        tfl_betas: Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+    });
+    let empty = GeneMatrix::new(Array2::zeros((1, 0)), vec![]);
+    let gex = GeneMatrix::new(array![[1.0]], vec!["X".to_string()]);
+    let result = bf.splash(&empty, &empty, &gex, 1.0, None);
+    assert_eq!(result.n_cols(), 0);
+    assert_eq!(result.n_rows(), 1);
+}
+
+#[test]
 fn test_betaframe_tf_only() {
     let bf = BetaFrame::from_parts(BetaFrameFromParts {
         gene_name: "simple".to_string(),
@@ -387,8 +432,8 @@ fn compute_cell_mapping_partial_cluster_still_maps_others() {
     let row_labels = vec!["0".to_string(), "1".to_string()];
     let obs = vec!["a".into(), "b".into(), "c".into()];
     let keys = vec!["0".into(), "1".into(), "999".into()];
-    let m = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
-    assert_eq!(m, vec![0, 1, 0]);
+    let (m, _) = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
+    assert_eq!(m, vec![0, 1, BetaFrame::missing_beta_row_index(row_labels.len())]);
 }
 
 #[test]
@@ -396,11 +441,32 @@ fn compute_cell_mapping_matches_category_name_not_code() {
     let row_labels = vec!["0".into(), "1".into(), "10".into()];
     let obs = vec!["a".into(), "b".into(), "c".into()];
     let keys = vec!["0".into(), "1".into(), "10".into()];
-    let m = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
+    let (m, _) = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
     assert_eq!(m, vec![0, 1, 2]);
     let wrong = vec!["0".into(), "1".into(), "2".into()];
-    let m2 = BetaFrame::compute_cell_mapping(&row_labels, &obs, &wrong);
-    assert_eq!(m2, vec![0, 1, 0]);
+    let (m2, _) = BetaFrame::compute_cell_mapping(&row_labels, &obs, &wrong);
+    assert_eq!(
+        m2,
+        vec![0, 1, BetaFrame::missing_beta_row_index(row_labels.len())]
+    );
+}
+
+#[test]
+fn splash_unmapped_cluster_uses_zero_betas_not_row_zero() {
+    let mut bf = make_test_betaframe();
+    let obs: Vec<String> = vec!["cell0".into(), "cell1".into()];
+    let keys = vec!["0".into(), "missing_type".into()];
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &keys).0);
+    bf.expand_to_cells(Arc::new(obs), mapping);
+
+    let rw_lig = GeneMatrix::new(array![[3.0], [2.0]], vec!["C".to_string()]);
+    let rw_tfl = GeneMatrix::new(array![[2.0], [1.0]], vec!["C".to_string()]);
+    let gex = GeneMatrix::new(array![[1.5, 0.8], [1.0, 0.5]], vec!["C".to_string(), "A".to_string()]);
+    let splash = bf.splash(&rw_lig, &rw_tfl, &gex, 1.0, None);
+    let a0 = splash.col("beta_A").unwrap()[0];
+    let a1 = splash.col("beta_A").unwrap()[1];
+    assert!((a0 - 0.7).abs() < 1e-6, "mapped cell should use cluster 0 β");
+    assert!(a1.abs() < 1e-6, "unmapped cell must not inherit row 0 β");
 }
 
 #[test]
@@ -427,7 +493,7 @@ fn test_feather_cnn_cellid_columns() {
 
     let obs: Vec<String> = vec!["cell0".into(), "cell1".into()];
     let cluster_keys = cluster_keys_from_usize(&[0usize, 0]);
-    let mapping = BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &cluster_keys);
+    let (mapping, _) = BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &cluster_keys);
     assert_eq!(mapping, vec![0, 1]);
 
     std::fs::remove_dir_all(&dir).ok();

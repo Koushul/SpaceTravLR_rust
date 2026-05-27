@@ -221,6 +221,38 @@ pub struct BetaFrame {
     pub join_by_obs_name: bool,
 }
 
+/// Mapping stats from [`BetaFrame::compute_cell_mapping`] / [`BetaFrame::compute_cell_mapping_cellid_rows`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellMappingSummary {
+    pub n_unmapped: usize,
+    pub n_cells: usize,
+    pub n_via_cluster_key: usize,
+    pub n_via_obs_id: usize,
+    pub per_cell_join: bool,
+}
+
+impl CellMappingSummary {
+    pub fn log_unmapped_warning(&self) {
+        if self.n_unmapped == 0 {
+            return;
+        }
+        if self.per_cell_join {
+            eprintln!(
+                "Warning: {} of {} cells could not map to a betadata CellID row; using zero betas for those.",
+                self.n_unmapped, self.n_cells
+            );
+        } else {
+            eprintln!(
+                "Warning: {} of {} cells could not map to a betadata row; using zero betas for those. ({} cells mapped via cluster key, {} via obs id.)",
+                self.n_unmapped,
+                self.n_cells,
+                self.n_via_cluster_key,
+                self.n_via_obs_id
+            );
+        }
+    }
+}
+
 pub struct BetaFrameFromParts {
     pub gene_name: String,
     pub row_labels: Vec<String>,
@@ -414,16 +446,17 @@ impl BetaFrame {
     }
 
     /// Determine how to map cell indices to beta rows for a given set of row_labels.
-    /// Returns a Vec<usize> of length obs_names.len().
+    /// Returns mapping + summary (caller logs the summary once per load, not per target gene).
     ///
     /// For each cell: match `cluster_keys[i]` to a row label (seed-only `Cluster` column), else
-    /// **obs name** (per-cell `CellID` export), else row `0` with a warning. `cluster_keys` must
-    /// use the same strings as in the feather (e.g. categorical **names** `"10"`, not code `2`).
+    /// **obs name** (per-cell `CellID` export), else [`Self::missing_beta_row_index`] (all β = 0).
+    /// `cluster_keys` must use the same strings as in the feather (e.g. categorical **names**
+    /// `"10"`, not code `2`).
     pub fn compute_cell_mapping(
         row_labels: &[String],
         obs_names: &[String],
         cluster_keys: &[String],
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, CellMappingSummary) {
         debug_assert_eq!(
             obs_names.len(),
             cluster_keys.len(),
@@ -434,6 +467,7 @@ impl BetaFrame {
             .enumerate()
             .map(|(i, l)| (l.as_str(), i))
             .collect();
+        let missing = Self::missing_beta_row_index(row_labels.len());
 
         let mut n_via_key = 0usize;
         let mut n_via_obs = 0usize;
@@ -449,54 +483,66 @@ impl BetaFrame {
                 i
             } else {
                 n_default += 1;
-                0
+                missing
             };
             mapping.push(idx);
         }
 
-        if n_default > 0 {
-            eprintln!(
-                "Warning: {} of {} cells could not map to a betadata row; using row 0 for those. ({} cells mapped via cluster key, {} via obs id.)",
-                n_default,
-                obs_names.len(),
-                n_via_key,
-                n_via_obs
-            );
-        }
+        (
+            mapping,
+            CellMappingSummary {
+                n_unmapped: n_default,
+                n_cells: obs_names.len(),
+                n_via_cluster_key: n_via_key,
+                n_via_obs_id: n_via_obs,
+                per_cell_join: false,
+            },
+        )
+    }
 
-        mapping
+    /// `cell_to_beta_row` value when no feather row matches: [`Self::splash`] treats this as all-zero β.
+    #[inline]
+    pub fn missing_beta_row_index(n_feather_rows: usize) -> usize {
+        n_feather_rows
     }
 
     /// Map each AnnData cell to a feather row by **`obs_names[i]`** matching `row_labels`.
     /// Used when the feather id column is **`CellID`**. Do not use `cluster_keys` here: those
-    /// are cell-type (or other) labels and can spuriously match row ids or force row `0`,
-    /// destroying per-cell spatial β variation.
+    /// are cell-type (or other) labels and can spuriously match row ids or assign zero β via the
+    /// missing-row sentinel, destroying per-cell spatial β variation.
     pub fn compute_cell_mapping_cellid_rows(
         row_labels: &[String],
         obs_names: &[String],
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, CellMappingSummary) {
         let mut row_map: HashMap<&str, usize> = HashMap::new();
         for (i, l) in row_labels.iter().enumerate() {
             row_map.entry(l.as_str()).or_insert(i);
         }
+        let missing = Self::missing_beta_row_index(row_labels.len());
         let mut n_default = 0usize;
+        let mut n_via_obs = 0usize;
         let mapping: Vec<usize> = obs_names
             .iter()
             .map(|name| {
-                row_map.get(name.as_str()).copied().unwrap_or_else(|| {
+                if let Some(&i) = row_map.get(name.as_str()) {
+                    n_via_obs += 1;
+                    i
+                } else {
                     n_default += 1;
-                    0
-                })
+                    missing
+                }
             })
             .collect();
-        if n_default > 0 {
-            eprintln!(
-                "Warning: {} of {} cells could not map to a betadata CellID row; using row 0 for those.",
-                n_default,
-                obs_names.len()
-            );
-        }
-        mapping
+        (
+            mapping,
+            CellMappingSummary {
+                n_unmapped: n_default,
+                n_cells: obs_names.len(),
+                n_via_cluster_key: 0,
+                n_via_obs_id: n_via_obs,
+                per_cell_join: true,
+            },
+        )
     }
 
     fn extract_gene_name(path: &str) -> String {
@@ -637,23 +683,28 @@ impl BetaFrame {
 
     /// Compute partial derivatives of target gene expression w.r.t. each modulator gene.
     ///
-    /// Mirrors the Python `BetaFrame.splash()`:
-    ///   dy/dTF    = beta_TF                                (no scale_factor)
-    ///   dy/dR     = beta_LR * wL        (where gex[R] > 0, × scale_factor)
-    ///   dy/dL(lr) = beta_LR * gex[R]                       (× scale_factor)
-    ///   dy/dL(tfl)= beta_TFL * gex[reg]                    (× scale_factor)
-    ///   dy/dTF(tfl)= beta_TFL * wL_tfl                     (× scale_factor)
+    /// `[perturbation].beta_scale_factor` is passed as `ligand_beta_scale_factor` at splash time
+    /// (not when loading seed-only `Cluster` feathers).
+    ///
+    ///   dy/dTF       = beta_TF
+    ///   dy/dR        = beta_LR * wL        (gex[R] > 0, × ligand_beta_scale_factor)
+    ///   dy/dL(lr)    = beta_LR * gex[R]   (× ligand_beta_scale_factor)
+    ///   dy/dL(tfl)   = beta_TFL * gex[reg] (× ligand_beta_scale_factor)
+    ///   dy/dTF(tfl)  = beta_TFL * wL_tfl  (TF regulator; no ligand scale)
     pub fn splash(
         &self,
         rw_ligands: &GeneMatrix,
         rw_ligands_tfl: &GeneMatrix,
         gex_df: &GeneMatrix,
-        scale_factor: f32,
+        ligand_beta_scale_factor: f32,
         beta_cap: Option<f32>,
     ) -> GeneMatrix {
         let n = self.n_cells;
         let map = self.cell_to_beta_row.as_slice();
         let n_out = self.modulator_genes.len();
+        if n_out == 0 {
+            return GeneMatrix::new(Array2::zeros((n, 0)), vec![]);
+        }
         let n_tfs = self.tfs.len();
         let n_lr = self.ligands.len();
         let n_tfl = self.tfl_ligands.len();
@@ -728,13 +779,17 @@ impl BetaFrame {
         // Row-by-row parallel processing: each cell's result row (~2KB) fits in L1
         let mut result = vec![0.0f32; n * n_out];
 
+        let n_beta_rows = self.n_beta_rows;
         result.par_chunks_mut(n_out).enumerate().for_each(|(i, r)| {
             let br = unsafe { *map.get_unchecked(i) };
+            if br >= n_beta_rows {
+                return;
+            }
             let rw_base = i * rw_nc;
             let rw_tfl_base = i * rw_tfl_nc;
             let gex_base = i * gex_nc;
 
-            // 1. TF derivatives (no scale_factor)
+            // 1. TF derivatives (plain TF modulators; no ligand_beta_scale_factor)
             let tf_base = br * n_tfs;
             for j in 0..n_tfs {
                 unsafe {
@@ -743,7 +798,9 @@ impl BetaFrame {
                 }
             }
 
-            // 2+3. LR derivatives
+            let lbs = ligand_beta_scale_factor;
+
+            // 2+3. LR derivatives (ligand + receptor)
             let lr_beta_base = br * n_lr;
             for lw in &lr_work {
                 let beta = unsafe { *lr_flat.get_unchecked(lr_beta_base + lw.beta_col) };
@@ -751,20 +808,20 @@ impl BetaFrame {
                 let gex = unsafe { *gex_flat.get_unchecked(gex_base + lw.gex_col) };
 
                 if gex > 0.0f32 {
-                    unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * scale_factor };
+                    unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * lbs };
                 }
-                unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex * scale_factor };
+                unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex * lbs };
             }
 
-            // 4+5. TFL derivatives
+            // 4+5. TFL: scale ligand leg only; regulator is a TF modulator
             let tfl_beta_base = br * n_tfl;
             for tw in &tfl_work {
                 let beta = unsafe { *tfl_flat.get_unchecked(tfl_beta_base + tw.beta_col) };
                 let gex_reg = unsafe { *gex_flat.get_unchecked(gex_base + tw.gex_col) };
                 let wl = unsafe { *rw_tfl_flat.get_unchecked(rw_tfl_base + tw.wl_col) };
 
-                unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * scale_factor };
-                unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl * scale_factor };
+                unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * lbs };
+                unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl };
             }
         });
 
@@ -933,6 +990,7 @@ impl Betabase {
         let mut last_row_labels: Option<Vec<String>> = None;
         let mut last_join_by_obs: Option<bool> = None;
         let mut last_mapping: Option<Arc<Vec<usize>>> = None;
+        let mut unmapped_summary: Option<CellMappingSummary> = None;
 
         let mut data = HashMap::new();
         let mut ligands_set = HashSet::new();
@@ -963,11 +1021,19 @@ impl Betabase {
             {
                 last_mapping.as_ref().unwrap().clone()
             } else {
-                let m = Arc::new(if frame.join_by_obs_name {
+                let (mapping_vec, summary) = if frame.join_by_obs_name {
                     BetaFrame::compute_cell_mapping_cellid_rows(&frame.row_labels, obs_names)
                 } else {
                     BetaFrame::compute_cell_mapping(&frame.row_labels, obs_names, cluster_keys)
-                });
+                };
+                if summary.n_unmapped > 0 {
+                    unmapped_summary = Some(match unmapped_summary {
+                        None => summary,
+                        Some(prev) if summary.n_unmapped >= prev.n_unmapped => summary,
+                        Some(prev) => prev,
+                    });
+                }
+                let m = Arc::new(mapping_vec);
                 last_row_labels = Some(frame.row_labels.clone());
                 last_join_by_obs = Some(frame.join_by_obs_name);
                 last_mapping = Some(m.clone());
@@ -990,6 +1056,10 @@ impl Betabase {
             }
 
             data.insert(frame.gene_name.clone(), frame);
+        }
+
+        if let Some(summary) = unmapped_summary {
+            summary.log_unmapped_warning();
         }
 
         Ok(Self {
@@ -1028,7 +1098,7 @@ fn betadata_feather_cell_mapping(
     row_labels: &[String],
     obs_names: &[String],
     cluster_keys: &[String],
-) -> Vec<usize> {
+) -> (Vec<usize>, CellMappingSummary) {
     let per_cell = label_idx
         .and_then(|i| all_names.get(i).map(|s| s.as_str()))
         .is_some_and(label_name_is_per_cell_identity);
@@ -1143,7 +1213,7 @@ pub fn betadata_feather_per_cell_column(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping =
+    let (mapping, _) =
         betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let series = df
         .column(column)
@@ -1206,7 +1276,7 @@ pub fn betadata_feather_top_coefficients_for_selection(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping =
+    let (mapping, _) =
         betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
@@ -1309,7 +1379,7 @@ pub fn betadata_feather_modulator_beta_means_for_cells(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping =
+    let (mapping, _) =
         betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
@@ -1571,7 +1641,7 @@ pub fn betadata_collect_interactions_all_cell_types_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping =
+    let (mapping, _) =
         betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
 
     let ct_idx = CellTypeIndices::build(cell_type_labels, unique_cell_types, &mapping);
@@ -1812,7 +1882,7 @@ pub fn betadata_collect_interactions_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping =
+    let (mapping, _) =
         betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let n_obs = obs_names.len();
 
@@ -1950,7 +2020,7 @@ pub fn betadata_pair_lr_one_gene(
     } else {
         (0..df.height()).map(|i| i.to_string()).collect()
     };
-    let mapping =
+    let (mapping, _) =
         betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
     let ra = mapping[cell_a];
     let rb = mapping[cell_b];

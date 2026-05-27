@@ -74,7 +74,7 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
     let obs: Vec<String> = (0..n_cells).map(|i| format!("cell_{}", i)).collect();
     let clusters: Vec<usize> = vec![0; n_cells];
     let cluster_keys: Vec<String> = clusters.iter().map(|c| c.to_string()).collect();
-    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&rows, &obs, &cluster_keys));
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&rows, &obs, &cluster_keys).0);
     let obs_arc = Arc::new(obs);
 
     bf_d.expand_to_cells(obs_arc.clone(), mapping.clone());
@@ -554,11 +554,9 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
     let cluster_keys = vec!["0".to_string(), "0".to_string()];
-    let mapping = Arc::new(BetaFrame::compute_cell_mapping(
-        &row_labels,
-        &obs_names,
-        &cluster_keys,
-    ));
+    let mapping = Arc::new(
+        BetaFrame::compute_cell_mapping(&row_labels, &obs_names, &cluster_keys).0,
+    );
     bf_target.expand_to_cells(Arc::new(obs_names.clone()), mapping);
     bf_target.modulator_gene_indices = Some(
         bf_target
@@ -1649,11 +1647,9 @@ fn two_cell_tf_lr_perturb_bundle() -> (
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
     let cluster_keys = vec!["0".to_string(), "0".to_string()];
-    let mapping = Arc::new(BetaFrame::compute_cell_mapping(
-        &row_labels,
-        &obs_names,
-        &cluster_keys,
-    ));
+    let mapping = Arc::new(
+        BetaFrame::compute_cell_mapping(&row_labels, &obs_names, &cluster_keys).0,
+    );
     bf_target.expand_to_cells(Arc::new(obs_names.clone()), mapping);
     bf_target.modulator_gene_indices = Some(
         bf_target

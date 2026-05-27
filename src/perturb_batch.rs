@@ -85,6 +85,9 @@ pub struct PerturbBatchFile {
     /// Hard max neighbor distance for received ligands (omit = no cutoff, matching historical behavior).
     #[serde(default)]
     pub contact_distance: Option<f64>,
+    /// Per-gene ligand β scale (scalar, length-1 broadcast, or one per `genes`). Omit = run / `[perturbation]` default.
+    #[serde(default)]
+    pub beta_scale_factor: Option<F64OrVec>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +99,7 @@ pub struct PreparedPerturbJob {
     pub radius: Option<f64>,
     pub ligand_grid_factor: Option<f64>,
     pub contact_distance: Option<f64>,
+    pub beta_scale_factor: f64,
     /// Resolved cell row indices for scoped perturbation; `None` = all cells.
     pub cell_indices: Option<Vec<usize>>,
 }
@@ -134,11 +138,41 @@ pub fn batch_from_perturb_table(tbl: &toml::value::Table) -> anyhow::Result<Pert
     PerturbBatchFile::deserialize(v).map_err(|e| anyhow::anyhow!("parse batch/job fields: {e}"))
 }
 
+/// Top-level keys in `--config` TOML that belong under `[perturbation]` for repro merge.
+const PERTURBATION_SCALAR_HOIST_KEYS: &[&str] = &["beta_scale_factor", "beta_cap"];
+
+fn hoist_perturbation_scalars_into_overlay(root: &mut toml::Value) {
+    let Some(tbl) = root.as_table_mut() else {
+        return;
+    };
+    let mut pert = tbl
+        .get("perturbation")
+        .and_then(|v| v.as_table())
+        .cloned()
+        .unwrap_or_default();
+    let mut hoisted = false;
+    for key in PERTURBATION_SCALAR_HOIST_KEYS {
+        if let Some(v) = tbl.remove(*key) {
+            // Arrays are per-gene batch fields; only hoist scalars into `[perturbation]`.
+            if matches!(v, toml::Value::Array(_)) {
+                tbl.insert(key.to_string(), v);
+            } else {
+                pert.entry(key.to_string()).or_insert(v);
+                hoisted = true;
+            }
+        }
+    }
+    if hoisted || tbl.contains_key("perturbation") {
+        tbl.insert("perturbation".to_string(), toml::Value::Table(pert));
+    }
+}
+
 pub fn load_perturb_cli_toml(path: &Path) -> anyhow::Result<ParsedPerturbToml> {
     let s = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("read perturb config {}: {e}", path.display()))?;
-    let root: toml::Value = toml::from_str(&s)
+    let mut root: toml::Value = toml::from_str(&s)
         .map_err(|e| anyhow::anyhow!("parse perturb config {}: {e}", path.display()))?;
+    hoist_perturbation_scalars_into_overlay(&mut root);
     let table = root
         .as_table()
         .ok_or_else(|| {
@@ -238,8 +272,17 @@ fn normalize_gene_list(file: &PerturbBatchFile) -> anyhow::Result<Vec<String>> {
 }
 
 fn broadcast_f64(spec: Option<&F64OrVec>, n: usize) -> anyhow::Result<Vec<f64>> {
+    broadcast_f64_field(spec, n, 0.0, "desired_expr")
+}
+
+fn broadcast_f64_field(
+    spec: Option<&F64OrVec>,
+    n: usize,
+    default: f64,
+    field: &'static str,
+) -> anyhow::Result<Vec<f64>> {
     match spec {
-        None => Ok(vec![0.0f64; n]),
+        None => Ok(vec![default; n]),
         Some(F64OrVec::One(x)) => Ok(vec![*x; n]),
         Some(F64OrVec::Many(v)) => {
             if v.len() == n {
@@ -248,9 +291,8 @@ fn broadcast_f64(spec: Option<&F64OrVec>, n: usize) -> anyhow::Result<Vec<f64>> 
                 Ok(vec![v[0]; n])
             } else {
                 anyhow::bail!(
-                    "batch TOML: `desired_expr` length {} must be 1, {}, or omit (default 0)",
+                    "batch TOML: `{field}` length {} must be 1, {n}, or omit (default {default})",
                     v.len(),
-                    n
                 )
             }
         }
@@ -318,11 +360,18 @@ pub fn expand_prepared_jobs(
     file: &PerturbBatchFile,
     batch_parent: &Path,
     default_n_propagation: usize,
+    default_beta_scale_factor: f64,
 ) -> anyhow::Result<Vec<PreparedPerturbJob>> {
     let genes = normalize_gene_list(file)?;
     let n = genes.len();
     let desired = broadcast_f64(file.desired_expr.as_ref(), n)?;
     let n_props = broadcast_usize(file.n_propagation.as_ref(), n, default_n_propagation)?;
+    let beta_scales = broadcast_f64_field(
+        file.beta_scale_factor.as_ref(),
+        n,
+        default_beta_scale_factor,
+        "beta_scale_factor",
+    )?;
 
     let out_paths: Vec<PathBuf> = match (&file.out, &file.out_dir) {
         (Some(_), Some(_)) => anyhow::bail!("batch TOML: set either `out` or `out_dir`, not both"),
@@ -373,6 +422,7 @@ pub fn expand_prepared_jobs(
             radius,
             ligand_grid_factor,
             contact_distance,
+            beta_scale_factor: beta_scales[i],
             cell_indices: None,
         })
         .collect())
@@ -495,6 +545,7 @@ fn run_one_job(
         .or(runtime.perturb_cfg.contact_distance);
     let mut cfg: PerturbConfig = runtime.perturb_cfg.clone();
     cfg.n_propagation = job.n_propagation;
+    cfg.beta_scale_factor = job.beta_scale_factor;
     cfg.ligand_grid_factor = ligand_grid;
     cfg.contact_distance = contact;
 
@@ -609,11 +660,12 @@ fn run_one_job(
     )?;
     if verbose {
         eprintln!(
-            "Wrote {} (gene={}, desired_expr={}, n_propagation={})",
+            "Wrote {} (gene={}, desired_expr={}, n_propagation={}, beta_scale_factor={})",
             job.out_path.display(),
             job.gene,
             job.desired_expr,
-            job.n_propagation
+            job.n_propagation,
+            job.beta_scale_factor
         );
     } else {
         eprintln!("Wrote {}", job.out_path.display());
@@ -659,13 +711,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hoist_top_level_beta_scale_into_perturbation_section() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_hoist_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("perturb.toml");
+        std::fs::write(
+            &path,
+            r#"
+run_toml = "run.toml"
+gene = "G"
+beta_scale_factor = 42.0
+"#,
+        )
+        .unwrap();
+        let parsed = load_perturb_cli_toml(&path).unwrap();
+        let pert = parsed
+            .overlay_source
+            .get("perturbation")
+            .and_then(|v| v.as_table())
+            .expect("perturbation table");
+        assert_eq!(
+            pert.get("beta_scale_factor").and_then(|v| v.as_float()),
+            Some(42.0)
+        );
+        assert!(parsed.batch_table.as_ref().unwrap().contains_key("gene"));
+        assert!(
+            !parsed
+                .batch_table
+                .as_ref()
+                .unwrap()
+                .contains_key("beta_scale_factor")
+        );
+    }
+
+    #[test]
     fn genes_scalar_string() {
         let s = r#"
 genes = "SOX2"
 out_dir = "o"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        let jobs = expand_prepared_jobs(&f, Path::new("/proj/root"), 5).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/proj/root"), 5, 1.0).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].gene, "SOX2");
         assert_eq!(
@@ -681,7 +768,7 @@ gene = "SOX2"
 out = "solo.feather"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].gene, "SOX2");
         assert_eq!(jobs[0].n_propagation, 4);
@@ -696,7 +783,7 @@ genes = ["SOX2", "PAX6"]
 out_dir = "panel"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 2);
         assert!(jobs.iter().all(|j| (j.desired_expr - 0.0).abs() < 1e-9));
         assert!(jobs.iter().all(|j| j.n_propagation == 4));
@@ -716,14 +803,56 @@ out_dir = "panel"
 genes = ["SOX2", "PAX6"]
 desired_expr = [0.0, 0.5]
 n_propagation = [2, 3]
+beta_scale_factor = [1.0, 100.0]
 out_dir = "panel"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 99).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 99, 1.0).unwrap();
         assert_eq!(jobs[0].desired_expr, 0.0);
         assert_eq!(jobs[1].desired_expr, 0.5);
         assert_eq!(jobs[0].n_propagation, 2);
         assert_eq!(jobs[1].n_propagation, 3);
+        assert!((jobs[0].beta_scale_factor - 1.0).abs() < 1e-9);
+        assert!((jobs[1].beta_scale_factor - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hoist_scalar_beta_scale_not_array() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_hoist_arr_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("perturb.toml");
+        std::fs::write(
+            &path,
+            r#"
+run_toml = "run.toml"
+genes = ["G1", "G2"]
+beta_scale_factor = [1.0, 2.0]
+out_dir = "out"
+"#,
+        )
+        .unwrap();
+        let parsed = load_perturb_cli_toml(&path).unwrap();
+        assert!(
+            parsed
+                .batch_table
+                .as_ref()
+                .unwrap()
+                .contains_key("beta_scale_factor"),
+            "per-gene array must stay in batch table"
+        );
+        assert!(
+            parsed
+                .overlay_source
+                .get("perturbation")
+                .and_then(|v| v.get("beta_scale_factor"))
+                .is_none(),
+            "array must not be hoisted into [perturbation]"
+        );
+        let batch = batch_from_perturb_table(parsed.batch_table.as_ref().unwrap()).unwrap();
+        let jobs = expand_prepared_jobs(&batch, dir.as_path(), 2, 1.0).unwrap();
+        assert!((jobs[0].beta_scale_factor - 1.0).abs() < 1e-9);
+        assert!((jobs[1].beta_scale_factor - 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -735,7 +864,7 @@ n_propagation = [7]
 out_dir = "panel"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
         assert!(jobs.iter().all(|j| (j.desired_expr - 0.25).abs() < 1e-9));
         assert!(jobs.iter().all(|j| j.n_propagation == 7));
     }
@@ -747,7 +876,7 @@ genes = ["SOX2", "PAX6"]
 out = ["a.feather", "b.feather"]
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        let jobs = expand_prepared_jobs(&f, Path::new("/batch/parent"), 4).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/batch/parent"), 4, 1.0).unwrap();
         assert_eq!(jobs[0].out_path, PathBuf::from("/batch/parent/a.feather"));
         assert_eq!(jobs[1].out_path, PathBuf::from("/batch/parent/b.feather"));
     }
@@ -760,7 +889,7 @@ genes = ["Y"]
 out_dir = "o"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4).is_err());
+        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).is_err());
     }
 
     #[test]
@@ -770,7 +899,7 @@ genes = ["SOX2", "PAX6"]
 out = "x.feather"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4).is_err());
+        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).is_err());
     }
 
     #[test]
@@ -781,7 +910,7 @@ out = ["a.feather", "b.feather"]
 out_dir = "q"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4).is_err());
+        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).is_err());
     }
 
     #[test]
@@ -792,14 +921,25 @@ desired_expr = [0.0, 0.5, 1.0]
 out_dir = "panel"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4).is_err());
+        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).is_err());
+    }
+
+    #[test]
+    fn errors_mismatched_beta_scale_len() {
+        let s = r#"
+genes = ["SOX2", "PAX6"]
+beta_scale_factor = [1.0, 2.0, 3.0]
+out_dir = "panel"
+"#;
+        let f: PerturbBatchFile = toml::from_str(s).unwrap();
+        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).is_err());
     }
 
     #[test]
     fn errors_missing_out_and_out_dir() {
         let s = r#"genes = ["SOX2", "PAX6"]"#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
-        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4).is_err());
+        assert!(expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).is_err());
     }
 
     #[test]
@@ -816,7 +956,7 @@ parallelism = 2
             file.genes,
             Some(GenesSpec::Many(ref v)) if v.len() == 2
         ));
-        let jobs = expand_prepared_jobs(&file, Path::new("/proj"), 99).unwrap();
+        let jobs = expand_prepared_jobs(&file, Path::new("/proj"), 99, 1.0).unwrap();
         assert_eq!(jobs.len(), 2);
         assert_eq!(
             jobs[0].out_path,
@@ -862,7 +1002,7 @@ cells_csv_columns = ["col_a", "col_b", ""]
         );
         let f: PerturbBatchFile = toml::from_str(&batch_toml).unwrap();
         let parent = dir.as_path();
-        let mut jobs = expand_prepared_jobs(&f, parent, 4).unwrap();
+        let mut jobs = expand_prepared_jobs(&f, parent, 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 3);
         resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
         assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[0usize]);
@@ -889,7 +1029,7 @@ cells_csv_columns = ["only"]
         );
         let f: PerturbBatchFile = toml::from_str(&batch_toml).unwrap();
         let parent = dir.as_path();
-        let mut jobs = expand_prepared_jobs(&f, parent, 4).unwrap();
+        let mut jobs = expand_prepared_jobs(&f, parent, 4, 1.0).unwrap();
         resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
         assert_eq!(jobs[0].cell_indices, jobs[1].cell_indices);
         assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[1usize]);
@@ -913,7 +1053,7 @@ cells_csv_columns = ["a"]
         );
         let f: PerturbBatchFile = toml::from_str(&s).unwrap();
         let obs = vec!["alpha".into()];
-        let mut jobs = expand_prepared_jobs(&f, dir.as_path(), 4).unwrap();
+        let mut jobs = expand_prepared_jobs(&f, dir.as_path(), 4, 1.0).unwrap();
         assert!(resolve_prepared_job_cell_indices(&f, dir.as_path(), &obs, &mut jobs).is_err());
     }
 }

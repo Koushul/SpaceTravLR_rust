@@ -164,8 +164,14 @@ fn main() -> anyhow::Result<()> {
         } else {
             runtime.perturb_cfg.n_propagation
         };
+        let default_beta_scale = runtime.perturb_cfg.beta_scale_factor;
 
-        let mut jobs = expand_prepared_jobs(&batch_file, batch_parent, default_n_prop)?;
+        let mut jobs = expand_prepared_jobs(
+            &batch_file,
+            batch_parent,
+            default_n_prop,
+            default_beta_scale,
+        )?;
         validate_jobs_genes(&jobs, &runtime.gene_names)?;
         resolve_prepared_job_cell_indices(
             &batch_file,

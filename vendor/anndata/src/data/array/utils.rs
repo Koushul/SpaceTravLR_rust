@@ -436,6 +436,39 @@ pub(crate) fn compute_sort_permutation(permutation: &mut [usize], indices: &[usi
     permutation.sort_unstable_by_key(|idx| indices[*idx]);
 }
 
+/// Sort column indices (and values) within each CSR row. Scanpy `obsp['distances']` stores
+/// neighbors in distance order, not column order; nalgebra-sparse requires canonical CSR.
+pub(crate) fn sort_csr_minor_indices<T: Clone>(
+    nrows: usize,
+    indptr: &[usize],
+    indices: &mut [usize],
+    data: &mut [T],
+) {
+    let mut idx_ws = Vec::new();
+    let mut val_ws = Vec::new();
+    let mut perm_ws = Vec::new();
+    for lane in 0..nrows {
+        let begin = indptr[lane];
+        let end = indptr[lane + 1];
+        let count = end - begin;
+        if count <= 1 {
+            continue;
+        }
+        idx_ws.resize(count, 0);
+        val_ws.resize(count, data[begin].clone());
+        perm_ws.resize(count, 0);
+        sort_lane(
+            &mut idx_ws[..count],
+            &mut val_ws[..count],
+            &indices[begin..end],
+            &data[begin..end],
+            &mut perm_ws[..count],
+        );
+        indices[begin..end].copy_from_slice(&idx_ws[..count]);
+        data[begin..end].clone_from_slice(&val_ws[..count]);
+    }
+}
+
 pub fn from_csr_data<T>(
     nrows: usize,
     ncols: usize,
@@ -446,6 +479,7 @@ pub fn from_csr_data<T>(
 where
     CsrMatrix<T>: Into<ArrayData>,
     CsrNonCanonical<T>: Into<ArrayData>,
+    T: Clone,
 {
     match check_format(nrows, ncols, &indptr, &indices) {
         Ok(_) => {
@@ -456,6 +490,30 @@ where
             Ok(csr.into())
         }
         Err(e) => match e {
+            SparsityPatternFormatError::NonmonotonicMinorIndices => {
+                let mut indices = indices;
+                let mut data = data;
+                sort_csr_minor_indices(nrows, &indptr, &mut indices, &mut data);
+                match check_format(nrows, ncols, &indptr, &indices) {
+                    Ok(_) => {
+                        let pattern = unsafe {
+                            SparsityPattern::from_offset_and_indices_unchecked(
+                                nrows, ncols, indptr, indices,
+                            )
+                        };
+                        let csr =
+                            CsrMatrix::try_from_pattern_and_values(pattern, data).unwrap();
+                        Ok(csr.into())
+                    }
+                    Err(SparsityPatternFormatError::DuplicateEntry) => {
+                        let csr = CsrNonCanonical::from_csr_data(
+                            nrows, ncols, indptr, indices, data,
+                        );
+                        Ok(csr.into())
+                    }
+                    Err(other) => Err(anyhow!("cannot read csr matrix: {}", other)),
+                }
+            }
             SparsityPatternFormatError::DuplicateEntry => {
                 let csr = CsrNonCanonical::from_csr_data(nrows, ncols, indptr, indices, data);
                 Ok(csr.into())

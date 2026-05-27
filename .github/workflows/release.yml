@@ -13,8 +13,69 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve-platforms:
+    name: Resolve release platforms
+    runs-on: ubuntu-latest
+    outputs:
+      linux_standard: ${{ steps.parse.outputs.linux_standard }}
+      linux_compat: ${{ steps.parse.outputs.linux_compat }}
+      linux_glibc228: ${{ steps.parse.outputs.linux_glibc228 }}
+      macos: ${{ steps.parse.outputs.macos }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse release-platforms from tag annotation
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          PLATFORMS=""
+          if git rev-parse "$TAG^{tag}" >/dev/null 2>&1; then
+            BODY="$(git tag -l "$TAG" --format='%(contents:body)')"
+            PLATFORMS="$(printf '%s\n' "$BODY" | sed -n 's/^[Rr]elease-platforms:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
+          fi
+          if [[ -z "$PLATFORMS" ]]; then
+            echo "No release-platforms line in tag; building all platforms."
+            echo "linux_standard=true" >> "$GITHUB_OUTPUT"
+            echo "linux_compat=true" >> "$GITHUB_OUTPUT"
+            echo "linux_glibc228=true" >> "$GITHUB_OUTPUT"
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Building subset from tag: $PLATFORMS"
+          IFS=',' read -ra IDS <<< "$PLATFORMS"
+          linux_standard=false
+          linux_compat=false
+          linux_glibc228=false
+          macos=false
+          for id in "${IDS[@]}"; do
+            case "$id" in
+              x86_64-unknown-linux-gnu) linux_standard=true ;;
+              x86_64-unknown-linux-gnu-glibc2.31) linux_compat=true ;;
+              x86_64-unknown-linux-gnu-glibc2.28) linux_glibc228=true ;;
+              aarch64-apple-darwin) macos=true ;;
+              *)
+                echo "::error::Unknown platform id in release-platforms: $id"
+                exit 1
+                ;;
+            esac
+          done
+          if [[ "$linux_standard" == false && "$linux_compat" == false && "$linux_glibc228" == false && "$macos" == false ]]; then
+            echo "::error::release-platforms was set but no known platform ids were found"
+            exit 1
+          fi
+          echo "linux_standard=$linux_standard" >> "$GITHUB_OUTPUT"
+          echo "linux_compat=$linux_compat" >> "$GITHUB_OUTPUT"
+          echo "linux_glibc228=$linux_glibc228" >> "$GITHUB_OUTPUT"
+          echo "macos=$macos" >> "$GITHUB_OUTPUT"
+
   build-linux-standard:
     name: x86_64-unknown-linux-gnu
+    needs: resolve-platforms
+    if: needs.resolve-platforms.outputs.linux_standard == 'true'
     runs-on: ubuntu-22.04
     env:
       BUNDLE_ID: x86_64-unknown-linux-gnu
@@ -71,6 +132,8 @@ jobs:
 
   build-linux-compat:
     name: x86_64-unknown-linux-gnu-glibc2.31
+    needs: resolve-platforms
+    if: needs.resolve-platforms.outputs.linux_compat == 'true'
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     env:
@@ -144,6 +207,8 @@ jobs:
 
   build-linux-glibc228:
     name: x86_64-unknown-linux-gnu-glibc2.28
+    needs: resolve-platforms
+    if: needs.resolve-platforms.outputs.linux_glibc228 == 'true'
     runs-on: ubuntu-latest
     container: debian:buster-slim
     env:
@@ -220,6 +285,8 @@ jobs:
 
   build-macos:
     name: aarch64-apple-darwin
+    needs: resolve-platforms
+    if: needs.resolve-platforms.outputs.macos == 'true'
     runs-on: macos-14
     env:
       BUNDLE_ID: aarch64-apple-darwin
@@ -273,10 +340,12 @@ jobs:
   publish:
     name: GitHub Release
     needs:
+      - resolve-platforms
       - build-linux-standard
       - build-linux-compat
       - build-linux-glibc228
       - build-macos
+    if: ${{ always() && needs.resolve-platforms.result == 'success' && !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

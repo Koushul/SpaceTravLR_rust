@@ -1577,6 +1577,36 @@ fn prepare_h5ad_path_for_anndata_memory_load(path: &Path) {
             e
         ),
     }
+    match h5ad_strip_obsp_for_preprocess_load(path) {
+        Ok(false) => {}
+        Ok(true) => eprintln!(
+            "rust_preprocess: removed obsp (Scanpy neighbor graphs) from {} — full prep recomputes UMAP/Leiden",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "rust_preprocess: warning: could not strip obsp from {}: {:#}. \
+             Loading may still work if obsp CSR is canonical.",
+            path.display(),
+            e
+        ),
+    }
+}
+
+fn h5ad_strip_obsp_for_preprocess_load(path: &Path) -> Result<bool> {
+    use hdf5_metno::File as H5File;
+
+    let f = match H5File::open_rw(path) {
+        Ok(f) => f,
+        Err(_) => return Ok(false),
+    };
+    if !f.link_exists("obsp") {
+        f.close().context("HDF5 close")?;
+        return Ok(false);
+    }
+    f.unlink("obsp").context("unlink obsp group")?;
+    f.flush().context("HDF5 flush after obsp strip")?;
+    f.close().context("HDF5 close after obsp strip")?;
+    Ok(true)
 }
 
 fn umap_lab_h5_dense_x_column_f32(

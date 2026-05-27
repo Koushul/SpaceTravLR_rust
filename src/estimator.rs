@@ -16,11 +16,23 @@ use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Concurrent group-lasso fits per gene (CPU); CNN remains sequential on the device.
 const GROUP_LASSO_MAX_CONCURRENT: usize = 4;
+
+/// Burn 0.16 autodiff keeps one process-global graph server. Parallel gene workers must not
+/// interleave forward/backward or steps are dropped ("Node should have a step registered").
+static BURN_AUTODIFF_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[inline]
+fn burn_autodiff_global_lock() -> std::sync::MutexGuard<'static, ()> {
+    BURN_AUTODIFF_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 fn spatial_maps_for_cluster_cnn(
     spatial_maps: &Array4<f32>,
@@ -353,6 +365,7 @@ pub struct TrainClusterCnnEpochsInput<'a, B: AutodiffBackend> {
 pub fn train_cluster_cnn_epochs<B: AutodiffBackend>(
     input: TrainClusterCnnEpochsInput<'_, B>,
 ) -> (CellularNicheNetwork<B>, Vec<f32>, bool) {
+    let _burn_ad_guard = burn_autodiff_global_lock();
     let TrainClusterCnnEpochsInput {
         mut model,
         device,
@@ -1799,6 +1812,87 @@ mod tests {
         assert!(!div);
         assert_eq!(mse.len(), 3);
         assert!(mse.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn parallel_cnn_workers_do_not_corrupt_burn_autodiff_graph() {
+        use crate::config::CnnConfig;
+        use crate::config::CnnOutputActivation;
+        use crate::model::CellularNicheNetworkConfig;
+        use burn::backend::NdArray;
+        use burn::tensor::Tensor;
+        use burn_autodiff::Autodiff;
+        use std::thread;
+
+        type B = Autodiff<NdArray<f32, i32>>;
+        let device: <B as Backend>::Device = Default::default();
+        const N: usize = 48;
+        const H: usize = 8;
+        const W: usize = 8;
+        const P: usize = 2;
+        const K: usize = 2;
+        let sm = Array4::<f32>::from_elem((N, 1, H, W), 0.1f32);
+        let x = Array2::<f64>::from_elem((N, P), 0.05);
+        let sf = Array2::<f64>::from_elem((N, K), 0.02);
+        let y = Array1::<f64>::zeros(N);
+        let lasso_coef = Array2::<f64>::from_elem((P, 1), 0.01);
+        let cnn = CnnConfig {
+            lasso_pred_align_weight: 0.0,
+            cnn_minibatch_size: 16,
+            cnn_early_stop_patience: 0,
+            ..Default::default()
+        };
+
+        let handles: Vec<_> = (0..4)
+            .map(|worker| {
+                let sm = sm.clone();
+                let x = x.clone();
+                let sf = sf.clone();
+                let y = y.clone();
+                let lasso_coef = lasso_coef.clone();
+                let cnn = cnn.clone();
+                let device = device.clone();
+                thread::spawn(move || {
+                    let anchors: Vec<f32> = std::iter::once(0.5f32)
+                        .chain(std::iter::repeat_n(0.1f32, P))
+                        .collect();
+                    let at = Tensor::<B, 1>::from_data(
+                        burn::tensor::TensorData::new(anchors, [P + 1]),
+                        &device,
+                    );
+                    let model = CellularNicheNetworkConfig {
+                        n_modulators: P,
+                        n_clusters: K,
+                        vision_in_channels: 1,
+                    }
+                    .init::<B>(&device, at, CnnOutputActivation::Sigmoid);
+                    let y_l = y_lasso_vec_from_xy_cpu(&x, 0.0, &lasso_coef);
+                    let (_m, mse, div) = train_cluster_cnn_epochs(TrainClusterCnnEpochsInput {
+                        model,
+                        device: &device,
+                        sm_c: &sm,
+                        x_c: &x,
+                        sf_c: &sf,
+                        y_c: &y,
+                        cluster_n: N,
+                        cluster_id: worker,
+                        y_lasso_cpu: Some(y_l.as_slice()),
+                        beta_prior_w: 0.0,
+                        cnn: &cnn,
+                        learning_rate: 1e-3,
+                        epochs: 2,
+                        cnn_epoch_slot: None,
+                        shuffle_seed: worker as u64,
+                    });
+                    assert!(!div);
+                    assert_eq!(mse.len(), 2);
+                    assert!(mse.iter().all(|v| v.is_finite()));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("parallel CNN worker panicked");
+        }
     }
 
     #[test]

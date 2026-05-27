@@ -1766,8 +1766,14 @@ async fn api_perturb_batch(
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         let default_n_prop = rt.perturb_cfg.n_propagation;
-        let mut jobs = expand_prepared_jobs(&batch_file, batch_parent, default_n_prop)
-            .map_err(|e| format!("{e:#}"))?;
+        let default_beta_scale = rt.perturb_cfg.beta_scale_factor;
+        let mut jobs = expand_prepared_jobs(
+            &batch_file,
+            batch_parent,
+            default_n_prop,
+            default_beta_scale,
+        )
+        .map_err(|e| format!("{e:#}"))?;
         validate_jobs_genes(&jobs, &rt.gene_names).map_err(|e| format!("{e:#}"))?;
         resolve_prepared_job_cell_indices(&batch_file, batch_parent, &rt.obs_names, &mut jobs)
             .map_err(|e| format!("{e:#}"))?;
