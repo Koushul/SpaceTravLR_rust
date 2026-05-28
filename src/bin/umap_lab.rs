@@ -1845,7 +1845,7 @@ fn resolve_static_dir(cli: &Path) -> anyhow::Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    spacetravlr::ensure_hdf5_no_file_locking();
+    spacetravlr::ensure_process_env();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -1,3 +1,12 @@
+use std::path::{Path, PathBuf};
+
+/// Process-wide defaults for batch/HPC nodes (NFS HDF5 locking, headless XDG runtime).
+/// Safe to call more than once.
+pub fn ensure_process_env() {
+    ensure_hdf5_no_file_locking();
+    ensure_xdg_runtime_dir();
+}
+
 /// Ensure HDF5 file locking is disabled so `.h5ad` opens succeed on network
 /// filesystems (NFS, Lustre, GPFS) that do not support POSIX advisory locks.
 /// Safe to call more than once; only the first call sets the variable.
@@ -11,6 +20,124 @@ pub fn ensure_hdf5_no_file_locking() {
             }
         }
     });
+}
+
+/// On batch/HPC nodes `XDG_RUNTIME_DIR` is often unset or points at a missing path (no
+/// systemd user session). Wayland, DBus, and some Python stacks log noisy errors when it
+/// is invalid; set a private writable runtime dir before those libraries initialize.
+pub fn ensure_xdg_runtime_dir() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if xdg_runtime_dir_is_usable(std::env::var_os("XDG_RUNTIME_DIR")) {
+            return;
+        }
+        for dir in xdg_runtime_dir_candidates() {
+            if install_xdg_runtime_dir(&dir) {
+                unsafe {
+                    std::env::set_var("XDG_RUNTIME_DIR", dir.as_os_str());
+                }
+                return;
+            }
+        }
+    });
+}
+
+fn xdg_runtime_dir_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(unix)]
+    if let Some(uid) = unix_effective_uid() {
+        out.push(PathBuf::from(format!("/run/user/{uid}")));
+    }
+    let tmp = std::env::var_os("TMPDIR")
+        .or_else(|| std::env::var_os("TEMP"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    #[cfg(unix)]
+    let suffix = unix_effective_uid()
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| std::process::id().to_string());
+    #[cfg(not(unix))]
+    let suffix = std::process::id().to_string();
+    out.push(tmp.join(format!("spacetravlr-xdg-runtime-{suffix}")));
+    out
+}
+
+fn xdg_runtime_dir_is_usable(val: Option<std::ffi::OsString>) -> bool {
+    let Some(val) = val.filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let path = Path::new(&val);
+    if !path.is_dir() {
+        return false;
+    }
+    let probe = path.join(format!(".spacetravlr_xdg_probe_{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+
+#[cfg(unix)]
+fn unix_effective_uid() -> Option<u32> {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())
+}
+
+#[cfg(not(unix))]
+fn unix_effective_uid() -> Option<u32> {
+    None
+}
+
+fn install_xdg_runtime_dir(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    xdg_runtime_dir_is_usable(Some(std::ffi::OsString::from(dir.as_os_str())))
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn xdg_runtime_dir_usable_when_writable() {
+        let dir = std::env::temp_dir().join(format!(
+            "st_xdg_ok_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(install_xdg_runtime_dir(&dir));
+        assert!(xdg_runtime_dir_is_usable(Some(dir.as_os_str().to_os_string())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn xdg_runtime_dir_not_usable_when_missing() {
+        assert!(!xdg_runtime_dir_is_usable(Some("/nonexistent/spacetravlr/xdg".into())));
+    }
 }
 
 #[cfg(feature = "spatial-viewer")]

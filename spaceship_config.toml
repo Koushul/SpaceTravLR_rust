@@ -17,7 +17,7 @@ cluster_annot   = "cell_type"
 # Distance threshold for secreted signaling
 radius           = 300
 # Grid resolution for spatial convolution kernel
-spatial_dim      = 64
+spatial_dim      = 48
 # Distance threshold for contact-based signaling
 contact_distance = 30
 # Linear scale on Gaussian weights in received-ligand aggregation
@@ -126,7 +126,7 @@ score_threshold = 0.1
 # Global RNG seed: Lasso (mixed per target gene) and CNN minibatch shuffle. Default 42; CLI: --random-seed
 # random_seed = 42
 # Number of parallel gene-training workers
-n_parallel  = 9
+n_parallel  = 5
 # Directory for *_betadata.feather. Leave empty to use cwd/{adata_stem}_YYYY-MM-DD (local date).
 # output_dir = "/path/to/custom_run"
 # Write spacetravlr_minimal_repro.h5ad (slow / large I/O on big datasets). Default false; or pass --write-minimal-repro-h5ad.

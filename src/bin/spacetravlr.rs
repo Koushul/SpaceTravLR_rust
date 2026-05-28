@@ -2539,7 +2539,7 @@ fn run_spacetravlr_gui(gui: &GuiCli) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    spacetravlr::ensure_hdf5_no_file_locking();
+    spacetravlr::ensure_process_env();
     let cli = Cli::parse();
 
     if cli.verify {

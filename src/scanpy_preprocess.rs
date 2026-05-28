@@ -199,6 +199,7 @@ fn apply_blas_thread_caps_for_uv_child(cmd: &mut Command) {
 }
 
 fn uv_command_base() -> Command {
+    crate::ensure_process_env();
     let mut c = Command::new(uv_executable());
     c.env_remove("PYTHONPATH");
     c.env("PYTHONNOUSERSITE", "1");
@@ -1156,7 +1157,7 @@ pub fn strip_heavy_training_artifacts_from_h5ad(path: &Path) -> anyhow::Result<(
 /// when present (does not modify **`src`**). Training auto-prep then chooses
 /// [`TrainingPrepPlan::FullPreprocess`] so Rust QC → normalize → HVG → … → MAGIC runs — used by **`--verify`**.
 pub fn copy_h5ad_for_verify_forcing_rust_full_prep(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    crate::ensure_hdf5_no_file_locking();
+    crate::ensure_process_env();
     anyhow::ensure!(
         src.is_file(),
         "copy_h5ad_for_verify_forcing_rust_full_prep: source not a file: {}",

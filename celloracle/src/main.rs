@@ -73,6 +73,7 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    spacetravlr::ensure_process_env();
     let cli = Cli::parse();
 
     let h5ad_expanded = expand_user_path(cli.h5ad.to_string_lossy().as_ref());

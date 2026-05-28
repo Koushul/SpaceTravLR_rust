@@ -33,6 +33,10 @@ fn grn_parquet_ready(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+fn grn_parquet_exists(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn github_repo_slug() -> String {
     std::env::var("SPACETRAVLR_GITHUB_REPO")
         .ok()
@@ -128,13 +132,13 @@ pub fn resolve_or_fetch_network_data_dir(
 
     if let Some(d) = config_network_data_dir.map(str::trim).filter(|s| !s.is_empty()) {
         let expanded = expand_user_path(d);
-        if grn_parquet_ready(&Path::new(&expanded).join(&filename)) {
+        if grn_parquet_exists(&Path::new(&expanded).join(&filename)) {
             return Ok(Some(expanded));
         }
     }
 
     let run_net = run_network_data_dir(output_dir);
-    if grn_parquet_ready(&run_net.join(&filename)) {
+    if grn_parquet_exists(&run_net.join(&filename)) {
         let dir_s = run_net
             .to_str()
             .with_context(|| format!("network dir path must be UTF-8: {}", run_net.display()))?
@@ -1166,6 +1170,34 @@ mod tests {
                 .expect("run network dir");
         assert_eq!(Path::new(&resolved), run_net);
         let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn resolve_or_fetch_honors_small_explicit_config_parquet() {
+        let dir = std::env::temp_dir().join(format!("st_small_net_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut df = DataFrame::new(vec![
+            Series::new("source".into(), vec!["A"]).into(),
+            Series::new("target".into(), vec!["B"]).into(),
+            Series::new("edge_type".into(), vec!["grn"]).into(),
+            Series::new("weight".into(), vec![1.0_f64]).into(),
+        ])
+        .unwrap();
+        let path = dir.join("mouse_network.parquet");
+        let f = fs::File::create(&path).unwrap();
+        ParquetWriter::new(f).finish(&mut df).unwrap();
+        assert!(
+            fs::metadata(&path).unwrap().len() < GRN_PARQUET_MIN_BYTES,
+            "fixture must stay below download min-size guard"
+        );
+        let out = dir.join("run_out");
+        fs::create_dir_all(&out).unwrap();
+        let resolved = resolve_or_fetch_network_data_dir("mouse", &out, Some(dir.to_str().unwrap()))
+            .unwrap()
+            .expect("explicit config dir");
+        assert_eq!(Path::new(&resolved), dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

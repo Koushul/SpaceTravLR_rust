@@ -126,7 +126,7 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    spacetravlr::ensure_hdf5_no_file_locking();
+    spacetravlr::ensure_process_env();
     let cli = Cli::parse();
 
     let perturb_config_path = cli.config.clone().or(cli.config_positional.clone());
