@@ -50,6 +50,8 @@ const VERIFY_GENE_TARGETS: &[&str] = &["AICDA", "CD74"];
 
 const VERIFY_TRAIN_STDERR_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+const VERIFY_TRAIN_LOG_TAIL_LINES: usize = 48;
+
 const VERIFY_LOG_RUST_FULL_PREP: &str = "running Rust preprocess (QC → log-norm → HVG";
 const VERIFY_LOG_MAGIC_CELLTYPE: &str = ">>> MAGIC per cell_type";
 const VERIFY_LOG_WEBGPU: &str = "CNN/compute backend = WebGPU";
@@ -73,6 +75,98 @@ fn read_file_utf8_lossy_capped(path: &Path, max_bytes: usize) -> anyhow::Result<
         .with_context(|| format!("read {}", path.display()))?;
     buf.truncate(n);
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        return lines.join("\n");
+    }
+    let start = lines.len().saturating_sub(n);
+    format!(
+        "… ({} earlier lines omitted) …\n{}",
+        start,
+        lines[start..].join("\n")
+    )
+}
+
+fn format_exit_status(st: &std::process::ExitStatus) -> String {
+    if st.success() {
+        return "exit code 0".into();
+    }
+    if let Some(code) = st.code() {
+        return format!("exit code {code} (non-zero; Unix convention: 0 = success)");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = st.signal() {
+            return format!("terminated by signal {sig} (no exit code)");
+        }
+    }
+    "terminated abnormally (no exit code)".into()
+}
+
+fn append_log_tail_details(details: &mut Vec<String>, label: &str, path: &Path, max_lines: usize) {
+    match read_file_utf8_lossy_capped(path, VERIFY_TRAIN_STDERR_MAX_BYTES) {
+        Ok(text) if text.trim().is_empty() => {
+            details.push(format!("{label}: (empty file at {})", path.display()));
+        }
+        Ok(text) => {
+            details.push(format!("{label} file: {}", path.display()));
+            details.push(format!(
+                "{label} tail (last {max_lines} lines):\n{}",
+                tail_lines(&text, max_lines)
+            ));
+        }
+        Err(e) => {
+            details.push(format!(
+                "{label}: could not read {} ({e:#})",
+                path.display()
+            ));
+        }
+    }
+}
+
+fn stderr_error_hints(stderr: &str, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        if lower.contains("error:")
+            || lower.contains(" panic")
+            || lower.starts_with("panic")
+            || lower.contains("thread '")
+            || lower.contains("caused by:")
+            || lower.contains("bail!")
+        {
+            out.push(format!("stderr hint: {t}"));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn training_subprocess_command_line(
+    exe: &Path,
+    cfg: &str,
+    h5: &str,
+    out: &str,
+    genes: &str,
+    max_lr: usize,
+) -> String {
+    format!(
+        "{} --plain --config {cfg} --h5ad {h5} --output-dir {out} \
+         --training-mode full --genes {genes} --max-genes {} --epochs 2 \
+         --spatial_dim {VERIFY_SPATIAL_DIM} --max-lr {max_lr} --parallel 2",
+        exe.display(),
+        VERIFY_GENE_TARGETS.len()
+    )
 }
 
 /// Workspace directory (`current_dir` for the training subprocess) and absolute `--config` path.
@@ -344,22 +438,56 @@ fn rule(width: usize) -> String {
 fn emit_check(
     log: &mut VerifyLog,
     all_ok: &mut bool,
+    failed_checks: &mut Vec<(String, Vec<String>)>,
     ok: bool,
     label: &str,
 ) -> anyhow::Result<()> {
+    emit_check_details(log, all_ok, failed_checks, ok, label, &[])
+}
+
+fn emit_check_details(
+    log: &mut VerifyLog,
+    all_ok: &mut bool,
+    failed_checks: &mut Vec<(String, Vec<String>)>,
+    ok: bool,
+    label: &str,
+    details: &[String],
+) -> anyhow::Result<()> {
     let status = if ok { "PASS" } else { "FAIL" };
     log.writeln_str(&format!("[{status}] {label}"))?;
-    *all_ok &= check_line_stdout(ok, label);
+    for d in details {
+        log.writeln_str(&format!("       {d}"))?;
+    }
+    if !ok {
+        failed_checks.push((label.to_string(), details.to_vec()));
+    }
+    *all_ok &= check_line_stdout(ok, label, details);
     Ok(())
 }
 
-fn check_line_stdout(ok: bool, label: &str) -> bool {
+fn check_line_stdout(ok: bool, label: &str, details: &[String]) -> bool {
     let icon = if ok { "✓" } else { "✗" };
     let text = format!("  [{icon}] {label}");
     if ok {
         println!("{}", text.green());
     } else {
         println!("{}", text.red());
+        for d in details.iter().take(6) {
+            for line in d.lines().take(8) {
+                println!("{}", format!("      {line}").red().dimmed());
+            }
+        }
+        if details.len() > 6 {
+            println!(
+                "{}",
+                format!(
+                    "      … ({} more detail lines in verify log)",
+                    details.len() - 6
+                )
+                .red()
+                .dimmed()
+            );
+        }
     }
     ok
 }
@@ -590,6 +718,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     log.flush()?;
 
     let mut all_ok = true;
+    let mut failed_checks: Vec<(String, Vec<String>)> = Vec::new();
 
     let resolved = verify_workspace_and_config();
     let (workspace, config_path) = match resolved {
@@ -602,6 +731,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             emit_check(
                 &mut log,
                 &mut all_ok,
+                &mut failed_checks,
                 false,
                 &format!(
                     "spaceship_config.toml (set SPACETRAVLR_ROOT, cd into SpaceTravLR_rust, or install data/spaceship_config.toml next to the binary; compile-time path {} is often wrong on release builds)",
@@ -619,6 +749,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
                     "spaceship_config.toml (see log; compile-time fallback was {})",
                     hint.display()
                 ),
+                &[],
             );
             println!(
                 "{}",
@@ -678,6 +809,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     emit_check(
         &mut log,
         &mut all_ok,
+        &mut failed_checks,
         h5ad_raw.is_file(),
         "Dataset available (download or local path)",
     )?;
@@ -690,11 +822,13 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             Ok(()) => Some(dst),
             Err(e) => {
                 log.writeln_str(&format!("  prep_strip_error: {e:#}"))?;
-                emit_check(
+                emit_check_details(
                     &mut log,
                     &mut all_ok,
+                    &mut failed_checks,
                     false,
                     "Copy .h5ad + strip layers normalized_count / imputed_count (forces Rust full auto-prep)",
+                    &[format!("{e:#}")],
                 )?;
                 None
             }
@@ -713,9 +847,18 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             missing.push(want);
         }
     }
-    emit_check(
+    let gene_check_details = if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "missing from AnnData var_names: {}",
+            missing.join(", ")
+        )]
+    };
+    emit_check_details(
         &mut log,
         &mut all_ok,
+        &mut failed_checks,
         missing.is_empty(),
         &format!(
             "AnnData contains verify targets {} (resolved: {})",
@@ -726,6 +869,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
                 genes_resolved.join(", ")
             }
         ),
+        &gene_check_details,
     )?;
 
     let genes_csv = genes_resolved.join(",");
@@ -733,10 +877,15 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     let out_dir = work_path.join("verify_train_out");
     let out_str = out_dir.to_string_lossy().into_owned();
     let cfg_str = config_path.to_string_lossy().into_owned();
+    let stdout_path = work_path.join("verify_training.stdout.log");
     let stderr_path = work_path.join("verify_training.stderr.log");
 
     log.writeln_str("")?;
     log.writeln_str("(When [data].condition is set, each group trains under output_dir/conditions/<id>/.)")?;
+    log.writeln_str(&format!(
+        "  training_stdout:   {}",
+        stdout_path.display()
+    ))?;
     log.writeln_str(&format!(
         "  training_stderr:   {}",
         stderr_path.display()
@@ -752,99 +901,219 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
         )
         .dimmed()
     );
+    println!(
+        "{}",
+        format!(
+            "  … logs → {} and {}",
+            stdout_path.display(),
+            stderr_path.display()
+        )
+        .dimmed()
+    );
 
     let mut st_train_ok = false;
-    if let Some(ref h5_train) = h5ad_train {
-        if missing.is_empty() {
-            let h5_str = h5_train.to_string_lossy().into_owned();
-            let stderr_file = File::create(&stderr_path).with_context(|| format!("create {}", stderr_path.display()))?;
-            let st_train = Command::new(&exe)
-                .arg("--plain")
-                .arg("--config")
-                .arg(&cfg_str)
-                .arg("--h5ad")
-                .arg(&h5_str)
-                .arg("--output-dir")
-                .arg(&out_str)
-                .arg("--training-mode")
-                .arg("full")
-                .arg("--genes")
-                .arg(&genes_csv)
-                .arg("--max-genes")
-                .arg(VERIFY_GENE_TARGETS.len().to_string())
-                .arg("--epochs")
-                .arg("2")
-                .arg("--spatial_dim")
-                .arg(VERIFY_SPATIAL_DIM.to_string())
-                .arg("--max-lr")
-                .arg(max_lr.to_string())
-                .arg("--parallel")
-                .arg("2")
-                .env("SPACETRAVLR_FORCE_KEEP_GENES", &genes_csv)
-                .stderr(Stdio::from(stderr_file))
-                .current_dir(&workspace)
-                .status()
-                .context("spawn spacetravlr training")?;
-            st_train_ok = st_train.success();
+    let mut train_status: Option<std::process::ExitStatus> = None;
+    let mut train_fail_details: Vec<String> = Vec::new();
+
+    if h5ad_train.is_none() {
+        train_fail_details.push(
+            "subprocess not started: prep-layer strip failed (see prep_strip_error above)".into(),
+        );
+    } else if !missing.is_empty() {
+        train_fail_details.push(format!(
+            "subprocess not started: missing verify target genes: {}",
+            missing.join(", ")
+        ));
+    } else if let Some(ref h5_train) = h5ad_train {
+        let h5_str = h5_train.to_string_lossy().into_owned();
+        let cmd_line = training_subprocess_command_line(
+            &exe,
+            &cfg_str,
+            &h5_str,
+            &out_str,
+            &genes_csv,
+            max_lr,
+        );
+        log.writeln_str(&format!("  training_command:  {cmd_line}"))?;
+        log.writeln_str(&format!(
+            "  training_cwd:      {}",
+            workspace.display()
+        ))?;
+        log.flush()?;
+
+        let stdout_file =
+            File::create(&stdout_path).with_context(|| format!("create {}", stdout_path.display()))?;
+        let stderr_file =
+            File::create(&stderr_path).with_context(|| format!("create {}", stderr_path.display()))?;
+        let st_train = Command::new(&exe)
+            .arg("--plain")
+            .arg("--config")
+            .arg(&cfg_str)
+            .arg("--h5ad")
+            .arg(&h5_str)
+            .arg("--output-dir")
+            .arg(&out_str)
+            .arg("--training-mode")
+            .arg("full")
+            .arg("--genes")
+            .arg(&genes_csv)
+            .arg("--max-genes")
+            .arg(VERIFY_GENE_TARGETS.len().to_string())
+            .arg("--epochs")
+            .arg("2")
+            .arg("--spatial_dim")
+            .arg(VERIFY_SPATIAL_DIM.to_string())
+            .arg("--max-lr")
+            .arg(max_lr.to_string())
+            .arg("--parallel")
+            .arg("2")
+            .env("SPACETRAVLR_FORCE_KEEP_GENES", &genes_csv)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .current_dir(&workspace)
+            .status()
+            .context("spawn spacetravlr training")?;
+        train_status = Some(st_train);
+        st_train_ok = st_train.success();
+        if !st_train_ok {
+            train_fail_details.push(format_exit_status(&st_train));
         }
-    } else {
-        log.writeln_str("  (training subprocess skipped — prep strip failed)")?;
     }
 
-    emit_check(
-        &mut log,
-        &mut all_ok,
-        st_train_ok,
-        "Training subprocess completed successfully (--parallel 2, AICDA + CD74, full mode, 2 epochs)",
-    )?;
-
+    let train_stdout = if stdout_path.is_file() {
+        read_file_utf8_lossy_capped(&stdout_path, VERIFY_TRAIN_STDERR_MAX_BYTES)
+            .unwrap_or_else(|_| String::from("(could not read training stdout)"))
+    } else {
+        String::new()
+    };
     let train_stderr = if stderr_path.is_file() {
         read_file_utf8_lossy_capped(&stderr_path, VERIFY_TRAIN_STDERR_MAX_BYTES)
             .unwrap_or_else(|_| String::from("(could not read training stderr)"))
     } else {
         String::new()
     };
+    let train_combined = format!("{train_stdout}\n{train_stderr}");
+
+    if !st_train_ok {
+        if train_status.is_some() {
+            train_fail_details.push(format!("subprocess binary: {}", exe.display()));
+        }
+        train_fail_details.extend(stderr_error_hints(&train_combined, 12));
+        append_log_tail_details(
+            &mut train_fail_details,
+            "stdout",
+            &stdout_path,
+            VERIFY_TRAIN_LOG_TAIL_LINES,
+        );
+        append_log_tail_details(
+            &mut train_fail_details,
+            "stderr",
+            &stderr_path,
+            VERIFY_TRAIN_LOG_TAIL_LINES,
+        );
+        let betas_found: Vec<String> = genes_resolved
+            .iter()
+            .filter(|g| find_gene_betadata_in_run_root(&out_dir, g).is_some())
+            .cloned()
+            .collect();
+        if !betas_found.is_empty() {
+            train_fail_details.push(format!(
+                "note: betadata exists for {} despite non-zero exit ({}) — inspect log tails for errors after \"done.\"",
+                betas_found.join(", "),
+                train_status
+                    .as_ref()
+                    .map(format_exit_status)
+                    .unwrap_or_else(|| "unknown status".into())
+            ));
+        }
+        if train_combined.contains("done.") && !st_train_ok {
+            train_fail_details.push(
+                "note: stdout contains \"done.\" but exit code was non-zero — likely a late panic/abort during cleanup or HDF5 close".into(),
+            );
+        }
+    }
+
+    emit_check_details(
+        &mut log,
+        &mut all_ok,
+        &mut failed_checks,
+        st_train_ok,
+        "Training subprocess completed successfully (--parallel 2, AICDA + CD74, full mode, 2 epochs)",
+        &train_fail_details,
+    )?;
 
     if skip_prep_strip {
         emit_check(
             &mut log,
             &mut all_ok,
+            &mut failed_checks,
             true,
             "Rust full preprocess + MAGIC log markers (skipped — SPACETRAVLR_VERIFY_SKIP_PREP_STRIP)",
         )?;
     } else {
-        let has_prep = train_stderr.contains(VERIFY_LOG_RUST_FULL_PREP);
-        emit_check(
+        let has_prep = train_combined.contains(VERIFY_LOG_RUST_FULL_PREP);
+        let prep_details = if has_prep {
+            Vec::new()
+        } else {
+            vec![
+                format!("expected log substring: {VERIFY_LOG_RUST_FULL_PREP:?}"),
+                "searched combined stdout+stderr from training subprocess".into(),
+            ]
+        };
+        emit_check_details(
             &mut log,
             &mut all_ok,
+            &mut failed_checks,
             has_prep,
             "Training stderr: Rust full preprocess (normalize / HVG / PCA / UMAP / Leiden / …)",
+            &prep_details,
         )?;
-        let has_magic = train_stderr.contains(VERIFY_LOG_MAGIC_CELLTYPE);
-        emit_check(
+        let has_magic = train_combined.contains(VERIFY_LOG_MAGIC_CELLTYPE);
+        let magic_details = if has_magic {
+            Vec::new()
+        } else {
+            vec![
+                format!("expected log substring: {VERIFY_LOG_MAGIC_CELLTYPE:?}"),
+                "searched combined stdout+stderr from training subprocess".into(),
+            ]
+        };
+        emit_check_details(
             &mut log,
             &mut all_ok,
+            &mut failed_checks,
             has_magic,
             "Training stderr: clusterwise MAGIC → layers['imputed_count']",
+            &magic_details,
         )?;
     }
 
-    let gpu_used = train_stderr.contains(VERIFY_LOG_WEBGPU);
+    let gpu_used = train_combined.contains(VERIFY_LOG_WEBGPU);
     if allow_cpu {
         emit_check(
             &mut log,
             &mut all_ok,
+            &mut failed_checks,
             true,
             &format!(
                 "CNN compute backend (SPACETRAVLR_VERIFY_ALLOW_CPU: WebGPU={gpu_used}, NdArray allowed)"
             ),
         )?;
     } else {
-        emit_check(
+        let gpu_details = if gpu_used {
+            Vec::new()
+        } else {
+            vec![
+                format!("expected log substring: {VERIFY_LOG_WEBGPU:?}"),
+                "searched combined stdout+stderr; set SPACETRAVLR_VERIFY_ALLOW_CPU=1 to allow CPU-only".into(),
+            ]
+        };
+        emit_check_details(
             &mut log,
             &mut all_ok,
+            &mut failed_checks,
             gpu_used,
             "CNN compute backend = WebGPU (training stderr; set SPACETRAVLR_VERIFY_ALLOW_CPU=1 for CPU-only)",
+            &gpu_details,
         )?;
     }
 
@@ -859,6 +1128,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             emit_check(
                 &mut log,
                 &mut all_ok,
+                &mut failed_checks,
                 true,
                 &format!(
                     "{} exists ({})",
@@ -868,43 +1138,52 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             )?;
             let mx = feather_max_abs_non_id(&beta_path).context("read betadata feather")?;
             let beta_vals = mx > 1e-8;
-            emit_check(
+            let beta_val_details = if beta_vals {
+                Vec::new()
+            } else {
+                vec![format!("max|β| = {mx:.3e} (expected > 1e-8)")]
+            };
+            emit_check_details(
                 &mut log,
                 &mut all_ok,
+                &mut failed_checks,
                 beta_vals,
                 &format!("{gene}: betadata feather has finite β values (max|β| ≈ {mx:.3e})"),
+                &beta_val_details,
             )?;
         } else {
-            let mut detail = format!(
+            let mut detail_lines = vec![format!(
                 "{gene}_betadata.feather not found under {} (searched run root and {}/<group>/)",
                 out_dir.display(),
                 CONDITION_RUNS_SUBDIR
-            );
+            )];
             if let Some(ref p) = orphan_path {
-                detail.push_str(&format!(
-                    " — found {} (no GRN modulators for this target at current --max-lr; try a higher SPACETRAVLR_VERIFY_MAX_LR)",
+                detail_lines.push(format!(
+                    "found orphan marker {} (no GRN modulators at current --max-lr; try higher SPACETRAVLR_VERIFY_MAX_LR)",
                     p.strip_prefix(&out_dir).unwrap_or(p.as_path()).display()
                 ));
             } else if let Some(ref p) = tf_ab_path {
-                detail.push_str(&format!(
-                    " — found {} (TF modulator block empty after ablation filters)",
+                detail_lines.push(format!(
+                    "found tf_ablated marker {} (TF modulator block empty after ablation filters)",
                     p.strip_prefix(&out_dir).unwrap_or(p.as_path()).display()
                 ));
             }
             let list = list_marker_files_for_debug(&out_dir);
             if !list.is_empty() {
-                use std::fmt::Write;
                 let preview: Vec<_> = list.iter().take(24).cloned().collect();
-                let _ = write!(
-                    detail,
-                    " — marker files seen: {}",
-                    preview.join(", ")
-                );
+                detail_lines.push(format!("marker files seen: {}", preview.join(", ")));
                 if list.len() > 24 {
-                    let _ = write!(detail, " … (+{} more)", list.len() - 24);
+                    detail_lines.push(format!("… (+{} more marker files)", list.len() - 24));
                 }
             }
-            emit_check(&mut log, &mut all_ok, false, &detail)?;
+            emit_check_details(
+                &mut log,
+                &mut all_ok,
+                &mut failed_checks,
+                false,
+                &format!("{gene}_betadata.feather exists"),
+                &detail_lines,
+            )?;
         }
     }
 
@@ -920,6 +1199,20 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             " verify work_dir retained: {}",
             work_path.display()
         ))?;
+        log.writeln_str("")?;
+        log.writeln_str(" Failed checks (detail):")?;
+        for (label, details) in &failed_checks {
+            log.writeln_str(&format!("  • {label}"))?;
+            if details.is_empty() {
+                log.writeln_str("      (no extra detail recorded)")?;
+            } else {
+                for d in details {
+                    for line in d.lines() {
+                        log.writeln_str(&format!("      {line}"))?;
+                    }
+                }
+            }
+        }
     }
     log.writeln_str(&hr(w))?;
     log.writeln_str(&format!("End (UTC): {}", Utc::now().format("%Y-%m-%d %H:%M:%S UTC")))?;
@@ -933,6 +1226,42 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     if all_ok {
         Ok(())
     } else {
-        bail!("verify finished with one or more failed checks — see log and terminal ✗ above");
+        let summary: Vec<String> = failed_checks
+            .iter()
+            .map(|(label, details)| {
+                if details.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{label} — {}", details[0])
+                }
+            })
+            .collect();
+        bail!(
+            "verify finished with {} failed check(s): {}",
+            failed_checks.len(),
+            summary.join("; ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod verify_diag_tests {
+    use super::*;
+
+    #[test]
+    fn tail_lines_keeps_last_n() {
+        let s = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let tail = tail_lines(&s, 3);
+        assert!(tail.contains("line8"));
+        assert!(tail.contains("line10"));
+        assert!(!tail.contains("line1\n"));
+    }
+
+    #[test]
+    fn stderr_error_hints_finds_error_lines() {
+        let stderr = "ok\nError: something broke\nCaused by: inner\n";
+        let hints = stderr_error_hints(stderr, 8);
+        assert!(hints.iter().any(|h| h.contains("something broke")));
+        assert!(hints.iter().any(|h| h.contains("Caused by")));
     }
 }
