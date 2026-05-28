@@ -3,10 +3,19 @@ use anyhow::{Context, Result};
 use polars::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Environment variable: directory containing `mouse_network.parquet` / `human_network.parquet`.
 pub const SPACETRAVLR_DATA_DIR_ENV: &str = "SPACETRAVLR_DATA_DIR";
+
+/// Subfolder under `[execution].output_dir` where GRN parquets are auto-downloaded (see `scripts/install.sh`).
+pub const RUN_NETWORK_SUBDIR: &str = "network";
+
+const DEFAULT_GITHUB_REPO: &str = "Koushul/SpaceTravLR_rust";
+const GRN_PARQUET_MIN_BYTES: u64 = 100_000;
+const GRN_NETWORK_PARQUETS: [&str; 2] = ["human_network.parquet", "mouse_network.parquet"];
 
 fn push_tried(tried: &mut Vec<String>, p: &Path) {
     tried.push(p.display().to_string());
@@ -15,6 +24,140 @@ fn push_tried(tried: &mut Vec<String>, p: &Path) {
 fn try_file_path(path: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
     push_tried(tried, &path);
     if path.is_file() { Some(path) } else { None }
+}
+
+fn grn_parquet_ready(path: &Path) -> bool {
+    path.is_file()
+        && fs::metadata(path)
+            .map(|m| m.len() >= GRN_PARQUET_MIN_BYTES)
+            .unwrap_or(false)
+}
+
+fn github_repo_slug() -> String {
+    std::env::var("SPACETRAVLR_GITHUB_REPO")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_GITHUB_REPO.to_string())
+}
+
+fn download_grn_parquet_url(filename: &str, dest: &Path) -> Result<()> {
+    let repo = github_repo_slug();
+    let version_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let part = dest.with_extension("part");
+    if part.exists() {
+        fs::remove_file(&part).ok();
+    }
+    let mut last_err: Option<anyhow::Error> = None;
+    for ref_name in [version_tag.as_str(), "main"] {
+        let url = format!("https://raw.githubusercontent.com/{repo}/{ref_name}/data/{filename}");
+        match download_url_to_path(&url, &part) {
+            Ok(()) if grn_parquet_ready(&part) => {
+                fs::rename(&part, dest)
+                    .with_context(|| format!("install {}", dest.display()))?;
+                return Ok(());
+            }
+            Ok(()) => {
+                fs::remove_file(&part).ok();
+                last_err = Some(anyhow::anyhow!(
+                    "downloaded {filename} from {url} was too small (< {GRN_PARQUET_MIN_BYTES} bytes)"
+                ));
+            }
+            Err(e) => {
+                fs::remove_file(&part).ok();
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no download attempts for {filename}")))
+}
+
+fn download_url_to_path(url: &str, path: &Path) -> Result<()> {
+    let st = Command::new("curl")
+        .args(["-fsSL", url, "-o"])
+        .arg(path)
+        .status()
+        .with_context(|| format!("spawn curl to fetch {url}"))?;
+    if st.success() {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "curl failed for {url} (exit {:?}); install curl or copy GRN parquets manually",
+        st.code()
+    ))
+}
+
+/// `{output_dir}/network` — auto-populated by [`ensure_grn_network_parquets`] when missing.
+pub fn run_network_data_dir(output_dir: &Path) -> PathBuf {
+    output_dir.join(RUN_NETWORK_SUBDIR)
+}
+
+/// Download `human_network.parquet` and `mouse_network.parquet` into `{output_dir}/network/`
+/// (same files as `scripts/install.sh` → `data/`). Skips files that already look valid.
+pub fn ensure_grn_network_parquets(output_dir: &Path) -> Result<PathBuf> {
+    let dir = run_network_data_dir(output_dir);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    for filename in GRN_NETWORK_PARQUETS {
+        let dest = dir.join(filename);
+        if grn_parquet_ready(&dest) {
+            continue;
+        }
+        eprintln!(
+            "spacetravlr: downloading {filename} into {} …",
+            dir.display()
+        );
+        download_grn_parquet_url(filename, &dest).with_context(|| {
+            format!(
+                "download GRN parquet {filename} into {}",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(dir)
+}
+
+/// Resolve GRN parquet search path for a training run: config/env/cwd first, then download into
+/// `{output_dir}/network/` when nothing is found (mirrors `scripts/install.sh`).
+pub fn resolve_or_fetch_network_data_dir(
+    species: &str,
+    output_dir: &Path,
+    config_network_data_dir: Option<&str>,
+) -> Result<Option<String>> {
+    let filename = format!("{species}_network.parquet");
+
+    if let Some(d) = config_network_data_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        let expanded = expand_user_path(d);
+        if grn_parquet_ready(&Path::new(&expanded).join(&filename)) {
+            return Ok(Some(expanded));
+        }
+    }
+
+    let run_net = run_network_data_dir(output_dir);
+    if grn_parquet_ready(&run_net.join(&filename)) {
+        let dir_s = run_net
+            .to_str()
+            .with_context(|| format!("network dir path must be UTF-8: {}", run_net.display()))?
+            .to_string();
+        return Ok(Some(dir_s));
+    }
+
+    if resolve_species_network_parquet(species, None).is_ok() {
+        return Ok(None);
+    }
+
+    eprintln!(
+        "spacetravlr: GRN network not found for species {species:?}; fetching parquets into {} …",
+        run_net.display()
+    );
+    let dir = ensure_grn_network_parquets(output_dir)?;
+    let dir_s = dir
+        .to_str()
+        .with_context(|| format!("network dir path must be UTF-8: {}", dir.display()))?
+        .to_string();
+    resolve_species_network_parquet(species, Some(dir_s.as_str()))
+        .with_context(|| format!("GRN parquet for {species} missing after download"))?;
+    Ok(Some(dir_s))
 }
 
 /// Resolve `{species}_network.parquet` using config override, env, exe-relative paths, and cwd
@@ -77,7 +220,7 @@ pub fn resolve_species_network_parquet(
 
     anyhow::bail!(
         "Could not find GRN network file {:?} for species {:?}. \
-Prebuilt binaries do not bundle these files; run `scripts/install.sh` (downloads into `data/` next to the binary), copy `human_network.parquet` / `mouse_network.parquet` from the SpaceTravLR_rust repo `data/`, or set [{}] / [grn].network_data_dir. \
+Prebuilt binaries do not bundle these files; training runs download into {{output_dir}}/{RUN_NETWORK_SUBDIR}/ automatically when curl is available, or run `scripts/install.sh` (downloads into `data/` next to the binary), copy `human_network.parquet` / `mouse_network.parquet` from the SpaceTravLR_rust repo `data/`, or set [{}] / [grn].network_data_dir. \
 You can also place a `data/` folder next to the executable (or walk up from the current cwd). Tried:\n  {}",
         filename,
         species,
@@ -994,6 +1137,35 @@ mod tests {
         assert!(m.regulators.is_empty());
         assert_eq!(m.lr_pairs.len(), 1);
         assert!(m.tfl_pairs.is_empty());
+    }
+
+    #[test]
+    fn run_network_data_dir_is_under_output() {
+        let out = Path::new("/tmp/spacetravlr_run");
+        assert_eq!(
+            run_network_data_dir(out),
+            Path::new("/tmp/spacetravlr_run/network")
+        );
+    }
+
+    #[test]
+    fn resolve_or_fetch_uses_existing_run_network_dir() {
+        let repo_data = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        let out = std::env::temp_dir().join(format!("st_run_net_{}", std::process::id()));
+        let run_net = run_network_data_dir(&out);
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&run_net).unwrap();
+        fs::copy(
+            repo_data.join("mouse_network.parquet"),
+            run_net.join("mouse_network.parquet"),
+        )
+        .unwrap();
+        let resolved =
+            resolve_or_fetch_network_data_dir("mouse", &out, Some("/nonexistent/network"))
+                .unwrap()
+                .expect("run network dir");
+        assert_eq!(Path::new(&resolved), run_net);
+        let _ = fs::remove_dir_all(&out);
     }
 
     #[test]

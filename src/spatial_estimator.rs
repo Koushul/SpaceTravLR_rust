@@ -2677,10 +2677,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     "could not infer human vs mouse from var_names; set [data].spatial_species or ensure var uses HGNC or MGI-style symbols"
                 )
             })?;
+            let network_data_dir_resolved = crate::network::resolve_or_fetch_network_data_dir(
+                species,
+                Path::new(training_dir),
+                network_data_dir,
+            )?;
             let global_grn = Arc::new(crate::network::GeneNetwork::new(
                 species,
                 &all_var_names,
-                network_data_dir,
+                network_data_dir_resolved.as_deref(),
             )?);
             pipeline_step_end(&hud, "load GRN (network parquet / priors)", t_grn);
 
