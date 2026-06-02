@@ -1,5 +1,12 @@
 # <span style="font-size:2em;">SpaceTravLR</span> {: .st-brand }
-Here we develop SpaceTravLR, a first interpretable machine-learning that generalises across tissues and species, uncovering spatial features linked to functional outcomes. SpaceTravLR infers how single or combinatorial genetic perturbations rewire signals across the tissue neighbourhood, by propagating effects through underlying spatially resolved molecular networks, thereby modelling how perturbations can reshape both the targeted cell and its surrounding neighbourhood.
+SpaceTravLR infers how single or combinatorial genetic perturbations rewire signals across the tissue neighbourhood, by propagating effects through underlying spatially resolved molecular networks, thereby modelling how perturbations can reshape both the targeted cell and its surrounding neighbourhood.
+
+
+# I want to 🧞️
+
+<div id="st-i-want-to" class="st-i-want-to" markdown="0"></div>
+
+
 
 ## Quickstart
 Install me
@@ -31,7 +38,9 @@ Learn more about [how SpaceTravLR works](math.md), other [installations](install
 
 <!-- ![](assets/concepts_B.png) -->
 
-## Training time estimate
+
+
+## Training time estimate {#training-time-estimate}
 
 The equation below provides a rough estimate of how long training SpaceTravLR on your dataset should take. This was empirically estimated using multiple runs across datasets on a100, l40s and rtx6k GPUs.
 

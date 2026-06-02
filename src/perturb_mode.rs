@@ -1125,6 +1125,44 @@ pub struct CollectInteractionsObs {
     pub cell_type_labels: Vec<String>,
 }
 
+fn collect_interactions_row_indices(
+    run_toml: &std::path::Path,
+    obs_names_full: &[String],
+) -> anyhow::Result<Vec<usize>> {
+    let cfg = SpaceshipConfig::from_file(run_toml)?;
+    if let Some(rel) = cfg.data.perturb_obs_subset_file.as_deref() {
+        let p = PathBuf::from(expand_user_path(rel));
+        perturb_obs_indices_from_file(p.as_path(), obs_names_full)
+    } else {
+        Ok((0..obs_names_full.len()).collect())
+    }
+}
+
+/// One string per cell from `obs[column]` (e.g. `adata.obs['cluster']`), aligned with training obs order.
+pub fn load_obs_column_for_collect_interactions(
+    run_toml: &std::path::Path,
+    column: &str,
+) -> anyhow::Result<Vec<String>> {
+    let cfg = SpaceshipConfig::from_file(run_toml)?;
+    let adata_path = expand_user_path(cfg.resolve_adata_path().as_str());
+    if adata_path.is_empty() {
+        anyhow::bail!("data.adata_path is empty in run TOML");
+    }
+    let adata = AnnData::<H5>::open(H5::open(adata_path.as_str())?)?;
+    let obs_names_full = adata.obs_names().into_vec();
+    let row_idx = collect_interactions_row_indices(run_toml, &obs_names_full)?;
+    let obs_df = adata.read_obs()?;
+    let col = obs_df
+        .column(column)
+        .with_context(|| format!("obs column {:?} not found", column))?;
+    let series = col.as_materialized_series();
+    let mut out = Vec::with_capacity(row_idx.len());
+    for &i in &row_idx {
+        out.push(obs_series_row_str(series, i)?);
+    }
+    Ok(out)
+}
+
 pub fn load_obs_for_collect_interactions(
     run_toml: &std::path::Path,
     annot_col: &str,
@@ -1136,12 +1174,7 @@ pub fn load_obs_for_collect_interactions(
     }
     let adata = AnnData::<H5>::open(H5::open(adata_path.as_str())?)?;
     let obs_names_full = adata.obs_names().into_vec();
-    let row_idx: Vec<usize> = if let Some(rel) = cfg.data.perturb_obs_subset_file.as_deref() {
-        let p = PathBuf::from(expand_user_path(rel));
-        perturb_obs_indices_from_file(p.as_path(), &obs_names_full)?
-    } else {
-        (0..obs_names_full.len()).collect()
-    };
+    let row_idx = collect_interactions_row_indices(run_toml, &obs_names_full)?;
     let obs_df = adata.read_obs()?;
     let betadata_key_col =
         resolve_betadata_cluster_key_column(&obs_df, cfg.data.cluster_annot.as_str());

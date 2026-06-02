@@ -67,10 +67,12 @@ extra_css:
   - stylesheets/extra.css
   - stylesheets/rose-pine.css
   - stylesheets/runtime-estimator.css
+  - stylesheets/i-want-to-cards.css
 
 extra_javascript:
   - javascripts/mathjax.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+  - javascripts/i-want-to-cards.js
   - javascripts/runtime-estimator.js
 
 extra:
@@ -98,9 +100,10 @@ nav:
   #   - Spatial Perturbseq: validation.md
 
   - Tutorials:
-      # - Find Functional Microniches: tutorials/find-functional-microniches.ipynb
+      - Find Functional Microniches: tutorials/find-functional-microniches.ipynb
       - Perturb Genes Spatially: tutorials/perturb-genes-spatially.ipynb
       - Screen Ligand-Receptors: tutorials/screen-ligand-receptors.ipynb
+      - Compare Two Samples: tutorials/compare-two-samples.ipynb
 
 
   - Examples:

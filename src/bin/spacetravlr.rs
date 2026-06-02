@@ -29,7 +29,9 @@ use spacetravlr::training_tui::{
 };
 use spacetravlr::{
     BetadataCollectAggregate, RunSummaryParams, betadata_collect_interactions_all_cell_types,
-    load_obs_for_collect_interactions, write_collected_interactions_feather, write_run_summary_html,
+    betadata_collect_interactions_all_cell_types_full, load_obs_column_for_collect_interactions,
+    load_obs_for_collect_interactions, write_collected_interactions_feather,
+    write_collected_interactions_full_feather, write_run_summary_html,
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -230,8 +232,14 @@ struct CollectInteractionsCli {
     annot: String,
     #[arg(
         long,
+        value_name = "COL",
+        help = "obs column (e.g. cluster) — collect interactions independently per value; output includes a cluster column with mean/min/max/sum/positive/negative"
+    )]
+    cluster_col: Option<String>,
+    #[arg(
+        long,
         default_value = "mean",
-        help = "mean|min|max|sum|positive|negative"
+        help = "mean|min|max|sum|positive|negative (ignored when --cluster-col is set)"
     )]
     aggregate: String,
     #[arg(
@@ -1591,12 +1599,6 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
 }
 
 fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
-    let mode = BetadataCollectAggregate::parse(ci.aggregate.trim()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "aggregate must be mean|min|max|sum|positive|negative (got {:?})",
-            ci.aggregate
-        )
-    })?;
     let cfg = SpaceshipConfig::from_file(&ci.run_toml)?;
     let annot_col = ci.annot.trim();
     anyhow::ensure!(
@@ -1608,6 +1610,43 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
     let dir_s = run_output_dir
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("training output directory path must be UTF-8"))?;
+    let out_path = ci
+        .out
+        .clone()
+        .unwrap_or_else(|| run_output_dir.join("plucked_feathers.feather"));
+    let out_s = out_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?;
+
+    if let Some(ref cluster_col) = ci.cluster_col {
+        let col = cluster_col.trim();
+        anyhow::ensure!(!col.is_empty(), "--cluster-col must be non-empty");
+        let cluster_obs =
+            load_obs_column_for_collect_interactions(ci.run_toml.as_path(), col)?;
+        let rows = betadata_collect_interactions_all_cell_types_full(
+            dir_s,
+            &ctx.obs_names,
+            &ctx.cluster_keys,
+            &ctx.cell_type_labels,
+            None,
+            Some(cluster_obs.as_slice()),
+        )?;
+        write_collected_interactions_full_feather(out_s, &rows)?;
+        eprintln!(
+            "Wrote {} rows (per-cluster β, column {:?}) to {}",
+            rows.len(),
+            col,
+            out_path.display()
+        );
+        return Ok(());
+    }
+
+    let mode = BetadataCollectAggregate::parse(ci.aggregate.trim()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "aggregate must be mean|min|max|sum|positive|negative (got {:?})",
+            ci.aggregate
+        )
+    })?;
     let rows = betadata_collect_interactions_all_cell_types(
         dir_s,
         &ctx.obs_names,
@@ -1616,13 +1655,6 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
         mode,
         None,
     )?;
-    let out_path = ci
-        .out
-        .clone()
-        .unwrap_or_else(|| run_output_dir.join("plucked_feathers.feather"));
-    let out_s = out_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?;
     write_collected_interactions_feather(out_s, &rows)?;
     eprintln!("Wrote {} rows to {}", rows.len(), out_path.display());
     Ok(())

@@ -3,9 +3,13 @@ lcov.info
 tmp_dir/
 tmp_bench_h5/
 __pycache__/
+python/spacetravlr/_native*.so
+python/spacetravlr/_native*.pyd
+python/spacetravlr/*.so
+python/spacetravlr/*.pyd
+python/.venv/
 scripts/__pycache__/
 .venv-bench/
-.venv_retro/
 .cache/
 .claude/
 .DS_Store
@@ -16,8 +20,6 @@ web/spatial_viewer/dist/
 results/
 .vscode/
 .cursor/
-
-retro_synthesis/
 
 # MkDocs (Material)
 site/
@@ -42,7 +44,6 @@ docs/_jupyter_cache/
 
 ablation_training_configs/
 scripts/*.py
-scripts/retro_validation/
 
 PIIS0092867425005720.pdf
 data/geo_perturbseq/

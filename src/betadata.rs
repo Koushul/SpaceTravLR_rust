@@ -1447,6 +1447,39 @@ pub struct CollectedInteractionRow {
     pub cell_type: String,
 }
 
+/// All β aggregation modes computed in one pass over matching cells.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct BetaAggregates {
+    pub mean: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub sum: Option<f64>,
+    pub positive: Option<f64>,
+    pub negative: Option<f64>,
+}
+
+/// Multi–cell-type interaction row with every aggregation as its own column.
+#[derive(Clone, Debug, Serialize)]
+pub struct CollectedInteractionRowFull {
+    pub interaction: String,
+    pub target_gene: String,
+    pub interaction_type: String,
+    pub cell_type: String,
+    /// Set when collecting independently per `obs[cluster_col]` partition.
+    pub cluster: Option<String>,
+    pub aggregates: BetaAggregates,
+}
+
+/// Single-selection interaction row with every aggregation as its own column.
+#[derive(Clone, Debug, Serialize)]
+pub struct CollectedInteractionFull {
+    pub interaction: String,
+    pub gene: String,
+    pub interaction_type: String,
+    pub cluster: Option<String>,
+    pub aggregates: BetaAggregates,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BetadataCollectAggregate {
     Mean,
@@ -1482,32 +1515,19 @@ fn classify_betadata_column_type(col: &str) -> &'static str {
     }
 }
 
-fn aggregate_values(vals: &[f64], mode: BetadataCollectAggregate) -> Option<f64> {
-    if vals.is_empty() {
-        return None;
-    }
-    match mode {
-        BetadataCollectAggregate::Mean => Some(vals.iter().sum::<f64>() / vals.len() as f64),
-        BetadataCollectAggregate::Min => vals.iter().copied().reduce(f64::min),
-        BetadataCollectAggregate::Max => vals.iter().copied().reduce(f64::max),
-        BetadataCollectAggregate::Sum => Some(vals.iter().sum::<f64>()),
-        BetadataCollectAggregate::Positive => {
-            let p: Vec<f64> = vals.iter().copied().filter(|x| *x > 0.0).collect();
-            if p.is_empty() {
-                None
-            } else {
-                Some(p.iter().sum::<f64>() / p.len() as f64)
-            }
-        }
-        BetadataCollectAggregate::Negative => {
-            let p: Vec<f64> = vals.iter().copied().filter(|x| *x < 0.0).collect();
-            if p.is_empty() {
-                None
-            } else {
-                Some(p.iter().sum::<f64>() / p.len() as f64)
-            }
-        }
-    }
+fn aggregates_have_signal(agg: &BetaAggregates) -> bool {
+    [agg.mean, agg.min, agg.max, agg.sum, agg.positive, agg.negative]
+        .into_iter()
+        .flatten()
+        .any(|v| v.is_finite() && v.abs() > 1e-15)
+}
+
+fn aggregate_sort_key(agg: &BetaAggregates) -> f64 {
+    [agg.mean, agg.min, agg.max, agg.sum, agg.positive, agg.negative]
+        .into_iter()
+        .flatten()
+        .map(f64::abs)
+        .fold(0.0f64, f64::max)
 }
 
 fn unique_sorted_cell_types(labels: &[String]) -> Vec<String> {
@@ -1518,6 +1538,48 @@ fn unique_sorted_cell_types(labels: &[String]) -> Vec<String> {
     let mut out: Vec<String> = seen.into_iter().map(str::to_string).collect();
     out.sort();
     out
+}
+
+fn ensure_obs_slices_same_len(
+    obs_names: usize,
+    cluster_keys: usize,
+    cell_type_labels: usize,
+    cluster_obs: Option<usize>,
+) -> Result<()> {
+    anyhow::ensure!(
+        obs_names == cluster_keys,
+        "obs_names len {obs_names} != cluster_keys len {cluster_keys}"
+    );
+    anyhow::ensure!(
+        obs_names == cell_type_labels,
+        "obs_names len {obs_names} != cell_type_labels len {cell_type_labels}"
+    );
+    if let Some(n) = cluster_obs {
+        anyhow::ensure!(
+            obs_names == n,
+            "obs_names len {obs_names} != cluster_obs len {n}"
+        );
+    }
+    Ok(())
+}
+
+fn subset_by_indices<T: Clone>(values: &[T], indices: &[usize]) -> Vec<T> {
+    indices.iter().map(|&i| values[i].clone()).collect()
+}
+
+fn partition_indices_by_label(labels: &[String]) -> Vec<(String, Vec<usize>)> {
+    unique_sorted_cell_types(labels)
+        .into_iter()
+        .map(|lab| {
+            let indices: Vec<usize> = labels
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.as_str() == lab.as_str())
+                .map(|(i, _)| i)
+                .collect();
+            (lab, indices)
+        })
+        .collect()
 }
 
 /// Precomputed per-cell-type row indices into the feather (through the `mapping`).
@@ -1548,6 +1610,548 @@ impl CellTypeIndices {
             labels: unique_cell_types.to_vec(),
             mapped_rows,
         }
+    }
+
+    /// Like [`Self::build`], but only includes obs rows in `obs_subset` (for cluster partitions).
+    fn build_for_obs_subset(
+        cell_type_labels: &[String],
+        unique_cell_types: &[Arc<str>],
+        mapping: &[usize],
+        obs_subset: &[usize],
+    ) -> Self {
+        let mut label_to_idx: HashMap<&str, usize> = HashMap::with_capacity(unique_cell_types.len());
+        for (i, ct) in unique_cell_types.iter().enumerate() {
+            label_to_idx.insert(ct.as_ref(), i);
+        }
+        let mut mapped_rows: Vec<Vec<usize>> = vec![Vec::new(); unique_cell_types.len()];
+        for &ci in obs_subset {
+            if let Some(&ct_i) = label_to_idx.get(cell_type_labels[ci].as_str()) {
+                mapped_rows[ct_i].push(mapping[ci]);
+            }
+        }
+        CellTypeIndices {
+            labels: unique_cell_types.to_vec(),
+            mapped_rows,
+        }
+    }
+}
+
+/// Per–obs-cluster partition: cell-type row lists for cells in that cluster only.
+struct ClusterPartitionCellTypes {
+    labels: Vec<String>,
+    per_partition: Vec<CellTypeIndices>,
+}
+
+enum InteractionGrouping {
+    CellTypes(CellTypeIndices),
+    /// One independent aggregation per `obs[cluster_col]` value; feather read once.
+    ClusterPartitions(ClusterPartitionCellTypes),
+}
+
+/// One β coefficient column materialized as `f64` for hot aggregation loops.
+struct CoefColumnData {
+    name: Arc<str>,
+    interaction_type: &'static str,
+    values: Vec<f64>,
+}
+
+/// Per-feather state shared across all coefficient columns (one IPC read per file).
+struct CollectGeneWorkspace {
+    target_gene: Arc<str>,
+    coef_columns: Vec<CoefColumnData>,
+    grouping: InteractionGrouping,
+}
+
+enum MaskInteractionGrouping {
+    Single(Vec<usize>),
+    ClusterPartitions {
+        labels: Vec<String>,
+        masked_rows: Vec<Vec<usize>>,
+    },
+}
+
+/// Per-feather state for mask-filtered collection (one IPC read per file).
+struct CollectGeneMaskWorkspace {
+    target_gene: Arc<str>,
+    coef_columns: Vec<CoefColumnData>,
+    grouping: MaskInteractionGrouping,
+}
+
+fn build_cluster_partition_cell_types(
+    cell_type_labels: &[String],
+    mapping: &[usize],
+    cluster_obs: &[String],
+) -> ClusterPartitionCellTypes {
+    let partitions = partition_indices_by_label(cluster_obs);
+    let mut labels = Vec::with_capacity(partitions.len());
+    let mut per_partition = Vec::with_capacity(partitions.len());
+    for (lab, obs_indices) in partitions {
+        let ct_in_part: Vec<String> = obs_indices
+            .iter()
+            .map(|&i| cell_type_labels[i].clone())
+            .collect();
+        let unique_ct: Vec<Arc<str>> = unique_sorted_cell_types(&ct_in_part)
+            .into_iter()
+            .map(|s| Arc::from(s.as_str()))
+            .collect();
+        labels.push(lab);
+        per_partition.push(CellTypeIndices::build_for_obs_subset(
+            cell_type_labels,
+            &unique_ct,
+            mapping,
+            &obs_indices,
+        ));
+    }
+    ClusterPartitionCellTypes {
+        labels,
+        per_partition,
+    }
+}
+
+fn read_feather_coef_columns_and_mapping(
+    path: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+) -> Result<(Vec<CoefColumnData>, Vec<usize>)> {
+    let df = read_betadata_feather_df(path)?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let (mapping, _) =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
+    let coef_columns = materialize_coef_columns(&df, &all_names, label_idx)?;
+    Ok((coef_columns, mapping))
+}
+
+fn list_betadata_feather_gene_paths(
+    dir: &Path,
+    max_genes: Option<usize>,
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut paths: Vec<(String, PathBuf)> = std::fs::read_dir(dir)
+        .with_context(|| format!("read_dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_str()?;
+            let stem = name.strip_suffix("_betadata.feather")?;
+            if stem.is_empty() {
+                return None;
+            }
+            Some((stem.to_string(), p))
+        })
+        .collect();
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(cap) = max_genes {
+        paths.truncate(cap.min(paths.len()));
+    }
+    Ok(paths)
+}
+
+fn read_betadata_feather_df(path: &str) -> Result<DataFrame> {
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))
+}
+
+fn materialize_coef_columns(
+    df: &DataFrame,
+    all_names: &[String],
+    label_idx: Option<usize>,
+) -> Result<Vec<CoefColumnData>> {
+    let mut out = Vec::new();
+    for (i, name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx || is_intercept_column(name) {
+            continue;
+        }
+        let col = match df.column(name.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let Ok(series) = col.cast(&DataType::Float64) else {
+            continue;
+        };
+        let ca = series.f64()?;
+        let n_rows = ca.len();
+        let values: Vec<f64> = (0..n_rows).map(|i| ca.get(i).unwrap_or(0.0)).collect();
+        out.push(CoefColumnData {
+            name: Arc::from(name.as_str()),
+            interaction_type: classify_betadata_column_type(name),
+            values,
+        });
+    }
+    Ok(out)
+}
+
+fn load_collect_gene_workspace(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    cluster_obs: Option<&[String]>,
+    unique_cell_types: &[Arc<str>],
+) -> Result<CollectGeneWorkspace> {
+    let (coef_columns, mapping) =
+        read_feather_coef_columns_and_mapping(path, obs_names, cluster_keys)?;
+    let grouping = if let Some(labels) = cluster_obs {
+        InteractionGrouping::ClusterPartitions(build_cluster_partition_cell_types(
+            cell_type_labels,
+            &mapping,
+            labels,
+        ))
+    } else {
+        InteractionGrouping::CellTypes(CellTypeIndices::build(
+            cell_type_labels,
+            unique_cell_types,
+            &mapping,
+        ))
+    };
+    Ok(CollectGeneWorkspace {
+        target_gene: Arc::from(target_gene),
+        coef_columns,
+        grouping,
+    })
+}
+
+fn load_collect_gene_workspace_all_ct(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    unique_cell_types: &[Arc<str>],
+) -> Result<CollectGeneWorkspace> {
+    load_collect_gene_workspace(
+        path,
+        target_gene,
+        obs_names,
+        cluster_keys,
+        cell_type_labels,
+        None,
+        unique_cell_types,
+    )
+}
+
+fn load_collect_gene_mask_workspace(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_include_mask: &[bool],
+    cluster_obs: Option<&[String]>,
+) -> Result<CollectGeneMaskWorkspace> {
+    let (coef_columns, mapping) =
+        read_feather_coef_columns_and_mapping(path, obs_names, cluster_keys)?;
+    let n_obs = obs_names.len();
+    let grouping = if let Some(labels) = cluster_obs {
+        let partitions = partition_indices_by_label(labels);
+        let mut cluster_labels = Vec::with_capacity(partitions.len());
+        let mut masked_rows = Vec::with_capacity(partitions.len());
+        for (lab, obs_indices) in partitions {
+            let rows: Vec<usize> = obs_indices
+                .iter()
+                .filter(|&&ci| ci < n_obs && cell_include_mask[ci])
+                .map(|&ci| mapping[ci])
+                .collect();
+            cluster_labels.push(lab);
+            masked_rows.push(rows);
+        }
+        MaskInteractionGrouping::ClusterPartitions {
+            labels: cluster_labels,
+            masked_rows,
+        }
+    } else {
+        let rows: Vec<usize> = cell_include_mask
+            .iter()
+            .enumerate()
+            .filter(|(ci, inc)| **inc && *ci < n_obs)
+            .map(|(ci, _)| mapping[ci])
+            .collect();
+        MaskInteractionGrouping::Single(rows)
+    };
+    Ok(CollectGeneMaskWorkspace {
+        target_gene: Arc::from(target_gene),
+        coef_columns,
+        grouping,
+    })
+}
+
+fn collect_rows_for_cell_type_indices(
+    coef: &CoefColumnData,
+    target_gene: &Arc<str>,
+    ct_idx: &CellTypeIndices,
+    mode: BetadataCollectAggregate,
+) -> Vec<CollectedInteractionRow> {
+    let mut local = Vec::with_capacity(ct_idx.mapped_rows.len());
+    for (ct_i, rows) in ct_idx.mapped_rows.iter().enumerate() {
+        let Some(beta) = aggregate_mapped_column(&coef.values, rows, mode) else {
+            continue;
+        };
+        if !beta.is_finite() || beta.abs() <= 1e-15 {
+            continue;
+        }
+        local.push(CollectedInteractionRow {
+            interaction: coef.name.to_string(),
+            target_gene: target_gene.to_string(),
+            beta,
+            interaction_type: coef.interaction_type.to_string(),
+            cell_type: ct_idx.labels[ct_i].to_string(),
+        });
+    }
+    local
+}
+
+fn collect_rows_full_for_cell_type_indices(
+    coef: &CoefColumnData,
+    target_gene: &Arc<str>,
+    ct_idx: &CellTypeIndices,
+    cluster: Option<&str>,
+) -> Vec<CollectedInteractionRowFull> {
+    let mut local = Vec::with_capacity(ct_idx.mapped_rows.len());
+    for (ct_i, rows) in ct_idx.mapped_rows.iter().enumerate() {
+        let aggregates = aggregate_mapped_column_all(&coef.values, rows);
+        if !aggregates_have_signal(&aggregates) {
+            continue;
+        }
+        local.push(CollectedInteractionRowFull {
+            interaction: coef.name.to_string(),
+            target_gene: target_gene.to_string(),
+            interaction_type: coef.interaction_type.to_string(),
+            cell_type: ct_idx.labels[ct_i].to_string(),
+            cluster: cluster.map(str::to_string),
+            aggregates,
+        });
+    }
+    local
+}
+
+fn collect_interactions_all_cell_types_from_workspace(
+    ws: &CollectGeneWorkspace,
+    mode: BetadataCollectAggregate,
+) -> Vec<CollectedInteractionRow> {
+    match &ws.grouping {
+        InteractionGrouping::CellTypes(ct_idx) => ws
+            .coef_columns
+            .par_iter()
+            .map(|coef| collect_rows_for_cell_type_indices(coef, &ws.target_gene, ct_idx, mode))
+            .reduce(
+                || Vec::new(),
+                |mut acc, mut chunk| {
+                    acc.append(&mut chunk);
+                    acc
+                },
+            ),
+        InteractionGrouping::ClusterPartitions(parts) => parts
+            .labels
+            .par_iter()
+            .zip(parts.per_partition.par_iter())
+            .map(|(lab, ct_idx)| {
+                ws.coef_columns
+                    .par_iter()
+                    .map(|coef| {
+                        collect_rows_for_cell_type_indices(coef, &ws.target_gene, ct_idx, mode)
+                    })
+                    .reduce(
+                        || Vec::new(),
+                        |mut acc, mut chunk| {
+                            acc.append(&mut chunk);
+                            acc
+                        },
+                    )
+            })
+            .reduce(
+                || Vec::new(),
+                |mut acc, mut chunk| {
+                    acc.append(&mut chunk);
+                    acc
+                },
+            ),
+    }
+}
+
+fn collect_interactions_all_cell_types_full_from_workspace(
+    ws: &CollectGeneWorkspace,
+) -> Vec<CollectedInteractionRowFull> {
+    match &ws.grouping {
+        InteractionGrouping::CellTypes(ct_idx) => ws
+            .coef_columns
+            .par_iter()
+            .map(|coef| {
+                collect_rows_full_for_cell_type_indices(coef, &ws.target_gene, ct_idx, None)
+            })
+            .reduce(
+                || Vec::new(),
+                |mut acc, mut chunk| {
+                    acc.append(&mut chunk);
+                    acc
+                },
+            ),
+        InteractionGrouping::ClusterPartitions(parts) => parts
+            .labels
+            .par_iter()
+            .zip(parts.per_partition.par_iter())
+            .map(|(lab, ct_idx)| {
+                ws.coef_columns
+                    .par_iter()
+                    .map(|coef| {
+                        collect_rows_full_for_cell_type_indices(
+                            coef,
+                            &ws.target_gene,
+                            ct_idx,
+                            Some(lab.as_str()),
+                        )
+                    })
+                    .reduce(
+                        || Vec::new(),
+                        |mut acc, mut chunk| {
+                            acc.append(&mut chunk);
+                            acc
+                        },
+                    )
+            })
+            .reduce(
+                || Vec::new(),
+                |mut acc, mut chunk| {
+                    acc.append(&mut chunk);
+                    acc
+                },
+            ),
+    }
+}
+
+fn collect_interactions_mask_from_workspace(
+    ws: &CollectGeneMaskWorkspace,
+    mode: BetadataCollectAggregate,
+) -> Vec<CollectedInteraction> {
+    let MaskInteractionGrouping::Single(rows) = &ws.grouping else {
+        unreachable!("mask single-β collection does not use cluster partitions");
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    ws.coef_columns
+        .par_iter()
+        .filter_map(|coef| {
+            let beta = aggregate_mapped_column(&coef.values, rows, mode)?;
+            if !beta.is_finite() || beta.abs() <= 1e-15 {
+                return None;
+            }
+            Some(CollectedInteraction {
+                interaction: coef.name.to_string(),
+                gene: ws.target_gene.to_string(),
+                beta,
+                interaction_type: coef.interaction_type.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn collect_interactions_mask_full_from_workspace(
+    ws: &CollectGeneMaskWorkspace,
+) -> Vec<CollectedInteractionFull> {
+    match &ws.grouping {
+        MaskInteractionGrouping::Single(rows) if rows.is_empty() => Vec::new(),
+        MaskInteractionGrouping::Single(rows) => ws
+            .coef_columns
+            .par_iter()
+            .filter_map(|coef| {
+                let aggregates = aggregate_mapped_column_all(&coef.values, rows);
+                if !aggregates_have_signal(&aggregates) {
+                    return None;
+                }
+                Some(CollectedInteractionFull {
+                    interaction: coef.name.to_string(),
+                    gene: ws.target_gene.to_string(),
+                    interaction_type: coef.interaction_type.to_string(),
+                    cluster: None,
+                    aggregates,
+                })
+            })
+            .collect(),
+        MaskInteractionGrouping::ClusterPartitions { labels, masked_rows } => labels
+            .par_iter()
+            .zip(masked_rows.par_iter())
+            .flat_map(|(lab, rows)| {
+                if rows.is_empty() {
+                    return Vec::new();
+                }
+                ws.coef_columns
+                    .par_iter()
+                    .filter_map(|coef| {
+                        let aggregates = aggregate_mapped_column_all(&coef.values, rows);
+                        if !aggregates_have_signal(&aggregates) {
+                            return None;
+                        }
+                        Some(CollectedInteractionFull {
+                            interaction: coef.name.to_string(),
+                            gene: ws.target_gene.to_string(),
+                            interaction_type: coef.interaction_type.to_string(),
+                            cluster: Some(lab.clone()),
+                            aggregates,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    }
+}
+
+#[inline]
+fn aggregate_mapped_column_all(col_data: &[f64], feather_rows: &[usize]) -> BetaAggregates {
+    if feather_rows.is_empty() {
+        return BetaAggregates::default();
+    }
+    let mut sum = 0.0f64;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut pos_sum = 0.0f64;
+    let mut pos_cnt = 0usize;
+    let mut neg_sum = 0.0f64;
+    let mut neg_cnt = 0usize;
+    for &r in feather_rows {
+        let x = *col_data.get(r).unwrap_or(&0.0);
+        sum += x;
+        if x < min {
+            min = x;
+        }
+        if x > max {
+            max = x;
+        }
+        if x > 0.0 {
+            pos_sum += x;
+            pos_cnt += 1;
+        }
+        if x < 0.0 {
+            neg_sum += x;
+            neg_cnt += 1;
+        }
+    }
+    let n = feather_rows.len() as f64;
+    BetaAggregates {
+        mean: Some(sum / n),
+        min: Some(min),
+        max: Some(max),
+        sum: Some(sum),
+        positive: if pos_cnt == 0 {
+            None
+        } else {
+            Some(pos_sum / pos_cnt as f64)
+        },
+        negative: if neg_cnt == 0 {
+            None
+        } else {
+            Some(neg_sum / neg_cnt as f64)
+        },
     }
 }
 
@@ -1625,73 +2229,174 @@ pub fn betadata_collect_interactions_all_cell_types_one_gene(
     unique_cell_types: &[Arc<str>],
     mode: BetadataCollectAggregate,
 ) -> Result<Vec<CollectedInteractionRow>> {
-    let f = File::open(path).with_context(|| format!("open {}", path))?;
-    let df = IpcReader::new(f)
-        .finish()
-        .with_context(|| format!("read IPC {}", path))?;
-    let all_names: Vec<String> = df
-        .get_columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-    let label_idx = betadata_feather_label_column_index(&all_names);
-    let row_labels: Vec<String> = if let Some(idx) = label_idx {
-        let label_name = &all_names[idx];
-        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    let ws = load_collect_gene_workspace_all_ct(
+        path,
+        target_gene,
+        obs_names,
+        cluster_keys,
+        cell_type_labels,
+        unique_cell_types,
+    )?;
+    Ok(collect_interactions_all_cell_types_from_workspace(&ws, mode))
+}
+
+/// Like [`betadata_collect_interactions_all_cell_types_one_gene`], but emits mean/min/max/sum/positive/negative columns.
+pub fn betadata_collect_interactions_all_cell_types_one_gene_full(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    unique_cell_types: &[Arc<str>],
+) -> Result<Vec<CollectedInteractionRowFull>> {
+    let ws = load_collect_gene_workspace_all_ct(
+        path,
+        target_gene,
+        obs_names,
+        cluster_keys,
+        cell_type_labels,
+        unique_cell_types,
+    )?;
+    Ok(collect_interactions_all_cell_types_full_from_workspace(&ws))
+}
+
+fn sort_collected_interaction_rows_full(merged: &mut [CollectedInteractionRowFull]) {
+    merged.par_sort_unstable_by(|a, b| {
+        aggregate_sort_key(&b.aggregates)
+            .partial_cmp(&aggregate_sort_key(&a.aggregates))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cluster.cmp(&b.cluster))
+            .then_with(|| a.cell_type.cmp(&b.cell_type))
+            .then_with(|| a.target_gene.cmp(&b.target_gene))
+            .then_with(|| a.interaction.cmp(&b.interaction))
+    });
+}
+
+/// Scan pre-listed feathers with all aggregation columns (parallel per gene, one read per file).
+fn betadata_collect_interactions_all_cell_types_full_paths(
+    _dir: &str,
+    paths: &[(String, PathBuf)],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    cluster_obs: Option<&[String]>,
+) -> Result<Vec<CollectedInteractionRowFull>> {
+    if let Some(labels) = cluster_obs {
+        anyhow::ensure!(
+            !unique_sorted_cell_types(labels).is_empty(),
+            "no distinct cluster values in cluster_obs — check obs column"
+        );
     } else {
-        (0..df.height()).map(|i| i.to_string()).collect()
-    };
-    let (mapping, _) =
-        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
-
-    let ct_idx = CellTypeIndices::build(cell_type_labels, unique_cell_types, &mapping);
-    let n_ct = ct_idx.labels.len();
-
-    let coef_count = all_names
-        .iter()
-        .enumerate()
-        .filter(|(i, c)| Some(*i) != label_idx && !is_intercept_column(c))
-        .count();
-    let mut out = Vec::with_capacity(coef_count * n_ct / 2);
-    let target_gene_arc: Arc<str> = Arc::from(target_gene);
-
-    for (i, col_name) in all_names.iter().enumerate() {
-        if Some(i) == label_idx {
-            continue;
-        }
-        if is_intercept_column(col_name) {
-            continue;
-        }
-        let col = match df.column(col_name.as_str()) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let Ok(series) = col.cast(&DataType::Float64) else {
-            continue;
-        };
-        let ca = series.f64()?;
-        let col_data: Vec<f64> = ca.into_no_null_iter().collect();
-        let itype: &'static str = classify_betadata_column_type(col_name);
-
-        for ct_i in 0..n_ct {
-            let rows = &ct_idx.mapped_rows[ct_i];
-            let Some(beta) = aggregate_mapped_column(&col_data, rows, mode) else {
-                continue;
-            };
-            if !beta.is_finite() || beta.abs() <= 1e-15 {
-                continue;
-            }
-            out.push(CollectedInteractionRow {
-                interaction: col_name.clone(),
-                target_gene: target_gene_arc.to_string(),
-                beta,
-                interaction_type: itype.to_string(),
-                cell_type: ct_idx.labels[ct_i].to_string(),
-            });
-        }
+        let unique_cell_types = unique_sorted_cell_types(cell_type_labels);
+        anyhow::ensure!(
+            !unique_cell_types.is_empty(),
+            "no distinct cell types in labels — check obs annotation column"
+        );
     }
-    drop(ct_idx);
-    Ok(out)
+
+    let unique_cell_types = unique_sorted_cell_types(cell_type_labels);
+    let unique_arcs: Vec<Arc<str>> = unique_cell_types.iter().map(|s| Arc::from(s.as_str())).collect();
+    let unique_arcs = Arc::new(unique_arcs);
+    let obs_names = Arc::new(obs_names.to_vec());
+    let cluster_keys = Arc::new(cluster_keys.to_vec());
+    let cell_type_labels_arc = Arc::new(cell_type_labels.to_vec());
+    let cluster_obs_arc = cluster_obs.map(|s| Arc::new(s.to_vec()));
+
+    let n_total = paths.len();
+    let pb = if std::io::stderr().is_terminal() && n_total > 0 {
+        let bar = indicatif::ProgressBar::new(n_total as u64);
+        bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {per_sec} eta {eta} collect-interactions",
+                )?
+                .progress_chars("#>-"),
+        );
+        bar.enable_steady_tick(std::time::Duration::from_millis(200));
+        Some(Arc::new(bar))
+    } else if n_total > 0 {
+        eprintln!("Scanning {n_total} betadata feathers…");
+        None
+    } else {
+        None
+    };
+
+    let row_counts: Arc<std::sync::atomic::AtomicUsize> =
+        Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let results: Vec<Vec<CollectedInteractionRowFull>> = paths
+        .par_iter()
+        .filter_map(|(gene, path)| {
+            let ps = path.to_string_lossy();
+            let r = load_collect_gene_workspace(
+                &ps,
+                gene.as_str(),
+                obs_names.as_slice(),
+                cluster_keys.as_slice(),
+                cell_type_labels_arc.as_slice(),
+                cluster_obs_arc.as_deref().map(|a| a.as_slice()),
+                unique_arcs.as_slice(),
+            )
+            .map(|ws| collect_interactions_all_cell_types_full_from_workspace(&ws));
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
+            match r {
+                Ok(v) => {
+                    row_counts.fetch_add(v.len(), std::sync::atomic::Ordering::Relaxed);
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load {}: {:#}", path.display(), e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if let Some(p) = &pb {
+        p.finish_with_message("Done collecting interactions");
+    }
+
+    let total_rows = row_counts.load(std::sync::atomic::Ordering::Relaxed);
+    let mut merged = Vec::with_capacity(total_rows);
+    for v in results {
+        merged.extend(v);
+    }
+    Ok(merged)
+}
+
+/// Parallel scan of every `*_betadata.feather` under `dir` with all aggregation columns (Rayon).
+///
+/// When `cluster_obs` is set (one label per obs cell, e.g. `adata.obs['cluster']`), interactions
+/// are collected independently within each distinct cluster value; output rows include `cluster`.
+pub fn betadata_collect_interactions_all_cell_types_full(
+    dir: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    max_genes: Option<usize>,
+    cluster_obs: Option<&[String]>,
+) -> Result<Vec<CollectedInteractionRowFull>> {
+    ensure_obs_slices_same_len(
+        obs_names.len(),
+        cluster_keys.len(),
+        cell_type_labels.len(),
+        cluster_obs.map(|s| s.len()),
+    )?;
+
+    let paths = list_betadata_feather_gene_paths(Path::new(dir), max_genes)?;
+
+    let mut merged = betadata_collect_interactions_all_cell_types_full_paths(
+        dir,
+        &paths,
+        obs_names,
+        cluster_keys,
+        cell_type_labels,
+        cluster_obs,
+    )?;
+    sort_collected_interaction_rows_full(&mut merged);
+    Ok(merged)
 }
 
 /// Parallel scan of every `*_betadata.feather` under `dir` (Rayon). Corrupt files are skipped with a warning.
@@ -1728,24 +2433,7 @@ pub fn betadata_collect_interactions_all_cell_types(
     let unique_arcs = Arc::new(unique_arcs);
     let cell_type_labels_arc = Arc::new(cell_type_labels.to_vec());
 
-    let dir_path = Path::new(dir);
-    let mut paths: Vec<(String, PathBuf)> = std::fs::read_dir(dir_path)
-        .with_context(|| format!("read_dir {}", dir_path.display()))?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            let name = p.file_name()?.to_str()?;
-            let stem = name.strip_suffix("_betadata.feather")?;
-            if stem.is_empty() {
-                return None;
-            }
-            Some((stem.to_string(), p))
-        })
-        .collect();
-    paths.sort_by(|a, b| a.0.cmp(&b.0));
-    if let Some(cap) = max_genes {
-        paths.truncate(cap.min(paths.len()));
-    }
+    let paths = list_betadata_feather_gene_paths(Path::new(dir), max_genes)?;
 
     let n_total = paths.len();
     let pb = if std::io::stderr().is_terminal() && n_total > 0 {
@@ -1771,15 +2459,15 @@ pub fn betadata_collect_interactions_all_cell_types(
         .par_iter()
         .filter_map(|(gene, path)| {
             let ps = path.to_string_lossy();
-            let r = betadata_collect_interactions_all_cell_types_one_gene(
+            let r = load_collect_gene_workspace_all_ct(
                 &ps,
                 gene.as_str(),
                 obs_names,
                 cluster_keys,
                 cell_type_labels_arc.as_slice(),
                 unique_arcs.as_slice(),
-                mode,
-            );
+            )
+            .map(|ws| collect_interactions_all_cell_types_from_workspace(&ws, mode));
             if let Some(ref p) = pb {
                 p.inc(1);
             }
@@ -1815,6 +2503,60 @@ pub fn betadata_collect_interactions_all_cell_types(
             .then_with(|| a.interaction.cmp(&b.interaction))
     });
     Ok(merged)
+}
+
+fn optional_f64_series(name: &str, values: &[Option<f64>]) -> Column {
+    let v: Vec<Option<f64>> = values
+        .iter()
+        .map(|x| x.filter(|v| v.is_finite()))
+        .collect();
+    Series::new(name.into(), v).into()
+}
+
+/// Write [`CollectedInteractionRowFull`] as Feather-compatible Arrow IPC (LZ4).
+pub fn write_collected_interactions_full_feather(
+    path: &str,
+    rows: &[CollectedInteractionRowFull],
+) -> Result<()> {
+    let interaction: Vec<String> = rows.iter().map(|r| r.interaction.clone()).collect();
+    let target_gene: Vec<String> = rows.iter().map(|r| r.target_gene.clone()).collect();
+    let interaction_type: Vec<String> = rows.iter().map(|r| r.interaction_type.clone()).collect();
+    let cell_type: Vec<String> = rows.iter().map(|r| r.cell_type.clone()).collect();
+    let cluster: Vec<Option<String>> = rows.iter().map(|r| r.cluster.clone()).collect();
+    let mean: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.mean).collect();
+    let min: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.min).collect();
+    let max: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.max).collect();
+    let sum: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.sum).collect();
+    let positive: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.positive).collect();
+    let negative: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.negative).collect();
+
+    let mut columns: Vec<Column> = vec![
+        Series::new("interaction".into(), interaction).into(),
+        Series::new("target_gene".into(), target_gene).into(),
+        Series::new("interaction_type".into(), interaction_type).into(),
+        Series::new("cell_type".into(), cell_type).into(),
+        optional_f64_series("mean", &mean),
+        optional_f64_series("min", &min),
+        optional_f64_series("max", &max),
+        optional_f64_series("sum", &sum),
+        optional_f64_series("positive", &positive),
+        optional_f64_series("negative", &negative),
+    ];
+    if rows.iter().any(|r| r.cluster.is_some()) {
+        columns.insert(4, Series::new("cluster".into(), cluster).into());
+    }
+
+    let mut df = DataFrame::new(columns)?;
+
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let f = File::create(path).with_context(|| format!("create {}", path))?;
+    let mut w = IpcWriter::new(f).with_compression(Some(IpcCompression::LZ4));
+    w.finish(&mut df).context("write IPC / feather")?;
+    Ok(())
 }
 
 /// Write [`CollectedInteractionRow`] as Feather-compatible Arrow IPC (LZ4).
@@ -1866,66 +2608,145 @@ pub fn betadata_collect_interactions_one_gene(
         cell_include_mask.len()
     );
 
-    let f = File::open(path).with_context(|| format!("open {}", path))?;
-    let df = IpcReader::new(f)
-        .finish()
-        .with_context(|| format!("read IPC {}", path))?;
-    let all_names: Vec<String> = df
-        .get_columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-    let label_idx = betadata_feather_label_column_index(&all_names);
-    let row_labels: Vec<String> = if let Some(idx) = label_idx {
-        let label_name = &all_names[idx];
-        feather_id_column_to_strings(df.column(label_name.as_str())?)?
-    } else {
-        (0..df.height()).map(|i| i.to_string()).collect()
-    };
-    let (mapping, _) =
-        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
-    let n_obs = obs_names.len();
+    let ws = load_collect_gene_mask_workspace(
+        path,
+        target_gene,
+        obs_names,
+        cluster_keys,
+        cell_include_mask,
+        None,
+    )?;
+    Ok(collect_interactions_mask_from_workspace(&ws, mode))
+}
 
-    let mut out = Vec::new();
-    for (i, col_name) in all_names.iter().enumerate() {
-        if Some(i) == label_idx {
-            continue;
-        }
-        if is_intercept_column(col_name) {
-            continue;
-        }
-        let col = match df.column(col_name.as_str()) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let Ok(series) = col.cast(&DataType::Float64) else {
-            continue;
-        };
-        let ca = series.f64()?;
-        let mut vals: Vec<f64> = Vec::new();
-        for (ci, &inc) in cell_include_mask.iter().enumerate() {
-            if !inc || ci >= n_obs {
-                continue;
+/// Like [`betadata_collect_interactions_one_gene`], but emits mean/min/max/sum/positive/negative columns.
+pub fn betadata_collect_interactions_one_gene_full(
+    path: &str,
+    target_gene: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_include_mask: &[bool],
+) -> Result<Vec<CollectedInteractionFull>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    anyhow::ensure!(
+        obs_names.len() == cell_include_mask.len(),
+        "obs_names len {} != mask len {}",
+        obs_names.len(),
+        cell_include_mask.len()
+    );
+
+    let ws = load_collect_gene_mask_workspace(
+        path,
+        target_gene,
+        obs_names,
+        cluster_keys,
+        cell_include_mask,
+        None,
+    )?;
+    Ok(collect_interactions_mask_full_from_workspace(&ws))
+}
+
+fn betadata_collect_interactions_parallel_full_impl(
+    dir: &str,
+    genes: &[String],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_include_mask: &[bool],
+    cluster_obs: Option<&[String]>,
+) -> Result<Vec<CollectedInteractionFull>> {
+    let dir_path = PathBuf::from(dir);
+    let row_counts: Arc<std::sync::atomic::AtomicUsize> =
+        Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let chunks: Vec<Result<Vec<CollectedInteractionFull>>> = genes
+        .par_iter()
+        .map(|gene| {
+            let path = dir_path.join(format!("{}_betadata.feather", gene));
+            if !path.is_file() {
+                return Ok(Vec::new());
             }
-            let r = mapping[ci];
-            let v = ca.get(r).unwrap_or(0.0);
-            vals.push(v);
-        }
-        let Some(beta) = aggregate_values(&vals, mode) else {
-            continue;
-        };
-        if beta == 0.0 || !beta.is_finite() {
-            continue;
-        }
-        let itype = classify_betadata_column_type(col_name);
-        out.push(CollectedInteraction {
-            interaction: col_name.clone(),
-            gene: target_gene.to_string(),
-            beta,
-            interaction_type: itype.to_string(),
-        });
+            let ps = path.to_string_lossy();
+            let ws = load_collect_gene_mask_workspace(
+                &ps,
+                gene.as_str(),
+                obs_names,
+                cluster_keys,
+                cell_include_mask,
+                cluster_obs,
+            )?;
+            let rows = collect_interactions_mask_full_from_workspace(&ws);
+            row_counts.fetch_add(rows.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(rows)
+        })
+        .collect();
+
+    let total_rows = row_counts.load(std::sync::atomic::Ordering::Relaxed);
+    let mut merged = Vec::with_capacity(total_rows);
+    for chunk in chunks {
+        merged.extend(chunk?);
     }
-    Ok(out)
+    Ok(merged)
+}
+
+fn sort_collected_interaction_full(merged: &mut [CollectedInteractionFull]) {
+    merged.par_sort_unstable_by(|a, b| {
+        aggregate_sort_key(&b.aggregates)
+            .partial_cmp(&aggregate_sort_key(&a.aggregates))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cluster.cmp(&b.cluster))
+            .then_with(|| a.gene.cmp(&b.gene))
+            .then_with(|| a.interaction.cmp(&b.interaction))
+    });
+}
+
+/// Parallel scan of `genes.len()` feather files (Rayon) with all aggregation columns.
+///
+/// When `cluster_obs` is set, collects independently per distinct obs cluster label (mask applied
+/// within each partition). Output rows include `cluster` when partitioned.
+pub fn betadata_collect_interactions_parallel_full(
+    dir: &str,
+    genes: &[String],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_include_mask: &[bool],
+    cluster_obs: Option<&[String]>,
+) -> Result<Vec<CollectedInteractionFull>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    anyhow::ensure!(
+        obs_names.len() == cell_include_mask.len(),
+        "obs_names len {} != mask len {}",
+        obs_names.len(),
+        cell_include_mask.len()
+    );
+    if let Some(labels) = cluster_obs {
+        anyhow::ensure!(
+            obs_names.len() == labels.len(),
+            "obs_names len {} != cluster_obs len {}",
+            obs_names.len(),
+            labels.len()
+        );
+    }
+
+    let mut merged = betadata_collect_interactions_parallel_full_impl(
+        dir,
+        genes,
+        obs_names,
+        cluster_keys,
+        cell_include_mask,
+        cluster_obs,
+    )?;
+    sort_collected_interaction_full(&mut merged);
+    Ok(merged)
 }
 
 /// Parallel scan of `genes.len()` feather files (Rayon). Missing files are skipped.
@@ -1938,30 +2759,37 @@ pub fn betadata_collect_interactions_parallel(
     mode: BetadataCollectAggregate,
 ) -> Result<Vec<CollectedInteraction>> {
     let dir_path = PathBuf::from(dir);
-    let results: Vec<Result<Vec<CollectedInteraction>>> = genes
+    let row_counts: Arc<std::sync::atomic::AtomicUsize> =
+        Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let chunks: Vec<Result<Vec<CollectedInteraction>>> = genes
         .par_iter()
         .map(|gene| {
             let path = dir_path.join(format!("{}_betadata.feather", gene));
             if !path.is_file() {
                 return Ok(Vec::new());
             }
-            let ps = path.to_string_lossy().into_owned();
-            betadata_collect_interactions_one_gene(
+            let ps = path.to_string_lossy();
+            let ws = load_collect_gene_mask_workspace(
                 &ps,
                 gene.as_str(),
                 obs_names,
                 cluster_keys,
                 cell_include_mask,
-                mode,
-            )
+                None,
+            )?;
+            let rows = collect_interactions_mask_from_workspace(&ws, mode);
+            row_counts.fetch_add(rows.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(rows)
         })
         .collect();
 
-    let mut merged = Vec::new();
-    for r in results {
-        merged.extend(r?);
+    let total_rows = row_counts.load(std::sync::atomic::Ordering::Relaxed);
+    let mut merged = Vec::with_capacity(total_rows);
+    for chunk in chunks {
+        merged.extend(chunk?);
     }
-    merged.sort_by(|a, b| {
+    merged.par_sort_unstable_by(|a, b| {
         b.beta
             .abs()
             .partial_cmp(&a.beta.abs())
@@ -2168,6 +2996,193 @@ mod collect_interactions_all_cell_types_tests {
         let t2: Vec<_> = rows.iter().filter(|r| r.cell_type == "T2").collect();
         assert_eq!(t2.len(), 1);
         assert!((t2[0].beta - 30.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn full_collect_per_cluster_obs_partition() {
+        let dir = std::env::temp_dir().join(format!(
+            "betadata_collect_cluster_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TG_betadata.feather");
+        let cols = vec!["beta0".into(), "beta_MOD".into()];
+        let m = array![[0.0f64, 10.0], [0.0, 30.0]];
+        write_betadata_feather(
+            path.to_str().unwrap(),
+            "Cluster",
+            &["cA".into(), "cB".into()],
+            &cols,
+            &m,
+        )
+        .unwrap();
+
+        let obs_names = vec!["o1".into(), "o2".into(), "o3".into(), "o4".into()];
+        let cluster_keys = vec!["cA".into(), "cA".into(), "cB".into(), "cB".into()];
+        let labels = vec!["T1".into(), "T1".into(), "T2".into(), "T2".into()];
+        let cluster_obs = vec!["C1".into(), "C1".into(), "C2".into(), "C2".into()];
+
+        let rows = betadata_collect_interactions_all_cell_types_full(
+            dir.to_str().unwrap(),
+            &obs_names,
+            &cluster_keys,
+            &labels,
+            None,
+            Some(cluster_obs.as_slice()),
+        )
+        .unwrap();
+
+        assert!(rows.iter().all(|r| r.cluster.is_some()));
+        let c1 = rows
+            .iter()
+            .find(|r| r.cluster.as_deref() == Some("C1") && r.interaction == "beta_MOD")
+            .unwrap();
+        assert!((c1.aggregates.mean.unwrap() - 10.0).abs() < 1e-9);
+        let c2 = rows
+            .iter()
+            .find(|r| r.cluster.as_deref() == Some("C2") && r.interaction == "beta_MOD")
+            .unwrap();
+        assert!((c2.aggregates.mean.unwrap() - 30.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same cell type in two obs clusters must not blend β across clusters.
+    #[test]
+    fn full_collect_cluster_partition_isolates_obs_clusters() {
+        let dir = std::env::temp_dir().join(format!(
+            "betadata_collect_cluster_iso_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TG_betadata.feather");
+        let cols = vec!["beta0".into(), "beta_MOD".into()];
+        let m = array![[0.0f64, 10.0], [0.0, 30.0]];
+        write_betadata_feather(
+            path.to_str().unwrap(),
+            "Cluster",
+            &["cA".into(), "cB".into()],
+            &cols,
+            &m,
+        )
+        .unwrap();
+
+        let obs_names = vec!["o1".into(), "o2".into(), "o3".into(), "o4".into()];
+        let cluster_keys = vec!["cA".into(), "cA".into(), "cB".into(), "cB".into()];
+        let labels = vec!["T1".into(), "T1".into(), "T1".into(), "T1".into()];
+        let cluster_obs = vec!["C1".into(), "C1".into(), "C2".into(), "C2".into()];
+
+        let rows = betadata_collect_interactions_all_cell_types_full(
+            dir.to_str().unwrap(),
+            &obs_names,
+            &cluster_keys,
+            &labels,
+            None,
+            Some(cluster_obs.as_slice()),
+        )
+        .unwrap();
+
+        let t1: Vec<_> = rows
+            .iter()
+            .filter(|r| r.cell_type == "T1" && r.interaction == "beta_MOD")
+            .collect();
+        assert_eq!(t1.len(), 2);
+        let c1 = t1
+            .iter()
+            .find(|r| r.cluster.as_deref() == Some("C1"))
+            .unwrap();
+        let c2 = t1
+            .iter()
+            .find(|r| r.cluster.as_deref() == Some("C2"))
+            .unwrap();
+        assert!((c1.aggregates.mean.unwrap() - 10.0).abs() < 1e-9);
+        assert!((c2.aggregates.mean.unwrap() - 30.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mask_collect_per_cluster_obs_partition() {
+        let dir = std::env::temp_dir().join(format!(
+            "betadata_collect_mask_cluster_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TG_betadata.feather");
+        let cols = vec!["beta0".into(), "beta_MOD".into()];
+        let m = array![[0.0f64, 10.0], [0.0, 30.0]];
+        write_betadata_feather(
+            path.to_str().unwrap(),
+            "Cluster",
+            &["cA".into(), "cB".into()],
+            &cols,
+            &m,
+        )
+        .unwrap();
+
+        let obs_names = vec!["o1".into(), "o2".into(), "o3".into(), "o4".into()];
+        let cluster_keys = vec!["cA".into(), "cA".into(), "cB".into(), "cB".into()];
+        let mask = vec![true, false, false, true];
+        let cluster_obs = vec!["C1".into(), "C1".into(), "C2".into(), "C2".into()];
+
+        let rows = betadata_collect_interactions_parallel_full(
+            dir.to_str().unwrap(),
+            &["TG".into()],
+            &obs_names,
+            &cluster_keys,
+            &mask,
+            Some(cluster_obs.as_slice()),
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        let c1 = rows
+            .iter()
+            .find(|r| r.cluster.as_deref() == Some("C1"))
+            .unwrap();
+        let c2 = rows
+            .iter()
+            .find(|r| r.cluster.as_deref() == Some("C2"))
+            .unwrap();
+        assert!((c1.aggregates.mean.unwrap() - 10.0).abs() < 1e-9);
+        assert!((c2.aggregates.mean.unwrap() - 30.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn materialize_coef_columns_aligns_with_feather_row_indices() {
+        let dir = std::env::temp_dir().join(format!(
+            "betadata_collect_nulls_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TG_betadata.feather");
+        let cols = vec!["beta0".into(), "beta_MOD".into()];
+        let m = array![[0.0f64, 10.0], [0.0, 30.0]];
+        write_betadata_feather(
+            path.to_str().unwrap(),
+            "Cluster",
+            &["cA".into(), "cB".into()],
+            &cols,
+            &m,
+        )
+        .unwrap();
+
+        let df = read_betadata_feather_df(path.to_str().unwrap()).unwrap();
+        let all_names: Vec<String> = df
+            .get_columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        let label_idx = betadata_feather_label_column_index(&all_names);
+        let coefs = materialize_coef_columns(&df, &all_names, label_idx).unwrap();
+        let beta_mod = coefs.iter().find(|c| c.name.as_ref() == "beta_MOD").unwrap();
+        assert_eq!(beta_mod.values.len(), df.height());
+        assert!((beta_mod.values[0] - 10.0).abs() < 1e-9);
+        assert!((beta_mod.values[1] - 30.0).abs() < 1e-9);
 
         std::fs::remove_dir_all(&dir).ok();
     }

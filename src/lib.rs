@@ -164,7 +164,10 @@ pub mod perturb;
 pub use perturb::{ComputeSplashAllProgressArgs, PerturbWithTargetsInputs};
 pub mod perturb_batch;
 pub mod perturb_mode;
-pub use perturb_mode::{CollectInteractionsObs, load_obs_for_collect_interactions};
+pub use perturb_mode::{
+    CollectInteractionsObs, load_obs_column_for_collect_interactions,
+    load_obs_for_collect_interactions,
+};
 #[cfg(feature = "tui")]
 pub mod perturb_tui;
 pub mod run_summary_html;
@@ -192,11 +195,16 @@ pub mod transition_umap;
 #[cfg(feature = "tui")]
 pub mod tui_theme;
 pub use betadata::{
-    BetaFrame, BetaFrameFromParts, Betabase, BetadataCollectAggregate, CollectedInteraction,
-    CollectedInteractionRow, GeneMatrix, TopBetaCoefficient,
+    BetaAggregates, BetaFrame, BetaFrameFromParts, Betabase, BetadataCollectAggregate,
+    CollectedInteraction, CollectedInteractionFull, CollectedInteractionRow,
+    CollectedInteractionRowFull, GeneMatrix, TopBetaCoefficient,
     betadata_collect_interactions_all_cell_types,
-    betadata_collect_interactions_all_cell_types_one_gene, betadata_collect_interactions_parallel,
+    betadata_collect_interactions_all_cell_types_full,
+    betadata_collect_interactions_all_cell_types_one_gene,
+    betadata_collect_interactions_all_cell_types_one_gene_full,
+    betadata_collect_interactions_parallel, betadata_collect_interactions_parallel_full,
     write_betadata_feather, write_betadata_feather_to_writer, write_collected_interactions_feather,
+    write_collected_interactions_full_feather,
 };
 pub use config::{
     CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME,

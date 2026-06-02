@@ -5,6 +5,7 @@ members = [
     "crates/enrichr",
     "crates/rctd-core",
     "crates/spacetravlr-rctd",
+    "python",
 ]
 resolver = "2"
 
