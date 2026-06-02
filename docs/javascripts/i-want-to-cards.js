@@ -90,11 +90,13 @@ function cardHtml(card, index) {
 }
 
 function mountIWantToCards(root) {
+  if (root.querySelector(".st-i-want-to__grid")) return;
   root.innerHTML = `<div class="st-i-want-to__grid">${CARDS.map(cardHtml).join("")}</div>`;
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  document.querySelectorAll(".st-i-want-to").forEach((el) => {
-    if (el.id === "st-i-want-to") mountIWantToCards(el);
-  });
-});
+function initIWantToCards() {
+  const root = document.getElementById("st-i-want-to");
+  if (root) mountIWantToCards(root);
+}
+
+document$.subscribe(initIWantToCards);

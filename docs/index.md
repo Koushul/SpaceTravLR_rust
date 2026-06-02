@@ -9,27 +9,27 @@ SpaceTravLR infers how single or combinatorial genetic perturbations rewire sign
 
 
 ## Quickstart
-Install me
+#### Install me
 ```bash
 curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
 ```
-Run me
+#### Run me
 ```bash
 spacetravlr --h5ad /path/to/adata.h5ad --output-dir /path/to/outputdir
 ```
 
-Join me
+#### Join me
 ```bash
-spacetravlr --join-output-dir  /path/to/outputdir
+spacetravlr --join-output-dir  /path/to/outputdir --plain
 ```
 
-Analyze me
+#### Analyze me
 ```bash
 spacetravlr collect-interactions \
   --run-toml /path/to/outputdir/spacetravlr_run_repro.toml 
 ```
 
-Learn more about [how SpaceTravLR works](math.md), other [installations](install.md) details and CLI [usage](usage.md).
+<!-- Learn more about [how SpaceTravLR works](math.md), other [installations](install.md) details and CLI [usage](usage.md). -->
 
 
 <!-- ![](assets/concepts_A.png) -->
