@@ -100,6 +100,7 @@ nav:
   #   - Spatial Perturbseq: validation.md
 
   - Tutorials:
+      - BYOD (Bring Your Own Data): tutorials/run-on-your-own-data.md
       - Find Functional Microniches: tutorials/find-functional-microniches.ipynb
       - Perturb Genes Spatially: tutorials/perturb-genes-spatially.ipynb
       - Screen Ligand-Receptors: tutorials/screen-ligand-receptors.ipynb

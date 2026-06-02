@@ -1563,10 +1563,6 @@ fn ensure_obs_slices_same_len(
     Ok(())
 }
 
-fn subset_by_indices<T: Clone>(values: &[T], indices: &[usize]) -> Vec<T> {
-    indices.iter().map(|&i| values[i].clone()).collect()
-}
-
 fn partition_indices_by_label(labels: &[String]) -> Vec<(String, Vec<usize>)> {
     unique_sorted_cell_types(labels)
         .into_iter()
@@ -1955,7 +1951,7 @@ fn collect_interactions_all_cell_types_from_workspace(
             .labels
             .par_iter()
             .zip(parts.per_partition.par_iter())
-            .map(|(lab, ct_idx)| {
+            .map(|(_lab, ct_idx)| {
                 ws.coef_columns
                     .par_iter()
                     .map(|coef| {

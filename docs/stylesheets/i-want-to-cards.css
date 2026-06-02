@@ -44,7 +44,7 @@
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  padding: 0.65rem 0.7rem 0.6rem;
+  padding: 0.65rem 1.55rem 0.65rem 0.7rem;
   border-radius: 0.5rem;
   border: 1px solid var(--st-iw-border);
   background: var(--st-iw-card-bg);
@@ -194,6 +194,42 @@
   overflow: hidden;
 }
 
+.st-i-want-to__arrow {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.45rem;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--st-iw-muted);
+  opacity: 0.42;
+  transition:
+    opacity 0.35s ease,
+    color 0.35s ease,
+    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.st-i-want-to__arrow svg {
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.st-i-want-to__card:hover .st-i-want-to__arrow,
+.st-i-want-to__card:focus-visible .st-i-want-to__arrow {
+  opacity: 0.72;
+  color: var(--st-iw-accent-2);
+  transform: translate(2px, -1px);
+}
+
 @keyframes st-iw-card-in {
   from {
     opacity: 0;
@@ -218,6 +254,11 @@
 
   .st-i-want-to__card:hover .st-i-want-to__icon,
   .st-i-want-to__card:focus-visible .st-i-want-to__icon {
+    transform: none;
+  }
+
+  .st-i-want-to__card:hover .st-i-want-to__arrow,
+  .st-i-want-to__card:focus-visible .st-i-want-to__arrow {
     transform: none;
   }
 }

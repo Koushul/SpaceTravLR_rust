@@ -14,7 +14,7 @@ const CARDS = [
   {
     title: "run SpaceTravLR on my own data",
     description: "Install and run SpaceTravLR on your data. Requires a GPU.",
-    href: "install/#quick-install-recommended",
+    href: "tutorials/run-on-your-own-data/",
     icon: ICONS.run,
   },
   {
@@ -85,6 +85,9 @@ function cardHtml(card, index) {
       <span class="st-i-want-to__icon">${card.icon}</span>
       <h3 class="st-i-want-to__title">${card.title}</h3>
       <p class="st-i-want-to__desc">${card.description}</p>
+      <span class="st-i-want-to__arrow" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M5 12h12"/><path d="m13 8 4 4-4 4"/></svg>
+      </span>
     </a>
   `;
 }

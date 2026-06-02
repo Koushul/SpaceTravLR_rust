@@ -3,11 +3,6 @@ lcov.info
 tmp_dir/
 tmp_bench_h5/
 __pycache__/
-python/spacetravlr/_native*.so
-python/spacetravlr/_native*.pyd
-python/spacetravlr/*.so
-python/spacetravlr/*.pyd
-python/.venv/
 scripts/__pycache__/
 .venv-bench/
 .cache/

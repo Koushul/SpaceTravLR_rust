@@ -1,12 +1,15 @@
-# <span style="font-size:2em;">SpaceTravLR</span> {: .st-brand }
-SpaceTravLR infers how single or combinatorial genetic perturbations rewire signals across the tissue neighbourhood, by propagating effects through underlying spatially resolved molecular networks, thereby modelling how perturbations can reshape both the targeted cell and its surrounding neighbourhood.
+<!-- # <span style="font-size:2em;">SpaceTravLR</span> {: .st-brand } -->
+
+![](assets/overview.png)
+SpaceTravLR infers how single or combinatorial genetic perturbations rewire signals across the tissue neighbourhood, by propagating effects through underlying spatially resolved molecular networks, thereby modelling how perturbations can reshape both the targeted cell and its surroundings.
+
 
 
 # I want to 🧞️
 
 <div id="st-i-want-to" class="st-i-want-to" markdown="0"></div>
 
-
+![](assets/spatial_betas.png)
 
 ## Quickstart
 #### Install me
@@ -32,11 +35,11 @@ spacetravlr collect-interactions \
 <!-- Learn more about [how SpaceTravLR works](math.md), other [installations](install.md) details and CLI [usage](usage.md). -->
 
 
-<!-- ![](assets/concepts_A.png) -->
 
 
 
-<!-- ![](assets/concepts_B.png) -->
+
+
 
 
 
