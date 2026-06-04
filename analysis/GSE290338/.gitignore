@@ -1,0 +1,6 @@
+raw/
+reference/*.h5ad
+reference/*.gz
+*.h5ad
+malt_out/
+figures/

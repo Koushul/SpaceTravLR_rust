@@ -1982,6 +1982,8 @@ def run_malt(
         print("STEP 3: PCA + KNN")
         print("=" * 60)
 
+        if "highly_variable" in ref_i.var.columns:
+            ref_i.var = ref_i.var.drop(columns=["highly_variable"])
         sc.pp.highly_variable_genes(
             ref_i, n_top_genes=min(800, len(shared)), subset=False
         )
