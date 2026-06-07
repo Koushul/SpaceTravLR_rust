@@ -109,7 +109,7 @@ def main() -> None:
     p.add_argument("--spatial-dim", type=int, default=16)
     p.add_argument("--radius", type=float, default=300.0)
     p.add_argument("--epochs", type=int, default=40)
-    p.add_argument("--variant", choices=["base", "deep"], default="base")
+    p.add_argument("--variant", choices=["base", "deep", "wide"], default="base")
     p.add_argument("--force-genes", default="", help="Comma-separated genes to keep through HVG")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()

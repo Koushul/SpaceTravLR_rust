@@ -56,6 +56,59 @@ def grad_cam(
     return cam.cpu().numpy()
 
 
+def integrated_gradients(
+    encoder: TissueVisionEncoder,
+    spatial_map: torch.Tensor,
+    spatial_features: torch.Tensor,
+    steps: int = 32,
+) -> np.ndarray:
+    """Integrated Gradients attribution on spatial map input."""
+    encoder.eval()
+    sm = spatial_map.unsqueeze(0) if spatial_map.dim() == 3 else spatial_map
+    sf = spatial_features.unsqueeze(0) if spatial_features.dim() == 1 else spatial_features
+    baseline = torch.zeros_like(sm)
+    total_grad = torch.zeros_like(sm)
+    for step in range(1, steps + 1):
+        alpha = step / steps
+        interp = (baseline + alpha * (sm - baseline)).clone().requires_grad_(True)
+        interp.retain_grad()
+        feat = encoder(interp, sf)
+        score = feat.sum()
+        encoder.zero_grad(set_to_none=True)
+        score.backward()
+        total_grad += interp.grad.detach()
+    attr = (sm - baseline) * total_grad / steps
+    cam = attr[0, 0].abs()
+    cam = cam - cam.min()
+    if cam.max() > 0:
+        cam = cam / cam.max()
+    return cam.detach().cpu().numpy()
+
+
+def plot_per_cluster_heatmap(finetune_json: Path, out_path: Path) -> None:
+    rows = json.loads(finetune_json.read_text())
+    if not rows:
+        return
+    genes = [r["gene"] for r in rows]
+    all_clusters = sorted({c for r in rows for c in r.get("per_cluster_r2", {})})
+    if not all_clusters:
+        return
+    mat = np.full((len(genes), len(all_clusters)), np.nan)
+    for i, r in enumerate(rows):
+        for j, cl in enumerate(all_clusters):
+            mat[i, j] = r.get("per_cluster_r2", {}).get(cl, np.nan)
+    fig, ax = plt.subplots(figsize=(max(6, len(all_clusters) * 0.55), max(3, len(genes) * 0.6)))
+    im = ax.imshow(mat, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
+    ax.set_xticks(range(len(all_clusters)), all_clusters, rotation=45, ha="right")
+    ax.set_yticks(range(len(genes)), genes)
+    ax.set_title("Per-cluster R² (shared CNN + gene MLP, finetune half)")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_performance(
     finetune_json: Path,
     pretrain_meta_paths: list[Path],
@@ -120,7 +173,7 @@ def plot_cnn_interpretation(
     rng = np.random.default_rng(1)
     idx = rng.choice(len(cache.obs_names), size=min(n_examples, len(cache.obs_names)), replace=False)
 
-    fig, axes = plt.subplots(n_examples, 3, figsize=(9, 2.2 * n_examples))
+    fig, axes = plt.subplots(n_examples, 4, figsize=(12, 2.2 * n_examples))
     if n_examples == 1:
         axes = np.array([axes])
 
@@ -129,24 +182,28 @@ def plot_cnn_interpretation(
         sfi = torch.from_numpy(sf[i : i + 1]).to(dev)
         spatial = sm[0, 0].cpu().numpy()
         cam = grad_cam(encoder, sm, sfi)
+        ig = integrated_gradients(encoder, sm, sfi)
 
-        # Upsample CAM to spatial map resolution
         from scipy.ndimage import zoom
 
         h, w = spatial.shape
         cam_up = zoom(cam, (h / cam.shape[0], w / cam.shape[1]), order=1)
+        ig_up = zoom(ig, (h / ig.shape[0], w / ig.shape[1]), order=1)
 
-        ax0, ax1, ax2 = axes[row]
-        im0 = ax0.imshow(spatial, cmap="viridis")
+        ax0, ax1, ax2, ax3 = axes[row]
+        ax0.imshow(spatial, cmap="viridis")
         ax0.set_title(f"Inv-dist map\n{cache.cluster_labels[cache.clusters[i]]}")
         ax0.axis("off")
-        im1 = ax1.imshow(cam_up, cmap="hot")
+        ax1.imshow(cam_up, cmap="hot")
         ax1.set_title("Grad-CAM (conv3)")
         ax1.axis("off")
-        ax2.imshow(spatial, cmap="gray", alpha=0.5)
-        ax2.imshow(cam_up, cmap="hot", alpha=0.55)
-        ax2.set_title("Overlay")
+        ax2.imshow(ig_up, cmap="hot")
+        ax2.set_title("Integrated Gradients")
         ax2.axis("off")
+        ax3.imshow(spatial, cmap="gray", alpha=0.5)
+        ax3.imshow(cam_up, cmap="hot", alpha=0.55)
+        ax3.set_title("Grad-CAM overlay")
+        ax3.axis("off")
 
     fig.suptitle("Shared tissue CNN interpretation (finetune half cells)")
     fig.tight_layout()
@@ -230,6 +287,7 @@ def main() -> None:
             args.pretrain_meta,
             args.figures / "gene_performance_finetune_half.png",
         )
+        plot_per_cluster_heatmap(args.finetune_json, args.figures / "per_cluster_r2_heatmap.png")
 
     if args.finetune_cache.exists() and args.encoder.exists():
         cache = SpatialCache.load(args.finetune_cache)

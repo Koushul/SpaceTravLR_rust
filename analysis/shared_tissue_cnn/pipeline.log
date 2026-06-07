@@ -1,0 +1,219 @@
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 split_tonsil.py --h5ad /ix1/ylee/kor11/tools/SpaceTravLR_rust/data/h5ad/SlideTags_human_tonsil.h5ad --out-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data
+train: /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_train.h5ad  finetune: /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_finetune.h5ad
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 build_cache.py --h5ad /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_finetune.h5ad --cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz --spatial-dim 16 --force-genes AICDA,CD74,CD3D,MS4A6A,LYZ
+wrote /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz (2889 cells)
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 pretrain_cnn.py --h5ad /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_train.h5ad --cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/train_cache.npz --out-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain --spatial-dim 16 --epochs 30 --variant base --device cpu --force-genes AICDA,CD74,CD3D,MS4A6A,LYZ
+{
+  "epochs": 30,
+  "n_pretrain_genes": 64,
+  "final_mse": 0.42035128582607617,
+  "variant": "base",
+  "checkpoint": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_base.pt"
+}
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 pretrain_cnn.py --h5ad /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_train.h5ad --cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/train_cache.npz --out-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain --spatial-dim 16 --epochs 30 --variant deep --device cpu --force-genes AICDA,CD74,CD3D,MS4A6A,LYZ
+{
+  "epochs": 30,
+  "n_pretrain_genes": 64,
+  "final_mse": 0.4116052064028653,
+  "variant": "deep",
+  "checkpoint": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_deep.pt"
+}
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 pretrain_cnn.py --h5ad /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_train.h5ad --cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/train_cache.npz --out-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain --spatial-dim 16 --epochs 30 --variant wide --device cpu --force-genes AICDA,CD74,CD3D,MS4A6A,LYZ
+{
+  "epochs": 30,
+  "n_pretrain_genes": 64,
+  "final_mse": 0.4055182391946966,
+  "variant": "wide",
+  "checkpoint": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_wide.pt"
+}
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 evaluate_variants.py --train-cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/train_cache.npz --finetune-cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz --pretrain-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain --probe-genes AICDA,CD74,CD3D,MS4A6A,LYZ --out /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/variant_transfer.json --device cpu
+{
+  "variants": {
+    "base": {
+      "per_gene_r2": {
+        "AICDA": -0.18290021204288132,
+        "CD74": -0.012375434428137044,
+        "CD3D": -0.15663941460338693,
+        "MS4A6A": -0.08115321452622482,
+        "LYZ": -0.03305778389594871
+      },
+      "mean_transfer_r2": -0.09322521189931576
+    },
+    "deep": {
+      "per_gene_r2": {
+        "AICDA": 0.024507580910918647,
+        "CD74": 0.034925458899585204,
+        "CD3D": -0.0319931498068351,
+        "MS4A6A": -0.029912325817124108,
+        "LYZ": -0.06323178919043904
+      },
+      "mean_transfer_r2": -0.013140845000778879
+    },
+    "wide": {
+      "per_gene_r2": {
+        "AICDA": -0.02833264965651261,
+        "CD74": 0.047442890426555584,
+        "CD3D": -0.06044734348054681,
+        "MS4A6A": -0.09521720534762701,
+        "LYZ": -0.18543956074762802
+      },
+      "mean_transfer_r2": -0.06439877376115177
+    }
+  },
+  "best_by_transfer": "deep"
+}
+Selected encoder variant: deep (transfer scores={'base': -0.09322521189931576, 'deep': -0.013140845000778879, 'wide': -0.06439877376115177})
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 finetune_genes.py --h5ad /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/data/tonsil_finetune.h5ad --cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz --encoder /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_deep.pt --out-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune --genes AICDA,CD74,CD3D,MS4A6A,LYZ --spatial-dim 16 --epochs 25 --device cpu --force-genes AICDA,CD74,CD3D,MS4A6A,LYZ
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+AICDA: CNN R²=-0.1604  Lasso R²=-0.1631
+CD74: CNN R²=-4.8959  Lasso R²=-4.9081
+CD3D: CNN R²=-0.1842  Lasso R²=-0.1890
+MS4A6A: CNN R²=0.5852  Lasso R²=0.5237
+LYZ: CNN R²=0.3170  Lasso R²=0.2915
+[
+  {
+    "gene": "AICDA",
+    "r2_cnn": -0.160390767029029,
+    "r2_lasso": -0.16311952541468022,
+    "n_lasso_clusters": 4,
+    "per_cluster_r2": {
+      "FDC": 0.4052972825955282,
+      "NKT": 0.40061578681173016,
+      "T_CD8": 0.14463691338927387,
+      "myeloid": 0.3188079512022777
+    },
+    "betadata": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/betadata/AICDA_betadata.feather"
+  },
+  {
+    "gene": "CD74",
+    "r2_cnn": -4.895857267780303,
+    "r2_lasso": -4.908077294712328,
+    "n_lasso_clusters": 9,
+    "per_cluster_r2": {
+      "FDC": 0.22958941169088554,
+      "NKT": 0.4419920971823452,
+      "T_CD8": 0.18499466990368307,
+      "T_double_neg": 0.7227773174680875,
+      "T_follicular_helper": 0.17619227363279344,
+      "mDC": 0.2887693859290392,
+      "myeloid": 0.354112915596989,
+      "pDC": 0.6024189038385261,
+      "plasma": 0.31345301889695965
+    },
+    "betadata": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/betadata/CD74_betadata.feather"
+  },
+  {
+    "gene": "CD3D",
+    "r2_cnn": -0.18420124636943203,
+    "r2_lasso": -0.1889508042776269,
+    "n_lasso_clusters": 5,
+    "per_cluster_r2": {
+      "FDC": 0.13986251603442934,
+      "T_double_neg": 0.7120906236895911,
+      "mDC": 0.24532593564005223,
+      "myeloid": 0.40319353473012487,
+      "pDC": 0.5338553763888398
+    },
+    "betadata": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/betadata/CD3D_betadata.feather"
+  },
+  {
+    "gene": "MS4A6A",
+    "r2_cnn": 0.5851815424466599,
+    "r2_lasso": 0.5237079500292087,
+    "n_lasso_clusters": 6,
+    "per_cluster_r2": {
+      "FDC": 0.1540923408774214,
+      "NKT": 0.15663801725033655,
+      "T_follicular_helper": 0.10115334637747009,
+      "mDC": 0.38138517603367106,
+      "myeloid": 0.44814521364377957,
+      "pDC": 0.7245217262006735
+    },
+    "betadata": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/betadata/MS4A6A_betadata.feather"
+  },
+  {
+    "gene": "LYZ",
+    "r2_cnn": 0.31700360046058573,
+    "r2_lasso": 0.29146680425897165,
+    "n_lasso_clusters": 4,
+    "per_cluster_r2": {
+      "NKT": 0.4996589561800001,
+      "T_double_neg": 0.6983606336548236,
+      "mDC": 0.4482749867688566,
+      "myeloid": 0.6009638325772909
+    },
+    "betadata": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/betadata/LYZ_betadata.feather"
+  }
+]
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 evaluate_halves.py --train-cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/train_cache.npz --finetune-cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz --encoder /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_deep.pt --heads-dir /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/gene_heads --device cpu
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+/ihome/ylee/kor11/.local/lib/python3.11/site-packages/sklearn/linear_model/_coordinate_descent.py:695: ConvergenceWarning: Objective did not converge. You might want to increase the number of iterations, check the scale of the features or consider increasing regularisation. Duality gap: 0.000e+00, tolerance: 0.000e+00
+  model = cd_fast.enet_coordinate_descent(
+[
+  {
+    "gene": "AICDA",
+    "r2_train_half": -0.1672461166673369,
+    "r2_finetune_half": -0.160390767029029
+  },
+  {
+    "gene": "CD3D",
+    "r2_train_half": -0.13818099738968992,
+    "r2_finetune_half": -0.18420124636943203
+  },
+  {
+    "gene": "CD74",
+    "r2_train_half": -4.919150266910074,
+    "r2_finetune_half": -4.895857267780303
+  },
+  {
+    "gene": "LYZ",
+    "r2_train_half": 0.25364783711153316,
+    "r2_finetune_half": 0.31700360046058573
+  },
+  {
+    "gene": "MS4A6A",
+    "r2_train_half": 0.5012124031377995,
+    "r2_finetune_half": 0.5851815424466599
+  }
+]
++ /software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3 plot_results.py --finetune-json /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/gene_performance.json --pretrain-meta /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/pretrain_base_meta.json /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/pretrain_deep_meta.json /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/pretrain_wide_meta.json --finetune-cache /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz --encoder /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_deep.pt --figures /ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/figures --device cpu
+  File "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/plot_results.py", line 113
+    ) -> None:
+    ^
+SyntaxError: unmatched ')'
+Traceback (most recent call last):
+  File "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/run_pipeline.py", line 203, in <module>
+    main()
+  File "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/run_pipeline.py", line 172, in main
+    run(
+  File "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/run_pipeline.py", line 32, in run
+    subprocess.run(cmd, check=True, cwd=ROOT)
+  File "/software/rhel9/manual/install/rust/1.89.0/python3.11/lib/python3.11/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/software/rhel9/manual/install/rust/1.89.0/python3.11/bin/python3', 'plot_results.py', '--finetune-json', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune/gene_performance.json', '--pretrain-meta', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/pretrain_base_meta.json', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/pretrain_deep_meta.json', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/pretrain_wide_meta.json', '--finetune-cache', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/finetune_cache.npz', '--encoder', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/outputs/pretrain/tissue_encoder_deep.pt', '--figures', '/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/shared_tissue_cnn/figures', '--device', 'cpu']' returned non-zero exit status 1.

@@ -51,7 +51,22 @@ def main() -> None:
 
     run([py, "split_tonsil.py", "--h5ad", str(args.h5ad.resolve()), "--out-dir", str(data_dir)])
 
-    variants = ["base", "deep"]
+    run(
+        [
+            py,
+            "build_cache.py",
+            "--h5ad",
+            str(data_dir / "tonsil_finetune.h5ad"),
+            "--cache",
+            str(out / "finetune_cache.npz"),
+            "--spatial-dim",
+            str(args.spatial_dim),
+            "--force-genes",
+            args.genes,
+        ]
+    )
+
+    variants = ["base", "deep", "wide"]
     for variant in variants:
         run(
             [
@@ -76,16 +91,40 @@ def main() -> None:
             ]
         )
 
-    # Pick best variant by final pretrain MSE
-    scores = {}
-    for variant in variants:
-        meta_path = out / "pretrain" / f"pretrain_{variant}_meta.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            scores[variant] = meta.get("final_mse", float("inf"))
-    best = min(scores, key=scores.get) if scores else "base"
+    # Pick best variant by transfer linear-probe R² on finetune half
+    variant_eval = out / "variant_transfer.json"
+    run(
+        [
+            py,
+            "evaluate_variants.py",
+            "--train-cache",
+            str(out / "train_cache.npz"),
+            "--finetune-cache",
+            str(out / "finetune_cache.npz"),
+            "--pretrain-dir",
+            str(out / "pretrain"),
+            "--probe-genes",
+            args.genes,
+            "--out",
+            str(variant_eval),
+            "--device",
+            args.device,
+        ]
+    )
+    if variant_eval.exists():
+        vt = json.loads(variant_eval.read_text())
+        best = vt.get("best_by_transfer", "base")
+        scores = {v: vt["variants"][v]["mean_transfer_r2"] for v in vt.get("variants", {})}
+    else:
+        scores = {}
+        for variant in variants:
+            meta_path = out / "pretrain" / f"pretrain_{variant}_meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+                scores[variant] = meta.get("final_mse", float("inf"))
+        best = min(scores, key=scores.get) if scores else "base"
     encoder = out / "pretrain" / f"tissue_encoder_{best}.pt"
-    print(f"Selected encoder variant: {best} (pretrain MSE={scores.get(best)})")
+    print(f"Selected encoder variant: {best} (transfer scores={scores})")
 
     run(
         [
@@ -151,8 +190,8 @@ def main() -> None:
 
     summary = {
         "encoder_variant": best,
-        "pretrain_mse": scores.get(best),
-        "genes": args.genes.split(","),
+        "variant_transfer_r2": scores,
+        "genes": gene_list,
         "figures": str(ROOT / "figures"),
         "betadata_dir": str(out / "finetune" / "betadata"),
     }

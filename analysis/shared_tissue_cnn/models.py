@@ -57,22 +57,30 @@ class TissueVisionEncoder(nn.Module):
         n_clusters: int,
         in_channels: int = 1,
         feature_dim: int = 64,
-        variant: Literal["base", "deep"] = "base",
+        variant: Literal["base", "deep", "wide"] = "base",
     ):
         super().__init__()
         self.n_clusters = n_clusters
         self.feature_dim = feature_dim
         self.variant = variant
 
-        self.conv1 = ConvBlock(in_channels, 16)
-        self.conv2 = ConvBlock(16, 32)
-        self.conv3 = ConvBlock(32, 64)
-        if variant == "deep":
-            self.conv4 = ConvBlock(64, 64)
+        if variant == "wide":
+            ch1, ch2, ch3, ch4 = 32, 64, 128, 128
+        else:
+            ch1, ch2, ch3, ch4 = 16, 32, 64, 64
+
+        self.conv1 = ConvBlock(in_channels, ch1)
+        self.conv2 = ConvBlock(ch1, ch2)
+        self.conv3 = ConvBlock(ch2, ch3)
+        out_ch = ch3
+        if variant in ("deep", "wide"):
+            self.conv4 = ConvBlock(ch3, ch4)
+            out_ch = ch4
         else:
             self.conv4 = None
 
-        self.spp_proj = nn.Linear(CNN_SPP_FLAT_DIM, feature_dim)
+        spp_in = out_ch * (1 + 4 + 16)
+        self.spp_proj = nn.Linear(spp_in, feature_dim)
         self.spatial_mlp = SpatialMLP(n_clusters, feature_dim)
 
     def encode_maps(self, spatial_maps: torch.Tensor) -> torch.Tensor:
