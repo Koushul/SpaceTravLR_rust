@@ -164,6 +164,7 @@ pub mod perturb;
 pub use perturb::{ComputeSplashAllProgressArgs, PerturbWithTargetsInputs};
 pub mod perturb_batch;
 pub mod perturb_mode;
+pub mod perturb_screen;
 pub use perturb_mode::{
     CollectInteractionsObs, load_obs_column_for_collect_interactions,
     load_obs_for_collect_interactions,
@@ -207,8 +208,8 @@ pub use betadata::{
     write_collected_interactions_full_feather,
 };
 pub use config::{
-    CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME,
-    SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
+    CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, PreprocessConfig,
+    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
     default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
     mix_execution_random_seed, normalize_ui_path, resolve_malt_label_transfer_py_path,
     resolve_spaceship_config_toml_path, resolve_training_target_genes,

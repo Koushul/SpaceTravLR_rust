@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
+mod common;
+
+use common::uv_python::{uv_available, uv_bin};
+
 fn uv_status_retry_no_cache(mut build: impl FnMut(bool) -> Command) -> std::io::Result<ExitStatus> {
     let s = build(false).status()?;
     if s.success() {
@@ -177,16 +181,10 @@ fn process_h5ad_hidden_alias_still_works() {
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn process_h5ad_end_to_end_writes_processed_sibling() {
-    let uv = std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into());
-    if !Command::new(&uv)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    let uv = uv_bin();
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }
@@ -273,16 +271,10 @@ a.write_h5ad(p)
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn impute_writes_imputed_sibling_after_process_h5ad() {
-    let uv = std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into());
-    if !Command::new(&uv)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    let uv = uv_bin();
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }
@@ -379,16 +371,10 @@ a.write_h5ad(p)
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn plot_umap_obs_errors_when_column_missing() {
-    let uv = std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into());
-    if !Command::new(&uv)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    let uv = uv_bin();
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }

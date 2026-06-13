@@ -1,22 +1,15 @@
 //! Integration: `rust_preprocess` loads real `.h5ad` from disk (Python-written) and runs the
 //! in-memory pipeline — including digit-like `var_names` repair from `var['feature_name']`.
 
+mod common;
+
 use std::process::Command;
 
+use common::uv_python::uv_available;
 use spacetravlr::rust_preprocess::{
     rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps, RustPreprocessParams,
     RustPreprocessSteps,
 };
-
-fn uv_ok() -> bool {
-    Command::new(std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into()))
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn write_h5ad_digit_var_with_feature_name(path: &std::path::Path) -> std::process::ExitStatus {
     let py = r#"
@@ -35,7 +28,7 @@ a.var_names = [str(i) for i in range(n_var)]
 a.var["feature_name"] = [f"GeneSym{k}" for k in range(n_var)]
 a.write_h5ad(p)
 "#;
-    Command::new(std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into()))
+    Command::new(common::uv_python::uv_bin())
         .env_remove("PYTHONPATH")
         .env("PYTHONNOUSERSITE", "1")
         .args([
@@ -55,8 +48,9 @@ a.write_h5ad(p)
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn rust_preprocess_memory_repairs_digit_var_index_from_feature_name() {
-    if !uv_ok() {
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }
@@ -115,8 +109,9 @@ fn rust_preprocess_memory_repairs_digit_var_index_from_feature_name() {
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn rust_preprocess_write_roundtrip_keeps_symbolic_var_index() {
-    if !uv_ok() {
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }
@@ -161,8 +156,9 @@ fn rust_preprocess_write_roundtrip_keeps_symbolic_var_index() {
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn load_h5ad_tolerates_scanpy_obsp_distances_unsorted_columns() {
-    if !uv_ok() {
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }
@@ -201,7 +197,7 @@ a.write_h5ad(p)
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let h5 = dir.join("obsp.h5ad");
-    let st = Command::new(std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into()))
+    let st = Command::new(common::uv_python::uv_bin())
         .env_remove("PYTHONPATH")
         .env("PYTHONNOUSERSITE", "1")
         .args([

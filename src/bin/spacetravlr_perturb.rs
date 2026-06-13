@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use spacetravlr::betadata::write_betadata_feather;
 use spacetravlr::config::expand_user_path;
 use spacetravlr::perturb::{
@@ -12,6 +12,7 @@ use spacetravlr::perturb_batch::{
 use spacetravlr::perturb_mode::{
     PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix,
 };
+use spacetravlr::perturb_screen::{RunPerturbScreenArgs, run_perturb_screen};
 #[cfg(not(feature = "tui"))]
 use spacetravlr::perturb_mode::{interactive_run_toml_prompt, run_interactive};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 #[command(
     name = "spacetravlr-perturb",
     version,
-    about = "SpaceTravLR perturbation: Ratatui UI (default) or --export/--out batch mode or --batch-toml. Same run TOML + betadata loading model as spatial_viewer.",
+    about = "SpaceTravLR perturbation: Ratatui UI (default), --export/--out batch mode, --batch-toml, or screen subcommand.",
     after_long_help = r#"Use --config PATH (or pass PATH as the first argument) for a single TOML: `run_toml` (path to spacetravlr_run_repro.toml) plus optional `[data]` / `[perturbation]` / … sections that override the repro file. `--run-toml` overrides `run_toml` in that file when both are set.
 
 Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag), or --batch-toml PATH for many single-gene jobs. Batch keys can live in --config instead of a separate batch file.
@@ -30,6 +31,8 @@ Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag),
 Single-job batch: requires a repro TOML (--run-toml or run_toml in --config), --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --cells-csv + --cells-csv-column, --verbose.
 
 Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Do not combine with --gene, --export/--out, or --cells-*.
+
+Screen subcommand: `spacetravlr-perturb screen --config PATH` loads the same KO/batch TOML shape (`run_toml`, `[perturbation]`, optional `out_dir`, `cells_csv`, `parallelism`, …) but ignores explicit `gene` / `genes` / `out` paths. It KOs every TF, ligand, receptor, `[grn].extra_modulators` gene, and ligand/receptor from `extra_lr`, writing `{out_dir or run output}/perturbations/{gene}_KO.feather`.
 
 Example:
   spacetravlr-perturb \
@@ -42,9 +45,14 @@ Example:
     --cells-csv-column selected \
     --verbose
 
+  spacetravlr-perturb screen --config /path/to/ko_screen.toml --verbose
+
 If --cells-csv is set, --cells-csv-column is required in single-job batch mode."#
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     #[arg(
         long = "config",
         visible_alias = "perturb-toml",
@@ -125,9 +133,76 @@ struct Cli {
     batch_parallelism: Option<usize>,
 }
 
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// KO-screen every TF, ligand, receptor, and extra GRN gene from a perturbation TOML.
+    Screen {
+        #[arg(
+            long = "config",
+            short = 'c',
+            visible_alias = "perturb-toml",
+            value_name = "PATH",
+            help = "KO / batch-style TOML (`run_toml`, `[perturbation]`, optional `out_dir`, `cells_csv`, `parallelism`, …). `gene` / `genes` / `out` are ignored."
+        )]
+        config: PathBuf,
+
+        #[arg(index = 1, value_name = "CONFIG", help = "Same as --config.")]
+        config_positional: Option<PathBuf>,
+
+        #[arg(
+            long = "run-toml",
+            value_name = "PATH",
+            help = "Overrides `run_toml` in --config when both are set."
+        )]
+        run_toml: Option<PathBuf>,
+
+        #[arg(
+            long = "n-propagation",
+            help = "Override [perturbation].n_propagation from the TOML."
+        )]
+        n_propagation: Option<usize>,
+
+        #[arg(long, help = "Print load and perturb timings on stderr.")]
+        verbose: bool,
+
+        #[arg(
+            long = "batch-parallelism",
+            value_name = "N",
+            help = "Override TOML `parallelism` (max concurrent perturb threads)."
+        )]
+        batch_parallelism: Option<usize>,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     spacetravlr::ensure_process_env();
     let cli = Cli::parse();
+
+    if let Some(Commands::Screen {
+        config,
+        config_positional,
+        run_toml,
+        n_propagation,
+        verbose,
+        batch_parallelism,
+    }) = cli.command
+    {
+        let config_path = config_positional.unwrap_or(config);
+        let parsed = load_perturb_cli_toml(config_path.as_path())?;
+        let run_toml_eff = resolve_effective_run_toml(
+            run_toml,
+            parsed.run_toml.clone(),
+            Some(config_path.as_path()),
+        )?;
+        return run_perturb_screen(RunPerturbScreenArgs {
+            run_toml: run_toml_eff,
+            config_path: config_path.as_path(),
+            overlay: Some(&parsed.overlay_source),
+            n_propagation_cli: n_propagation,
+            parallelism_cli: batch_parallelism,
+            verbose,
+        });
+    }
 
     let perturb_config_path = cli.config.clone().or(cli.config_positional.clone());
     let parsed_opt = if let Some(ref p) = perturb_config_path {

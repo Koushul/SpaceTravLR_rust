@@ -8,6 +8,7 @@ use spacetravlr::celloracle::{
 };
 use spacetravlr::config::{canonical_adata_stem, expand_user_path};
 use spacetravlr::network::{GeneNetwork, infer_species};
+use spacetravlr::rust_preprocess::RustPreprocessParams;
 use spacetravlr::scanpy_preprocess::{
     SpatialMicronsOptions, ensure_training_adata_ready, resolve_magic_batch_obs_column,
 };
@@ -129,6 +130,7 @@ fn main() -> anyhow::Result<()> {
             Path::new(&h5ad_expanded),
             magic_batch.as_deref(),
             spatial_microns,
+            &RustPreprocessParams::default(),
         )?;
     }
 

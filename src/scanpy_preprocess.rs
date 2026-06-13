@@ -1455,6 +1455,7 @@ pub fn ensure_training_adata_ready(
     original_input_for_stem: &Path,
     magic_batch_obs: Option<&str>,
     spatial_microns: SpatialMicronsOptions,
+    preprocess_params: &RustPreprocessParams,
 ) -> anyhow::Result<()> {
     let expanded = expand_user_path(adata_path.trim());
     let p = PathBuf::from(&expanded);
@@ -1550,11 +1551,10 @@ pub fn ensure_training_adata_ready(
                 out.display()
             );
             let _ = std::fs::remove_file(&out);
-            let params = RustPreprocessParams::default();
             rust_preprocess_h5ad_with_steps(
                 &p,
                 Some(out.as_path()),
-                &params,
+                preprocess_params,
                 &RustPreprocessSteps::TRAINING_LAYERS_LEIDEN_ANNOTATE,
             )?;
             *adata_path = expand_user_path(out.to_string_lossy().as_ref());
@@ -1581,11 +1581,10 @@ pub fn ensure_training_adata_ready(
                     out.display()
                 );
                 let _ = std::fs::remove_file(&out);
-                let params = RustPreprocessParams::default();
                 rust_preprocess_h5ad_with_steps(
                     &p,
                     Some(out.as_path()),
-                    &params,
+                    preprocess_params,
                     &RustPreprocessSteps::FULL,
                 )?;
                 *adata_path = expand_user_path(out.to_string_lossy().as_ref());
@@ -1950,6 +1949,7 @@ a.write_h5ad(p)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_isolated_scanpy_basic_preprocess_writes_sibling_processed() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2043,6 +2043,7 @@ a.write_h5ad(p)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_preprocess_scales_obsm_spatial_microns() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2150,6 +2151,7 @@ a.write_h5ad(p)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_preprocess_classifies_log1p_like_input() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2359,6 +2361,7 @@ a.write_h5ad(out)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_probe_and_plan_leiden_only_normalized_not_imputed() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2403,6 +2406,7 @@ a.obs["leiden"] = np.array([str(i % 3) for i in range(n_obs)], dtype=object)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_probe_cell_type_normalized_not_imputed_is_impute_only() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2444,6 +2448,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_probe_ready_for_training_is_noop() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2482,6 +2487,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_magic_impute_batch_obs_column_produces_imputed_layer() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");
@@ -2528,6 +2534,7 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
     }
 
     #[test]
+    #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_magic_impute_unknown_batch_obs_column_fails() {
         if !uv_available() {
             eprintln!("skip: uv not on PATH");

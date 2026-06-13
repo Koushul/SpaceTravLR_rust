@@ -61,10 +61,17 @@ const INIT_NOISE_STD: f32 = 1e-4;
 
 #[derive(Clone, Debug)]
 pub struct RustPreprocessParams {
+    /// `filter_cells(min_genes=…)` when QC is enabled.
+    pub min_genes: u32,
+    /// `filter_genes(min_cells=…)` when QC is enabled.
+    pub min_cells: u32,
+    /// `normalize_total(target_sum=…)` when `X` is raw counts.
+    pub normalize_target_sum: u32,
     /// Max highly-variable genes when `n_vars` exceeds this; when `n_vars <= n_top_hvg`, dispersion
     /// ranking is skipped and **all non-MT genes** are used (nothing to trim to a smaller top-N).
     pub n_top_hvg: usize,
     pub n_pca_components: usize,
+    pub pca_random_seed: u32,
     pub n_neighbors: usize,
     pub min_dist: f32,
     pub n_epochs: Option<usize>,
@@ -73,20 +80,16 @@ pub struct RustPreprocessParams {
     pub spread: f32,
     /// UMAP SGD learning rate passed to [`OptimizationParams::learning_rate`].
     pub umap_learning_rate: f32,
+    /// Leiden resolution passed to [`leiden_labels_from_graph`].
+    pub leiden_resolution: f64,
+    pub leiden_max_iter: usize,
+    /// MAGIC diffusion time `t` (Rust `magic-impute` path).
+    pub magic_t: u32,
 }
 
 impl Default for RustPreprocessParams {
     fn default() -> Self {
-        Self {
-            n_top_hvg: 2000,
-            n_pca_components: 50,
-            n_neighbors: 15,
-            min_dist: 0.5,
-            n_epochs: None,
-            ef_construction: 30,
-            spread: 0.5,
-            umap_learning_rate: 1.0,
-        }
+        crate::config::PreprocessConfig::default().to_rust_preprocess_params()
     }
 }
 
@@ -1773,7 +1776,7 @@ pub fn umap_lab_run_magic_imputed_leiden(
     umap_lab_ensure_normalized_count_for_magic(&adata)?;
     let _ = adata.layers().remove_array("imputed_count");
     let mut log = Vec::new();
-    add_magic_imputed_count(&adata, graph, leiden_labels, &mut log)?;
+    add_magic_imputed_count(&adata, graph, leiden_labels, RustPreprocessParams::default().magic_t, &mut log)?;
     write_adata_h5ad(&adata, out_h5ad_path)?;
     Ok(())
 }
@@ -2650,6 +2653,7 @@ fn sync_labels_after_embedding(
     graph: &FuzzyGraph,
     write_leiden: bool,
     run_magic: bool,
+    params: &RustPreprocessParams,
     log: &mut Vec<(String, f64)>,
 ) -> Result<Vec<String>> {
     let obs = adata.obs().get_data();
@@ -2659,7 +2663,11 @@ fn sync_labels_after_embedding(
     if write_leiden || (run_magic && !had_cell_type && !had_leiden) {
         let t = Instant::now();
         eprintln!(">>> leiden-rs");
-        let labels = leiden_labels_from_graph(graph, 1.0, 100);
+        let labels = leiden_labels_from_graph(
+            graph,
+            params.leiden_resolution,
+            params.leiden_max_iter,
+        );
         eprintln!("<<< leiden-rs: {:.2} s", t.elapsed().as_secs_f64());
         log.push(("leiden-rs".to_string(), t.elapsed().as_secs_f64()));
 
@@ -2745,6 +2753,7 @@ fn add_magic_imputed_count(
     adata: &IMAnnData,
     graph: &FuzzyGraph,
     labels: &[String],
+    magic_t: u32,
     log: &mut Vec<(String, f64)>,
 ) -> Result<()> {
     if adata.layers().get_array("imputed_count").is_ok() {
@@ -2796,7 +2805,7 @@ fn add_magic_imputed_count(
             let sub = ndarray::Array2::<f32>::from_shape_fn((rows.len(), ke - kc), |(i, j)| {
                 block[[rows[i], j]]
             });
-            let imp = impute_magic_f32(&diff, &sub, 3, &cfg);
+            let imp = impute_magic_f32(&diff, &sub, magic_t, &cfg);
             for (i, &gi) in rows.iter().enumerate() {
                 for j in 0..(ke - kc) {
                     block[[gi, j]] = imp[[i, j]];
@@ -2841,30 +2850,46 @@ pub fn rust_preprocess_h5ad_to_memory(
 
     if steps.qc_filter {
         let t = Instant::now();
-        eprintln!(">>> filter_genes(min_cells=3)");
-        let gene_mask =
-            mark_filter_genes::<u32, f64>(&adata, Some(3u32), None, None, None, None, None)
-                .map_err(|e| anyhow!("mark_filter_genes: {e:?}"))?;
+        eprintln!(">>> filter_genes(min_cells={})", params.min_cells);
+        let gene_mask = mark_filter_genes::<u32, f64>(
+            &adata,
+            Some(params.min_cells),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| anyhow!("mark_filter_genes: {e:?}"))?;
         eprintln!(
-            "<<< filter_genes(min_cells=3): {:.2} s",
+            "<<< filter_genes(min_cells={}): {:.2} s",
+            params.min_cells,
             t.elapsed().as_secs_f64()
         );
         log.push((
-            "filter_genes(min_cells=3)".to_string(),
+            format!("filter_genes(min_cells={})", params.min_cells),
             t.elapsed().as_secs_f64(),
         ));
 
         let t = Instant::now();
-        eprintln!(">>> filter_cells(min_genes=100)");
-        let cell_mask =
-            mark_filter_cells::<u32, f64>(&adata, Some(100u32), None, None, None, None, None)
-                .map_err(|e| anyhow!("mark_filter_cells: {e:?}"))?;
+        eprintln!(">>> filter_cells(min_genes={})", params.min_genes);
+        let cell_mask = mark_filter_cells::<u32, f64>(
+            &adata,
+            Some(params.min_genes),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| anyhow!("mark_filter_cells: {e:?}"))?;
         eprintln!(
-            "<<< filter_cells(min_genes=100): {:.2} s",
+            "<<< filter_cells(min_genes={}): {:.2} s",
+            params.min_genes,
             t.elapsed().as_secs_f64()
         );
         log.push((
-            "filter_cells(min_genes=100)".to_string(),
+            format!("filter_cells(min_genes={})", params.min_genes),
             t.elapsed().as_secs_f64(),
         ));
 
@@ -2917,8 +2942,16 @@ pub fn rust_preprocess_h5ad_to_memory(
         } else {
             ensure_x_csr_for_pca(&adata).context("prepare X as CSR for normalize_total")?;
             let t = Instant::now();
-            eprintln!(">>> normalize_total (target_sum=10000, Scanpy-equivalent)");
-            normalize_expression(&adata.x(), 10_000, &Direction::ROW, None)
+            eprintln!(
+                ">>> normalize_total (target_sum={}, Scanpy-equivalent)",
+                params.normalize_target_sum
+            );
+            normalize_expression(
+                &adata.x(),
+                params.normalize_target_sum,
+                &Direction::ROW,
+                None,
+            )
                 .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
             let norm_data = adata.x().get_data().context("x after normalize")?;
             layer_replace_if_present(&adata, "normalized_count", norm_data)?;
@@ -3036,7 +3069,7 @@ pub fn rust_preprocess_h5ad_to_memory(
             Some(false),
             Some(params.n_pca_components),
             None,
-            Some(42),
+            Some(params.pca_random_seed),
             Some(SVDMethod::Random {
                 n_oversamples: 10,
                 n_power_iterations: 4,
@@ -3080,10 +3113,17 @@ pub fn rust_preprocess_h5ad_to_memory(
             &fuzzy_graph,
             steps.write_leiden,
             steps.run_magic_impute,
+            params,
             &mut log,
         )?;
         if steps.run_magic_impute {
-            add_magic_imputed_count(&adata, &fuzzy_graph, &labels, &mut log)?;
+            add_magic_imputed_count(
+                &adata,
+                &fuzzy_graph,
+                &labels,
+                params.magic_t,
+                &mut log,
+            )?;
         }
     }
 

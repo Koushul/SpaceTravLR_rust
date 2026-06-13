@@ -2,6 +2,10 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
+use common::uv_python::{uv_available, uv_bin};
+
 fn spacetravlr_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_spacetravlr"))
 }
@@ -38,6 +42,7 @@ fn map_labels_requires_reference_and_query() {
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn map_labels_end_to_end_toy_h5ad() {
     if std::env::var_os("SPACETRAVLR_MAP_LABELS_E2E").is_none() {
         eprintln!(
@@ -45,15 +50,8 @@ fn map_labels_end_to_end_toy_h5ad() {
         );
         return;
     }
-    let uv = std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into());
-    if !Command::new(&uv)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    let uv = uv_bin();
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }
@@ -160,6 +158,7 @@ q.write_h5ad(sys.argv[2])
 }
 
 #[test]
+#[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn map_labels_spatial_toy_h5ad_with_seed_betadata() {
     if std::env::var_os("SPACETRAVLR_MAP_LABELS_E2E").is_none() {
         eprintln!(
@@ -167,15 +166,8 @@ fn map_labels_spatial_toy_h5ad_with_seed_betadata() {
         );
         return;
     }
-    let uv = std::env::var_os("UV_BIN").unwrap_or_else(|| "uv".into());
-    if !Command::new(&uv)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    let uv = uv_bin();
+    if !uv_available() {
         eprintln!("skip: uv not on PATH");
         return;
     }

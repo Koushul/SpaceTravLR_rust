@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const SPACESHIP_MERGE_SECTIONS: &[&str] = &[
     "data",
+    "preprocess",
     "spatial",
     "grn",
     "cnn",
@@ -149,6 +150,8 @@ pub struct SpaceshipConfig {
     #[serde(default)]
     pub data: DataConfig,
     #[serde(default)]
+    pub preprocess: PreprocessConfig,
+    #[serde(default)]
     pub spatial: SpatialConfig,
     #[serde(default)]
     pub grn: GrnConfig,
@@ -182,6 +185,81 @@ pub struct DataConfig {
     pub spatial_species: String,
     /// Override median k-NN target distance (µm) for spatial scaling; omit to use the species default.
     pub spatial_median_nn_target_um: Option<f64>,
+}
+
+/// Rust / training auto-prep pipeline ([`crate::rust_preprocess`]): QC, normalize, HVG, PCA, UMAP, Leiden, MAGIC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreprocessConfig {
+    /// `sc.pp.filter_cells(min_genes=…)` — minimum detected genes per cell.
+    pub min_genes: u32,
+    /// `sc.pp.filter_genes(min_cells=…)` — minimum cells expressing each gene.
+    pub min_cells: u32,
+    /// `sc.pp.normalize_total(target_sum=…)` when `X` is raw counts.
+    pub normalize_target_sum: u32,
+    /// Max highly-variable genes when `n_vars` exceeds this (dispersion ranking skipped below).
+    pub n_top_hvg: usize,
+    pub n_pca_components: usize,
+    /// RNG seed for randomized PCA (`single_rust` SVD).
+    pub pca_random_seed: u32,
+    /// UMAP / fuzzy graph KNN count.
+    pub n_neighbors: usize,
+    pub min_dist: f32,
+    pub spread: f32,
+    pub umap_learning_rate: f32,
+    /// UMAP SGD epochs; omit for umap-rs default (data-size dependent).
+    pub n_epochs: Option<usize>,
+    /// HNSW `ef_construction` for PCA-space KNN.
+    pub ef_construction: usize,
+    /// Leiden resolution (`sc.tl.leiden` analogue).
+    pub leiden_resolution: f64,
+    pub leiden_max_iter: usize,
+    /// MAGIC diffusion time `t` (Rust `magic-impute` path).
+    pub magic_t: u32,
+}
+
+impl PreprocessConfig {
+    pub fn to_rust_preprocess_params(&self) -> crate::rust_preprocess::RustPreprocessParams {
+        crate::rust_preprocess::RustPreprocessParams {
+            min_genes: self.min_genes,
+            min_cells: self.min_cells,
+            normalize_target_sum: self.normalize_target_sum,
+            n_top_hvg: self.n_top_hvg,
+            n_pca_components: self.n_pca_components,
+            pca_random_seed: self.pca_random_seed,
+            n_neighbors: self.n_neighbors,
+            min_dist: self.min_dist,
+            n_epochs: self.n_epochs,
+            ef_construction: self.ef_construction,
+            spread: self.spread,
+            umap_learning_rate: self.umap_learning_rate,
+            leiden_resolution: self.leiden_resolution,
+            leiden_max_iter: self.leiden_max_iter,
+            magic_t: self.magic_t,
+        }
+    }
+}
+
+impl Default for PreprocessConfig {
+    fn default() -> Self {
+        Self {
+            min_genes: 100,
+            min_cells: 3,
+            normalize_target_sum: 10_000,
+            n_top_hvg: 2000,
+            n_pca_components: 50,
+            pca_random_seed: 42,
+            n_neighbors: 15,
+            min_dist: 0.5,
+            spread: 0.5,
+            umap_learning_rate: 1.0,
+            n_epochs: None,
+            ef_construction: 30,
+            leiden_resolution: 1.0,
+            leiden_max_iter: 100,
+            magic_t: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1770,5 +1848,93 @@ gram_override = false
 "#;
         let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.lasso.gram_override, Some(false));
+    }
+}
+
+#[cfg(test)]
+mod preprocess_config_tests {
+    use super::{PreprocessConfig, SpaceshipConfig, merge_spaceship_overlay_into_toml};
+
+    #[test]
+    fn default_preprocess_matches_rust_pipeline_defaults() {
+        let p = PreprocessConfig::default();
+        assert_eq!(p.min_genes, 100);
+        assert_eq!(p.min_cells, 3);
+        assert_eq!(p.normalize_target_sum, 10_000);
+        assert_eq!(p.n_top_hvg, 2000);
+        assert_eq!(p.n_pca_components, 50);
+        assert_eq!(p.n_neighbors, 15);
+        assert_eq!(p.leiden_resolution, 1.0);
+        assert_eq!(p.magic_t, 3);
+        let rust = p.to_rust_preprocess_params();
+        assert_eq!(rust.n_top_hvg, p.n_top_hvg);
+        assert_eq!(rust.n_pca_components, p.n_pca_components);
+        assert_eq!(rust.min_genes, p.min_genes);
+        assert_eq!(rust.magic_t, p.magic_t);
+    }
+
+    #[test]
+    fn toml_preprocess_section_deserializes() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[preprocess]
+min_genes = 50
+n_top_hvg = 800
+n_pca_components = 12
+n_neighbors = 8
+leiden_resolution = 0.8
+magic_t = 2
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.preprocess.min_genes, 50);
+        assert_eq!(cfg.preprocess.n_top_hvg, 800);
+        assert_eq!(cfg.preprocess.n_pca_components, 12);
+        assert_eq!(cfg.preprocess.n_neighbors, 8);
+        assert!((cfg.preprocess.leiden_resolution - 0.8).abs() < 1e-9);
+        assert_eq!(cfg.preprocess.magic_t, 2);
+        assert_eq!(cfg.preprocess.min_cells, 3);
+    }
+
+    #[test]
+    fn overlay_merges_preprocess_section() {
+        let base = r#"
+[data]
+adata_path = "/x.h5ad"
+layer = "L"
+cluster_annot = "c"
+
+[preprocess]
+n_top_hvg = 1000
+n_pca_components = 40
+"#;
+        let overlay = r#"
+[preprocess]
+n_pca_components = 25
+n_neighbors = 20
+"#;
+        let mut root: toml::Value = toml::from_str(base).unwrap();
+        let ov: toml::Value = toml::from_str(overlay).unwrap();
+        merge_spaceship_overlay_into_toml(&mut root, &ov);
+        let cfg: SpaceshipConfig = toml::from_str(&toml::to_string_pretty(&root).unwrap()).unwrap();
+        assert_eq!(cfg.preprocess.n_top_hvg, 1000);
+        assert_eq!(cfg.preprocess.n_pca_components, 25);
+        assert_eq!(cfg.preprocess.n_neighbors, 20);
+    }
+
+    #[test]
+    fn repro_toml_roundtrip_preprocess_fields() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.preprocess.n_top_hvg = 1500;
+        cfg.preprocess.min_genes = 80;
+        cfg.preprocess.magic_t = 4;
+        let s = cfg.to_toml_pretty().unwrap();
+        let back: SpaceshipConfig = toml::from_str(&s).expect("deserialize repro TOML");
+        assert_eq!(back.preprocess.n_top_hvg, 1500);
+        assert_eq!(back.preprocess.min_genes, 80);
+        assert_eq!(back.preprocess.magic_t, 4);
     }
 }

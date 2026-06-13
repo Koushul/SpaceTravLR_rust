@@ -1796,8 +1796,11 @@ fn run_map_labels(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_rust_preprocess_params(cli: &Cli) -> spacetravlr::rust_preprocess::RustPreprocessParams {
-    let mut params = spacetravlr::rust_preprocess::RustPreprocessParams::default();
+fn resolve_rust_preprocess_params(
+    cfg: &SpaceshipConfig,
+    cli: &Cli,
+) -> spacetravlr::rust_preprocess::RustPreprocessParams {
+    let mut params = cfg.preprocess.to_rust_preprocess_params();
     if let Some(n) = cli.rust_n_top_hvg {
         params.n_top_hvg = n;
     }
@@ -1829,7 +1832,8 @@ fn run_rust_prep_convenience(cli: &Cli) -> anyhow::Result<()> {
     if !h5ad.is_file() {
         anyhow::bail!("AnnData not found at {}.", h5ad.display());
     }
-    let params = resolve_rust_preprocess_params(cli);
+    let cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
+    let params = resolve_rust_preprocess_params(&cfg, cli);
     let steps = spacetravlr::rust_preprocess::RustPreprocessSteps::from_convenience_flags(
         cli.prep_umap,
         cli.prep_leiden,
@@ -1876,7 +1880,8 @@ fn run_rust_process_h5ad(cli: &Cli) -> anyhow::Result<()> {
     let stem = canonical_training_prep_stem(&h5ad);
     let dest = out_dir.join(format!("{stem}_rust_processed.h5ad"));
 
-    let params = resolve_rust_preprocess_params(cli);
+    let cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
+    let params = resolve_rust_preprocess_params(&cfg, cli);
 
     spacetravlr::rust_preprocess::rust_preprocess_h5ad(&h5ad, &dest, &params)?;
     eprintln!("spacetravlr: wrote {}", dest.display());
@@ -2067,7 +2072,8 @@ fn run_plot_umap(cli: &Cli) -> anyhow::Result<()> {
                 "No usable on-disk UMAP plot path — running Rust preprocess ({phase}) on {} …",
                 h5ad.display()
             );
-            let params = resolve_rust_preprocess_params(cli);
+            let cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
+            let params = resolve_rust_preprocess_params(&cfg, cli);
             let steps = spacetravlr::rust_preprocess::RustPreprocessSteps::from_convenience_flags(
                 true,
                 cli.prep_leiden,
@@ -2241,6 +2247,8 @@ fn run_celloracle(cli: &Cli, h5ad_input: &std::path::Path) -> anyhow::Result<()>
     let mut adata_path = h5ad_expanded.clone();
 
     if !cli.celloracle_skip_preprocess {
+        let cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
+        let preprocess_params = cfg.preprocess.to_rust_preprocess_params();
         let magic_batch = resolve_magic_batch_obs_column(cli.magic_batch_obs.as_deref(), None);
         let species_trim = cli
             .spatial_species
@@ -2259,6 +2267,7 @@ fn run_celloracle(cli: &Cli, h5ad_input: &std::path::Path) -> anyhow::Result<()>
             Path::new(&h5ad_expanded),
             magic_batch.as_deref(),
             spatial_microns,
+            &preprocess_params,
         )?;
     }
 
@@ -2902,6 +2911,7 @@ fn main() -> anyhow::Result<()> {
             Path::new(&adata_path_for_stem),
             magic_batch.as_deref(),
             spatial_microns,
+            &cfg.preprocess.to_rust_preprocess_params(),
         )?;
         path = expand_user_path(&cfg.data.adata_path);
         cfg.data.adata_path = path.clone();

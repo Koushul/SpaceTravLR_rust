@@ -36,15 +36,39 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build workspace (default features incl. RCTD)
+        run: cargo --config 'build.rustc-wrapper=""' build
+
+      - name: Run tests (excludes uv/python `#[ignore]` integration tests)
+        run: cargo --config 'build.rustc-wrapper=""' test
+
+  uv-python-tests:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
+      - name: spacetravlr binary compile env (env! in spacetravlr.rs)
+        run: |
+          echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          echo "SPACETRAVLR_TARGET_TRIPLE=$(rustc -vV | awk '/host:/ {print $2}')" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
 
-      - name: Build workspace (default features incl. RCTD)
-        run: cargo --config 'build.rustc-wrapper=""' build
-
-      - name: Run tests
-        run: cargo --config 'build.rustc-wrapper=""' test
+      - name: Run uv/python integration tests (ignored by default)
+        run: cargo --config 'build.rustc-wrapper=""' test -- --ignored
 
   install-script:
     runs-on: ubuntu-latest

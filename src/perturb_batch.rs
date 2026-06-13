@@ -51,7 +51,7 @@ pub enum StrOrVec {
     Many(Vec<String>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct PerturbBatchFile {
     #[serde(default)]
     pub gene: Option<String>,
@@ -275,7 +275,7 @@ fn broadcast_f64(spec: Option<&F64OrVec>, n: usize) -> anyhow::Result<Vec<f64>> 
     broadcast_f64_field(spec, n, 0.0, "desired_expr")
 }
 
-fn broadcast_f64_field(
+pub(crate) fn broadcast_f64_field(
     spec: Option<&F64OrVec>,
     n: usize,
     default: f64,
@@ -319,7 +319,7 @@ fn broadcast_str_cols(spec: Option<&StrOrVec>, n: usize) -> anyhow::Result<Vec<S
     }
 }
 
-fn broadcast_usize(
+pub(crate) fn broadcast_usize(
     spec: Option<&UszOrVec>,
     n: usize,
     default: usize,
