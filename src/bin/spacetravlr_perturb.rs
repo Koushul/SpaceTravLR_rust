@@ -7,7 +7,7 @@ use spacetravlr::perturb::{
 use spacetravlr::perturb_batch::{
     PerturbBatchFile, batch_from_perturb_table, effective_parallelism, expand_prepared_jobs,
     load_batch_file, load_perturb_cli_toml, resolve_effective_run_toml,
-    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
+    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes, BatchRunOptions,
 };
 use spacetravlr::perturb_mode::{
     PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix,
@@ -280,7 +280,12 @@ fn main() -> anyhow::Result<()> {
         let parallelism = effective_parallelism(batch_file.parallelism, cli.batch_parallelism);
         let rt = Arc::new(runtime);
         let t_batch = Instant::now();
-        run_batch_jobs(Arc::clone(&rt), jobs, parallelism, cli.verbose)?;
+        run_batch_jobs(
+            Arc::clone(&rt),
+            jobs,
+            parallelism,
+            BatchRunOptions::from_verbose(cli.verbose),
+        )?;
         let batch_elapsed = t_batch.elapsed();
         if cli.verbose {
             eprintln!("--- spacetravlr-perturb batch timings ---");

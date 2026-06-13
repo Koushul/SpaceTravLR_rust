@@ -1,9 +1,16 @@
 use std::collections::VecDeque;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+use indicatif::{ProgressBar, ProgressStyle};
 
 use serde::Deserialize;
+
+use anyhow::Context;
 
 use crate::betadata::{GeneMatrix, write_betadata_feather};
 use crate::config::{SPACESHIP_MERGE_SECTIONS, expand_user_path};
@@ -511,6 +518,180 @@ pub fn resolve_prepared_job_cell_indices(
     Ok(())
 }
 
+/// Live KO-screen progress shared across parallel perturb workers (one indicatif bar).
+pub struct UnifiedBatchProgress {
+    pb: ProgressBar,
+    total_genes: usize,
+    completed: AtomicUsize,
+    slots: Vec<Arc<AtomicU32>>,
+    active_genes: Vec<Mutex<String>>,
+    stop_tick: Arc<AtomicBool>,
+    tick_handle: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl UnifiedBatchProgress {
+    pub fn new(total_genes: usize, n_workers: usize) -> Option<Arc<Self>> {
+        if total_genes == 0 || !std::io::stderr().is_terminal() {
+            return None;
+        }
+        let units = (total_genes as u64).saturating_mul(1000);
+        let pb = ProgressBar::new(units);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {msg} {per_sec} eta {eta}")
+                .ok()?
+                .progress_chars("#>-"),
+        );
+        pb.enable_steady_tick(Duration::from_millis(120));
+        let slots = (0..n_workers.max(1))
+            .map(|_| Arc::new(AtomicU32::new(0)))
+            .collect();
+        let active_genes = (0..n_workers.max(1))
+            .map(|_| Mutex::new(String::new()))
+            .collect();
+        let stop_tick = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Self {
+            pb,
+            total_genes,
+            completed: AtomicUsize::new(0),
+            slots,
+            active_genes,
+            stop_tick: Arc::clone(&stop_tick),
+            tick_handle: Mutex::new(None),
+        });
+        progress.refresh();
+        let tick_src = Arc::clone(&progress);
+        let handle = thread::spawn(move || {
+            while !stop_tick.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(150));
+                tick_src.refresh();
+            }
+        });
+        if let Ok(mut g) = progress.tick_handle.lock() {
+            *g = Some(handle);
+        }
+        Some(progress)
+    }
+
+    fn refresh(&self) {
+        let done = self.completed.load(Ordering::Relaxed) as u64;
+        let mut inflight = 0u64;
+        for slot in &self.slots {
+            inflight += slot.load(Ordering::Relaxed) as u64;
+        }
+        let pos = done.saturating_mul(1000).saturating_add(inflight);
+        self.pb.set_position(pos);
+        let frac = (pos as f64 / 1000.0).min(self.total_genes as f64);
+        let active: Vec<String> = self
+            .active_genes
+            .iter()
+            .filter_map(|m| m.lock().ok().map(|g| g.clone()))
+            .filter(|g| !g.is_empty())
+            .collect();
+        let active_hint = if active.is_empty() {
+            String::new()
+        } else if active.len() == 1 {
+            format!(" · {}", active[0])
+        } else {
+            format!(" · {} in flight", active.len())
+        };
+        self.pb.set_message(format!(
+            "{frac:.1}/{}{active_hint}",
+            self.total_genes
+        ));
+    }
+
+    pub fn job_started(&self, worker_id: usize, gene: &str) {
+        if let Some(slot) = self.slots.get(worker_id) {
+            slot.store(0, Ordering::Relaxed);
+        }
+        if let Some(m) = self.active_genes.get(worker_id) {
+            if let Ok(mut g) = m.lock() {
+                *g = gene.to_string();
+            }
+        }
+        self.refresh();
+    }
+
+    pub fn job_finished(&self, worker_id: usize) {
+        self.completed.fetch_add(1, Ordering::Relaxed);
+        if let Some(slot) = self.slots.get(worker_id) {
+            slot.store(0, Ordering::Relaxed);
+        }
+        if let Some(m) = self.active_genes.get(worker_id) {
+            if let Ok(mut g) = m.lock() {
+                g.clear();
+            }
+        }
+        self.refresh();
+    }
+
+    pub fn slot_progress(&self, worker_id: usize) -> Option<Arc<AtomicU32>> {
+        self.slots.get(worker_id).cloned()
+    }
+
+    pub fn job_failed(&self, worker_id: usize) {
+        if let Some(slot) = self.slots.get(worker_id) {
+            slot.store(0, Ordering::Relaxed);
+        }
+        if let Some(m) = self.active_genes.get(worker_id) {
+            if let Ok(mut g) = m.lock() {
+                g.clear();
+            }
+        }
+        self.refresh();
+    }
+
+    pub fn finish(self: Arc<Self>) {
+        self.stop_tick.store(true, Ordering::Relaxed);
+        if let Ok(mut g) = self.tick_handle.lock() {
+            if let Some(h) = g.take() {
+                let _ = h.join();
+            }
+        }
+        self.pb.finish_and_clear();
+    }
+}
+
+pub struct BatchRunOptions {
+    pub verbose: bool,
+    /// KO screen mode: suppress routine logs; show unified progress on a TTY.
+    pub screen_mode: bool,
+    screen_progress: Option<Arc<UnifiedBatchProgress>>,
+}
+
+impl Clone for BatchRunOptions {
+    fn clone(&self) -> Self {
+        Self {
+            verbose: self.verbose,
+            screen_mode: self.screen_mode,
+            screen_progress: self.screen_progress.clone(),
+        }
+    }
+}
+
+impl BatchRunOptions {
+    pub fn from_verbose(verbose: bool) -> Self {
+        Self {
+            verbose,
+            screen_mode: false,
+            screen_progress: None,
+        }
+    }
+
+    pub fn screen(total_genes: usize, parallelism: usize, verbose: bool) -> Self {
+        Self {
+            verbose,
+            screen_mode: true,
+            screen_progress: UnifiedBatchProgress::new(total_genes, parallelism),
+        }
+    }
+
+    pub fn is_quiet(&self) -> bool {
+        self.screen_mode && !self.verbose
+    }
+}
+
 pub fn validate_jobs_genes(
     jobs: &[PreparedPerturbJob],
     gene_names: &[String],
@@ -529,7 +710,8 @@ pub fn validate_jobs_genes(
 fn run_one_job(
     runtime: &PerturbRuntime,
     job: PreparedPerturbJob,
-    verbose: bool,
+    opts: &BatchRunOptions,
+    job_progress: Option<&Arc<AtomicU32>>,
 ) -> anyhow::Result<()> {
     let cell_indices = job.cell_indices.clone();
     let targets = vec![PerturbTarget {
@@ -604,7 +786,7 @@ fn run_one_job(
         )
     };
 
-    let mut timings: Option<PerturbTimings> = if verbose {
+    let mut timings: Option<PerturbTimings> = if opts.verbose {
         Some(PerturbTimings::default())
     } else {
         None
@@ -625,7 +807,7 @@ fn run_one_job(
             targets: &targets,
             config: &cfg,
             lr_radii: lr_radii_ref,
-            job_progress: None,
+            job_progress,
             job_message: None,
             cancel: None,
             baseline_splash_cache: baseline_cache,
@@ -658,7 +840,7 @@ fn run_one_job(
         &runtime.gene_names,
         &result.simulated,
     )?;
-    if verbose {
+    if opts.verbose {
         eprintln!(
             "Wrote {} (gene={}, desired_expr={}, n_propagation={}, beta_scale_factor={})",
             job.out_path.display(),
@@ -667,7 +849,7 @@ fn run_one_job(
             job.n_propagation,
             job.beta_scale_factor
         );
-    } else {
+    } else if !opts.is_quiet() {
         eprintln!("Wrote {}", job.out_path.display());
     }
     Ok(())
@@ -677,24 +859,47 @@ pub fn run_batch_jobs(
     runtime: Arc<PerturbRuntime>,
     jobs: Vec<PreparedPerturbJob>,
     parallelism: usize,
-    verbose: bool,
+    opts: BatchRunOptions,
 ) -> anyhow::Result<()> {
     if jobs.is_empty() {
         return Ok(());
     }
     let n_workers = parallelism.max(1).min(jobs.len());
     let queue = Arc::new(Mutex::new(VecDeque::from(jobs)));
+    let screen_progress = opts.screen_progress.clone();
     let mut handles = Vec::with_capacity(n_workers);
-    for _ in 0..n_workers {
+    for worker_id in 0..n_workers {
         let q = Arc::clone(&queue);
         let rt = Arc::clone(&runtime);
+        let opts = opts.clone();
+        let screen = screen_progress.clone();
+        let job_permille = screen
+            .as_ref()
+            .and_then(|p| p.slot_progress(worker_id));
         handles.push(thread::spawn(move || -> anyhow::Result<()> {
             loop {
                 let job = { q.lock().expect("batch queue poisoned").pop_front() };
                 let Some(job) = job else {
                     break;
                 };
-                run_one_job(rt.as_ref(), job, verbose)?;
+                if let Some(ref sp) = screen {
+                    sp.job_started(worker_id, &job.gene);
+                }
+                let gene = job.gene.clone();
+                let res = run_one_job(
+                    rt.as_ref(),
+                    job,
+                    &opts,
+                    job_permille.as_ref(),
+                );
+                if let Some(ref sp) = screen {
+                    if res.is_ok() {
+                        sp.job_finished(worker_id);
+                    } else {
+                        sp.job_failed(worker_id);
+                    }
+                }
+                res.with_context(|| format!("perturbation failed for gene {gene}"))?;
             }
             Ok(())
         }));
@@ -702,6 +907,9 @@ pub fn run_batch_jobs(
     for h in handles {
         h.join()
             .map_err(|_| anyhow::anyhow!("batch perturb worker thread panicked"))??;
+    }
+    if let Some(sp) = screen_progress {
+        sp.finish();
     }
     Ok(())
 }

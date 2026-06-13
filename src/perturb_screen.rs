@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::perturb_batch::{
-    PerturbBatchFile, batch_from_perturb_table, effective_parallelism, resolve_prepared_job_cell_indices,
-    resolve_relative_to, run_batch_jobs, sanitize_gene_for_filename, validate_jobs_genes,
-    PreparedPerturbJob,
+    BatchRunOptions, PerturbBatchFile, batch_from_perturb_table, effective_parallelism,
+    resolve_prepared_job_cell_indices, resolve_relative_to, run_batch_jobs,
+    sanitize_gene_for_filename, validate_jobs_genes, PreparedPerturbJob,
 };
 use crate::perturb_mode::PerturbRuntime;
 
@@ -210,17 +210,19 @@ pub fn run_perturb_screen(args: RunPerturbScreenArgs<'_>) -> anyhow::Result<()> 
     resolve_prepared_job_cell_indices(&batch_file, batch_parent, &runtime.obs_names, &mut jobs)?;
 
     let parallelism = effective_parallelism(batch_file.parallelism, parallelism_cli);
+    let n_jobs = jobs.len();
     let rt = Arc::new(runtime);
     let t_batch = Instant::now();
-    run_batch_jobs(Arc::clone(&rt), jobs, parallelism, verbose)?;
+    let batch_opts = BatchRunOptions::screen(n_jobs, parallelism, verbose);
+    run_batch_jobs(Arc::clone(&rt), jobs, parallelism, batch_opts)?;
     let batch_elapsed = t_batch.elapsed();
 
-    eprintln!(
-        "Wrote {} KO feathers under {}",
-        genes.len(),
-        perturbations_dir.display()
-    );
     if verbose {
+        eprintln!(
+            "Wrote {} KO feathers under {}",
+            n_jobs,
+            perturbations_dir.display()
+        );
         eprintln!("--- spacetravlr-perturb screen timings ---");
         eprintln!("  load_runtime: {load_elapsed:?}");
         eprintln!("  screen_batch_total: {batch_elapsed:?}");

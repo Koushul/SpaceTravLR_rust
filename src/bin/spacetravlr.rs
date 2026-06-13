@@ -71,6 +71,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
+• Use --view PATH to display .png, .jpg, .jpeg, or .svg images directly in the terminal (auto-detects Kitty/iTerm2/Sixel protocols for full-resolution; falls back to colored Unicode blocks). Optional --view-width / --view-height to constrain size.
 • Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74, require WebGPU CNN backend unless SPACETRAVLR_VERIFY_ALLOW_CPU=1; confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
 
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
@@ -341,6 +342,35 @@ struct Cli {
         help = "Peek: path/size/shape (wrapped); obs & var column names in a grid; other keys wrapped. --obs COL adds value_counts. HDF5 metadata only"
     )]
     peek: Option<PathBuf>,
+
+    #[cfg(feature = "view-image")]
+    #[arg(
+        long = "view",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "Display an image (.png, .jpg, .jpeg, .svg) in the terminal. Auto-detects Kitty/iTerm2/Sixel graphics protocols for full-resolution output; falls back to Unicode half-blocks. Optional --view-width / --view-height to constrain size."
+    )]
+    view: Option<PathBuf>,
+
+    #[cfg(feature = "view-image")]
+    #[arg(
+        long = "view-width",
+        value_name = "COLS",
+        help_heading = "Utility",
+        requires = "view",
+        help = "Max width in terminal columns for --view"
+    )]
+    view_width: Option<u32>,
+
+    #[cfg(feature = "view-image")]
+    #[arg(
+        long = "view-height",
+        value_name = "ROWS",
+        help_heading = "Utility",
+        requires = "view",
+        help = "Max height in terminal rows for --view"
+    )]
+    view_height: Option<u32>,
 
     #[arg(
         long = "make-cells-csv",
@@ -615,6 +645,14 @@ struct Cli {
         help = "Fake training dashboard only — no AnnData, no disk exports, no accelerator"
     )]
     demo: bool,
+
+    #[arg(
+        long,
+        hide = true,
+        action = ArgAction::SetTrue,
+        help = "?"
+    )]
+    silly: bool,
 
     #[cfg(feature = "rctd")]
     #[arg(
@@ -2596,9 +2634,88 @@ fn run_spacetravlr_gui(gui: &GuiCli) -> anyhow::Result<()> {
     std::process::exit(st.code().unwrap_or(1));
 }
 
+#[cfg(feature = "view-image")]
+fn view_image_in_terminal(
+    path: &Path,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> anyhow::Result<()> {
+    use image::DynamicImage;
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let img: DynamicImage = match ext.as_str() {
+        "svg" => render_svg_high_res(path)?,
+        "png" | "jpg" | "jpeg" => {
+            image::open(path).with_context(|| format!("decode {}", path.display()))?
+        }
+        _ => {
+            anyhow::bail!(
+                "--view supports .png, .jpg, .jpeg, .svg — got .{ext} ({})",
+                path.display()
+            );
+        }
+    };
+
+    let conf = viuer::Config {
+        transparent: true,
+        absolute_offset: false,
+        width,
+        height,
+        ..Default::default()
+    };
+
+    viuer::print(&img, &conf).map_err(|e| anyhow::anyhow!("viuer: {e}"))?;
+    Ok(())
+}
+
+/// Rasterize an SVG at high resolution so terminal protocols (Kitty/iTerm2/Sixel)
+/// get enough pixels for sharp output.  We target ~2× the terminal pixel area
+/// (assuming ~8px per cell column, ~16px per cell row) capped at 4096px on the
+/// long edge, then let viuer downscale as needed for the actual protocol.
+#[cfg(feature = "view-image")]
+fn render_svg_high_res(path: &Path) -> anyhow::Result<image::DynamicImage> {
+    let svg_data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(&svg_data, &opt)
+        .map_err(|e| anyhow::anyhow!("SVG parse error: {e}"))?;
+
+    let size = tree.size();
+    let (svg_w, svg_h) = (size.width(), size.height());
+    if svg_w <= 0.0 || svg_h <= 0.0 {
+        anyhow::bail!("SVG has zero/negative dimensions: {svg_w}×{svg_h}");
+    }
+
+    let (term_cols, term_rows) = viuer::terminal_size();
+    // Estimate pixel budget: ~8px/col, ~16px/row, then 2× supersample
+    let target_px_w = (term_cols as f32 * 8.0 * 2.0).min(4096.0);
+    let target_px_h = (term_rows as f32 * 16.0 * 2.0).min(4096.0);
+
+    let scale = (target_px_w / svg_w).min(target_px_h / svg_h).max(1.0);
+    let w = (svg_w * scale).ceil() as u32;
+    let h = (svg_h * scale).ceil() as u32;
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
+        .ok_or_else(|| anyhow::anyhow!("failed to create pixmap {w}×{h}"))?;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    let rgba = image::RgbaImage::from_raw(w, h, pixmap.take())
+        .ok_or_else(|| anyhow::anyhow!("pixmap → RgbaImage conversion failed"))?;
+    Ok(image::DynamicImage::ImageRgba8(rgba))
+}
+
 fn main() -> anyhow::Result<()> {
     spacetravlr::ensure_process_env();
     let cli = Cli::parse();
+
+    if cli.silly {
+        return silly_sheep::render();
+    }
 
     if cli.verify {
         if cli.command.is_some() {
@@ -2658,6 +2775,15 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("--peek: not a file: {}", p.display());
         }
         return spacetravlr::print_h5ad_peek(p.as_path(), cli.obs.as_deref().map(str::trim));
+    }
+
+    #[cfg(feature = "view-image")]
+    if let Some(view_path) = &cli.view {
+        let p = PathBuf::from(expand_user_path(view_path.to_string_lossy().as_ref()));
+        if !p.is_file() {
+            anyhow::bail!("--view: not a file: {}", p.display());
+        }
+        return view_image_in_terminal(&p, cli.view_width, cli.view_height);
     }
 
     if cli.demo {
@@ -3278,4 +3404,492 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// silly sheep
+mod silly_sheep {
+    use std::io::{IsTerminal, Write};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mat {
+        Bg,
+        Eye,
+        HatPom,
+        Mouth,
+        Nose,
+        Hat,
+        Face,
+        Ear,
+        Wool,
+        Leg,
+        Grass,
+    }
+
+    impl Mat {
+        /// Lower rank renders in front when several materials share a cell.
+        fn rank(self) -> u8 {
+            match self {
+                Mat::Eye => 0,
+                Mat::HatPom => 1,
+                Mat::Mouth => 2,
+                Mat::Nose => 3,
+                Mat::Hat => 4,
+                Mat::Face => 5,
+                Mat::Ear => 6,
+                Mat::Wool => 7,
+                Mat::Leg => 8,
+                Mat::Grass => 9,
+                Mat::Bg => 255,
+            }
+        }
+    }
+
+    fn hash2(a: usize, b: usize) -> u64 {
+        let mut h = (a as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (b as u64)
+                .wrapping_add(0x632B_E59B_D9B4_E019)
+                .wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        h ^= h >> 29;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 32;
+        h
+    }
+
+    fn lerp3(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (u8, u8, u8) {
+        let t = t.clamp(0.0, 1.0);
+        (
+            (a.0 + (b.0 - a.0) * t).round() as u8,
+            (a.1 + (b.1 - a.1) * t).round() as u8,
+            (a.2 + (b.2 - a.2) * t).round() as u8,
+        )
+    }
+
+    fn ramp_char(shade: f32, ramp: &[u8]) -> char {
+        let n = ramp.len();
+        let idx = (shade.clamp(0.0, 1.0) * (n as f32 - 1.0)).round() as usize;
+        ramp[idx.min(n - 1)] as char
+    }
+
+    /// Glyph stream for the wool: the phrase "ally is silly" woven across every
+    fn wool_text(r: usize, c: usize) -> (char, f32) {
+        const PHRASE: &[u8] = b"ally is silly ";
+        let n = PHRASE.len();
+        let row_off = (hash2(r, 0x0A11_5111) % n as u64) as usize;
+        let base = PHRASE[(c + row_off) % n];
+        if base == b' ' {
+            const SEP: [u8; 3] = [b'.', b'`', b','];
+            return (SEP[(hash2(r, c) % 3) as usize] as char, 0.68);
+        }
+        let h = hash2(r.wrapping_mul(131).wrapping_add(c), c.wrapping_mul(17).wrapping_add(r));
+        let ch = match base {
+            b'a' if h % 6 == 0 => b'@',
+            b's' if h % 6 == 0 => b'$',
+            b'i' if h % 5 == 0 => b'!',
+            b'l' if h % 9 == 0 => b'!',
+            _ => base,
+        };
+        (ch as char, 1.0)
+    }
+
+    /// Lambertian dome shading for a fluff blob: treat the normalized position
+    /// inside the ellipse as a hemisphere normal and light it from upper-left.
+    fn dome_shade(nx: f32, ny: f32, floor: f32, span: f32) -> f32 {
+        let q = (nx * nx + ny * ny).min(1.0);
+        let nz = (1.0 - q).max(0.0).sqrt();
+        let (lx, ly, lz) = (-0.45f32, 0.55, 0.70);
+        let ln = (lx * lx + ly * ly + lz * lz).sqrt();
+        let d = ((nx * lx + ny * ly + nz * lz) / ln).clamp(-1.0, 1.0);
+        floor + span * (d * 0.5 + 0.5)
+    }
+
+    fn ellipse_inside(x: f32, y: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> bool {
+        let dx = (x - cx) / rx;
+        let dy = (y - cy) / ry;
+        dx * dx + dy * dy <= 1.0
+    }
+
+    fn point_in_tri(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> bool {
+        fn edge(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+            (px - bx) * (ay - by) - (ax - bx) * (py - by)
+        }
+        let ab = edge(px, py, ax, ay, bx, by);
+        let bc = edge(px, py, bx, by, cx, cy);
+        let ca = edge(px, py, cx, cy, ax, ay);
+        let (has_neg, has_pos) = (ab < 0.0 || bc < 0.0 || ca < 0.0, ab > 0.0 || bc > 0.0 || ca > 0.0);
+        !(has_neg && has_pos)
+    }
+
+    /// Classify a point in art space (x right, y up) into a material + shade.
+    /// Checked front-to-back so the first match wins within a single sample.
+    fn classify(x: f32, y: f32) -> (Mat, f32) {
+        // Eyes: two small shiny dots on the dark face with a catch-light.
+        for &(ex, ey) in &[(0.81f32, 0.20f32), (1.03f32, 0.20f32)] {
+            let dx = (x - ex) / 0.040;
+            let dy = (y - ey) / 0.053;
+            if dx * dx + dy * dy <= 1.0 {
+                let sx = x - (ex - 0.012);
+                let sy = y - (ey + 0.015);
+                let bright = if sx * sx + sy * sy < 0.0004 { 1.0 } else { 0.85 };
+                return (Mat::Eye, bright);
+            }
+        }
+
+        // A soft upturned grin — the lower arc of a circle, brighter mid-smile.
+        {
+            let (mx, my) = (0.92f32, 0.04f32);
+            let dx = x - mx;
+            let dy = y - my;
+            let rr = (dx * dx + dy * dy).sqrt();
+            if (rr - 0.085).abs() < 0.017 && dy < -0.004 && dx.abs() < 0.072 {
+                let s = 0.62 + 0.38 * (1.0 - dx.abs() / 0.072);
+                return (Mat::Mouth, s);
+            }
+        }
+
+        // Subtle nose — a tiny oval between the eyes and smile.
+        {
+            let (nx, ny) = (0.92f32, 0.11f32);
+            let dx = (x - nx) / 0.030;
+            let dy = (y - ny) / 0.022;
+            if dx * dx + dy * dy <= 1.0 {
+                return (Mat::Nose, 0.55);
+            }
+        }
+
+        // Birthday hat: fluffy pom at the tip.
+        {
+            let (tx, ty) = (0.90f32, 0.98f32);
+            let dx = (x - tx) / 0.042;
+            let dy = (y - ty) / 0.042;
+            if dx * dx + dy * dy <= 1.0 {
+                return (Mat::HatPom, 0.92);
+            }
+        }
+
+        // Birthday hat: tall pointy cone.
+        {
+            let apex = (0.90f32, 0.98f32);
+            let bl = (0.73f32, 0.49f32);
+            let br = (1.07f32, 0.49f32);
+            if point_in_tri(x, y, apex.0, apex.1, bl.0, bl.1, br.0, br.1) {
+                let t = ((y - 0.49) / 0.49).clamp(0.0, 1.0);
+                return (Mat::Hat, t);
+            }
+        }
+
+        // Birthday hat: gold brim band where the cone meets the wool.
+        if ellipse_inside(x, y, 0.90, 0.49, 0.20, 0.032) {
+            return (Mat::Hat, 0.0);
+        }
+
+        // Woolly forelock on top of the head (wins over the face).
+        {
+            let (cx, cy, rx, ry) = (0.92f32, 0.46f32, 0.30f32, 0.20f32);
+            let a = (y - cy).atan2(x - cx);
+            let bump = 1.0 + 0.07 * (a * 6.0).cos() + 0.05 * (a * 11.0 + 1.0).sin();
+            let dx = (x - cx) / rx;
+            let dy = (y - cy) / ry;
+            if dx * dx + dy * dy <= bump * bump {
+                return (Mat::Wool, dome_shade((x - cx) / rx, (y - cy) / ry, 0.34, 0.66));
+            }
+        }
+
+        // Round dark face (near-circular muzzle).
+        if ellipse_inside(x, y, 0.92, 0.18, 0.38, 0.38) {
+            let s = dome_shade((x - 0.92) / 0.38, (y - 0.18) / 0.38, 0.34, 0.30);
+            return (Mat::Face, s);
+        }
+
+        // Ears (behind the face, splayed outward).
+        for &(ex, ey, rot) in &[(0.60f32, 0.16f32, 0.5f32), (1.24f32, 0.16f32, -0.5f32)] {
+            let (rx, ry) = (0.13f32, 0.24f32);
+            let (ca, sa) = (rot.cos(), rot.sin());
+            let ox = x - ex;
+            let oy = y - ey;
+            let px = ca * ox + sa * oy;
+            let py = -sa * ox + ca * oy;
+            let dx = px / rx;
+            let dy = py / ry;
+            if dx * dx + dy * dy <= 1.0 {
+                return (Mat::Ear, 0.40);
+            }
+        }
+
+        // Big fluffy body cloud with a bumpy wool edge.
+        {
+            let (cx, cy, rx, ry) = (-0.08f32, 0.06f32, 1.04f32, 0.66f32);
+            let ox = x - cx;
+            let oy = y - cy;
+            let a = oy.atan2(ox);
+            let bump = 1.0
+                + 0.055 * (a * 7.0).cos()
+                + 0.040 * (a * 13.0 + 1.3).sin()
+                + 0.025 * (a * 23.0).cos();
+            let q = (ox / rx).powi(2) + (oy / ry).powi(2);
+            if q <= bump * bump {
+                return (Mat::Wool, dome_shade(ox / rx, oy / ry, 0.32, 0.68));
+            }
+        }
+
+        // A big fluffy tail puff sticking out the back.
+        {
+            let (cx, cy, rx, ry) = (-1.10f32, 0.12f32, 0.21f32, 0.25f32);
+            let a = (y - cy).atan2(x - cx);
+            let bump = 1.0
+                + 0.11 * (a * 6.0).cos()
+                + 0.06 * (a * 11.0 + 0.5).sin()
+                + 0.04 * (a * 19.0).cos();
+            let dx = (x - cx) / rx;
+            let dy = (y - cy) / ry;
+            if dx * dx + dy * dy <= bump * bump {
+                return (Mat::Wool, dome_shade((x - cx) / rx, (y - cy) / ry, 0.34, 0.66));
+            }
+        }
+
+        // Four legs (hidden under the wool where they overlap; hooves darker).
+        {
+            let (top, bot, half) = (0.10f32, -0.90f32, 0.058f32);
+            for &lx in &[-0.55f32, -0.26f32, 0.34f32, 0.60f32] {
+                if (x - lx).abs() <= half && y <= top && y >= bot {
+                    let frac = (y - bot) / (top - bot);
+                    let s = if frac < 0.16 { 0.12 } else { 0.70 };
+                    return (Mat::Leg, s);
+                }
+            }
+        }
+
+        // A lush, wavy meadow for the sheep to stand in.
+        {
+            let wave = 0.55 * (x * 8.0).sin()
+                + 0.30 * (x * 17.0 + 1.1).sin()
+                + 0.15 * (x * 41.0).sin();
+            let top = -0.62 + 0.10 * wave;
+            if y <= top {
+                // Bright, upright at the tips; darker and matted near the soil.
+                let tip = ((top - y) / 0.40).clamp(0.0, 1.0);
+                return (Mat::Grass, (1.0 - tip).clamp(0.05, 1.0));
+            }
+        }
+
+        (Mat::Bg, 0.0)
+    }
+
+    fn cell_glyph(
+        mat: Mat,
+        shade: f32,
+        cov: f32,
+        r: usize,
+        c: usize,
+    ) -> (char, Option<(u8, u8, u8)>) {
+        match mat {
+            Mat::Bg => (' ', None),
+            Mat::Wool => {
+                let (ch, mult) = if cov < 0.5 {
+                    const E: [char; 4] = ['.', ':', '\'', ','];
+                    (E[(hash2(r, c) % 4) as usize], 0.82)
+                } else {
+                    wool_text(r, c)
+                };
+                let s = (shade * mult).clamp(0.0, 1.0);
+                (ch, Some(lerp3((151.0, 150.0, 156.0), (251.0, 251.0, 248.0), s)))
+            }
+            Mat::Face => {
+                let ch = if cov < 0.5 {
+                    [',', '.'][(hash2(r, c) % 2) as usize]
+                } else {
+                    ramp_char(shade, b"+*x#%@")
+                };
+                (ch, Some(lerp3((58.0, 56.0, 68.0), (124.0, 118.0, 134.0), shade)))
+            }
+            Mat::Ear => {
+                let ch = if cov < 0.5 { ',' } else { '#' };
+                (ch, Some(lerp3((52.0, 50.0, 62.0), (108.0, 102.0, 118.0), shade)))
+            }
+            Mat::Eye => {
+                let ch = if cov < 0.6 { 'o' } else { 'O' };
+                (ch, Some(lerp3((150.0, 176.0, 205.0), (238.0, 248.0, 255.0), shade)))
+            }
+            Mat::Mouth => {
+                let ch = if cov < 0.45 { '.' } else { 'w' };
+                (ch, Some(lerp3((176.0, 104.0, 114.0), (228.0, 152.0, 160.0), shade)))
+            }
+            Mat::Nose => {
+                let ch = if cov < 0.5 { '.' } else { 'n' };
+                (ch, Some(lerp3((72.0, 68.0, 78.0), (108.0, 102.0, 112.0), shade)))
+            }
+            Mat::Hat => {
+                let ch = if shade < 0.12 {
+                    '='
+                } else if cov < 0.5 {
+                    '/'
+                } else {
+                    const S: [char; 4] = ['/', '\\', '|', '^'];
+                    S[(hash2(r, c) % 4) as usize]
+                };
+                let col = if shade < 0.12 {
+                    lerp3((218.0, 168.0, 48.0), (248.0, 208.0, 72.0), 0.7)
+                } else {
+                    lerp3((210.0, 72.0, 88.0), (255.0, 148.0, 108.0), shade)
+                };
+                (ch, Some(col))
+            }
+            Mat::HatPom => {
+                let ch = if cov < 0.5 { 'o' } else { 'O' };
+                (ch, Some(lerp3((248.0, 244.0, 236.0), (255.0, 252.0, 248.0), shade)))
+            }
+            Mat::Leg => {
+                let hoof = shade < 0.30;
+                let ch = if cov < 0.5 {
+                    ':'
+                } else if hoof {
+                    '@'
+                } else {
+                    '#'
+                };
+                let col = if hoof {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (206.0, 198.0, 205.0)
+                };
+                (ch, Some(lerp3(col, col, 0.0)))
+            }
+            Mat::Grass => {
+                let ch = if shade > 0.66 {
+                    const T: [char; 5] = ['^', '|', 'Y', '\'', 'V'];
+                    T[(hash2(r, c) % 5) as usize]
+                } else if shade > 0.33 {
+                    const M: [char; 4] = ['v', '^', '|', ','];
+                    M[(hash2(r, c) % 4) as usize]
+                } else {
+                    const B: [char; 4] = [',', '.', '_', 'v'];
+                    B[(hash2(r, c) % 4) as usize]
+                };
+                (ch, Some(lerp3((40.0, 94.0, 42.0), (122.0, 205.0, 92.0), shade)))
+            }
+        }
+    }
+
+    pub fn render() -> anyhow::Result<()> {
+        let (tw, th) = terminal_size::terminal_size()
+            .map(|(w, h)| (w.0 as usize, h.0 as usize))
+            .unwrap_or((100, 32));
+        let w = tw.max(20);
+        let h = th.max(10);
+
+        let interactive = std::io::stdout().is_terminal();
+        let use_color = interactive && std::env::var_os("NO_COLOR").is_none();
+
+        let width = w;
+        const BOTTOM_BLANK: usize = 2;
+        const CAPTION_ROWS: usize = 1;
+        let sheep_h = h.saturating_sub(BOTTOM_BLANK + CAPTION_ROWS).max(7);
+
+        // Fit the art-space box (≈3.0 wide × 2.0 tall) to the drawable area,
+        // then shrink to ~2/3 so the sheep sits small with headroom above.
+        // `scale` is pixels-per-art-unit: smaller scale → smaller sheep.
+        let (xspan, yspan) = (3.0f32, 2.0f32);
+        const SHEEP_SHRINK: f32 = 0.72;
+        let scale = (width as f32 / xspan)
+            .min(2.0 * sheep_h as f32 / yspan)
+            * SHEEP_SHRINK;
+        let cx = width as f32 / 2.0;
+        let cy = sheep_h as f32 * 0.38;
+        let off_x = 0.06f32;
+        let grass_art_y = -0.92f32;
+        let off_y = grass_art_y + ((sheep_h as f32 - 1.0 - cy) * 2.0 / scale);
+        let k = 3usize; // supersampling factor (k×k samples per cell)
+
+        let mut out = String::with_capacity(width * h * 2 + 64);
+        if interactive {
+            out.push_str("\x1b[2J\x1b[3J\x1b[H");
+        }
+
+        for r in 0..sheep_h {
+            let mut cells: Vec<(char, Option<(u8, u8, u8)>)> = Vec::with_capacity(width);
+            for c in 0..width {
+                let mut nonbg = 0u32;
+                let mut best = Mat::Bg;
+                let mut best_rank = 255u8;
+                let mut samples: [(Mat, f32); 16] = [(Mat::Bg, 0.0); 16];
+                let mut n = 0usize;
+                for sy in 0..k {
+                    for sx in 0..k {
+                        let fc = c as f32 + (sx as f32 + 0.5) / k as f32;
+                        let fr = r as f32 + (sy as f32 + 0.5) / k as f32;
+                        let x = (fc - cx) / scale + off_x;
+                        let y = -((fr - cy) * 2.0 / scale) + off_y;
+                        let s = classify(x, y);
+                        samples[n] = s;
+                        n += 1;
+                        if s.0 != Mat::Bg {
+                            nonbg += 1;
+                            let rk = s.0.rank();
+                            if rk < best_rank {
+                                best_rank = rk;
+                                best = s.0;
+                            }
+                        }
+                    }
+                }
+                if nonbg == 0 {
+                    cells.push((' ', None));
+                    continue;
+                }
+                let (mut ssum, mut scnt) = (0.0f32, 0u32);
+                for &(m, sh) in &samples[..n] {
+                    if m == best {
+                        ssum += sh;
+                        scnt += 1;
+                    }
+                }
+                let shade = if scnt > 0 { ssum / scnt as f32 } else { 0.5 };
+                let cov = nonbg as f32 / (k * k) as f32;
+                cells.push(cell_glyph(best, shade, cov, r, c));
+            }
+
+            // Emit the row, run-length grouping by color to keep ANSI compact.
+            let mut i = 0;
+            while i < width {
+                let col = cells[i].1;
+                let start = i;
+                while i < width && cells[i].1 == col {
+                    i += 1;
+                }
+                let seg: String = cells[start..i].iter().map(|(ch, _)| *ch).collect();
+                match (use_color, col) {
+                    (true, Some((rr, gg, bb))) => {
+                        out.push_str(&format!("\x1b[38;2;{rr};{gg};{bb}m{seg}"));
+                    }
+                    _ => out.push_str(&seg),
+                }
+            }
+            if use_color {
+                out.push_str("\x1b[0m");
+            }
+            out.push('\n');
+        }
+
+        // Caption sits directly under the grass; two blank rows follow.
+        let caption = "baaa~   -   you found the secret sheep";
+        let cap: String = if caption.chars().count() > width {
+            caption.chars().take(width).collect()
+        } else {
+            let pad = (width - caption.chars().count()) / 2;
+            format!("{}{}", " ".repeat(pad), caption)
+        };
+        if use_color {
+            out.push_str(&format!("\x1b[2;38;2;150;150;160m{cap}\x1b[0m"));
+        } else {
+            out.push_str(&cap);
+        }
+        out.push('\n');
+        for _ in 0..BOTTOM_BLANK {
+            out.push('\n');
+        }
+
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(out.as_bytes())?;
+        stdout.flush()?;
+        Ok(())
+    }
 }

@@ -46,7 +46,7 @@ use spacetravlr::perturb::{
 };
 use spacetravlr::perturb_batch::{
     effective_parallelism, expand_prepared_jobs, load_batch_file,
-    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
+    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes, BatchRunOptions,
 };
 use spacetravlr::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
 use spacetravlr::transition_umap::{
@@ -1778,7 +1778,13 @@ async fn api_perturb_batch(
         resolve_prepared_job_cell_indices(&batch_file, batch_parent, &rt.obs_names, &mut jobs)
             .map_err(|e| format!("{e:#}"))?;
         let parallelism = effective_parallelism(batch_file.parallelism, par_override);
-        run_batch_jobs(rt, jobs, parallelism, verbose).map_err(|e| format!("{e:#}"))
+        run_batch_jobs(
+            rt,
+            jobs,
+            parallelism,
+            BatchRunOptions::from_verbose(verbose),
+        )
+        .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| {

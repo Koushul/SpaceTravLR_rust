@@ -50,7 +50,7 @@ lto = "thin"
 codegen-units = 1
 
 [features]
-default = ["tui", "self-update", "rctd"]
+default = ["tui", "self-update", "rctd", "view-image"]
 tui = [
     "dep:ratatui",
     "dep:ratatui-themes",
@@ -85,6 +85,7 @@ self-update = [
     "dep:sha2",
     "dep:semver",
 ]
+view-image = ["dep:viuer", "dep:image", "dep:resvg"]
 rctd = ["dep:spacetravlr-rctd"]
 rctd-wgpu = ["rctd", "spacetravlr-rctd/wgpu"]
 
@@ -205,6 +206,9 @@ sha2 = { version = "0.10", optional = true }
 semver = { version = "1", optional = true }
 spacetravlr-rctd = { path = "crates/spacetravlr-rctd", optional = true, default-features = false }
 colored = "2.2"
+viuer = { version = "0.11", features = ["print-file", "icy_sixel"], optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
+resvg = { version = "0.47", optional = true, default-features = false }
 termplot-rs = "0.3.0"
 terminal_size = "0.3"
 statrs = "0.18"
