@@ -830,7 +830,7 @@ impl Default for ExecutionConfig {
 impl Default for PerturbationConfig {
     fn default() -> Self {
         Self {
-            beta_scale_factor: 1.0,
+            beta_scale_factor: 100.0,
             beta_cap: None,
             n_propagation: 4,
             ligand_grid_factor: None,

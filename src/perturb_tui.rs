@@ -90,6 +90,7 @@ pub struct PerturbTuiOptions {
     pub run_toml: Option<PathBuf>,
     pub default_desired_expr: f64,
     pub n_propagation_initial: Option<usize>,
+    pub beta_scale_factor_initial: Option<f64>,
     pub verbose: bool,
     pub toml_path_hint_for_error: Option<String>,
     pub cells_csv: Option<PathBuf>,
@@ -203,6 +204,7 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
         spinner_frame: 0u8,
         bg_rx: rx_bg,
         load_applied_n_prop: opts.n_propagation_initial,
+        load_applied_beta_scale: opts.beta_scale_factor_initial,
         filtered_gene_indices: Vec::new(),
         load_progress_permille: load_progress_permille.clone(),
         load_progress_message: load_progress_message.clone(),
@@ -273,6 +275,9 @@ fn run_sync(opts: PerturbTuiOptions) -> anyhow::Result<()> {
                             let mut rt = *rt_box;
                             if let Some(n) = app.load_applied_n_prop {
                                 rt.perturb_cfg.n_propagation = n;
+                            }
+                            if let Some(b) = app.load_applied_beta_scale {
+                                rt.perturb_cfg.beta_scale_factor = b;
                             }
                             app.n_propagation = rt.perturb_cfg.n_propagation;
                             let run_parent = rt
@@ -373,6 +378,7 @@ struct App {
     spinner_frame: u8,
     bg_rx: mpsc::Receiver<BgMsg>,
     load_applied_n_prop: Option<usize>,
+    load_applied_beta_scale: Option<f64>,
     filtered_gene_indices: Vec<usize>,
     load_progress_permille: Arc<AtomicU32>,
     load_progress_message: Arc<Mutex<String>>,

@@ -145,7 +145,7 @@ score_threshold = 0.1
 
 [perturbation]
 # Multiplier applied to all betas in splash()
-beta_scale_factor = 1.0
+beta_scale_factor = 100.0
 # Clamp betas to [-cap, cap] after scaling (comment out or omit for no cap)
 # beta_cap        = 10.0
 # Number of signal propagation rounds

@@ -69,6 +69,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Subcommand collect-interactions builds a multi–cell-type interaction database from *_betadata.feather files.
 • Subcommand gui runs `npm run build` in web/umap_lab, then starts the UMAP lab server and prints the URL.
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
+• Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
 • Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74, require WebGPU CNN backend unless SPACETRAVLR_VERIFY_ALLOW_CPU=1; confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
 
@@ -340,6 +341,22 @@ struct Cli {
         help = "Peek: path/size/shape (wrapped); obs & var column names in a grid; other keys wrapped. --obs COL adds value_counts. HDF5 metadata only"
     )]
     peek: Option<PathBuf>,
+
+    #[arg(
+        long = "make-cells-csv",
+        action = ArgAction::SetTrue,
+        help_heading = "Utility",
+        help = "Write cells.csv in the training output directory from --run-toml: one column per distinct [data].cluster_annot obs value (default column cell_type), each cell listing obs_names for spacetravlr-perturb --cells-csv."
+    )]
+    make_cells_csv: bool,
+
+    #[arg(
+        long = "run-toml",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "spacetravlr_run_repro.toml from a finished training run (required for --make-cells-csv)."
+    )]
+    run_toml: Option<PathBuf>,
 
     #[arg(
         long = "obs",
@@ -2615,6 +2632,19 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!(
             "--obs requires --peek PATH (or --peak PATH), or use --plot-umap to color the UMAP"
         );
+    }
+
+    if cli.make_cells_csv {
+        if cli.command.is_some() {
+            anyhow::bail!("--make-cells-csv cannot be combined with a subcommand");
+        }
+        let run_toml = cli
+            .run_toml
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--make-cells-csv requires --run-toml PATH"))?;
+        let out = spacetravlr::write_cells_csv_from_run_toml(run_toml.as_path(), None)?;
+        println!("{}", out.display());
+        return Ok(());
     }
 
     if let Some(peek_path) = &cli.peek {

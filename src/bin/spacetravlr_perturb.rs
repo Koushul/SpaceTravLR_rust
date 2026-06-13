@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag), or --batch-toml PATH for many single-gene jobs. Batch keys can live in --config instead of a separate batch file.
 
-Single-job batch: requires a repro TOML (--run-toml or run_toml in --config), --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --cells-csv + --cells-csv-column, --verbose.
+Single-job batch: requires a repro TOML (--run-toml or run_toml in --config), --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --beta-scale-factor, --cells-csv + --cells-csv-column, --verbose.
 
 Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Do not combine with --gene, --export/--out, or --cells-*.
 
@@ -41,6 +41,7 @@ Example:
     --gene SOX2 \
     --desired-expr 0 \
     --n-propagation 4 \
+    --beta-scale-factor 1.0 \
     --cells-csv /path/to/cells.csv \
     --cells-csv-column selected \
     --verbose
@@ -97,6 +98,13 @@ struct Cli {
         help = "Override [perturbation].n_propagation from the TOML (batch or TUI initial value)."
     )]
     n_propagation: Option<usize>,
+
+    #[arg(
+        long = "beta-scale-factor",
+        value_name = "FACTOR",
+        help = "Override [perturbation].beta_scale_factor from the TOML (batch default or TUI initial value)."
+    )]
+    beta_scale_factor: Option<f64>,
 
     #[arg(
         long,
@@ -162,6 +170,13 @@ enum Commands {
         )]
         n_propagation: Option<usize>,
 
+        #[arg(
+            long = "beta-scale-factor",
+            value_name = "FACTOR",
+            help = "Override [perturbation].beta_scale_factor from the TOML."
+        )]
+        beta_scale_factor: Option<f64>,
+
         #[arg(long, help = "Print load and perturb timings on stderr.")]
         verbose: bool,
 
@@ -183,6 +198,7 @@ fn main() -> anyhow::Result<()> {
         config_positional,
         run_toml,
         n_propagation,
+        beta_scale_factor,
         verbose,
         batch_parallelism,
     }) = cli.command
@@ -199,6 +215,7 @@ fn main() -> anyhow::Result<()> {
             config_path: config_path.as_path(),
             overlay: Some(&parsed.overlay_source),
             n_propagation_cli: n_propagation,
+            beta_scale_factor_cli: beta_scale_factor,
             parallelism_cli: batch_parallelism,
             verbose,
         });
@@ -239,7 +256,12 @@ fn main() -> anyhow::Result<()> {
         } else {
             runtime.perturb_cfg.n_propagation
         };
-        let default_beta_scale = runtime.perturb_cfg.beta_scale_factor;
+        let default_beta_scale = if let Some(b) = cli.beta_scale_factor {
+            runtime.perturb_cfg.beta_scale_factor = b;
+            b
+        } else {
+            runtime.perturb_cfg.beta_scale_factor
+        };
 
         let mut jobs = expand_prepared_jobs(
             &batch_file,
@@ -318,6 +340,7 @@ fn main() -> anyhow::Result<()> {
                 run_toml: run_for_interactive.clone(),
                 default_desired_expr: cli.desired_expr,
                 n_propagation_initial: cli.n_propagation,
+                beta_scale_factor_initial: cli.beta_scale_factor,
                 verbose: cli.verbose,
                 toml_path_hint_for_error: run_for_interactive
                     .as_ref()
@@ -342,6 +365,9 @@ fn main() -> anyhow::Result<()> {
             if let Some(n) = cli.n_propagation {
                 runtime.perturb_cfg.n_propagation = n;
             }
+            if let Some(b) = cli.beta_scale_factor {
+                runtime.perturb_cfg.beta_scale_factor = b;
+            }
             return run_interactive(runtime);
         }
     }
@@ -363,6 +389,9 @@ fn main() -> anyhow::Result<()> {
     let load_elapsed = t_load.elapsed();
     if let Some(n) = cli.n_propagation {
         runtime.perturb_cfg.n_propagation = n;
+    }
+    if let Some(b) = cli.beta_scale_factor {
+        runtime.perturb_cfg.beta_scale_factor = b;
     }
     if !runtime.gene_names.iter().any(|g| g == gene) {
         anyhow::bail!("Gene '{}' is not present in AnnData var_names.", gene);
@@ -460,11 +489,12 @@ fn main() -> anyhow::Result<()> {
         &result.simulated,
     )?;
     eprintln!(
-        "Wrote {} ({} cells × {} genes, n_propagation={})",
+        "Wrote {} ({} cells × {} genes, n_propagation={}, beta_scale_factor={})",
         export_path.display(),
         runtime.obs_names.len(),
         runtime.gene_names.len(),
-        runtime.perturb_cfg.n_propagation
+        runtime.perturb_cfg.n_propagation,
+        runtime.perturb_cfg.beta_scale_factor
     );
     if cli.verbose {
         eprintln!("--- spacetravlr-perturb timings ---");

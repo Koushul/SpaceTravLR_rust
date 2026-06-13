@@ -35,7 +35,7 @@ use ndarray::Array2;
 use polars::prelude::{CsvReadOptions, DataType, SerReader};
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -632,6 +632,103 @@ pub fn parse_obs_columns_csv(path: &Path, obs_names: &[String]) -> anyhow::Resul
         column_names,
         columns,
     })
+}
+
+fn escape_csv_field(s: &str) -> String {
+    if s.contains(['"', ',', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Write a perturbation `cells.csv`: header = distinct `labels`, each column lists `obs_names`.
+pub fn write_cells_csv_grouped_by_label(
+    out_path: &Path,
+    obs_names: &[String],
+    labels: &[String],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        obs_names.len() == labels.len(),
+        "obs_names and labels length mismatch ({} vs {})",
+        obs_names.len(),
+        labels.len()
+    );
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, label) in obs_names.iter().zip(labels.iter()) {
+        groups.entry(label.clone()).or_default().push(name.clone());
+    }
+    for cells in groups.values_mut() {
+        cells.sort();
+    }
+    let column_names: Vec<&String> = groups.keys().collect();
+    let max_rows = groups.values().map(|v| v.len()).max().unwrap_or(0);
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create directory {}", parent.display()))?;
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut w = io::BufWriter::new(&mut out);
+        let header: Vec<String> = column_names
+            .iter()
+            .map(|name| escape_csv_field(name))
+            .collect();
+        writeln!(w, "{}", header.join(",")).context("write cells.csv header")?;
+        for row in 0..max_rows {
+            let fields: Vec<String> = column_names
+                .iter()
+                .map(|name| {
+                    groups
+                        .get(*name)
+                        .and_then(|cells| cells.get(row))
+                        .map(|s| escape_csv_field(s))
+                        .unwrap_or_default()
+                })
+                .collect();
+            writeln!(w, "{}", fields.join(",")).context("write cells.csv row")?;
+        }
+        w.flush().context("flush cells.csv")?;
+    }
+    fs::write(out_path, &out).with_context(|| format!("write {}", out_path.display()))?;
+    Ok(())
+}
+
+/// Build `cells.csv` in the training output directory from a finished run repro TOML.
+///
+/// Columns are the distinct values of `[data].cluster_annot` in AnnData `obs` (default column
+/// name `cell_type`). Respects `[data].perturb_obs_subset_file` when set.
+pub fn write_cells_csv_from_run_toml(
+    run_toml: &Path,
+    out_path: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    let cfg = SpaceshipConfig::from_file(run_toml)?;
+    let annot_col = cfg.data.cluster_annot.trim();
+    anyhow::ensure!(
+        !annot_col.is_empty(),
+        "[data].cluster_annot must be non-empty in {}",
+        run_toml.display()
+    );
+    let ctx = load_obs_for_collect_interactions(run_toml, annot_col)?;
+    let output_dir = cfg.resolve_training_output_dir(run_toml);
+    let out = out_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| output_dir.join("cells.csv"));
+    write_cells_csv_grouped_by_label(&out, &ctx.obs_names, &ctx.cell_type_labels)?;
+    eprintln!(
+        "Wrote {} ({} columns, {} cells) using obs[{:?}] from {}",
+        out.display(),
+        ctx.cell_type_labels
+            .iter()
+            .collect::<HashSet<_>>()
+            .len(),
+        ctx.obs_names.len(),
+        annot_col,
+        cfg.resolve_adata_path()
+    );
+    Ok(out)
 }
 
 /// Combines optional CSV column indices with optional per–cell-type row index lists (intersection when both).
@@ -1278,6 +1375,32 @@ mod tests {
             merge_csv_and_type_cell_indices(Some(&c), Some(vec![])),
             Some(vec![])
         );
+    }
+
+    #[test]
+    fn write_cells_csv_grouped_roundtrips_with_parser() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_make_cells_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("cells.csv");
+        let obs = vec![
+            "c1".into(),
+            "c2".into(),
+            "c3".into(),
+            "c4".into(),
+        ];
+        let labels = vec![
+            "B".into(),
+            "A".into(),
+            "A".into(),
+            "B".into(),
+        ];
+        write_cells_csv_grouped_by_label(&p, &obs, &labels).unwrap();
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert!(body.starts_with("A,B\n"));
+        let parsed = parse_obs_columns_csv(&p, &obs).unwrap();
+        assert_eq!(parsed.indices_for_column("A").unwrap(), &[1usize, 2]);
+        assert_eq!(parsed.indices_for_column("B").unwrap(), &[0usize, 3]);
     }
 
     #[test]

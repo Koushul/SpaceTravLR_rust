@@ -135,7 +135,7 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
-| `beta_scale_factor` | `1.0` | Global multiplier on all β before propagation. | Stronger perturbation amplitudes. | Weaker systemic response. |
+| `beta_scale_factor` | `100.0` | Global multiplier on all β before propagation. | Stronger perturbation amplitudes. | Weaker systemic response. |
 | `beta_cap` |  | Clamp β to `[-cap, cap]` after scaling. | Prevent extreme coefficients from dominating. | Omit for uncapped dynamics. |
 | `n_propagation` | `4` | Rounds of ligand / GRN signal propagation in `splash()`. | Deeper equilibration; more neighbor feedback. | Shallower, more local effects. |
 | `ligand_grid_factor` |  | Grid spacing as fraction of `radius` for approximate received ligands. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |

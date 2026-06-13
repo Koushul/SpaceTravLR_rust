@@ -41,7 +41,7 @@ impl Default for PerturbConfig {
         Self {
             n_propagation: 4,
             scale_factor: 1.0,
-            beta_scale_factor: 1.0,
+            beta_scale_factor: 100.0,
             beta_cap: None,
             min_expression: 1e-9,
             ligand_grid_factor: None,

@@ -167,7 +167,8 @@ pub mod perturb_mode;
 pub mod perturb_screen;
 pub use perturb_mode::{
     CollectInteractionsObs, load_obs_column_for_collect_interactions,
-    load_obs_for_collect_interactions,
+    load_obs_for_collect_interactions, write_cells_csv_from_run_toml,
+    write_cells_csv_grouped_by_label,
 };
 #[cfg(feature = "tui")]
 pub mod perturb_tui;

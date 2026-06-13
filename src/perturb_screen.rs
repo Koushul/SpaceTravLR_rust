@@ -117,6 +117,7 @@ pub struct RunPerturbScreenArgs<'a> {
     pub config_path: &'a Path,
     pub overlay: Option<&'a toml::Value>,
     pub n_propagation_cli: Option<usize>,
+    pub beta_scale_factor_cli: Option<f64>,
     pub parallelism_cli: Option<usize>,
     pub verbose: bool,
 }
@@ -127,6 +128,7 @@ pub fn run_perturb_screen(args: RunPerturbScreenArgs<'_>) -> anyhow::Result<()> 
         config_path,
         overlay,
         n_propagation_cli,
+        beta_scale_factor_cli,
         parallelism_cli,
         verbose,
     } = args;
@@ -148,6 +150,9 @@ pub fn run_perturb_screen(args: RunPerturbScreenArgs<'_>) -> anyhow::Result<()> 
 
     if let Some(n) = n_propagation_cli {
         runtime.perturb_cfg.n_propagation = n;
+    }
+    if let Some(b) = beta_scale_factor_cli {
+        runtime.perturb_cfg.beta_scale_factor = b;
     }
     let default_n_prop = runtime.perturb_cfg.n_propagation;
     let default_beta_scale = runtime.perturb_cfg.beta_scale_factor;
