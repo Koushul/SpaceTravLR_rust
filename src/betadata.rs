@@ -1941,7 +1941,7 @@ fn collect_interactions_all_cell_types_from_workspace(
             .par_iter()
             .map(|coef| collect_rows_for_cell_type_indices(coef, &ws.target_gene, ct_idx, mode))
             .reduce(
-                || Vec::new(),
+                Vec::new,
                 |mut acc, mut chunk| {
                     acc.append(&mut chunk);
                     acc
@@ -1958,7 +1958,7 @@ fn collect_interactions_all_cell_types_from_workspace(
                         collect_rows_for_cell_type_indices(coef, &ws.target_gene, ct_idx, mode)
                     })
                     .reduce(
-                        || Vec::new(),
+                        Vec::new,
                         |mut acc, mut chunk| {
                             acc.append(&mut chunk);
                             acc
@@ -1966,7 +1966,7 @@ fn collect_interactions_all_cell_types_from_workspace(
                     )
             })
             .reduce(
-                || Vec::new(),
+                Vec::new,
                 |mut acc, mut chunk| {
                     acc.append(&mut chunk);
                     acc
@@ -1986,7 +1986,7 @@ fn collect_interactions_all_cell_types_full_from_workspace(
                 collect_rows_full_for_cell_type_indices(coef, &ws.target_gene, ct_idx, None)
             })
             .reduce(
-                || Vec::new(),
+                Vec::new,
                 |mut acc, mut chunk| {
                     acc.append(&mut chunk);
                     acc
@@ -2008,7 +2008,7 @@ fn collect_interactions_all_cell_types_full_from_workspace(
                         )
                     })
                     .reduce(
-                        || Vec::new(),
+                        Vec::new,
                         |mut acc, mut chunk| {
                             acc.append(&mut chunk);
                             acc
@@ -2016,7 +2016,7 @@ fn collect_interactions_all_cell_types_full_from_workspace(
                     )
             })
             .reduce(
-                || Vec::new(),
+                Vec::new,
                 |mut acc, mut chunk| {
                     acc.append(&mut chunk);
                     acc

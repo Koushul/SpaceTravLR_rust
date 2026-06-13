@@ -1905,7 +1905,7 @@ impl App {
                             let exp = expand_user_path(t);
                             let p = PathBuf::from(exp);
                             let resolved =
-                                if p.parent().map_or(true, |par| par.as_os_str().is_empty()) {
+                                if p.parent().is_none_or(|par| par.as_os_str().is_empty()) {
                                     let Some(rt) = self.runtime.as_ref() else {
                                         self.set_status(
                                             "Load a run before basename-only export path",

@@ -56,6 +56,8 @@ use umap_rs::{
 };
 
 pub type FuzzyGraph = CsMatI<f32, u32, usize>;
+type UmapLabEmbeddingResult = (Array2<f32>, FuzzyGraph, Vec<(String, f64)>, UmapLabKnnCache);
+type UmapLabSpatialCoords = (String, Vec<f32>, Vec<f32>);
 
 const INIT_NOISE_STD: f32 = 1e-4;
 
@@ -1101,7 +1103,7 @@ pub fn umap_lab_run_embedding(
     pca: &Array2<f64>,
     params: &RustPreprocessParams,
     knn_cache_in: Option<&UmapLabKnnCache>,
-) -> Result<(Array2<f32>, FuzzyGraph, Vec<(String, f64)>, UmapLabKnnCache)> {
+) -> Result<UmapLabEmbeddingResult> {
     let mut log = Vec::new();
     let (emb_umap, graph, knn_cache) = run_umap_on_pca(pca, params, &mut log, knn_cache_in)?;
     let n = emb_umap.nrows();
@@ -1182,7 +1184,7 @@ fn gene_display_bounds(values: &[f32]) -> (f32, f32) {
     let hi_i = hi_i.min(n - 1).max(lo_i);
     let mut lo = v[lo_i];
     let mut hi = v[hi_i];
-    if !(lo < hi) {
+    if lo.partial_cmp(&hi) != Some(std::cmp::Ordering::Less) {
         lo = v[0];
         hi = v[n - 1];
         if lo >= hi {
@@ -1278,7 +1280,7 @@ fn umap_lab_h5_read_obsm_x_pca_matrix(h5: &H5File) -> Result<Option<Array2<f64>>
 fn umap_lab_h5_read_obsm_spatial_xy(
     h5: &H5File,
     n_obs: usize,
-) -> Result<Option<(String, Vec<f32>, Vec<f32>)>> {
+) -> Result<Option<UmapLabSpatialCoords>> {
     if !h5.exists("obsm")? {
         return Ok(None);
     }
@@ -1624,7 +1626,7 @@ fn umap_lab_h5_dense_x_column_f32(
     let sh = ds.shape();
     anyhow::ensure!(sh.len() == 2, "X: expected 2D dataset, got shape {:?}", sh);
     anyhow::ensure!(
-        sh[0] as usize == n_obs && sh[1] as usize == n_vars,
+        sh[0] == n_obs && sh[1] == n_vars,
         "X shape {:?} does not match obs×var {}×{}",
         sh,
         n_obs,
@@ -1893,7 +1895,7 @@ fn umap_lab_h5_dense_layer_column_f32(
     let sh = ds.shape();
     anyhow::ensure!(sh.len() == 2, "layer {layer}: expected 2D dataset, got shape {:?}", sh);
     anyhow::ensure!(
-        sh[0] as usize == n_obs && sh[1] as usize == n_vars,
+        sh[0] == n_obs && sh[1] == n_vars,
         "layer {layer} shape {:?} does not match obs×var {}×{}",
         sh,
         n_obs,
@@ -2575,12 +2577,12 @@ pub fn leiden_labels_subcluster_into(
     }
     let mut out = Vec::with_capacity(n);
     let mut li = 0usize;
-    for global_i in 0..n {
-        if base_codes[global_i] == parent_code {
+    for &code in base_codes.iter().take(n) {
+        if code == parent_code {
             out.push(format!("{}/{}", parent_name, local[li]));
             li += 1;
         } else {
-            let c = base_codes[global_i] as usize;
+            let c = code as usize;
             out.push(categories.get(c).cloned().unwrap_or_else(|| c.to_string()));
         }
     }
@@ -2615,8 +2617,8 @@ pub fn leiden_labels_from_graph(
     }
 
     let mut g = Graph::with_capacity(n, graph.nnz() * 2);
-    for i in 0..n {
-        g.add_node(degrees[i]);
+    for &deg in degrees.iter().take(n) {
+        g.add_node(deg);
     }
     for i in 0..n {
         if let Some(row) = graph.outer_view(i) {

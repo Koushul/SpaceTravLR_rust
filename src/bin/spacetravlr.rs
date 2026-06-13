@@ -3410,6 +3410,10 @@ fn main() -> anyhow::Result<()> {
 mod silly_sheep {
     use std::io::{IsTerminal, Write};
 
+    type Rgb = (u8, u8, u8);
+    type Cell = (char, Option<Rgb>);
+    type SampleBuf = [(Mat, f32); 16];
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Mat {
         Bg,
@@ -3419,6 +3423,7 @@ mod silly_sheep {
         Nose,
         Hat,
         Face,
+        EarInner,
         Ear,
         Wool,
         Leg,
@@ -3435,6 +3440,7 @@ mod silly_sheep {
                 Mat::Nose => 3,
                 Mat::Hat => 4,
                 Mat::Face => 5,
+                Mat::EarInner => 4,
                 Mat::Ear => 6,
                 Mat::Wool => 7,
                 Mat::Leg => 8,
@@ -3508,6 +3514,7 @@ mod silly_sheep {
         dx * dx + dy * dy <= 1.0
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn point_in_tri(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> bool {
         fn edge(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
             (px - bx) * (ay - by) - (ax - bx) * (py - by)
@@ -3582,6 +3589,30 @@ mod silly_sheep {
             return (Mat::Hat, 0.0);
         }
 
+        // Sideways ears — long pointy triangles sticking out to each side
+        // (angled slightly up), with a soft pink inner ear. Lit from the left
+        // so the right ear sits a touch in shadow for depth.
+        for &(ax, ay, bix, biy, bcx, bcy, lit) in &[
+            (0.14f32, 0.58f32, 0.62f32, 0.56f32, 0.66f32, 0.32f32, 0.74f32),
+            (1.70f32, 0.58f32, 1.22f32, 0.56f32, 1.18f32, 0.32f32, 0.44f32),
+        ] {
+            if point_in_tri(x, y, ax, ay, bix, biy, bcx, bcy) {
+                let cgx = (ax + bix + bcx) / 3.0;
+                let cgy = (ay + biy + bcy) / 3.0;
+                let k = 0.55;
+                let (i0x, i0y) = (cgx + (ax - cgx) * k, cgy + (ay - cgy) * k);
+                let (i1x, i1y) = (cgx + (bix - cgx) * k, cgy + (biy - cgy) * k);
+                let (i2x, i2y) = (cgx + (bcx - cgx) * k, cgy + (bcy - cgy) * k);
+                if point_in_tri(x, y, i0x, i0y, i1x, i1y, i2x, i2y) {
+                    return (Mat::EarInner, lit);
+                }
+                let bmx = (bix + bcx) * 0.5;
+                let tip = ((x - bmx) / (ax - bmx)).clamp(0.0, 1.0);
+                let s = (lit * (1.0 - 0.22 * tip)).clamp(0.0, 1.0);
+                return (Mat::Ear, s);
+            }
+        }
+
         // Woolly forelock on top of the head (wins over the face).
         {
             let (cx, cy, rx, ry) = (0.92f32, 0.46f32, 0.30f32, 0.20f32);
@@ -3598,21 +3629,6 @@ mod silly_sheep {
         if ellipse_inside(x, y, 0.92, 0.18, 0.38, 0.38) {
             let s = dome_shade((x - 0.92) / 0.38, (y - 0.18) / 0.38, 0.34, 0.30);
             return (Mat::Face, s);
-        }
-
-        // Ears (behind the face, splayed outward).
-        for &(ex, ey, rot) in &[(0.60f32, 0.16f32, 0.5f32), (1.24f32, 0.16f32, -0.5f32)] {
-            let (rx, ry) = (0.13f32, 0.24f32);
-            let (ca, sa) = (rot.cos(), rot.sin());
-            let ox = x - ex;
-            let oy = y - ey;
-            let px = ca * ox + sa * oy;
-            let py = -sa * ox + ca * oy;
-            let dx = px / rx;
-            let dy = py / ry;
-            if dx * dx + dy * dy <= 1.0 {
-                return (Mat::Ear, 0.40);
-            }
         }
 
         // Big fluffy body cloud with a bumpy wool edge.
@@ -3702,8 +3718,17 @@ mod silly_sheep {
                 (ch, Some(lerp3((58.0, 56.0, 68.0), (124.0, 118.0, 134.0), shade)))
             }
             Mat::Ear => {
-                let ch = if cov < 0.5 { ',' } else { '#' };
-                (ch, Some(lerp3((52.0, 50.0, 62.0), (108.0, 102.0, 118.0), shade)))
+                let ch = if cov < 0.5 {
+                    ','
+                } else {
+                    const O: [char; 4] = ['c', 'e', 'o', 'C'];
+                    O[(hash2(r, c) % 4) as usize]
+                };
+                (ch, Some(lerp3((82.0, 68.0, 72.0), (148.0, 124.0, 118.0), shade)))
+            }
+            Mat::EarInner => {
+                let ch = if cov < 0.5 { '.' } else { 'o' };
+                (ch, Some(lerp3((196.0, 128.0, 138.0), (238.0, 168.0, 176.0), shade)))
             }
             Mat::Eye => {
                 let ch = if cov < 0.6 { 'o' } else { 'O' };
@@ -3780,9 +3805,11 @@ mod silly_sheep {
         let use_color = interactive && std::env::var_os("NO_COLOR").is_none();
 
         let width = w;
-        const BOTTOM_BLANK: usize = 2;
-        const CAPTION_ROWS: usize = 1;
-        let sheep_h = h.saturating_sub(BOTTOM_BLANK + CAPTION_ROWS).max(7);
+        const TITLE_ROWS: usize = 1;
+        const BOTTOM_MARGIN: usize = 1;
+        let sheep_h = h
+            .saturating_sub(TITLE_ROWS + BOTTOM_MARGIN)
+            .max(7);
 
         // Fit the art-space box (≈3.0 wide × 2.0 tall) to the drawable area,
         // then shrink to ~2/3 so the sheep sits small with headroom above.
@@ -3793,10 +3820,9 @@ mod silly_sheep {
             .min(2.0 * sheep_h as f32 / yspan)
             * SHEEP_SHRINK;
         let cx = width as f32 / 2.0;
-        let cy = sheep_h as f32 * 0.38;
+        let cy = 0.5f32;
         let off_x = 0.06f32;
-        let grass_art_y = -0.92f32;
-        let off_y = grass_art_y + ((sheep_h as f32 - 1.0 - cy) * 2.0 / scale);
+        let off_y = 1.02f32; // pin hat/ears to the first row under the title
         let k = 3usize; // supersampling factor (k×k samples per cell)
 
         let mut out = String::with_capacity(width * h * 2 + 64);
@@ -3804,13 +3830,27 @@ mod silly_sheep {
             out.push_str("\x1b[2J\x1b[3J\x1b[H");
         }
 
+        let title_text = "baaa ~~~ you found the secret silly sheep";
+        let title: String = if title_text.chars().count() > width {
+            title_text.chars().take(width).collect()
+        } else {
+            let pad = (width - title_text.chars().count()) / 2;
+            format!("{}{}", " ".repeat(pad), title_text)
+        };
+        if use_color {
+            out.push_str(&format!("\x1b[1;38;2;236;214;142m{title}\x1b[0m"));
+        } else {
+            out.push_str(&title);
+        }
+        out.push('\n');
+
         for r in 0..sheep_h {
-            let mut cells: Vec<(char, Option<(u8, u8, u8)>)> = Vec::with_capacity(width);
+            let mut cells: Vec<Cell> = Vec::with_capacity(width);
             for c in 0..width {
                 let mut nonbg = 0u32;
                 let mut best = Mat::Bg;
                 let mut best_rank = 255u8;
-                let mut samples: [(Mat, f32); 16] = [(Mat::Bg, 0.0); 16];
+                let mut samples: SampleBuf = [(Mat::Bg, 0.0); 16];
                 let mut n = 0usize;
                 for sy in 0..k {
                     for sx in 0..k {
@@ -3869,22 +3909,9 @@ mod silly_sheep {
             out.push('\n');
         }
 
-        // Caption sits directly under the grass; two blank rows follow.
-        let caption = "baaa~   -   you found the secret sheep";
-        let cap: String = if caption.chars().count() > width {
-            caption.chars().take(width).collect()
-        } else {
-            let pad = (width - caption.chars().count()) / 2;
-            format!("{}{}", " ".repeat(pad), caption)
-        };
-        if use_color {
-            out.push_str(&format!("\x1b[2;38;2;150;150;160m{cap}\x1b[0m"));
-        } else {
-            out.push_str(&cap);
-        }
-        out.push('\n');
-        for _ in 0..BOTTOM_BLANK {
-            out.push('\n');
+        // Trim the trailing newline so the bottom margin row doesn't scroll.
+        while out.ends_with('\n') {
+            out.pop();
         }
 
         let mut stdout = std::io::stdout().lock();

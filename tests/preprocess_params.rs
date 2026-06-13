@@ -98,13 +98,17 @@ fn n_pca_components_sets_x_pca_width() {
     let h5 = dir.join("toy.h5ad");
     assert!(standard_toy_h5ad(&h5), "uv toy h5ad failed");
 
-    let mut low = RustPreprocessParams::default();
-    low.n_top_hvg = 100;
-    low.n_pca_components = 6;
+    let low = RustPreprocessParams {
+        n_top_hvg: 100,
+        n_pca_components: 6,
+        ..Default::default()
+    };
 
-    let mut high = RustPreprocessParams::default();
-    high.n_top_hvg = 100;
-    high.n_pca_components = 18;
+    let high = RustPreprocessParams {
+        n_top_hvg: 100,
+        n_pca_components: 18,
+        ..Default::default()
+    };
 
     let (_, _, ncol_low) = run_pca_only(&h5, &low);
     let (_, _, ncol_high) = run_pca_only(&h5, &high);
@@ -129,13 +133,17 @@ fn n_top_hvg_caps_gene_subset() {
     let h5 = dir.join("toy.h5ad");
     assert!(standard_toy_h5ad(&h5), "uv toy h5ad failed");
 
-    let mut small = RustPreprocessParams::default();
-    small.n_top_hvg = 40;
-    small.n_pca_components = 8;
+    let small = RustPreprocessParams {
+        n_top_hvg: 40,
+        n_pca_components: 8,
+        ..Default::default()
+    };
 
-    let mut large = RustPreprocessParams::default();
-    large.n_top_hvg = 120;
-    large.n_pca_components = 8;
+    let large = RustPreprocessParams {
+        n_top_hvg: 120,
+        n_pca_components: 8,
+        ..Default::default()
+    };
 
     let (_, nvar_small, _) = run_pca_only(&h5, &small);
     let (_, nvar_large, _) = run_pca_only(&h5, &large);
@@ -163,17 +171,21 @@ fn min_genes_filters_sparse_cells() {
     let h5 = dir.join("qc.h5ad");
     assert!(qc_variable_h5ad(&h5), "uv qc h5ad failed");
 
-    let mut permissive = RustPreprocessParams::default();
-    permissive.min_genes = 5;
-    permissive.min_cells = 1;
-    permissive.n_top_hvg = 80;
-    permissive.n_pca_components = 6;
+    let permissive = RustPreprocessParams {
+        min_genes: 5,
+        min_cells: 1,
+        n_top_hvg: 80,
+        n_pca_components: 6,
+        ..Default::default()
+    };
 
-    let mut strict = RustPreprocessParams::default();
-    strict.min_genes = 50;
-    strict.min_cells = 1;
-    strict.n_top_hvg = 80;
-    strict.n_pca_components = 6;
+    let strict = RustPreprocessParams {
+        min_genes: 50,
+        min_cells: 1,
+        n_top_hvg: 80,
+        n_pca_components: 6,
+        ..Default::default()
+    };
 
     let steps = RustPreprocessSteps {
         qc_filter: true,
@@ -209,10 +221,12 @@ fn min_genes_filters_sparse_cells() {
 fn config_preprocess_converts_to_rust_params() {
     use spacetravlr::PreprocessConfig;
 
-    let mut cfg = PreprocessConfig::default();
-    cfg.n_top_hvg = 777;
-    cfg.n_pca_components = 9;
-    cfg.min_genes = 42;
+    let cfg = PreprocessConfig {
+        n_top_hvg: 777,
+        n_pca_components: 9,
+        min_genes: 42,
+        ..Default::default()
+    };
     let rust = cfg.to_rust_preprocess_params();
     assert_eq!(rust.n_top_hvg, 777);
     assert_eq!(rust.n_pca_components, 9);

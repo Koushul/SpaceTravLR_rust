@@ -830,7 +830,7 @@ pub fn export_joint_perturb_result(args: ExportJointPerturbArgs<'_>) -> anyhow::
     {
         let feather_path = if custom
             .parent()
-            .map_or(true, |p| p.as_os_str().is_empty())
+            .is_none_or(|p| p.as_os_str().is_empty())
         {
             let name = custom
                 .file_name()

@@ -1851,7 +1851,6 @@ mod tests {
                 let y = y.clone();
                 let lasso_coef = lasso_coef.clone();
                 let cnn = cnn.clone();
-                let device = device.clone();
                 thread::spawn(move || {
                     let anchors: Vec<f32> = std::iter::once(0.5f32)
                         .chain(std::iter::repeat_n(0.1f32, P))
