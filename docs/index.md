@@ -25,6 +25,23 @@ spacetravlr --h5ad /path/to/adata.h5ad --output-dir /path/to/outputdir
 ```bash
 spacetravlr --join-output-dir  /path/to/outputdir --plain
 ```
+For example, this slurm job will coordinate multiple workers on the same output/adata
+```
+#!/bin/bash
+#SBATCH --partition=preempt
+#SBATCH --job-name=SpaceTravLR
+#SBATCH --mem=300G
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --cluster=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --time=1-00:00:00
+
+spacetravlr --join-output-dir /path/to/outputdir --plain
+```
 
 #### Analyze me
 ```bash
@@ -35,31 +52,9 @@ spacetravlr collect-interactions \
 <!-- Learn more about [how SpaceTravLR works](math.md), other [installations](install.md) details and CLI [usage](usage.md). -->
 
 
-
-
-
-
-
-
-
-
 ## Training time estimate {#training-time-estimate}
 
-The equation below provides a rough estimate of how long training SpaceTravLR on your dataset should take. This was empirically estimated using multiple runs across datasets on a100, l40s and rtx6k GPUs.
-
-\[
-T_{\mathrm{seconds}}
-  \approx
-  \frac{26.259\; G}{W \cdot s_{\mathrm{gpu}}}
-  \cdot \left(
-    \frac{N_{\mathrm{cnn}}}{200}
-    \left(
-      \frac{\ln(1 + N/N_{\mathrm{cnn}})}{\ln 2}
-    \right)^{0.4}
-  \right)^{0.85}
-  \cdot \left(\frac{D}{16}\right)^{1.5}
-  \cdot \frac{E}{100}
-\]
+The widget below provides a rough estimate of how long training SpaceTravLR on your dataset will take. This was empirically estimated using multiple runs across datasets on a100, l40s and rtx6k GPUs.
 
 <div id="st-runtime-estimator" class="st-runtime-estimator" markdown="0"></div>
 

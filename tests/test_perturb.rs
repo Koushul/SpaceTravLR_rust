@@ -596,6 +596,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
 
     let config = PerturbConfig {
         n_propagation: 1,
+        beta_scale_factor: 1.0,
         ..Default::default()
     };
     let mut no_timings: Option<spacetravlr::perturb::PerturbTimings> = None;
