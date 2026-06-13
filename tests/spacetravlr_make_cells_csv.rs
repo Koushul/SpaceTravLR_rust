@@ -19,6 +19,7 @@ fn spacetravlr_cmd() -> Command {
 }
 
 fn write_toy_h5ad(path: &Path) -> anyhow::Result<()> {
+    spacetravlr::ensure_process_env();
     let a = AnnData::<H5>::new(path)?;
     let obs_names: Vec<String> = (0..6).map(|i| format!("cell_{i}")).collect();
     a.set_obs_names(obs_names.into())?;
@@ -148,6 +149,7 @@ fn make_cells_csv_cli_writes_grouped_obs_names() {
 
 #[test]
 fn write_cells_csv_from_run_toml_library_matches_cli() {
+    spacetravlr::ensure_process_env();
     let dir = std::env::temp_dir().join(format!(
         "spacetravlr_make_cells_lib_{}",
         std::process::id()

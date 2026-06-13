@@ -704,6 +704,7 @@ pub fn write_cells_csv_from_run_toml(
     run_toml: &Path,
     out_path: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
+    crate::ensure_process_env();
     let cfg = SpaceshipConfig::from_file(run_toml)?;
     let annot_col = cfg.data.cluster_annot.trim();
     anyhow::ensure!(
