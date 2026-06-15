@@ -546,6 +546,12 @@ pub struct PerturbationConfig {
     /// Default column in `cells_csv` (required in TOML when `cells_csv` is set).
     #[serde(default)]
     pub cells_csv_column: Option<String>,
+    /// Lower clip for simulated gene expression after each propagation iteration (default `0.0` when omitted).
+    #[serde(default)]
+    pub perturbed_gene_min_bound: Option<f64>,
+    /// Upper clip for simulated gene expression after each propagation iteration (omit for no upper bound).
+    #[serde(default)]
+    pub perturbed_gene_max_bound: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -836,6 +842,8 @@ impl Default for PerturbationConfig {
             ligand_grid_factor: None,
             cells_csv: None,
             cells_csv_column: None,
+            perturbed_gene_min_bound: None,
+            perturbed_gene_max_bound: None,
         }
     }
 }

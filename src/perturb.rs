@@ -33,6 +33,12 @@ pub struct PerturbConfig {
     /// Hard cutoff on sender distance for received-ligand aggregation. None = full Gaussian support.
     #[serde(default)]
     pub contact_distance: Option<f64>,
+    /// Lower clip for simulated gene expression after each propagation iteration (default `0.0` when omitted).
+    #[serde(default)]
+    pub perturbed_gene_min_bound: Option<f64>,
+    /// Upper clip for simulated gene expression after each propagation iteration (omit for no upper bound).
+    #[serde(default)]
+    pub perturbed_gene_max_bound: Option<f64>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -46,7 +52,29 @@ impl Default for PerturbConfig {
             min_expression: 1e-9,
             ligand_grid_factor: None,
             contact_distance: None,
+            perturbed_gene_min_bound: None,
+            perturbed_gene_max_bound: None,
         }
+    }
+}
+
+/// Resolved per-gene expression clip applied during perturbation propagation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExpressionBounds {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl ExpressionBounds {
+    pub fn from_config(config: &PerturbConfig) -> Self {
+        Self {
+            min: config.perturbed_gene_min_bound.unwrap_or(0.0),
+            max: config.perturbed_gene_max_bound.unwrap_or(f64::INFINITY),
+        }
+    }
+
+    pub fn clip_value(&self, value: f64) -> f64 {
+        value.clamp(self.min, self.max)
     }
 }
 
@@ -114,6 +142,7 @@ pub fn perturb_result_from_delta(
     delta: Array2<f64>,
     targets: &[PerturbTarget],
     gene_names: &[String],
+    bounds: Option<ExpressionBounds>,
 ) -> PerturbResult {
     let n_cells = gene_mtx.nrows();
     let gene_to_idx: HashMap<&str, usize> = gene_names
@@ -124,18 +153,24 @@ pub fn perturb_result_from_delta(
     let mut simulated = gene_mtx + &delta;
     for target in targets {
         if let Some(&idx) = gene_to_idx.get(target.gene.as_str()) {
+            let desired = bounds
+                .map(|b| b.clip_value(target.desired_expr))
+                .unwrap_or(target.desired_expr);
             if let Some(cell_indices) = target.cell_indices.as_ref() {
                 for &cell in cell_indices {
                     if cell < n_cells {
-                        simulated[[cell, idx]] = target.desired_expr;
+                        simulated[[cell, idx]] = desired;
                     }
                 }
             } else {
                 for cell in 0..n_cells {
-                    simulated[[cell, idx]] = target.desired_expr;
+                    simulated[[cell, idx]] = desired;
                 }
             }
         }
+    }
+    if let Some(bounds) = bounds {
+        clip_simulated_matrix_in_place(&mut simulated, bounds);
     }
     PerturbResult { simulated, delta }
 }
@@ -208,6 +243,7 @@ pub fn perturb_with_targets(
     let targets = inputs.targets;
     let config = inputs.config;
     let lr_radii = inputs.lr_radii;
+    let expression_bounds = ExpressionBounds::from_config(config);
     let job_progress = inputs.job_progress;
     let job_message = inputs.job_message;
     let cancel = inputs.cancel;
@@ -515,7 +551,6 @@ pub fn perturb_with_targets(
         }
 
         // 8. Pin target genes to their perturbed values (only target columns)
-        let t_pin_nonneg = Instant::now();
         for target in targets {
             if let Some(&gi) = gene_to_idx.get(target.gene.as_str()) {
                 if let Some(cell_indices) = target.cell_indices.as_ref() {
@@ -532,33 +567,20 @@ pub fn perturb_with_targets(
             }
         }
 
-        // 9. Enforce simulated expression ≥ 0 (zero-alloc, parallel)
-        let delta_flat = delta_simulated.as_slice_memory_order_mut().unwrap();
-        let gmtx_flat = gene_mtx.as_slice().unwrap();
-        delta_flat
-            .par_chunks_mut(n_genes)
-            .enumerate()
-            .for_each(|(cell, row)| {
-                let base = cell * n_genes;
-                for gene in 0..n_genes {
-                    unsafe {
-                        let orig = *gmtx_flat.get_unchecked(base + gene);
-                        let val = (orig + *row.get_unchecked(gene)).max(0.0);
-                        *row.get_unchecked_mut(gene) = val - orig;
-                    }
-                }
-            });
+        // 9. Clip simulated expression to configured bounds (zero-alloc, parallel)
+        let t_clip = Instant::now();
+        clip_simulated_delta_in_place(gene_mtx, &mut delta_simulated, expression_bounds);
         if let Some(t) = timings.as_mut() {
             t.record(
-                format!("iter{}/pin_nonneg", iter + 1),
-                t_pin_nonneg.elapsed(),
+                format!("iter{}/clip_expression", iter + 1),
+                t_clip.elapsed(),
             );
         }
         report_perturb_step(
             job_progress,
             job_message,
             (base + span).saturating_sub(1).min(PROP_HI),
-            &format!("{msg_prefix} · nonneg & sync"),
+            &format!("{msg_prefix} · clip & sync"),
         );
     }
 
@@ -569,7 +591,13 @@ pub fn perturb_with_targets(
         "GRN perturbation · assembling result…",
     );
 
-    let out = perturb_result_from_delta(gene_mtx, delta_simulated, targets, gene_names);
+    let out = perturb_result_from_delta(
+        gene_mtx,
+        delta_simulated,
+        targets,
+        gene_names,
+        Some(expression_bounds),
+    );
 
     report_perturb_step(
         job_progress,
@@ -632,6 +660,33 @@ fn scatter_max_to_full(
         }
     }
     result
+}
+
+fn clip_simulated_delta_in_place(
+    gene_mtx: &Array2<f64>,
+    delta: &mut Array2<f64>,
+    bounds: ExpressionBounds,
+) {
+    let n_genes = gene_mtx.ncols();
+    let delta_flat = delta.as_slice_memory_order_mut().unwrap();
+    let gmtx_flat = gene_mtx.as_slice().unwrap();
+    delta_flat
+        .par_chunks_mut(n_genes)
+        .enumerate()
+        .for_each(|(cell, row)| {
+            let base = cell * n_genes;
+            for gene in 0..n_genes {
+                unsafe {
+                    let orig = *gmtx_flat.get_unchecked(base + gene);
+                    let val = bounds.clip_value(orig + *row.get_unchecked(gene));
+                    *row.get_unchecked_mut(gene) = val - orig;
+                }
+            }
+        });
+}
+
+fn clip_simulated_matrix_in_place(simulated: &mut Array2<f64>, bounds: ExpressionBounds) {
+    simulated.mapv_inplace(|v| bounds.clip_value(v));
 }
 
 fn gene_matrix_masked_f32_from_expr(
@@ -903,4 +958,59 @@ fn recompute_weighted_ligands(args: RecomputeWeightedLigandsArgs<'_>) -> Option<
     }
 
     Some(GeneMatrix::new(result_data, lig_names))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    #[test]
+    fn clip_simulated_delta_respects_bounds() {
+        let gene_mtx = array![[1.0, 5.0], [2.0, -1.0]];
+        let mut delta = array![[0.0, 6.0], [0.0, 2.0]];
+        clip_simulated_delta_in_place(
+            &gene_mtx,
+            &mut delta,
+            ExpressionBounds {
+                min: 0.0,
+                max: 8.0,
+            },
+        );
+        assert!((delta[[0, 0]] - 0.0).abs() < 1e-12);
+        assert!((delta[[0, 1]] - 3.0).abs() < 1e-12);
+        assert!((delta[[1, 0]] - 0.0).abs() < 1e-12);
+        assert!((delta[[1, 1]] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn perturb_result_from_delta_clamps_target_gene() {
+        let gene_mtx = array![[2.0, 4.0]];
+        let delta = array![[0.0, 0.0]];
+        let targets = vec![PerturbTarget {
+            gene: "G1".into(),
+            desired_expr: 20.0,
+            cell_indices: None,
+        }];
+        let gene_names = vec!["G1".into(), "G2".into()];
+        let out = perturb_result_from_delta(
+            &gene_mtx,
+            delta,
+            &targets,
+            &gene_names,
+            Some(ExpressionBounds {
+                min: 0.0,
+                max: 10.0,
+            }),
+        );
+        assert!((out.simulated[[0, 0]] - 10.0).abs() < 1e-12);
+        assert!((out.simulated[[0, 1]] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn expression_bounds_default_matches_nonneg_only() {
+        let bounds = ExpressionBounds::from_config(&PerturbConfig::default());
+        assert_eq!(bounds.min, 0.0);
+        assert!(bounds.max.is_infinite());
+    }
 }

@@ -528,7 +528,7 @@ fn main() -> anyhow::Result<()> {
                 sum_suffix("/weighted_ligands_tfl")
             );
             eprintln!("    grn_propagate: {:?}", sum_suffix("/grn_propagate"));
-            eprintln!("    pin_nonneg: {:?}", sum_suffix("/pin_nonneg"));
+            eprintln!("    clip_expression: {:?}", sum_suffix("/clip_expression"));
         }
     }
     Ok(())

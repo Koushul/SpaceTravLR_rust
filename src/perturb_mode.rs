@@ -8,8 +8,8 @@ use crate::ligand::{
     calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
 };
 use crate::perturb::{
-    CachedBaselineSplash, PerturbConfig, PerturbTarget, PerturbTimings, PerturbWithTargetsInputs,
-    perturb_with_targets,
+    CachedBaselineSplash, ExpressionBounds, PerturbConfig, PerturbTarget, PerturbTimings,
+    PerturbWithTargetsInputs, perturb_with_targets,
 };
 use crate::spatial_estimator::{load_spatial_coords_f64, read_expression_matrix_dense_f64};
 
@@ -437,7 +437,14 @@ impl PerturbRuntime {
             min_expression,
             ligand_grid_factor: cfg.perturbation.ligand_grid_factor,
             contact_distance: None,
+            perturbed_gene_min_bound: cfg.perturbation.perturbed_gene_min_bound,
+            perturbed_gene_max_bound: cfg.perturbation.perturbed_gene_max_bound,
         };
+        let bounds = ExpressionBounds::from_config(&perturb_cfg);
+        anyhow::ensure!(
+            bounds.min.is_finite() && bounds.max.is_finite() && bounds.min <= bounds.max,
+            "perturbed_gene_min_bound must be <= perturbed_gene_max_bound and both must be finite"
+        );
 
         set_msg("Perturbation runtime ready.");
         set_p(1000);

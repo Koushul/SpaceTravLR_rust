@@ -140,6 +140,8 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 | `n_propagation` | `4` | Rounds of ligand / GRN signal propagation in `splash()`. | Deeper equilibration; more neighbor feedback. | Shallower, more local effects. |
 | `ligand_grid_factor` |  | Grid spacing as fraction of `radius` for approximate received ligands. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |
 | `cells_csv` / `cells_csv_column` |  | Default ROI for perturb export. | Restrict splash to a cell list. | — |
+| `perturbed_gene_min_bound` | `0.0` (when omitted) | Lower clip on simulated expression after each propagation step. | Keep predictions non-negative or in a biologically plausible range. | Set explicitly to allow negative values (unusual). |
+| `perturbed_gene_max_bound` |  | Upper clip on simulated expression after each propagation step. | Cap OOD overexpression from linear propagation. | Omit for no upper bound. |
 
 ---
 

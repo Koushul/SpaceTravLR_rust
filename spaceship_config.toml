@@ -170,6 +170,9 @@ n_propagation     = 4
 # ligand_grid_factor = 0.2
 # cells_csv = "cell_scope.csv"
 # cells_csv_column = "my_cells"
+# Clip simulated expression after each propagation iteration (omit max for no upper bound)
+# perturbed_gene_min_bound = 0.0
+# perturbed_gene_max_bound = 10.0
 
 [model_export]
 save_cnn_weights = false

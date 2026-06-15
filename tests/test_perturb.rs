@@ -1406,6 +1406,7 @@ fn bench_perturb() {
             min_expression: 1e-9,
             ligand_grid_factor: None,
             contact_distance: None,
+            ..Default::default()
         };
 
         let config_grid = PerturbConfig {
@@ -1416,6 +1417,7 @@ fn bench_perturb() {
             min_expression: 1e-9,
             ligand_grid_factor: Some(grid_factor),
             contact_distance: None,
+            ..Default::default()
         };
 
         let targets = vec![(target.clone(), 0.0)];

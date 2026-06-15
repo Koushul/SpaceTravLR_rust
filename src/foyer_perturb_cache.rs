@@ -196,7 +196,7 @@ pub fn decode_perturb_cache_entry(
                         v.ncols
                     );
                     Ok(perturb_result_from_delta(
-                        gene_mtx, delta, targets, gene_names,
+                        gene_mtx, delta, targets, gene_names, None,
                     ))
                 }
             };
@@ -409,7 +409,7 @@ mod tests {
         let gene_names = sample_gene_names();
         let gene_mtx = Array2::<f64>::zeros((2, 3));
         let delta = Array2::from_shape_vec((2, 3), (1..=6).map(|i| i as f64).collect()).unwrap();
-        let pr = perturb_result_from_delta(&gene_mtx, delta, &[], &gene_names);
+        let pr = perturb_result_from_delta(&gene_mtx, delta, &[], &gene_names, None);
         (gene_mtx, gene_names, pr)
     }
 
@@ -428,6 +428,7 @@ mod tests {
             min_expression: 1e-9,
             ligand_grid_factor: Some(0.5),
             contact_distance: None,
+            ..Default::default()
         };
         let a = grn_perturb_cache_key(1, false, "/data/x.h5ad", 100, 2000, &t, &cfg);
         let b = grn_perturb_cache_key(1, false, "/data/x.h5ad", 100, 2000, &t, &cfg);
