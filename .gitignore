@@ -8,7 +8,11 @@ scripts/__pycache__/
 .cache/
 .claude/
 .DS_Store
-benchmarks/
+benchmarks/data/
+benchmarks/results/preprocess_n*/
+benchmarks/results/plots/*.png
+!benchmarks/results/plots/.gitkeep
+benchmarks/.uv-cache/
 web/spatial_viewer/node_modules/
 web/spatial_viewer/dist/
 

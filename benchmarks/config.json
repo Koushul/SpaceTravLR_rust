@@ -1,0 +1,31 @@
+{
+  "source_h5ad": "/ix/djishnu/shared/djishnu_kor11/training_data_revision/atera_human_cervix.h5ad",
+  "subsample_sizes": [700, 2000, 7000, 20000, 70000, 200000, 700000],
+  "rng_seed": 1337,
+  "stratify_obs_column": "cell_type",
+  "preprocess": {
+    "skip_python_for_sizes_geq": 250000,
+    "per_run_timeout_seconds": 7200
+  },
+  "cnn_scaling": {
+    "spatial_dim": 32,
+    "n_modulators": 16,
+    "n_clusters": 12,
+    "epochs": 4,
+    "minibatch_size": 128,
+    "learning_rate": 0.001,
+    "device_preference_python": "cuda",
+    "rust_backend": "wgpu_or_cpu"
+  },
+  "dropout_experiment": {
+    "n_cells": 20000,
+    "spatial_dim": 32,
+    "n_modulators": 16,
+    "n_clusters": 12,
+    "epochs": 8,
+    "minibatch_size": 128,
+    "learning_rate": 0.001,
+    "dropouts": [0.0, 0.2, 0.5, 0.8, 0.95]
+  },
+  "out_root": "benchmarks/results"
+}

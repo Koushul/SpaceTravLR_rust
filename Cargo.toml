@@ -116,6 +116,10 @@ required-features = ["umap-lab"]
 name = "cnn_train_bench"
 path = "src/bin/cnn_train_bench.rs"
 
+[[bin]]
+name = "scaling_bench"
+path = "src/bin/scaling_bench.rs"
+
 [dependencies]
 burn = { version = "0.16.1", features = ["wgpu", "train", "ndarray"] }
 burn-autodiff = { version = "0.16.1" }
