@@ -96,20 +96,47 @@ def write_subsample(src: str, idx: np.ndarray, out_path: str) -> dict:
         n = len(idx)
 
         nc_src = fi["layers/normalized_count"]
-        x_out = fo.create_dataset("X", shape=(n, n_genes), dtype="float32")
-        x_out.attrs["encoding-type"] = "array"
-        x_out.attrs["encoding-version"] = "0.2.0"
+        total_src = nc_src.shape[0]
+        x_group = fo.create_group("X")
+        x_group.attrs["encoding-type"] = "csr_matrix"
+        x_group.attrs["encoding-version"] = "0.1.0"
+        x_group.attrs["shape"] = np.array([n, n_genes], dtype=np.int64)
 
-        chunk = 4096
-        for s in range(0, n, chunk):
-            e = min(n, s + chunk)
+        chunk_size = min(50000, max(2048, n))
+        data_chunks: list[np.ndarray] = []
+        indices_chunks: list[np.ndarray] = []
+        indptr_list = [0]
+        nnz_running = 0
+        for s in range(0, n, chunk_size):
+            e = min(n, s + chunk_size)
             rows = idx[s:e]
-            sorted_idx = np.argsort(rows)
-            row_sorted = rows[sorted_idx]
-            block = nc_src[list(row_sorted), :].astype(np.float32)
-            inv = np.empty_like(sorted_idx)
-            inv[sorted_idx] = np.arange(len(sorted_idx))
-            x_out[s:e, :] = block[inv]
+            block = nc_src[rows.tolist(), :]
+            block = np.round(np.expm1(block)).astype(np.float32)
+            rows_csr, cols_csr = np.nonzero(block)
+            vals = block[rows_csr, cols_csr]
+            order = np.argsort(rows_csr, kind="stable")
+            rows_csr = rows_csr[order]
+            cols_csr = cols_csr[order]
+            vals = vals[order]
+            counts = np.bincount(rows_csr, minlength=(e - s))
+            running = nnz_running
+            for c in counts:
+                running += int(c)
+                indptr_list.append(running)
+            data_chunks.append(vals.astype(np.float32))
+            indices_chunks.append(cols_csr.astype(np.int32))
+            nnz_running = running
+
+        if data_chunks:
+            data_arr = np.concatenate(data_chunks)
+            indices_arr = np.concatenate(indices_chunks)
+        else:
+            data_arr = np.zeros(0, dtype=np.float32)
+            indices_arr = np.zeros(0, dtype=np.int32)
+        indptr_arr = np.asarray(indptr_list, dtype=np.int32)
+        x_group.create_dataset("data", data=data_arr)
+        x_group.create_dataset("indices", data=indices_arr)
+        x_group.create_dataset("indptr", data=indptr_arr)
 
         layers = fo.create_group("layers")
         layers.attrs["encoding-type"] = "dict"
@@ -125,11 +152,15 @@ def write_subsample(src: str, idx: np.ndarray, out_path: str) -> dict:
 
         src_index = fi["obs/_index"][...]
         sub_index = src_index[idx]
-        obs_g.create_dataset("_index", data=sub_index)
+        ds = obs_g.create_dataset("_index", data=sub_index)
+        ds.attrs["encoding-type"] = "string-array"
+        ds.attrs["encoding-version"] = "0.2.0"
 
         for col in ("x_centroid", "y_centroid"):
             if f"obs/{col}" in fi:
-                obs_g.create_dataset(col, data=fi[f"obs/{col}"][...][idx])
+                ds = obs_g.create_dataset(col, data=fi[f"obs/{col}"][...][idx])
+                ds.attrs["encoding-type"] = "array"
+                ds.attrs["encoding-version"] = "0.2.0"
         for cat_col in ("cell_type", "leiden"):
             cat_path = f"obs/{cat_col}"
             if cat_path not in fi:
@@ -149,15 +180,23 @@ def write_subsample(src: str, idx: np.ndarray, out_path: str) -> dict:
         var_g.attrs["_index"] = "_index"
         var_g.attrs["column-order"] = np.array(["gene_ids"], dtype=object)
         var_index = fi["var/_index"][...]
-        var_g.create_dataset("_index", data=var_index)
+        ds = var_g.create_dataset("_index", data=var_index)
+        ds.attrs["encoding-type"] = "string-array"
+        ds.attrs["encoding-version"] = "0.2.0"
         if "var/gene_ids" in fi:
-            var_g.create_dataset("gene_ids", data=fi["var/gene_ids"][...])
+            ds = var_g.create_dataset("gene_ids", data=fi["var/gene_ids"][...])
+            ds.attrs["encoding-type"] = "string-array"
+            ds.attrs["encoding-version"] = "0.2.0"
 
         obsm_g = fo.create_group("obsm")
         obsm_g.attrs["encoding-type"] = "dict"
         obsm_g.attrs["encoding-version"] = "0.1.0"
         if "obsm/spatial" in fi:
-            obsm_g.create_dataset("spatial", data=fi["obsm/spatial"][...][idx, :])
+            ds = obsm_g.create_dataset(
+                "spatial", data=fi["obsm/spatial"][...][idx, :]
+            )
+            ds.attrs["encoding-type"] = "array"
+            ds.attrs["encoding-version"] = "0.2.0"
 
         fo.create_group("uns").attrs["encoding-type"] = "dict"
         fo["uns"].attrs["encoding-version"] = "0.1.0"

@@ -37,7 +37,7 @@ def _parse_time_v(stderr: str) -> dict:
     return out
 
 
-def run_one(cmd: list, log_path: Path, timeout_s: int) -> dict:
+def run_one(cmd: list, log_path: Path, timeout_s: int, env: dict | None = None) -> dict:
     """Run a subprocess with optional /usr/bin/time -v; capture timing, RSS, exit."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     use_time = _has_gnu_time()
@@ -52,6 +52,7 @@ def run_one(cmd: list, log_path: Path, timeout_s: int) -> dict:
                 stderr=subprocess.PIPE,
                 timeout=timeout_s,
                 check=False,
+                env=env,
             )
         elapsed = time.time() - t0
         err_text = proc.stderr.decode("utf-8", "replace")
@@ -122,6 +123,8 @@ def main():
     env_common.setdefault("SPACETRAVLR_FORCE_CPU", "1")
     env_common.setdefault("RUST_BACKTRACE", "1")
     env_common.setdefault("OMP_NUM_THREADS", "8")
+    env_common.setdefault("UV_PYTHON", "3.11")
+    env_common.setdefault("SPACETRAVLR_UV_ALLOW_CACHE", "1")
 
     if args.mode in ("rust", "both"):
         cmd = [
@@ -144,7 +147,7 @@ def main():
                 rust_out_h5.unlink()
             except Exception:
                 pass
-        r = run_one(cmd, log, args.timeout)
+        r = run_one(cmd, log, args.timeout, env=env_common)
         if rust_out_h5.exists():
             try:
                 r["output_size_gb"] = rust_out_h5.stat().st_size / 1e9
@@ -170,7 +173,7 @@ def main():
                 py_out_h5.unlink()
             except Exception:
                 pass
-        r = run_one(cmd, log, args.timeout)
+        r = run_one(cmd, log, args.timeout, env=env_common)
         if py_out_h5.exists():
             try:
                 r["output_size_gb"] = py_out_h5.stat().st_size / 1e9

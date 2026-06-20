@@ -42,6 +42,8 @@ def run_subsample(n: int, source: str, out_dir: Path, seed: int, stratify: str, 
         "uv",
         "run",
         "--isolated",
+        "--python",
+        "3.11",
     ]
     for w in uv_with:
         cmd += ["--with", w]
@@ -111,12 +113,9 @@ def run_cnn_rust(binary: Path, n: int, cfg: dict, dropout: float = 0.0) -> dict:
         return {"ok": False, "error": f"parse: {e}", "raw": proc.stdout[-500:]}
 
 
-def run_cnn_python(n: int, cfg: dict, uv_with: list, dropout: float = 0.0, device: str = "auto") -> dict:
-    cmd = ["uv", "run", "--isolated"]
-    for w in uv_with:
-        cmd += ["--with", w]
-    cmd += [
-        "python",
+def run_cnn_python(n: int, cfg: dict, python_bin: Path, dropout: float = 0.0, device: str = "auto") -> dict:
+    cmd = [
+        str(python_bin),
         str(BENCH / "bench_cnn_python.py"),
         "--n", str(n),
         "--spatial-dim", str(cfg["spatial_dim"]),
@@ -152,7 +151,10 @@ def main():
     ap.add_argument("--skip-preprocess", action="store_true")
     ap.add_argument("--skip-cnn", action="store_true")
     ap.add_argument("--skip-dropout", action="store_true")
+    ap.add_argument("--skip-subsample", action="store_true")
     ap.add_argument("--cnn-device-python", type=str, default="auto")
+    ap.add_argument("--fresh", action="store_true",
+                    help="Discard any existing results.json")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -171,20 +173,57 @@ def main():
     assert binary.exists(), f"missing {binary}; run cargo build --release"
     assert rust_cnn_binary.exists(), f"missing {rust_cnn_binary}; run cargo build --release --bin scaling_bench"
 
-    UV_BASIC = ["numpy<2", "h5py", "anndata>=0.11"]
-    UV_TORCH = ["numpy<2", "torch>=2.2"]
+    UV_BASIC = ["numpy<2", "h5py"]
+    torch_venv = ROOT / "benchmarks/.venv-torch"
+    py_bin = torch_venv / "bin/python"
+    if not py_bin.exists():
+        step("Bootstrap PyTorch venv (one-time)")
+        subprocess.run(
+            ["uv", "venv", "--python", "3.11", str(torch_venv)], check=True
+        )
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(py_bin),
+                "--index-url",
+                "https://download.pytorch.org/whl/cu124",
+                "--extra-index-url",
+                "https://pypi.org/simple",
+                "numpy<2",
+                "torch==2.4.1",
+            ],
+            check=True,
+        )
 
-    results = {
-        "config": cfg,
-        "sizes_run": sizes,
-        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "subsamples": {},
-        "preprocess": {},
-        "cnn_scaling": {},
-        "dropout": {},
-    }
     out_json = Path(args.results_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
+    if out_json.exists() and not args.fresh:
+        with open(out_json) as f:
+            try:
+                results = json.load(f)
+            except Exception:
+                results = None
+    else:
+        results = None
+    if results is None:
+        results = {
+            "config": cfg,
+            "sizes_run": [],
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "subsamples": {},
+            "preprocess": {},
+            "cnn_scaling": {},
+            "dropout": {},
+        }
+    results.setdefault("subsamples", {})
+    results.setdefault("preprocess", {})
+    results.setdefault("cnn_scaling", {})
+    results.setdefault("dropout", {})
+    results["sizes_run"] = sorted(set([*results.get("sizes_run", []), *sizes]))
+    results["config"] = cfg
 
     def flush():
         with open(out_json, "w") as f:
@@ -224,18 +263,41 @@ def main():
                 continue
             out_dir = results_dir / f"preprocess_n{n}"
             mode = "rust" if n >= skip_py_geq else "both"
-            r = run_preprocess(h5, out_dir, binary, mode, cfg["preprocess"]["per_run_timeout_seconds"])
-            r["mode_attempted"] = mode
+            existing = results["preprocess"].get(str(n))
+            need_rust = not (existing and (existing.get("rust") or {}).get("ok"))
+            need_py = mode == "both" and not (existing and (existing.get("python") or {}).get("ok"))
+            run_mode = None
+            if need_rust and need_py:
+                run_mode = "both"
+            elif need_rust:
+                run_mode = "rust"
+            elif need_py:
+                run_mode = "python"
+            if run_mode is None:
+                print(f"  n={n} preprocess (cached)", flush=True)
+                continue
+            r = run_preprocess(h5, out_dir, binary, run_mode, cfg["preprocess"]["per_run_timeout_seconds"])
+            r["mode_attempted"] = run_mode
+            if existing:
+                if "rust" in existing and "rust" not in r:
+                    r["rust"] = existing["rust"]
+                if "python" in existing and "python" not in r:
+                    r["python"] = existing["python"]
             results["preprocess"][str(n)] = r
             flush()
-            print(f"  n={n} preprocess -> mode={mode} rust_ok={r.get('rust', {}).get('ok')} py_ok={r.get('python', {}).get('ok')}", flush=True)
+            print(f"  n={n} preprocess -> mode={run_mode} rust_ok={r.get('rust', {}).get('ok')} py_ok={r.get('python', {}).get('ok')}", flush=True)
 
     if not args.skip_cnn:
         step("CNN scaling (rust + python)")
         cnn_cfg = cfg["cnn_scaling"]
         for n in sizes:
-            r_rust = run_cnn_rust(rust_cnn_binary, n, cnn_cfg)
-            r_py = run_cnn_python(n, cnn_cfg, UV_TORCH, device=args.cnn_device_python)
+            existing = results["cnn_scaling"].get(str(n)) or {}
+            r_rust = existing.get("rust")
+            r_py = existing.get("python")
+            if not (r_rust and r_rust.get("ok")):
+                r_rust = run_cnn_rust(rust_cnn_binary, n, cnn_cfg)
+            if not (r_py and r_py.get("ok")):
+                r_py = run_cnn_python(n, cnn_cfg, py_bin, device=args.cnn_device_python)
             results["cnn_scaling"][str(n)] = {"rust": r_rust, "python": r_py}
             flush()
             r_t = r_rust.get("total_seconds")
@@ -248,9 +310,15 @@ def main():
         d_n = d_cfg["n_cells"]
         cnn_like = {k: d_cfg[k] for k in ("spatial_dim", "n_modulators", "n_clusters", "epochs", "minibatch_size", "learning_rate")}
         for drop in d_cfg["dropouts"]:
-            r_rust = run_cnn_rust(rust_cnn_binary, d_n, cnn_like, dropout=drop)
-            r_py = run_cnn_python(d_n, cnn_like, UV_TORCH, dropout=drop, device=args.cnn_device_python)
-            results["dropout"][f"{drop}"] = {"rust": r_rust, "python": r_py}
+            key = f"{drop}"
+            existing = results["dropout"].get(key) or {}
+            r_rust = existing.get("rust")
+            r_py = existing.get("python")
+            if not (r_rust and r_rust.get("ok")):
+                r_rust = run_cnn_rust(rust_cnn_binary, d_n, cnn_like, dropout=drop)
+            if not (r_py and r_py.get("ok")):
+                r_py = run_cnn_python(d_n, cnn_like, py_bin, dropout=drop, device=args.cnn_device_python)
+            results["dropout"][key] = {"rust": r_rust, "python": r_py}
             flush()
             print(f"  dropout={drop} rust_mse={r_rust.get('final_mse')} py_mse={r_py.get('final_mse')}", flush=True)
 

@@ -5,14 +5,14 @@
   "stratify_obs_column": "cell_type",
   "preprocess": {
     "skip_python_for_sizes_geq": 250000,
-    "per_run_timeout_seconds": 7200
+    "per_run_timeout_seconds": 3600
   },
   "cnn_scaling": {
     "spatial_dim": 32,
     "n_modulators": 16,
     "n_clusters": 12,
-    "epochs": 4,
-    "minibatch_size": 128,
+    "epochs": 2,
+    "minibatch_size": 256,
     "learning_rate": 0.001,
     "device_preference_python": "cuda",
     "rust_backend": "wgpu_or_cpu"
