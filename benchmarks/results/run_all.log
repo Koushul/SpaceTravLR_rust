@@ -1,0 +1,36 @@
+
+=== Subsamples === 19:44:05
+  n=700 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n700.h5ad', 'size_gb': 0.0007933}
+  n=2000 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n2000.h5ad', 'size_gb': 0.001600372}
+  n=7000 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n7000.h5ad', 'size_gb': 0.004743564}
+  n=20000 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n20000.h5ad', 'size_gb': 0.01287458}
+  n=70000 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n70000.h5ad', 'size_gb': 0.044217356}
+  n=200000 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n200000.h5ad', 'size_gb': 0.125863372}
+  n=700000 -> {'ok': True, 'cached': True, 'out': '/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n700000.h5ad', 'size_gb': 0.43952654}
+
+=== Preprocess (rust + python) === 19:44:05
+  n=700 preprocess (cached)
+  n=2000 preprocess -> mode=both rust_ok=True py_ok=True
+  n=7000 preprocess -> mode=both rust_ok=True py_ok=True
+  n=20000 preprocess -> mode=both rust_ok=True py_ok=True
+  n=70000 preprocess -> mode=both rust_ok=True py_ok=True
+  n=200000 preprocess -> mode=both rust_ok=True py_ok=True
+  n=700000 preprocess -> mode=rust rust_ok=True py_ok=None
+
+=== CNN scaling (rust + python) === 19:49:01
+  n=700 cnn rust=5.459879805s python=0.541008710861206s
+  n=2000 cnn rust=15.265905514s python=0.42685413360595703s
+  n=7000 cnn rust=54.251505605s python=0.8809568881988525s
+  n=20000 cnn rust=155.156196596s python=2.1406912803649902s
+  n=70000 cnn rust=542.240931443s python=4.845633268356323s
+  n=200000 cnn rust=1543.576662448s python=12.422093868255615s
+  n=700000 cnn rust=5426.782085957s python=45.57608199119568s
+
+=== Dropout sensitivity === 22:00:01
+  dropout=0.0 rust_mse=0.00045037045 py_mse=0.00044031831963064897
+  dropout=0.2 rust_mse=0.00045904197 py_mse=0.000433823440422654
+  dropout=0.5 rust_mse=0.00044002885 py_mse=0.0004322551986852151
+  dropout=0.8 rust_mse=0.0004313169 py_mse=0.0004453502547597975
+  dropout=0.95 rust_mse=0.00047111936 py_mse=0.0004740781951577041
+
+Results written to: benchmarks/results/results.json

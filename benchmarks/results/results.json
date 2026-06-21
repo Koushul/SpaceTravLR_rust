@@ -1,0 +1,1022 @@
+{
+  "config": {
+    "source_h5ad": "/ix/djishnu/shared/djishnu_kor11/training_data_revision/atera_human_cervix.h5ad",
+    "subsample_sizes": [
+      700,
+      2000,
+      7000,
+      20000,
+      70000,
+      200000,
+      700000
+    ],
+    "rng_seed": 1337,
+    "stratify_obs_column": "cell_type",
+    "preprocess": {
+      "skip_python_for_sizes_geq": 250000,
+      "per_run_timeout_seconds": 3600
+    },
+    "cnn_scaling": {
+      "spatial_dim": 32,
+      "n_modulators": 16,
+      "n_clusters": 12,
+      "epochs": 2,
+      "minibatch_size": 256,
+      "learning_rate": 0.001,
+      "device_preference_python": "cuda",
+      "rust_backend": "wgpu_or_cpu"
+    },
+    "dropout_experiment": {
+      "n_cells": 20000,
+      "spatial_dim": 32,
+      "n_modulators": 16,
+      "n_clusters": 12,
+      "epochs": 8,
+      "minibatch_size": 128,
+      "learning_rate": 0.001,
+      "dropouts": [
+        0.0,
+        0.2,
+        0.5,
+        0.8,
+        0.95
+      ]
+    },
+    "out_root": "benchmarks/results"
+  },
+  "sizes_run": [
+    700,
+    2000,
+    7000,
+    20000,
+    70000,
+    200000,
+    700000
+  ],
+  "started_at": "2026-06-20T18:41:53",
+  "subsamples": {
+    "700": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n700.h5ad",
+      "size_gb": 0.0007933
+    },
+    "2000": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n2000.h5ad",
+      "size_gb": 0.001600372
+    },
+    "7000": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n7000.h5ad",
+      "size_gb": 0.004743564
+    },
+    "20000": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n20000.h5ad",
+      "size_gb": 0.01287458
+    },
+    "70000": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n70000.h5ad",
+      "size_gb": 0.044217356
+    },
+    "200000": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n200000.h5ad",
+      "size_gb": 0.125863372
+    },
+    "700000": {
+      "ok": true,
+      "cached": true,
+      "out": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n700000.h5ad",
+      "size_gb": 0.43952654
+    }
+  },
+  "preprocess": {
+    "700": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n700.h5ad",
+      "label": "",
+      "input_size_gb": 0.0007933,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 1.4709248542785645,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "01.46",
+        "max_rss_kb": 37952,
+        "output_size_gb": 0.000535021
+      },
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 57.358869314193726,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "57.35",
+        "max_rss_kb": 601956,
+        "output_size_gb": 0.002502376
+      },
+      "mode_attempted": "both"
+    },
+    "2000": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n2000.h5ad",
+      "label": "",
+      "input_size_gb": 0.001600372,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 1.4168195724487305,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n2000/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n2000/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "01.41",
+        "max_rss_kb": 56944,
+        "output_size_gb": 0.001387562
+      },
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 18.833933353424072,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n2000/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n2000/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "18.82",
+        "max_rss_kb": 517108,
+        "output_size_gb": 0.00740978
+      },
+      "mode_attempted": "both"
+    },
+    "7000": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n7000.h5ad",
+      "label": "",
+      "input_size_gb": 0.004743564,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 1.7758491039276123,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n7000/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n7000/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "01.77",
+        "max_rss_kb": 152132,
+        "output_size_gb": 0.004559873
+      },
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 18.200582027435303,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n7000/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n7000/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "18.19",
+        "max_rss_kb": 577844,
+        "output_size_gb": 0.027565512
+      },
+      "mode_attempted": "both"
+    },
+    "20000": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n20000.h5ad",
+      "label": "",
+      "input_size_gb": 0.01287458,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 2.8726775646209717,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n20000/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n20000/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "02.86",
+        "max_rss_kb": 346916,
+        "output_size_gb": 0.012304707
+      },
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 21.86778688430786,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n20000/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n20000/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "21.86",
+        "max_rss_kb": 750968,
+        "output_size_gb": 0.08244069
+      },
+      "mode_attempted": "both"
+    },
+    "70000": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n70000.h5ad",
+      "label": "",
+      "input_size_gb": 0.044217356,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 5.83812141418457,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n70000/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n70000/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "05.83",
+        "max_rss_kb": 1006524,
+        "output_size_gb": 0.040354779
+      },
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 61.12103867530823,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n70000/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n70000/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "01.11",
+        "max_rss_kb": 1777540,
+        "output_size_gb": 0.31950103
+      },
+      "mode_attempted": "both"
+    },
+    "200000": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n200000.h5ad",
+      "label": "",
+      "input_size_gb": 0.125863372,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 14.071931600570679,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n200000/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n200000/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "14.06",
+        "max_rss_kb": 2710168,
+        "output_size_gb": 0.108868004
+      },
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 103.46044945716858,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n200000/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n200000/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "43.45",
+        "max_rss_kb": 3983592,
+        "output_size_gb": 0.954704954
+      },
+      "mode_attempted": "both"
+    },
+    "700000": {
+      "input": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/data/atera_n700000.h5ad",
+      "label": "",
+      "input_size_gb": 0.43952654,
+      "rust": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 45.83427810668945,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700000/rust/spacetravlr_rust_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700000/rust/spacetravlr_rust_process.stderr.log",
+        "elapsed_str": "45.82",
+        "max_rss_kb": 9279412,
+        "output_size_gb": 0.356994562
+      },
+      "mode_attempted": "both",
+      "python": {
+        "ok": true,
+        "returncode": 0,
+        "wall_seconds": 448.47936844825745,
+        "stdout_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700000/python/spacetravlr_python_process.log",
+        "stderr_log": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/benchmarks/results/preprocess_n700000/python/spacetravlr_python_process.stderr.log",
+        "elapsed_str": "28.45",
+        "max_rss_kb": 12907472,
+        "output_size_gb": 3.453105716
+      }
+    }
+  },
+  "cnn_scaling": {
+    "700": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 700,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 5.459879805,
+        "epoch_seconds": [
+          2.7299399025,
+          2.7299399025
+        ],
+        "final_mse": 0.011694152,
+        "mse_history": [
+          0.025590306,
+          0.011694152
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 700,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 0.541008710861206,
+        "epoch_seconds": [
+          0.4989509582519531,
+          0.042029380798339844
+        ],
+        "final_mse": 0.006101489222298066,
+        "mse_history": [
+          0.019740592688322067,
+          0.006101489222298066
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "2000": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 2000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 15.265905514,
+        "epoch_seconds": [
+          7.632952757,
+          7.632952757
+        ],
+        "final_mse": 0.0038965424,
+        "mse_history": [
+          0.009237542,
+          0.0038965424
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 2000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 0.42685413360595703,
+        "epoch_seconds": [
+          0.3642241954803467,
+          0.06260085105895996
+        ],
+        "final_mse": 0.004398171731736511,
+        "mse_history": [
+          0.010444103361805901,
+          0.004398171731736511
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "7000": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 7000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 54.251505605,
+        "epoch_seconds": [
+          27.1257528025,
+          27.1257528025
+        ],
+        "final_mse": 0.0016088932,
+        "mse_history": [
+          0.0054536914,
+          0.0016088932
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 7000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 0.8809568881988525,
+        "epoch_seconds": [
+          0.6066379547119141,
+          0.2742898464202881
+        ],
+        "final_mse": 0.002582440967671573,
+        "mse_history": [
+          0.005705400029130813,
+          0.002582440967671573
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "20000": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 155.156196596,
+        "epoch_seconds": [
+          77.578098298,
+          77.578098298
+        ],
+        "final_mse": 0.00060149876,
+        "mse_history": [
+          0.0027599703,
+          0.00060149876
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 2.1406912803649902,
+        "epoch_seconds": [
+          1.3427636623382568,
+          0.7978982925415039
+        ],
+        "final_mse": 0.0009526893558405057,
+        "mse_history": [
+          0.003460702029516614,
+          0.0009526893558405057
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "70000": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 70000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 542.240931443,
+        "epoch_seconds": [
+          271.1204657215,
+          271.1204657215
+        ],
+        "final_mse": 0.00051915995,
+        "mse_history": [
+          0.0019006295,
+          0.00051915995
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 70000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 4.845633268356323,
+        "epoch_seconds": [
+          2.5258986949920654,
+          2.3197057247161865
+        ],
+        "final_mse": 0.0005185060878836611,
+        "mse_history": [
+          0.0015563018856668694,
+          0.0005185060878836611
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "200000": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 200000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 1543.576662448,
+        "epoch_seconds": [
+          771.788331224,
+          771.788331224
+        ],
+        "final_mse": 0.000501321,
+        "mse_history": [
+          0.000785244,
+          0.000501321
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 200000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 12.422093868255615,
+        "epoch_seconds": [
+          6.561002969741821,
+          5.8610615730285645
+        ],
+        "final_mse": 0.0005086860152037667,
+        "mse_history": [
+          0.0008747015981544928,
+          0.0005086860152037667
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "700000": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 700000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 5426.782085957,
+        "epoch_seconds": [
+          2713.3910429785,
+          2713.3910429785
+        ],
+        "final_mse": 0.00050116034,
+        "mse_history": [
+          0.00057062495,
+          0.00050116034
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 700000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 2,
+        "minibatch_size": 256,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 45.57608199119568,
+        "epoch_seconds": [
+          23.862712621688843,
+          21.713337898254395
+        ],
+        "final_mse": 0.0005061333884005784,
+        "mse_history": [
+          0.0006150006058126163,
+          0.0005061333884005784
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    }
+  },
+  "dropout": {
+    "0.0": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 600.365078615,
+        "epoch_seconds": [
+          75.045634826875,
+          75.045634826875,
+          75.045634826875,
+          75.045634826875,
+          75.045634826875,
+          75.045634826875,
+          75.045634826875,
+          75.045634826875
+        ],
+        "final_mse": 0.00045037045,
+        "mse_history": [
+          0.002638352,
+          0.0006045563,
+          0.00055134494,
+          0.0005012954,
+          0.0004933879,
+          0.00046374035,
+          0.0004550723,
+          0.00045037045
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.0,
+        "learning_rate": 0.001,
+        "total_seconds": 6.96856164932251,
+        "epoch_seconds": [
+          1.2124865055084229,
+          0.8102908134460449,
+          0.8110620975494385,
+          0.810016393661499,
+          0.8299987316131592,
+          0.8092653751373291,
+          0.8748049736022949,
+          0.8105309009552002
+        ],
+        "final_mse": 0.00044031831963064897,
+        "mse_history": [
+          0.002266309827278445,
+          0.0005613875875299926,
+          0.0005121990487018043,
+          0.0004894995090928356,
+          0.00048264274507120344,
+          0.00047477360782925346,
+          0.0004602721484472892,
+          0.00044031831963064897
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "0.2": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.2,
+        "learning_rate": 0.001,
+        "total_seconds": 608.058588398,
+        "epoch_seconds": [
+          76.00732354975,
+          76.00732354975,
+          76.00732354975,
+          76.00732354975,
+          76.00732354975,
+          76.00732354975,
+          76.00732354975,
+          76.00732354975
+        ],
+        "final_mse": 0.00045904197,
+        "mse_history": [
+          0.0019373533,
+          0.00055240566,
+          0.00052297744,
+          0.0004965543,
+          0.0004901985,
+          0.0004697896,
+          0.00046301045,
+          0.00045904197
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.2,
+        "learning_rate": 0.001,
+        "total_seconds": 7.3252644538879395,
+        "epoch_seconds": [
+          1.548156499862671,
+          0.8184514045715332,
+          0.8143789768218994,
+          0.8138775825500488,
+          0.8144245147705078,
+          0.8152446746826172,
+          0.8835577964782715,
+          0.8170645236968994
+        ],
+        "final_mse": 0.000433823440422654,
+        "mse_history": [
+          0.002307318114849092,
+          0.000554143295624845,
+          0.0004983085300699232,
+          0.0004898139491015867,
+          0.00047527995849603634,
+          0.0004615427957325699,
+          0.000444881103608081,
+          0.000433823440422654
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "0.5": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.5,
+        "learning_rate": 0.001,
+        "total_seconds": 610.021480367,
+        "epoch_seconds": [
+          76.252685045875,
+          76.252685045875,
+          76.252685045875,
+          76.252685045875,
+          76.252685045875,
+          76.252685045875,
+          76.252685045875,
+          76.252685045875
+        ],
+        "final_mse": 0.00044002885,
+        "mse_history": [
+          0.0017003567,
+          0.00057398545,
+          0.000536517,
+          0.00049144786,
+          0.00048520154,
+          0.00045485463,
+          0.00044511977,
+          0.00044002885
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.5,
+        "learning_rate": 0.001,
+        "total_seconds": 7.464426279067993,
+        "epoch_seconds": [
+          1.5874810218811035,
+          0.8155615329742432,
+          0.8414702415466309,
+          0.819415807723999,
+          0.8060481548309326,
+          0.8776261806488037,
+          0.8891973495483398,
+          0.827519416809082
+        ],
+        "final_mse": 0.0004322551986852151,
+        "mse_history": [
+          0.002312746802478388,
+          0.000551321144641383,
+          0.0004957935184827609,
+          0.0004887513341426636,
+          0.00047373670082135943,
+          0.0004608351872584361,
+          0.0004449221194324315,
+          0.0004322551986852151
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "0.8": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.8,
+        "learning_rate": 0.001,
+        "total_seconds": 610.044939992,
+        "epoch_seconds": [
+          76.255617499,
+          76.255617499,
+          76.255617499,
+          76.255617499,
+          76.255617499,
+          76.255617499,
+          76.255617499,
+          76.255617499
+        ],
+        "final_mse": 0.0004313169,
+        "mse_history": [
+          0.002107166,
+          0.00066386524,
+          0.00055847934,
+          0.0005057693,
+          0.00048592553,
+          0.00045090128,
+          0.00043778858,
+          0.0004313169
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.8,
+        "learning_rate": 0.001,
+        "total_seconds": 8.386502742767334,
+        "epoch_seconds": [
+          1.9098827838897705,
+          0.895801305770874,
+          0.8226392269134521,
+          1.2743251323699951,
+          0.8867166042327881,
+          0.8791797161102295,
+          0.9023869037628174,
+          0.8154618740081787
+        ],
+        "final_mse": 0.0004453502547597975,
+        "mse_history": [
+          0.0023545129144946883,
+          0.0005613617481482898,
+          0.000499493254135084,
+          0.0004927965304087611,
+          0.0004778568794918217,
+          0.0004690354471213546,
+          0.00045880238888162386,
+          0.0004453502547597975
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    },
+    "0.95": {
+      "rust": {
+        "impl_": "rust-burn",
+        "backend": "NdArray-CPU",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.95,
+        "learning_rate": 0.001,
+        "total_seconds": 614.285324783,
+        "epoch_seconds": [
+          76.785665597875,
+          76.785665597875,
+          76.785665597875,
+          76.785665597875,
+          76.785665597875,
+          76.785665597875,
+          76.785665597875,
+          76.785665597875
+        ],
+        "final_mse": 0.00047111936,
+        "mse_history": [
+          0.0021285135,
+          0.0005921406,
+          0.000534082,
+          0.00050440617,
+          0.0004969018,
+          0.0004807424,
+          0.0004750346,
+          0.00047111936
+        ],
+        "diverged": false,
+        "ok": true
+      },
+      "python": {
+        "impl_": "python-pytorch",
+        "backend": "cuda",
+        "device_name": "NVIDIA A100-PCIE-40GB",
+        "n_cells": 20000,
+        "spatial_dim": 32,
+        "n_modulators": 16,
+        "n_clusters": 12,
+        "epochs": 8,
+        "minibatch_size": 128,
+        "dropout": 0.95,
+        "learning_rate": 0.001,
+        "total_seconds": 7.401579856872559,
+        "epoch_seconds": [
+          1.2119946479797363,
+          0.8489861488342285,
+          1.081681728363037,
+          0.8391838073730469,
+          0.8089492321014404,
+          0.8120532035827637,
+          0.9475927352905273,
+          0.8510277271270752
+        ],
+        "final_mse": 0.0004740781951577041,
+        "mse_history": [
+          0.002360562879182873,
+          0.0005597125870104476,
+          0.0005035612451885441,
+          0.0004993262009288831,
+          0.0004909870718608783,
+          0.0004857078926477605,
+          0.0004803605728403066,
+          0.0004740781951577041
+        ],
+        "diverged": false,
+        "ok": true
+      }
+    }
+  },
+  "finished_at": "2026-06-20T22:51:50"
+}

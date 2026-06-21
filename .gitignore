@@ -10,13 +10,14 @@ scripts/__pycache__/
 .DS_Store
 benchmarks/data/
 benchmarks/results/preprocess_n*/
-benchmarks/results/plots/*.png
-!benchmarks/results/plots/.gitkeep
 benchmarks/.uv-cache/
+benchmarks/.venv-torch/
+!benchmarks/results/
+!benchmarks/results/**
 web/spatial_viewer/node_modules/
 web/spatial_viewer/dist/
 
-results/
+/results/
 .vscode/
 .cursor/
 
