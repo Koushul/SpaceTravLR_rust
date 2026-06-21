@@ -1,0 +1,9 @@
+# Large downloaded/processed artifacts (keep on /ix1)
+subQ-*/
+conda_env/
+conda_pkgs/
+conda_envs/
+home/
+pyuser/
+micromamba_root/
+MERCI/
