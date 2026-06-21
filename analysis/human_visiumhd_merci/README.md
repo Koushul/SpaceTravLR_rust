@@ -49,6 +49,12 @@ python3 run_human_merci_analysis.py --data-dir P1-CRC --use-mtsnp
 
 Regenerate BAM from SRA FASTQs with Space Ranger v4+ and `--create-bam=true`.
 
+## Reports
+
+- **[MITOCHONDRIAL_TRANSFER_REPORT.md](MITOCHONDRIAL_TRANSFER_REPORT.md)** — Full report with plots, stats, and biological interpretation
+- [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) — Initial MERCI analysis summary
+- [NICHE_ANALYSIS_REPORT.md](NICHE_ANALYSIS_REPORT.md) — Spatial niche analysis summary
+
 ## Outputs
 
 Under `P1-CRC/results/` and `P1-CRC/figures/`:
