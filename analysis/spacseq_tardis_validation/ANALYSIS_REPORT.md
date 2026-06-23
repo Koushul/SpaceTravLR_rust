@@ -351,6 +351,49 @@ p = 2.5 × 10⁻⁹ (pooled model), sgBcam/myeloid p = 1.5 × 10⁻⁸.
 Full comparison: `results/scorecard/prediction_scorecard.csv` and
 `figures/scorecard/fig_scorecard.png`.
 
+### 11. Beta + Leiden functional microniches
+
+Space Ranger **graphclust** niches (§9) are morphology‑defined and agnostic to
+SpaceTravLR's learned regulatory geometry. `scripts/11_beta_leiden_microniches.py`
+defines **functionally distinct microniches** by combining:
+
+1. **Per‑cell beta‑weighted GRN scores** — for each of 305 trained target genes,
+   `score_g = β₀[cluster] + Σ β_m[cluster] × modulator_expr(cell)` using
+   `*_betadata.feather` and imputed/modulator expression (69 TFs overlap the
+   prep transcriptome). Scores vary within cell type because modulator expression
+   differs across cells even when betas are cluster‑level.
+2. **Joint β‑PCA + spatial Leiden** — within each (slice, cell_type), Leiden
+   clustering on a weighted concatenation of beta‑PCA (15 PCs) and normalized
+   spatial coordinates (35 % spatial weight). Clustering runs on **pool NTC cells**
+   (unperturbed); sgP cells inherit the niche of their nearest NTC spatial
+   neighbour.
+3. **Functional distinctness** — 87.5 % of pathway gene sets (MHC‑II, M1/M2,
+   IFN, ECM, …) show significant Kruskal–Wallis separation across β‑Leiden
+   niches (pooled NTC, all slices). Median silhouette on beta score space ≈ 0.04
+   within myeloid/fibroblast compartments.
+
+**SPAC‑seq concordance** (473 β‑Leiden niche tests + 214 graphclust controls,
+pooled model):
+
+| niche definition | median Pearson r (all tests) | sgIl4ra / immune | sgCks1b / immune |
+| --- | --- | --- | --- |
+| **β‑Leiden (functional)** | **+0.080** | **+0.153** (89 % perm p<0.05) | **+0.106** |
+| graphclust (morphology) | +0.023 | +0.054 | +0.090 |
+
+β‑Leiden niches improve concordance for **Il4ra, Cd83, and myeloid/fibroblast**
+compartments (Δr up to +0.10 vs graphclust) — consistent with these perturbations
+acting through **local regulatory programs** rather than purely anatomical
+boundaries. Top β‑Leiden pairs: sgIl4ra/immune median r = +0.15 (4 slices,
+89 % perm p<0.05), sgCks1b/myeloid +0.10, sgCd83/fibroblast +0.09.
+
+Side‑by‑side tissue maps (`figures/beta_leiden/spatial_beta_leiden_*.png`) show
+β‑Leiden partitions that track immune‑adjacent functional zones more coherently
+than graphclust alone for Il4ra/Cd83 validation slices.
+
+Outputs: `results/beta_leiden/niche_corr_pooled.csv`,
+`results/beta_leiden/summary_pooled.csv`,
+`figures/beta_leiden/fig_compare_niche_methods_pooled.png`.
+
 ## Reproduce
 
 ```bash
@@ -428,6 +471,13 @@ python3 scripts/09_spatial_validation.py \
 
 # 10. Prediction quality scorecard (seed vs pooled)
 python3 scripts/10_sharpened_scorecard.py --models seed pooled
+
+# 11. Beta + Leiden functional microniches vs SPAC-seq concordance
+python3 scripts/11_beta_leiden_microniches.py \
+  --baseline-h5ad runs/baseline_pooled_seed/spacetravlr_prep/baseline_ntc_0c6fbac5e6cd947c_fullprep.h5ad \
+  --betadata-dir runs/baseline_pooled_seed \
+  --pred-dir results/predictions_pooled \
+  --tag pooled
 ```
 
 ## Limitations and next steps
@@ -474,6 +524,9 @@ in the cell compartments where the perturbed genes are biologically active
   - **Spatial microniche validation:** graphclust‑stratified immune median
     r = +0.10; tissue maps show predicted KO effects colocalize with sgP cells
     in immune‑rich clusters.
+  - **β‑Leiden functional microniches:** SpaceTravLR beta scores + spatial Leiden
+    raise overall niche concordance to median r = +0.08 (vs +0.02 graphclust);
+    sgIl4ra/immune r = +0.15 across four slices.
   - **Pooled NTC training (n=4,915):** immune median r +0.15 (vs +0.09
     single‑slice); fibroblast r turns positive (+0.07 vs −0.01).
   - **Top‑15 predicted‑magnitude sign agreement**: 80 % (binomial p = 0.018)

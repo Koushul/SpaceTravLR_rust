@@ -1,0 +1,68 @@
+{
+  "tag": "pooled",
+  "n_beta_genes": 305,
+  "n_niche_tests": 473,
+  "silhouette_median": 0.03829866205129124,
+  "by_niche_type": {
+    "beta_leiden": 0.08007676975399684,
+    "graphclust": 0.023157442940532697
+  },
+  "best_beta_leiden": [
+    {
+      "niche_type": "beta_leiden",
+      "perturbation": "Il4ra",
+      "cell_type": "immune",
+      "n_niche_rows": 9,
+      "n_slices": 4,
+      "median_pearson_r": 0.1534290772842758,
+      "mean_pearson_r": 0.15545899387723852,
+      "frac_pos_r": 0.8888888888888888,
+      "frac_perm_p05": 0.8888888888888888
+    },
+    {
+      "niche_type": "beta_leiden",
+      "perturbation": "Cks1b",
+      "cell_type": "immune",
+      "n_niche_rows": 10,
+      "n_slices": 4,
+      "median_pearson_r": 0.10637477899079895,
+      "mean_pearson_r": 0.11197733226039426,
+      "frac_pos_r": 1.0,
+      "frac_perm_p05": 0.8
+    },
+    {
+      "niche_type": "beta_leiden",
+      "perturbation": "Cks1b",
+      "cell_type": "myeloid",
+      "n_niche_rows": 15,
+      "n_slices": 4,
+      "median_pearson_r": 0.10420140889705906,
+      "mean_pearson_r": 0.08684849655523089,
+      "frac_pos_r": 0.8,
+      "frac_perm_p05": 0.7333333333333333
+    },
+    {
+      "niche_type": "beta_leiden",
+      "perturbation": "Cd83",
+      "cell_type": "fibroblast",
+      "n_niche_rows": 29,
+      "n_slices": 4,
+      "median_pearson_r": 0.09273990436968194,
+      "mean_pearson_r": 0.07647966721319267,
+      "frac_pos_r": 0.7931034482758621,
+      "frac_perm_p05": 0.7241379310344828
+    },
+    {
+      "niche_type": "beta_leiden",
+      "perturbation": "Il4ra",
+      "cell_type": "myeloid",
+      "n_niche_rows": 13,
+      "n_slices": 4,
+      "median_pearson_r": 0.08600483461321727,
+      "mean_pearson_r": 0.08395957498149298,
+      "frac_pos_r": 0.7692307692307693,
+      "frac_perm_p05": 0.8461538461538461
+    }
+  ],
+  "pathway_sig_frac": 0.875
+}
