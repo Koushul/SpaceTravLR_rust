@@ -1,0 +1,90 @@
+{
+  "tag": "seed",
+  "n_pert_celltype_rows": 24,
+  "n_unique_perturbations": 6,
+  "median_pearson_r": 0.08414411619688722,
+  "median_spearman_rho": -0.009075726636650917,
+  "median_cosine": 0.08680567136272281,
+  "n_pearson_p05": 17,
+  "n_pearson_p001": 8,
+  "median_top50_sign_agree": 0.49,
+  "n_top50_binom_p05": 1,
+  "by_cell_type_median_pearson": {
+    "fibroblast": 0.0107,
+    "immune": 0.1537,
+    "myeloid": 0.1067,
+    "tumor": -0.0383
+  },
+  "best_5_rows": [
+    {
+      "perturbation": "Il4ra",
+      "cell_type": "immune",
+      "pearson_r": 0.26511114162679145,
+      "pearson_perm_p": 0.0,
+      "cosine": 0.2606606685596473
+    },
+    {
+      "perturbation": "Cd83",
+      "cell_type": "immune",
+      "pearson_r": 0.209065607324072,
+      "pearson_perm_p": 0.0,
+      "cosine": 0.19650270358406666
+    },
+    {
+      "perturbation": "Il4ra",
+      "cell_type": "myeloid",
+      "pearson_r": 0.1941530052396166,
+      "pearson_perm_p": 0.0,
+      "cosine": 0.19029219252005214
+    },
+    {
+      "perturbation": "Cd83",
+      "cell_type": "myeloid",
+      "pearson_r": 0.16592262721055806,
+      "pearson_perm_p": 0.0,
+      "cosine": 0.1602560130906935
+    },
+    {
+      "perturbation": "Cks1b",
+      "cell_type": "immune",
+      "pearson_r": 0.16582623387843243,
+      "pearson_perm_p": 0.0,
+      "cosine": 0.17194042146043495
+    }
+  ],
+  "specificity_per_celltype": [
+    {
+      "cell_type": "fibroblast",
+      "diag_median_r": 0.016625385652164742,
+      "off_diag_median_r": 0.017450782839423248,
+      "n_pert": 6,
+      "diag_off_mw_p_onesided": 0.45883492693265
+    },
+    {
+      "cell_type": "immune",
+      "diag_median_r": 0.15372362707024778,
+      "off_diag_median_r": 0.14930485455467774,
+      "n_pert": 6,
+      "diag_off_mw_p_onesided": 0.39401075679538683
+    },
+    {
+      "cell_type": "myeloid",
+      "diag_median_r": 0.10664350066998737,
+      "off_diag_median_r": 0.10147886262353216,
+      "n_pert": 6,
+      "diag_off_mw_p_onesided": 0.5411650730673501
+    },
+    {
+      "cell_type": "tumor",
+      "diag_median_r": -0.038305602840100345,
+      "off_diag_median_r": -0.04047137753941756,
+      "n_pert": 6,
+      "diag_off_mw_p_onesided": 0.37816974297050204
+    }
+  ],
+  "on_target_summary": {
+    "median_predicted_delta": -0.5916851766490157,
+    "median_observed_delta": -0.0056772613897919655,
+    "frac_both_negative": 0.5833333333333334
+  }
+}

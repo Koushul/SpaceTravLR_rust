@@ -65,8 +65,8 @@ parallel_lasso_clusters = false
 gram_override = true
 
 [training]
-mode            = "seed"
-epochs          = 30
+mode            = "full"
+epochs          = 60
 learning_rate   = 4e-4
 score_threshold = 0.05
 
