@@ -1,0 +1,8 @@
+data/baseline_ntc.h5ad
+data/perturbed_pool.h5ad
+data/cell_guide_assignments.parquet
+data/sgrna_metadata.parquet
+runs/
+*.log
+results/predicted_*.feather
+results/observed_*.parquet
