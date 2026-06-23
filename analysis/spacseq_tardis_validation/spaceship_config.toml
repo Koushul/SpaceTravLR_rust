@@ -9,10 +9,10 @@ layer          = "imputed_count"
 cluster_annot  = "cluster_id"
 
 [preprocess]
-min_genes             = 50
+min_genes             = 30
 min_cells             = 3
 normalize_target_sum  = 10000
-n_top_hvg             = 600
+n_top_hvg             = 2000
 n_pca_components      = 30
 pca_random_seed       = 42
 n_neighbors           = 15

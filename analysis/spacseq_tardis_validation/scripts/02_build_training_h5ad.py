@@ -128,14 +128,18 @@ def main() -> None:
     adata.obs["target_gene"] = [cell_to_target.get(b, "no_guide") for b in adata.obs_names]
     adata.obs["is_ntc"] = adata.obs_names.isin(ntc_set)
 
-    # ----- gene panel -----
+    # ----- gene panel (training target list) -----
     panel = select_target_genes(adata, n_hvg=args.n_hvg)
     panel_idx = adata.var_names.isin(panel)
     print(f"  selected gene panel: {panel_idx.sum()} / {adata.n_vars} (incl. {len(ALWAYS_KEEP_GENES)} forced markers)")
+    # Keep the FULL transcriptome in the h5ad so SpaceTravLR's QC (min_genes)
+    # filter uses real per-cell complexity, not the panel-only count. The
+    # target gene list is written to data/target_genes.txt and passed via
+    # [training].genes in the config so only those genes get trained.
 
     # ----- baseline (NTC) h5ad -----
     ntc_mask = adata.obs["is_ntc"].values
-    baseline = adata[ntc_mask, panel_idx].copy()
+    baseline = adata[ntc_mask, :].copy()
     baseline, code = encode_clusters(baseline)
     baseline.uns = {}  # drop log1p flag - SpaceTravLR will redo
     if sparse.issparse(baseline.X):
@@ -160,7 +164,7 @@ def main() -> None:
         keep_cells.extend(idx.tolist())
         cohort_table.append({"target_gene": g, "n_cells": int(len(idx)), "role": "perturbation"})
     keep_idx = pd.Index(dict.fromkeys(keep_cells).keys())  # dedupe preserving order
-    pert = adata[keep_idx, panel_idx].copy()
+    pert = adata[keep_idx, :].copy()
     pert, code2 = encode_clusters(pert)
     assert code == code2, "cluster encoding mismatch"
     pert.uns = {}
