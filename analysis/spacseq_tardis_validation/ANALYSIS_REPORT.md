@@ -390,6 +390,16 @@ Side‑by‑side tissue maps (`figures/beta_leiden/spatial_beta_leiden_*.png`) s
 β‑Leiden partitions that track immune‑adjacent functional zones more coherently
 than graphclust alone for Il4ra/Cd83 validation slices.
 
+**Report figures** (`scripts/12_beta_leiden_report_figures.py`):
+
+| Figure | File | Content |
+| --- | --- | --- |
+| Overview | `fig1_main_overview_pooled.png` | Method comparison, r distribution, pathway separation, heatmap |
+| Spotlight | `fig2_spotlight_Il4ra_immune_pooled.png` | Spatial niches, pred Δ field, per‑niche r, pred vs obs scatter |
+| Grid | `fig3_concordance_grid_pooled.png` | Pred vs obs Δ for 6 headline perturbation × cell‑type pairs |
+| Facet | `fig4_spatial_facet_Il4ra_immune_pooled.png` | β‑Leiden + sgIl4ra across 4 slices |
+| On‑target | `fig5_on_target_niche_pooled.png` | Niche‑level on‑target Δ concordance (e.g. sgCd83 r = +0.36) |
+
 Outputs: `results/beta_leiden/niche_corr_pooled.csv`,
 `results/beta_leiden/summary_pooled.csv`,
 `figures/beta_leiden/fig_compare_niche_methods_pooled.png`.
@@ -478,6 +488,9 @@ python3 scripts/11_beta_leiden_microniches.py \
   --betadata-dir runs/baseline_pooled_seed \
   --pred-dir results/predictions_pooled \
   --tag pooled
+
+# 12. Publication figures for microniche validation
+python3 scripts/12_beta_leiden_report_figures.py --tag pooled
 ```
 
 ## Limitations and next steps
