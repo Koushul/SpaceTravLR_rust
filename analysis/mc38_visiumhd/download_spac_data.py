@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 
 
@@ -57,9 +60,63 @@ def download_share(share_id: str, dest: Path) -> None:
         print(f"saved {out}")
 
 
+def _flatten_extracted(extract_dir: Path, inner_name: str) -> None:
+    if not inner_name:
+        return
+    nested = extract_dir / inner_name
+    if not nested.is_dir():
+        return
+    for item in nested.iterdir():
+        dest = extract_dir / item.name
+        if dest.exists():
+            continue
+        shutil.move(str(item), str(dest))
+    shutil.rmtree(nested, ignore_errors=True)
+    mac = extract_dir / "__MACOSX"
+    if mac.exists():
+        shutil.rmtree(mac, ignore_errors=True)
+
+
+def extract_and_layout(out_dir: Path) -> None:
+    """Normalize flat downloads into subQ-1-compatible directory layout."""
+    guide_root = out_dir / "filtered_guide_bc_matrix.h5"
+    guide_nested = out_dir / "perturbation" / "filtered_guide_bc_matrix.h5"
+    if guide_root.exists() and not guide_nested.exists():
+        guide_nested.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(guide_root), str(guide_nested))
+        print(f"layout: {guide_nested}")
+
+    for component, zip_name in [("segmentation", "segmentation.zip"), ("raw", "raw_output.zip")]:
+        flat = out_dir / zip_name
+        nested = out_dir / component / zip_name
+        if flat.exists() and not nested.exists():
+            nested.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(flat), str(nested))
+        zip_path = nested if nested.exists() else flat
+        extract_dir = out_dir / component / "extracted"
+        marker = (
+            extract_dir / "segmentation" / "filtered_feature_cell_matrix.h5"
+            if component == "segmentation"
+            else extract_dir / "tissue_positions.parquet"
+        )
+        if zip_path.exists() and not marker.exists():
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            print(f"extracting {zip_path} -> {extract_dir}")
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(extract_dir)
+            _flatten_extracted(extract_dir, "raw_output" if component == "raw" else "")
+            print(f"extracted {component}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", default="subQ-1", help="Dataset name from SPAC portal")
+    parser.add_argument(
+        "--dataset-type",
+        type=int,
+        default=2,
+        help="SPAC portal type: 1=lung metastasis, 2=subQ Visium HD, 3=timecourse Stereo-seq",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--components",
@@ -68,7 +125,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    records = list_datasets(dataset_type=2)
+    records = list_datasets(dataset_type=args.dataset_type)
     match = next((r for r in records if r["name"] == args.name), None)
     if match is None:
         raise SystemExit(f"Dataset {args.name!r} not found. Available: {[r['name'] for r in records]}")
@@ -77,9 +134,8 @@ def main() -> None:
     for key in args.components:
         share_id = match[key]
         download_share(share_id, args.out_dir)
+    extract_and_layout(args.out_dir)
 
 
 if __name__ == "__main__":
-    import urllib.parse
-
     main()

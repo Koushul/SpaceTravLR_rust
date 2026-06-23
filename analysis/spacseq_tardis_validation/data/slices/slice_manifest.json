@@ -1,0 +1,196 @@
+{
+  "slices": [
+    {
+      "slice": "subQ-1",
+      "n_cells_annotated": 298426,
+      "n_cells_unambiguous": 91410,
+      "n_cells_ntc": 1247,
+      "n_baseline_ntc": 1247,
+      "n_perturbed_pool": 9998,
+      "perturbation_cohorts": [
+        {
+          "target_gene": "non-targeting",
+          "n_cells": 1247,
+          "role": "control"
+        },
+        {
+          "target_gene": "Bcam",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cks1b",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Ptk6",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd83",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Il4ra",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd74",
+          "n_cells": 1251,
+          "role": "perturbation"
+        }
+      ],
+      "elapsed_s": 8.5
+    },
+    {
+      "slice": "subQ-2",
+      "n_cells_annotated": 372528,
+      "n_cells_unambiguous": 99870,
+      "n_cells_ntc": 1256,
+      "n_baseline_ntc": 1256,
+      "n_perturbed_pool": 9154,
+      "perturbation_cohorts": [
+        {
+          "target_gene": "non-targeting",
+          "n_cells": 1256,
+          "role": "control"
+        },
+        {
+          "target_gene": "Bcam",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cks1b",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Ptk6",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd83",
+          "n_cells": 1369,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Il4ra",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd74",
+          "n_cells": 529,
+          "role": "perturbation"
+        }
+      ],
+      "elapsed_s": 1.1
+    },
+    {
+      "slice": "subQ-3",
+      "n_cells_annotated": 322716,
+      "n_cells_unambiguous": 89818,
+      "n_cells_ntc": 1247,
+      "n_baseline_ntc": 1247,
+      "n_perturbed_pool": 9833,
+      "perturbation_cohorts": [
+        {
+          "target_gene": "non-targeting",
+          "n_cells": 1247,
+          "role": "control"
+        },
+        {
+          "target_gene": "Bcam",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cks1b",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Ptk6",
+          "n_cells": 1459,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd83",
+          "n_cells": 1127,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Il4ra",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd74",
+          "n_cells": 1500,
+          "role": "perturbation"
+        }
+      ],
+      "elapsed_s": 0.9
+    },
+    {
+      "slice": "subQ-4",
+      "n_cells_annotated": 346322,
+      "n_cells_unambiguous": 103403,
+      "n_cells_ntc": 1165,
+      "n_baseline_ntc": 1165,
+      "n_perturbed_pool": 9265,
+      "perturbation_cohorts": [
+        {
+          "target_gene": "non-targeting",
+          "n_cells": 1165,
+          "role": "control"
+        },
+        {
+          "target_gene": "Bcam",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cks1b",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Ptk6",
+          "n_cells": 993,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd83",
+          "n_cells": 1107,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Il4ra",
+          "n_cells": 1500,
+          "role": "perturbation"
+        },
+        {
+          "target_gene": "Cd74",
+          "n_cells": 1500,
+          "role": "perturbation"
+        }
+      ],
+      "elapsed_s": 0.9
+    }
+  ],
+  "perturb_genes": [
+    "Bcam",
+    "Cks1b",
+    "Ptk6",
+    "Cd83",
+    "Il4ra",
+    "Cd74"
+  ]
+}

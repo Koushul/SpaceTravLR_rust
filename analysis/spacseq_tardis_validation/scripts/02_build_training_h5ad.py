@@ -31,7 +31,7 @@ from scipy import sparse
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 REPO = ROOT.parent.parent
-SOURCE_H5AD = REPO / "analysis/mc38_visiumhd/subQ-1/processed/mc38_subq1_cells_annotated.h5ad"
+DEFAULT_SOURCE_H5AD = REPO / "analysis/mc38_visiumhd/subQ-1/processed/mc38_subq1_cells_annotated.h5ad"
 GUIDE_PARQUET = ROOT / "data/cell_guide_assignments.parquet"
 
 
@@ -82,9 +82,11 @@ def encode_clusters(adata: sc.AnnData) -> tuple[sc.AnnData, dict[str, int]]:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source-h5ad", type=Path, default=SOURCE_H5AD)
+    p.add_argument("--source-h5ad", type=Path, default=DEFAULT_SOURCE_H5AD)
     p.add_argument("--guide-parquet", type=Path, default=GUIDE_PARQUET)
     p.add_argument("--out-dir", type=Path, default=ROOT / "data")
+    p.add_argument("--slice-id", type=str, default="subQ-1",
+                   help="Slice label stored in obs.slice_id.")
     p.add_argument("--n-hvg", type=int, default=600,
                    help="Top variable genes to include as SpaceTravLR target panel.")
     p.add_argument("--perturb-genes", nargs="*", default=[
@@ -146,6 +148,7 @@ def main() -> None:
         baseline.X = baseline.X.astype(np.float32)
     baseline.obs["target_gene"] = "non-targeting"
     baseline.obs["sample_role"] = "baseline_ntc"
+    baseline.obs["slice_id"] = args.slice_id
     print(f"  baseline_ntc: {baseline.shape}  cluster_id codes: {code}")
     baseline.write_h5ad(args.out_dir / "baseline_ntc.h5ad")
 
@@ -169,11 +172,13 @@ def main() -> None:
     assert code == code2, "cluster encoding mismatch"
     pert.uns = {}
     pert.obs["sample_role"] = np.where(pert.obs["is_ntc"], "baseline_ntc", "perturbed")
+    pert.obs["slice_id"] = args.slice_id
     pert.write_h5ad(args.out_dir / "perturbed_pool.h5ad")
     print(f"  perturbed_pool: {pert.shape}")
 
     # ----- summary -----
     summary = {
+        "slice_id": args.slice_id,
         "n_genes_panel": int(len(panel)),
         "panel_first_30": panel[:30],
         "always_kept_present": [g for g in ALWAYS_KEEP_GENES if g in panel],

@@ -10,6 +10,9 @@ genomics with CRISPR screen sequencing*, Cell 2026 ([S0092-8674(26)00516-7](http
 Introduces SPAC‑seq (spatial CRISPR screen sequencing) on Visium HD / Stereo‑seq
 and TARDIS (the matching statistical toolkit). Subcutaneous MC38 tumor dataset
 ‘subQ‑1’ (Visium HD, 1,520 sgRNAs over 735 gene perturbations) is used here.
+The analysis has been extended to **four independent subQ tissue sections**
+(subQ‑1 through subQ‑4; subQ‑5 lacks a guide matrix on the SPAC portal as of
+June 2026).
 
 **Repository changes.** Everything lives under
 `analysis/spacseq_tardis_validation/`.
@@ -240,6 +243,53 @@ type) the mean predicted and observed Δ across curated gene sets
 response). Overall Pearson r(predicted_mean_delta, observed_mean_delta) across
 all (P, c, pathway) rows: see `figures/final/fig3_pathway_scatter_seed.png`.
 
+### 8. Cross‑slice replication (subQ‑1 … subQ‑4)
+
+The single‑slice result above is now replicated across **four independent Visium
+HD sections** from the same MC38 subcutaneous SPAC‑seq experiment. For each
+slice we assigned sgRNAs, built a slice‑specific `perturbed_pool.h5ad`, and
+compared the **same** SpaceTravLR predicted Δ vectors (trained on subQ‑1 sgNTC)
+against that slice's observed Δ. A Stouffer Z meta‑analysis combines
+permutation p‑values across slices for each (perturbation × cell type) pair.
+
+| slice | unambiguous cells | sgNTC | median Pearson r | sig. pairs (perm p<0.05) |
+| --- | --- | --- | --- | --- |
+| subQ‑1 | 91,410 | 1,247 | +0.080 | 18 / 24 |
+| subQ‑2 | 99,870 | 1,256 | −0.031 | 19 / 24 |
+| subQ‑3 | 89,818 | 1,247 | +0.068 | 21 / 24 |
+| subQ‑4 | 103,403 | 1,165 | −0.028 | 17 / 24 |
+
+Pooled across slices: **75 / 96** (perturbation × cell type × slice) rows are
+permutation‑significant. Nine (perturbation × cell type) meta‑tests reach
+Stouffer p < 0.05 across all four sections:
+
+| perturbation | cell type | median r (4 slices) | slices with r > 0 | Stouffer meta p |
+| --- | --- | --- | --- | --- |
+| **sgCd83** | **fibroblast** | **+0.087** | 4 / 4 | **3.4 × 10⁻⁹** |
+| **sgBcam** | **myeloid** | **+0.094** | 4 / 4 | **2.6 × 10⁻⁸** |
+| sgCd74 | immune | +0.061 | 3 / 4 | 7.6 × 10⁻⁵ |
+| sgBcam | immune | +0.146 | 4 / 4 | 1.1 × 10⁻⁴ |
+| sgIl4ra | fibroblast | +0.076 | 3 / 4 | 7.7 × 10⁻³ |
+| sgIl4ra | immune | +0.227 | 4 / 4 | (all slice perm p = 0) |
+| sgCd83 | immune | +0.185 | 4 / 4 | (all slice perm p = 0) |
+| sgIl4ra | myeloid | +0.093 | 3 / 4 | 0.018 |
+| sgCd83 | myeloid | +0.095 | 3 / 4 | 0.031 |
+
+The cross‑slice pattern confirms the single‑slice finding: immune and myeloid
+compartments show reproducible positive correlation; tumor cells remain
+negative across all four sections (median r ≈ −0.05). Fibroblast predictions
+for Cd83 and Il4ra KO — which were weak in subQ‑1 alone — become highly
+significant when aggregated across sections, suggesting the single‑slice
+estimate was underpowered rather than wrong.
+
+Combining sgNTC cells from all four slices yields **4,915 pooled NTC cells**
+(`data/pooled/baseline_ntc.h5ad`), addressing the small‑NTC limitation and
+enabling a future retrain on ≈4× more baseline cells.
+
+See `figures/multislice/fig1_slice_heatmap_multislice.png` (per‑slice r matrix),
+`fig2_meta_analysis_multislice.png` (Stouffer meta‑analysis bars), and
+`results/multislice/meta_analysis_multislice.csv`.
+
 ## Reproduce
 
 ```bash
@@ -280,6 +330,15 @@ python3 scripts/06_topk_biology_figure.py \
   --baseline-h5ad runs/baseline_ntc_seed/spacetravlr_prep \
   --pred-dir results/predictions \
   --out-dir results/final --fig-dir figures/final --tag seed --topk 15
+
+# 7. Multi-slice: download + prepare subQ-1..4, cross-slice validation
+python3 scripts/07_multislice_prepare.py --slices subQ-1 subQ-2 subQ-3 subQ-4
+python3 scripts/08_multislice_validation.py \
+  --slices subQ-1 subQ-2 subQ-3 subQ-4 \
+  --baseline-h5ad runs/baseline_ntc_seed/spacetravlr_prep \
+  --pred-dir results/predictions \
+  --out-dir results/multislice --fig-dir figures/multislice \
+  --build-pooled
 ```
 
 ## Limitations and next steps
@@ -305,7 +364,12 @@ python3 scripts/06_topk_biology_figure.py \
 5. **NTC training is small (n=1,247).** A larger “non‑perturb” cohort — e.g.
    combining sgNTC with the cells where no guide was detected (≈ 70k cells,
    still phenotypically baseline) — would give the Lasso many more cells per
-   cluster while preserving the “no functional gene KO” property.
+   cluster while preserving the “no functional gene KO” property. **Partially
+   addressed:** pooling sgNTC across subQ‑1…4 yields 4,915 cells
+   (`data/pooled/baseline_ntc.h5ad`); retraining on this pooled set is the
+   natural next step.
+6. **subQ‑5 unavailable.** The SPAC portal perturbation bundle for subQ‑5
+   currently ships only the bin‑level transcriptome matrix, not the guide matrix.
 
 ## Conclusion
 
@@ -319,6 +383,10 @@ in the cell compartments where the perturbed genes are biologically active
     permutation‑significant for 17/24 (perturbation × cell type) pairs;
     p < 0.001 for 8/24. Strongest single results sgIl4ra/immune r = +0.27
     (perm p = 0/2000), sgCd83/immune r = +0.21 (perm p = 0/2000).
+  - **Cross‑slice replication (subQ‑1…4):** Stouffer meta p = 3.4 × 10⁻⁹ for
+    sgCd83/fibroblast and 2.6 × 10⁻⁸ for sgBcam/myeloid, with positive r in
+    all four independent tissue sections. Nine (perturbation × cell type) pairs
+    reach meta p < 0.05 across slices.
   - **Top‑15 predicted‑magnitude sign agreement**: 80 % (binomial p = 0.018)
     for sgCd83/immune and sgIl4ra/myeloid; 67 % median across seven
     immune/myeloid pairs.

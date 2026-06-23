@@ -1,0 +1,110 @@
+{
+  "tag": "multislice",
+  "slices": [
+    "subQ-1",
+    "subQ-2",
+    "subQ-3",
+    "subQ-4"
+  ],
+  "n_slices_with_data": 4,
+  "eligible_perturbations": [
+    "Bcam",
+    "Cd74",
+    "Cd83",
+    "Cks1b",
+    "Il4ra",
+    "Ptk6"
+  ],
+  "per_slice": {
+    "subQ-1": {
+      "n_rows": 24,
+      "median_pearson_r": 0.07960153337166219,
+      "n_perm_p05": 18,
+      "by_cell_type": {
+        "fibroblast": 0.0216,
+        "immune": 0.1552,
+        "myeloid": 0.1153,
+        "tumor": -0.0447
+      }
+    },
+    "subQ-2": {
+      "n_rows": 24,
+      "median_pearson_r": -0.030959093015313785,
+      "n_perm_p05": 19,
+      "by_cell_type": {
+        "fibroblast": -0.0395,
+        "immune": 0.0456,
+        "myeloid": 0.0497,
+        "tumor": -0.0661
+      }
+    },
+    "subQ-3": {
+      "n_rows": 24,
+      "median_pearson_r": 0.06779432692835394,
+      "n_perm_p05": 21,
+      "by_cell_type": {
+        "fibroblast": 0.0365,
+        "immune": 0.1679,
+        "myeloid": 0.0852,
+        "tumor": -0.0542
+      }
+    },
+    "subQ-4": {
+      "n_rows": 24,
+      "median_pearson_r": -0.028427212475598228,
+      "n_perm_p05": 17,
+      "by_cell_type": {
+        "fibroblast": -0.059,
+        "immune": 0.0745,
+        "myeloid": -0.0587,
+        "tumor": -0.053
+      }
+    }
+  },
+  "combined_median_pearson_r": 0.0016390085949383537,
+  "combined_n_perm_p05": 75,
+  "combined_n_rows": 96,
+  "meta_n_stouffer_p05": 9,
+  "meta_best_5": [
+    {
+      "perturbation": "Cd83",
+      "cell_type": "fibroblast",
+      "n_slices": 4,
+      "median_pearson_r": 0.08711383757675649,
+      "frac_slices_pos_r": 1.0,
+      "stouffer_meta_p": 3.380057832535846e-09
+    },
+    {
+      "perturbation": "Bcam",
+      "cell_type": "myeloid",
+      "n_slices": 4,
+      "median_pearson_r": 0.09396506025697487,
+      "frac_slices_pos_r": 1.0,
+      "stouffer_meta_p": 2.6423557682107423e-08
+    },
+    {
+      "perturbation": "Cd74",
+      "cell_type": "immune",
+      "n_slices": 4,
+      "median_pearson_r": 0.06142750002936016,
+      "frac_slices_pos_r": 0.75,
+      "stouffer_meta_p": 7.605727036798208e-05
+    },
+    {
+      "perturbation": "Bcam",
+      "cell_type": "immune",
+      "n_slices": 4,
+      "median_pearson_r": 0.14562460707682381,
+      "frac_slices_pos_r": 1.0,
+      "stouffer_meta_p": 0.00010543972551654912
+    },
+    {
+      "perturbation": "Il4ra",
+      "cell_type": "fibroblast",
+      "n_slices": 4,
+      "median_pearson_r": 0.07565413863241262,
+      "frac_slices_pos_r": 0.75,
+      "stouffer_meta_p": 0.007671113729732468
+    }
+  ]
+}

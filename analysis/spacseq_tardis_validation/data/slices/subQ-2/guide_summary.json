@@ -1,0 +1,29 @@
+{
+  "n_bins": 615251,
+  "n_sgrnas": 1520,
+  "n_cells_polygons": 372529,
+  "n_cells_with_any_guide": 142282,
+  "n_cells_unambiguous": 99870,
+  "n_cells_ntc": 1256,
+  "n_unique_targets_unambig": 638,
+  "top_15_targets": {
+    "Bcam": 7834,
+    "Rab8a": 2847,
+    "Il4ra": 2659,
+    "Cks1b": 2515,
+    "Ehf": 2025,
+    "Tff3": 1667,
+    "Ptk6": 1667,
+    "Myo1c": 1383,
+    "Cd83": 1369,
+    "non-targeting": 1256,
+    "App": 1239,
+    "Muc4": 1116,
+    "Fkrp": 1114,
+    "Arf6": 935,
+    "Bbs2": 915
+  },
+  "icam1_cells": 23,
+  "cd44_cells": 149,
+  "spp1_cells": 0
+}
