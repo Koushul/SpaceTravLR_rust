@@ -1,0 +1,13 @@
+{
+  "headlines": [
+    "seed: immune median r=+0.091, Fisher-z=+0.105",
+    "pooled: immune median r=+0.147, Fisher-z=+0.125",
+    "seed: graphclust/immune median r=+0.097",
+    "pooled: graphclust/immune median r=+0.096"
+  ],
+  "n_scorecard_rows": 38,
+  "models": [
+    "seed",
+    "pooled"
+  ]
+}

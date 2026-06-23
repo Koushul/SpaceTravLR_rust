@@ -75,10 +75,13 @@ def build_pooled_h5ad(slices: list[str], data_root: Path, out_path: Path) -> sc.
             xy[:, 0] += x_cursor
         ad.obsm["spatial"] = xy
         ad.obs["slice_id"] = sl
+        ad.obs_names = [f"{b}@{sl}" for b in ad.obs_names]
         parts.append(ad)
         x_cursor = float(xy[:, 0].max()) + SPATIAL_PAD
     if not parts:
         raise SystemExit("No baseline h5ads found for pooling")
+    for i, ad in enumerate(parts):
+        ad.obs_names = [f"{ad.obs['slice_id'].iloc[0]}__{b}" for b in ad.obs_names]
     pooled = sc.concat(parts, join="outer", merge="same")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pooled.write_h5ad(out_path)

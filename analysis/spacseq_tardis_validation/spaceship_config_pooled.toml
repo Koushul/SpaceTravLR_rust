@@ -1,0 +1,83 @@
+# SpaceTravLR config: pooled sgNTC from subQ-1..4 (4915 cells).
+# Same hyperparameters as subQ-1 seed run; train with --training-mode seed.
+
+[data]
+adata_path     = "data/pooled/baseline_ntc.h5ad"
+layer          = "imputed_count"
+cluster_annot  = "cluster_id"
+
+[preprocess]
+min_genes             = 30
+min_cells             = 3
+normalize_target_sum  = 10000
+n_top_hvg             = 2000
+n_pca_components      = 30
+pca_random_seed         = 42
+n_neighbors           = 15
+min_dist              = 0.5
+spread                = 0.5
+umap_learning_rate    = 1.0
+ef_construction       = 30
+leiden_resolution     = 1.0
+leiden_max_iter       = 100
+magic_t               = 3
+
+[spatial]
+radius           = 200
+spatial_dim      = 32
+contact_distance = 40
+weighted_ligand_scale_factor = 1.0
+
+[grn]
+tf_ligand_cutoff  = 0.1
+celloracle_p_max  = 0.05
+max_lr            = 200
+use_tf_modulators = true
+use_lr_modulators = true
+use_tfl_modulators = true
+
+[cnn]
+adam_beta_1 = 0.9
+adam_beta_2 = 0.999
+adam_epsilon = 1e-5
+spatial_feature_radius = 200.0
+output_activation = "sigmoidx2"
+cnn_minibatch_size = 128
+cnn_inference_batch_size = 512
+cnn_max_cells_per_epoch = 1000
+lasso_pred_align_weight = 0.05
+lasso_pred_align_linear_decay = true
+drop_cnn_if_insample_worse_than_lasso = true
+cnn_vs_lasso_arbitration_margin = 0.2
+
+[lasso]
+l1_reg    = 1e-4
+group_reg = 1e-5
+n_iter    = 500
+tol       = 1e-4
+scale_modulators = true
+unscale_betas_on_export = false
+parallel_lasso_clusters = false
+gram_override = true
+
+[training]
+mode            = "seed"
+epochs          = 30
+learning_rate   = 4e-4
+score_threshold = 0.05
+
+[execution]
+n_parallel  = 8
+output_dir  = "runs/baseline_pooled_seed"
+stale_lock_secs = 3600
+
+[perturbation]
+beta_scale_factor = 100.0
+n_propagation     = 4
+perturbed_gene_min_bound = 0.0
+perturbed_gene_max_bound = 10.0
+
+[model_export]
+save_cnn_weights = false
+compressed_npz = true
+output_subdir = "CNN_weights"

@@ -1,0 +1,66 @@
+{
+  "tag": "pooled",
+  "n_niche_tests": 214,
+  "n_immune_dist_tests": 179,
+  "by_niche_type": {
+    "graphclust": 0.023157442940532697
+  },
+  "best_graphclust": [
+    {
+      "niche_type": "graphclust",
+      "perturbation": "Bcam",
+      "cell_type": "immune",
+      "n_niche_rows": 6,
+      "n_slices": 4,
+      "median_pearson_r": 0.1599053752852292,
+      "mean_pearson_r": 0.15096757830765747,
+      "frac_pos_r": 1.0,
+      "frac_perm_p05": 1.0
+    },
+    {
+      "niche_type": "graphclust",
+      "perturbation": "Cd74",
+      "cell_type": "immune",
+      "n_niche_rows": 8,
+      "n_slices": 4,
+      "median_pearson_r": 0.1279817707066207,
+      "mean_pearson_r": 0.10077243657879623,
+      "frac_pos_r": 0.75,
+      "frac_perm_p05": 0.75
+    },
+    {
+      "niche_type": "graphclust",
+      "perturbation": "Cks1b",
+      "cell_type": "immune",
+      "n_niche_rows": 11,
+      "n_slices": 4,
+      "median_pearson_r": 0.08957376573738862,
+      "mean_pearson_r": 0.11296612811806943,
+      "frac_pos_r": 1.0,
+      "frac_perm_p05": 0.8181818181818182
+    },
+    {
+      "niche_type": "graphclust",
+      "perturbation": "Il4ra",
+      "cell_type": "immune",
+      "n_niche_rows": 12,
+      "n_slices": 4,
+      "median_pearson_r": 0.05429120784977069,
+      "mean_pearson_r": 0.07196084536257648,
+      "frac_pos_r": 0.75,
+      "frac_perm_p05": 0.5
+    },
+    {
+      "niche_type": "graphclust",
+      "perturbation": "Cd83",
+      "cell_type": "immune",
+      "n_niche_rows": 11,
+      "n_slices": 4,
+      "median_pearson_r": 0.044318424672914504,
+      "mean_pearson_r": 0.06271308263156374,
+      "frac_pos_r": 0.9090909090909091,
+      "frac_perm_p05": 0.45454545454545453
+    }
+  ],
+  "best_spatial_grid": []
+}

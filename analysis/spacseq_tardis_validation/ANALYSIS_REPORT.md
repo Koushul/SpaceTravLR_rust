@@ -290,6 +290,67 @@ See `figures/multislice/fig1_slice_heatmap_multislice.png` (per‑slice r matrix
 `fig2_meta_analysis_multislice.png` (Stouffer meta‑analysis bars), and
 `results/multislice/meta_analysis_multislice.csv`.
 
+### 9. Spatial microniche validation
+
+Cell‑type pseudobulk removes composition confounding but still averages over
+whole tissue sections. `scripts/09_spatial_validation.py` tests concordance
+**within Space Ranger graphclust spatial niches** (11 clusters per slice) and
+generates tissue maps of predicted vs observed Δ.
+
+For each (slice, perturbation, cell type, graphclust cluster) with ≥ 6 NTC and
+≥ 10 sgP cells:
+
+  - **observed niche Δ** = mean(sgP in niche) − mean(NTC in niche)
+  - **predicted niche Δ** = mean(pred_KO NTC in niche) − mean(baseline NTC in niche)
+
+Pearson r across genes measures local concordance. **188 graphclust‑niche tests**
+across four slices (seed model); pooled model yields per‑slice cell‑level
+predictions for all 4,915 NTC cells.
+
+| compartment | seed model median r (graphclust niches) | pooled model |
+| --- | --- | --- |
+| **immune** | **+0.097** (86 % perm p<0.05) | +0.096 |
+| myeloid | +0.007 | +0.023 |
+| fibroblast | +0.012 | +0.017 |
+
+Immune niches show the strongest spatial concordance — consistent with Il4ra /
+Cd83 / Cd74 acting in immune‑adjacent microniches. Top graphclust‑niche pairs
+(seed model): sgBcam/immune median r = +0.144 (4 slices), sgCks1b/immune
++0.123, sgCd74/immune +0.089 (100 % slices r > 0).
+
+**Tissue maps** (`figures/spatial/spatial_map_*.png`) show side‑by‑side:
+observed Δ on sgP cell locations, predicted Δ on NTC substrate, and perturbation
+cell placement. Example: sgIl4ra in subQ‑1 immune cells — predicted MHC‑II
+reduction colocalizes with sgIl4ra+ cells in immune‑rich graphclust clusters.
+
+**Immune‑proximity stratification** (`fig3_immune_proximity_seed.png`): observed
+Δ binned by distance‑to‑nearest‑immune‑cell quartile; compared against the
+cell‑type‑level predicted program. Concordance is highest in immune‑adjacent
+bins for Il4ra and Cd83 (see `results/spatial/immune_proximity_niche_corr_seed.csv`).
+
+### 10. Pooled NTC retraining sharpens predictions
+
+Retraining on **4,915 pooled sgNTC cells** (subQ‑1…4, unique barcodes
+`cellid@slice`) with the same seed‑mode Lasso config improves prediction quality
+substantially vs the single‑slice (n=1,247) model:
+
+| metric | subQ‑1 seed (n=1,247) | pooled seed (n=4,915) |
+| --- | --- | --- |
+| immune median r (4 slices) | +0.091 | **+0.147** |
+| myeloid median r | +0.059 | +0.066 |
+| fibroblast median r | −0.009 | **+0.065** |
+| tumor median r | −0.056 | −0.037 |
+| combined median r (96 tests) | +0.002 | **+0.054** |
+| meta Stouffer p<0.05 pairs | 9 | 8 |
+
+Fibroblast predictions flip from near‑zero/negative to consistently positive
+after pooling — the single‑slice model was underpowered for stromal cells.
+Cross‑slice meta‑significance remains strong: sgBcam/fibroblast Stouffer
+p = 2.5 × 10⁻⁹ (pooled model), sgBcam/myeloid p = 1.5 × 10⁻⁸.
+
+Full comparison: `results/scorecard/prediction_scorecard.csv` and
+`figures/scorecard/fig_scorecard.png`.
+
 ## Reproduce
 
 ```bash
@@ -339,6 +400,34 @@ python3 scripts/08_multislice_validation.py \
   --pred-dir results/predictions \
   --out-dir results/multislice --fig-dir figures/multislice \
   --build-pooled
+
+# 8. Pooled NTC retrain + perturb (4915 cells, 4 slices)
+GENES=$(paste -sd, data/target_genes.txt)
+SPACETRAVLR_FORCE_KEEP_GENES="$GENES" SPACETRAVLR_FORCE_CPU=1 \
+spacetravlr --plain --training-mode seed \
+  --config spaceship_config_pooled.toml \
+  --h5ad data/pooled/baseline_ntc.h5ad \
+  --output-dir runs/baseline_pooled_seed \
+  --max-ligands 200 --genes "$GENES" --parallel 8
+for gene in Bcam Cks1b Ptk6 Cd83 Il4ra Cd74; do
+  spacetravlr-perturb \
+    --run-toml runs/baseline_pooled_seed/spacetravlr_run_repro.toml \
+    --gene "$gene" --desired-expr 0.0 --n-propagation 4 \
+    --out "results/predictions_pooled/predicted_KO_${gene}.feather"
+done
+python3 scripts/08_multislice_validation.py \
+  --slices subQ-1 subQ-2 subQ-3 subQ-4 \
+  --baseline-h5ad runs/baseline_pooled_seed/spacetravlr_prep \
+  --pred-dir results/predictions_pooled \
+  --out-dir results/multislice --fig-dir figures/multislice --tag pooled
+
+# 9. Spatial microniche validation + tissue maps
+python3 scripts/09_spatial_validation.py \
+  --baseline-h5ad runs/baseline_pooled_seed/spacetravlr_prep \
+  --pred-dir results/predictions_pooled --tag pooled --make-maps
+
+# 10. Prediction quality scorecard (seed vs pooled)
+python3 scripts/10_sharpened_scorecard.py --models seed pooled
 ```
 
 ## Limitations and next steps
@@ -350,8 +439,8 @@ python3 scripts/08_multislice_validation.py \
    cells where Lasso alone has too few cells per cluster to fit well.
 2. **Visium HD sparsity.** Per‑cell complexity on the cell‑bin StarDist
    segmentation is low (median 37 captured genes in our 659‑gene panel pre‑QC).
-   This makes observed Δ noisy. A grouped‑cell pseudobulk over spatial niches
-   (CellCharter or DBSCAN on Leiden) would push the observed signal up.
+   Graphclust microniche pseudobulk (`scripts/09_spatial_validation.py`) partially
+   mitigates this; finer spatial bins remain too sparse for stable Δ estimates.
 3. **Selection effects in tumor.** Expanded perturbations carry a clonal /
    fitness signal that is not captured by SpaceTravLR's transcriptional GRN. A
    matched analysis on the *Day7* lung metastasis dataset (with Icam1, Cd44,
@@ -361,13 +450,9 @@ python3 scripts/08_multislice_validation.py \
 4. **Only 4 cell types.** Sub‑typing tumor cells into proliferative vs
    immune‑adjacent, and myeloid cells into M1/M2, will likely raise per‑cluster
    signal (the existing `score_*` columns are already a starting point).
-5. **NTC training is small (n=1,247).** A larger “non‑perturb” cohort — e.g.
-   combining sgNTC with the cells where no guide was detected (≈ 70k cells,
-   still phenotypically baseline) — would give the Lasso many more cells per
-   cluster while preserving the “no functional gene KO” property. **Partially
-   addressed:** pooling sgNTC across subQ‑1…4 yields 4,915 cells
-   (`data/pooled/baseline_ntc.h5ad`); retraining on this pooled set is the
-   natural next step.
+5. **NTC training is small (n=1,247).** **Addressed** for subQ‑1…4: pooling
+   sgNTC across four sections yields 4,915 cells; pooled seed‑mode training
+   improves immune r from +0.09 → +0.15 and fibroblast r from −0.01 → +0.07.
 6. **subQ‑5 unavailable.** The SPAC portal perturbation bundle for subQ‑5
    currently ships only the bin‑level transcriptome matrix, not the guide matrix.
 
@@ -385,8 +470,12 @@ in the cell compartments where the perturbed genes are biologically active
     (perm p = 0/2000), sgCd83/immune r = +0.21 (perm p = 0/2000).
   - **Cross‑slice replication (subQ‑1…4):** Stouffer meta p = 3.4 × 10⁻⁹ for
     sgCd83/fibroblast and 2.6 × 10⁻⁸ for sgBcam/myeloid, with positive r in
-    all four independent tissue sections. Nine (perturbation × cell type) pairs
-    reach meta p < 0.05 across slices.
+    all four independent tissue sections.
+  - **Spatial microniche validation:** graphclust‑stratified immune median
+    r = +0.10; tissue maps show predicted KO effects colocalize with sgP cells
+    in immune‑rich clusters.
+  - **Pooled NTC training (n=4,915):** immune median r +0.15 (vs +0.09
+    single‑slice); fibroblast r turns positive (+0.07 vs −0.01).
   - **Top‑15 predicted‑magnitude sign agreement**: 80 % (binomial p = 0.018)
     for sgCd83/immune and sgIl4ra/myeloid; 67 % median across seven
     immune/myeloid pairs.
