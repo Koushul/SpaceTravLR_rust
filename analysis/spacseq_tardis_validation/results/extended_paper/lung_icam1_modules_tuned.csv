@@ -1,0 +1,16 @@
+module,obs_sign_match_rate,obs_mean_delta,n_genes,perturbation,cell_type
+IFN / inflammatory chemokines,0.6,-0.17302910685539247,5,Icam1,tumor
+LFA-1 immune synapse,0.5,-0.0032783448696136475,2,Icam1,tumor
+M2 / suppressive macrophage,0.5,0.06780699267983437,4,Icam1,tumor
+On-target Icam1,1.0,-0.28160232305526733,1,Icam1,tumor
+T cell effector,0.5,-0.004193538334220648,4,Icam1,tumor
+IFN / inflammatory chemokines,0.8,-0.26620193421840666,5,Icam1,myeloid
+LFA-1 immune synapse,0.5,-0.08048674464225769,2,Icam1,myeloid
+M2 / suppressive macrophage,0.75,0.1640443317592144,4,Icam1,myeloid
+On-target Icam1,1.0,-0.22834396362304688,1,Icam1,myeloid
+T cell effector,0.75,-0.06299067893996835,4,Icam1,myeloid
+IFN / inflammatory chemokines,0.6,-0.0818277657032013,5,Icam1,immune
+LFA-1 immune synapse,1.0,-0.38755862414836884,2,Icam1,immune
+M2 / suppressive macrophage,0.25,-0.07006412604823709,4,Icam1,immune
+On-target Icam1,1.0,-0.19553929567337036,1,Icam1,immune
+T cell effector,0.5,-0.06376540288329124,4,Icam1,immune

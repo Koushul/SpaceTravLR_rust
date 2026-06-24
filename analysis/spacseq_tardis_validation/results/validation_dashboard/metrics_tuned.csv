@@ -1,0 +1,9 @@
+category,metric,value
+Direct sgP DEG,median_pearson_r,0.16590554575499963
+Spatial niche DEG,median_pearson_r,-0.21950438869085567
+Paper modules (obs),frac_support,0.5098039215686274
+Paper modules (pred),frac_support,0.7647058823529411
+Lung Icam1 (obs),frac_support,0.6
+Lung Bcam (obs),frac_support,0.3333333333333333
+β-Leiden niche,median_pearson_r,0.08586396430910538
+Spatial kNN (script 13),median_pearson_r,-0.2328831101065061

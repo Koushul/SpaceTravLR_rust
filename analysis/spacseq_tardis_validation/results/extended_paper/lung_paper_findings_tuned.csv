@@ -1,0 +1,31 @@
+finding_id,title,perturbation,cell_type,module,expected_sign,n_genes_scored,obs_sign_match_rate,pred_sign_match_rate,obs_pred_concordance_rate,obs_binom_p,pred_binom_p,obs_mean_delta,pred_mean_delta,paper_recapitulated_obs,paper_recapitulated_pred,tag,cohort
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,IFN / inflammatory chemokines,-1,5,0.6,,,0.5,,-0.18181164264678956,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,LFA-1 immune synapse,-1,2,0.5,,,0.75,,-0.09287868440151215,,False,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,M2 / suppressive macrophage,1,4,0.5,,,0.6875,,0.06480855494737625,,False,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,On-target Icam1,-1,1,1.0,,,0.5,,-0.18426969647407532,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,T cell effector,-1,4,0.5,,,0.6875,,-0.003757745260372758,,False,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,IFN / inflammatory chemokines,-1,5,0.6,,,0.5,,-0.3118626356124878,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,LFA-1 immune synapse,-1,2,0.5,,,0.75,,0.01961122453212738,,False,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,M2 / suppressive macrophage,1,4,0.75,,,0.3125,,0.14641033671796322,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,On-target Icam1,-1,1,1.0,,,0.5,,-0.001354604959487915,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,T cell effector,-1,4,1.0,,,0.0625,,-0.05911503126844764,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,IFN / inflammatory chemokines,-1,5,0.6,,,0.5,,-0.16221931278705598,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,LFA-1 immune synapse,-1,2,1.0,,,0.25,,-0.41492563486099243,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,M2 / suppressive macrophage,1,4,0.25,,,0.9375,,-0.10985505394637585,,False,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,On-target Icam1,-1,1,1.0,,,0.5,,-0.28582364320755005,,True,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,T cell effector,-1,4,0.5,,,0.6875,,-0.027763085439801216,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Cd44–integrin axis,1,4,0.5,,,0.6875,,-0.012704625725746155,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,ECM remodeling,1,4,0.0,,,1.0,,-0.041204631328582764,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,On-target Bcam,-1,1,1.0,,,0.5,,-0.04536227881908417,,True,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Spp1 / osteopontin,1,1,0.0,,,1.0,,-0.08926013112068176,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,T cell exhaustion,1,4,0.5,,,0.6875,,-0.026523749344050884,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Cd44–integrin axis,1,4,0.75,,,0.3125,,-0.01249481737613678,,True,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,ECM remodeling,1,4,0.0,,,1.0,,-0.1281317863613367,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,On-target Bcam,-1,1,0.0,,,1.0,,0.04607763886451721,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Spp1 / osteopontin,1,1,1.0,,,0.5,,0.014285385608673096,,True,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,T cell exhaustion,1,4,0.5,,,0.6875,,-0.0028059198521077633,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Cd44–integrin axis,1,4,0.5,,,0.6875,,-0.02091968059539795,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,ECM remodeling,1,4,0.5,,,0.6875,,0.01717008277773857,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,On-target Bcam,-1,1,1.0,,,0.5,,-0.1697051227092743,,True,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Spp1 / osteopontin,1,1,0.0,,,1.0,,-0.3621816337108612,,False,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,T cell exhaustion,1,4,0.75,,,0.3125,,0.04434266872704029,,True,,tuned,lung_M001

@@ -1,0 +1,29 @@
+{
+  "n_bins": 273886,
+  "n_sgrnas": 1520,
+  "n_cells_polygons": 197901,
+  "n_cells_with_any_guide": 43354,
+  "n_cells_unambiguous": 36556,
+  "n_cells_ntc": 395,
+  "n_unique_targets_unambig": 443,
+  "top_15_targets": {
+    "Icam1": 4578,
+    "Arap1": 2214,
+    "Cd276": 1839,
+    "Sema4b": 1799,
+    "Slc43a3": 1293,
+    "Bcam": 1283,
+    "Cxcr4": 987,
+    "Slc2a1": 877,
+    "Utrn": 819,
+    "Eps8l2": 803,
+    "Itgav": 782,
+    "H2-Q7": 779,
+    "Rab8a": 740,
+    "Phgr1": 638,
+    "H2-M10.6": 537
+  },
+  "icam1_cells": 4578,
+  "cd44_cells": 1,
+  "spp1_cells": 0
+}

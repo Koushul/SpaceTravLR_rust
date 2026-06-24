@@ -548,6 +548,164 @@ python3 scripts/18_perturbation_niche_spp1.py --tag tuned --skip-spp1-perturb
 python3 scripts/13_niche_deg_ccc_analysis.py --pred-dir results/predictions_tuned --tag tuned
 ```
 
+### 15. Paper headline biology recapitulation (Zhang et al. Cell 2026)
+
+`scripts/19_paper_findings_validation.py` encodes six mechanistic themes from the
+SPAC-seq paper as **gene-module hypotheses** with expected direction under KO,
+then scores whether SPAC-seq (observed) and SpaceTravLR (predicted) match the
+paper's biology (≥60% genes in module with expected sign).
+
+**Paper themes tested**
+
+| Theme | Perturbation (subQ) | Key modules |
+| --- | --- | --- |
+| Icam1 immune escape | sgIcam1 (sparse; pooled 4 slices from guide assignments) | IFN↓, LFA-1↓, T cell↓, M2/Spp1↑ |
+| Cd44–Spp1 crosstalk | sgBcam (Cd44-axis proxy; no sgCd44/sgSpp1) | Spp1↑, ECM, exhaustion markers |
+| Il4ra → MHC-II↓ | sgIl4ra (expanded) | H2-Aa/Ab1, Cd74, Il4ra on-target |
+| Cd83 costimulation | sgCd83 (expanded) | MHC-II, Cd80/86, on-target Cd83 |
+| Cd74 invariant chain | sgCd74 (expanded) | MHC-II, on-target Cd74 |
+| TF–chemokine axis | sgIl4ra | Ccr/Cxcr receptors, Ccl/Cxcl ligands |
+
+**Results (β-tuned model, 51 module × cell-type tests)**
+
+| Metric | SPAC-seq (obs) | SpaceTravLR (pred) |
+| --- | --- | --- |
+| Modules supporting paper direction | **26 / 51 (51%)** | **39 / 51 (76%)** |
+| Both obs + pred support | 18 modules | — |
+
+**Where SpaceTravLR recapitulates the paper well**
+
+- **MHC-II / antigen presentation** under sgIl4ra, sgCd83, sgCd74 in immune/myeloid:
+  predicted sign match **100%** for H2-Aa, H2-Ab1, Cd74 modules (obs also 62–92%).
+- **Spp1 induction** under sgBcam (Cd44-axis proxy): observed and predicted **Spp1↑**
+  in fibroblast and immune (100% sign match both sides).
+- **On-target KOs**: Il4ra, Cd83, Cd74, Bcam predicted down on NTC substrate with
+  correct sign in immune compartments.
+- **Icam1 (sparse subQ cohort, n≈95 pooled)**: predicted **LFA-1 (Itgal/Itgb2)↓** and
+  **on-target Icam1↓** in tumor; observed **Spp1↑** in tumor under sgIcam1 matches
+  paper's M2 polarization theme (pred: partial M2 module support).
+
+**Where SpaceTravLR diverges from paper / experiment**
+
+- **Icam1 IFN program** (Cxcl9/10, Stat1): observed weak in subQ tumor (selection /
+  sparse cells); predicted IFN↓ in myeloid but not uniformly in tumor.
+- **Cd44–integrin axis** under sgBcam: observed up in stromal cells; predicted **down**
+  in immune/myeloid (discordant).
+- **Chemokine receptor axis**: observed Il4ra→chemokine↓ in myeloid (85% match);
+  predicted only 60% — mixed concordance.
+- **Full Icam1 / Cd44 / Spp1 spatial niche story** requires **lung metastasis**
+  (Lung_Metastasis_M001–M003 on SPAC portal) where headline perturbations have
+  thousands of cells and immune-exclusion niches were defined by TARDIS.
+
+**Outputs**
+
+| Artifact | Path |
+| --- | --- |
+| Hypothesis scorecard | `figures/paper_findings/fig13_paper_findings_scorecard_tuned.png` |
+| Module heatmap | `figures/paper_findings/fig14_paper_modules_heatmap_tuned.png` |
+| Tables | `results/paper_findings/hypothesis_scores_tuned.csv`, `overall_tuned.json` |
+
+```bash
+# Paper biology scorecard
+python3 scripts/19_paper_findings_validation.py --tag tuned
+
+# Generate missing headline predictions (e.g. Icam1)
+spacetravlr-perturb --run-toml runs/baseline_pooled_seed/spacetravlr_run_repro.toml \
+  --gene Icam1 --desired-expr 0 --n-propagation 3 --beta-scale-factor 50 \
+  --out results/predictions_tuned/predicted_KO_Icam1.feather
+```
+
+### 16. Extended validation — lung metastasis M001 + consolidated dashboard
+
+`scripts/20_extended_paper_validation.py` and `scripts/21_validation_dashboard.py`
+extend the subQ analysis to the paper's **Day7 lung metastasis** cohort
+(`Lung_Metastasis_M001`: 4,578 sgIcam1, 1,283 sgBcam, 395 NTC) and aggregate
+all tuned-model readouts into one summary figure.
+
+**Lung M001 observed SPAC-seq (headline cohort)**
+
+| Cohort | sgIcam1 | sgBcam | NTC | Analysis |
+| --- | --- | --- | --- | --- |
+| Lung M001 | 1,500 (pool cap) | 1,283 | 395 | Observed module tests only |
+| subQ pooled | ~95 (sparse guides) | expanded | 4,915 NTC | Obs + SpaceTravLR β-tuned |
+
+SpaceTravLR was trained on **subQ NTC** cells; lung CellIDs are disjoint, so lung
+validation is **observed-only** via `evaluate_finding_obs_only()` (uses full
+`perturbed_pool.h5ad`, not 500-cell sparse subsample).
+
+**Icam1 immune-escape modules (lung observed, 15 tests)**
+
+| Module | Best lung result |
+| --- | --- |
+| On-target Icam1↓ | **100%** sign match in tumor, myeloid, immune |
+| LFA-1 synapse (Itgal/Itgb2)↓ | **100%** in immune |
+| IFN / chemokines↓ | **80%** in myeloid; 60% in tumor/immune |
+| M2 / Spp1↑ | 75% myeloid; mixed in tumor/immune |
+| **Overall** | **9 / 15 modules (60%)** support paper direction |
+
+Lung recapitulates the paper's Icam1 story **more strongly than sparse subQ**
+(where on-target Icam1↓ was not observed in tumor due to selection / n≈95).
+
+**Bcam / Cd44–Spp1 axis (lung observed, 15 tests)**
+
+| Module | Lung result |
+| --- | --- |
+| On-target Bcam↓ | 100% fibroblast & immune |
+| Spp1↑ | 100% myeloid; **0%** fibroblast/immune (discordant vs subQ) |
+| Cd44–integrin↑ | 75% myeloid |
+| **Overall** | **5 / 15 modules (33%)** — weaker than subQ (76% pred) |
+
+Lung sgBcam does not uniformly raise Spp1 (immune Spp1↓ observed), highlighting
+that **sgBcam is an imperfect Cd44 proxy** and tissue context matters.
+
+**In-silico headline KO downstream (subQ NTC substrate)**
+
+`predicted_KO_{Icam1,Cd44,Spp1,Bcam}.feather` on pooled NTC shows expected
+directional programs: Icam1 KO → Cxcl9/10 & LFA-1↓; Bcam KO → Spp1↑ in
+fibroblast/immune (see `fig17_in_silico_headline_ko_tuned.png`).
+
+**Consolidated dashboard (`scripts/21_validation_dashboard.py`)**
+
+| Metric | β-tuned value |
+| --- | --- |
+| Direct sgP DEG median r | **+0.166** |
+| Spatial niche DEG median r | **−0.220** |
+| Paper modules (obs / pred) | **51% / 76%** |
+| Lung Icam1 modules (obs) | **60%** |
+| Lung Bcam modules (obs) | **33%** |
+| β-Leiden niche median r | **+0.086** |
+| Spatial kNN (script 13) median r | **−0.233** |
+
+**Outputs**
+
+| Artifact | Path |
+| --- | --- |
+| Lung Icam1 modules | `results/extended_paper/lung_icam1_modules_tuned.csv` |
+| Lung Bcam modules | `results/extended_paper/lung_bcam_modules_tuned.csv` |
+| Lung paper findings (obs) | `results/extended_paper/lung_paper_findings_tuned.csv` |
+| Cross-cohort comparison | `results/extended_paper/subq_vs_lung_icam1_tuned.csv` |
+| In-silico headline KO | `results/extended_paper/in_silico_spp1_cd44_tuned.csv` |
+| Lung Icam1 bar chart | `figures/extended_paper/fig15_lung_icam1_observed_tuned.png` |
+| subQ vs lung heatmap | `figures/extended_paper/fig16_subq_lung_comparison_tuned.png` |
+| In-silico downstream heatmap | `figures/extended_paper/fig17_in_silico_headline_ko_tuned.png` |
+| Lung Bcam bar chart | `figures/extended_paper/fig18_lung_bcam_observed_tuned.png` |
+| Cross-cohort summary | `figures/extended_paper/fig19_cohort_validation_summary_tuned.png` |
+| Validation dashboard | `figures/validation_dashboard/fig20_validation_dashboard_tuned.png` |
+
+```bash
+# Lung M001 prep (once)
+python3 scripts/07_multislice_prepare.py --slices Lung_Metastasis_M001
+
+# Extended paper + lung observed validation
+python3 scripts/20_extended_paper_validation.py --tag tuned
+
+# Consolidated dashboard
+python3 scripts/21_validation_dashboard.py --tag tuned
+
+# Niche DEG / CCC (script 13; β-Leiden section is slow on CPU)
+python3 scripts/13_niche_deg_ccc_analysis.py --pred-dir results/predictions_tuned --tag tuned
+```
+
 ```bash
 cd analysis/spacseq_tardis_validation
 
@@ -717,6 +875,14 @@ in the cell compartments where the perturbed genes are biologically active
   - **Spp1 / Cd44 axis:** sgBcam raises observed Spp1 in fibroblast/immune;
     model predicts positive Spp1 Δ with correct sign but lacks perturbation
     specificity for unrelated immune KOs (subQ‑1…4 has no sgSpp1).
+  - **Paper module recapitulation:** SpaceTravLR matches **76%** of Zhang et al.
+    Cell 2026 gene‑module hypotheses (vs 51% observed in subQ); strongest on
+    MHC‑II/Il4ra/Cd83/Cd74 and Spp1 under sgBcam; Icam1/LFA‑1 partially recovered.
+  - **Lung M001 observed validation:** sgIcam1 headline cohort recapitulates
+    **60%** of paper immune‑escape modules (on‑target Icam1↓ and LFA‑1↓ at 100%);
+    sgBcam lung modules **33%** (Spp1 discordant in fibroblast/immune vs subQ).
+  - **Consolidated dashboard:** direct sgP DEG r = +0.17; paper pred = 76%;
+    β‑Leiden niche r = +0.086; spatial kNN niche r = −0.23.
   - **Top‑15 predicted‑magnitude sign agreement**: 80 % (binomial p = 0.018)
     for sgCd83/immune and sgIl4ra/myeloid; 67 % median across seven
     immune/myeloid pairs.

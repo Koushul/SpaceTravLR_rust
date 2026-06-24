@@ -1,0 +1,97 @@
+{
+  "tag": "tuned",
+  "lung_icam1_cells": 1500,
+  "lung_bcam_cells": 1283,
+  "lung_ntc_cells": 395,
+  "lung_icam1_modules_obs_support": 9,
+  "lung_bcam_modules_obs_support": 5,
+  "lung_icam1_n_modules": 15,
+  "lung_bcam_n_modules": 15,
+  "subq_icam1_n_modules": 15,
+  "best_lung_icam1": [
+    {
+      "module": "On-target Icam1",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": -0.28160232305526733,
+      "n_genes": 1,
+      "perturbation": "Icam1",
+      "cell_type": "tumor"
+    },
+    {
+      "module": "On-target Icam1",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": -0.22834396362304688,
+      "n_genes": 1,
+      "perturbation": "Icam1",
+      "cell_type": "myeloid"
+    },
+    {
+      "module": "LFA-1 immune synapse",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": -0.38755862414836884,
+      "n_genes": 2,
+      "perturbation": "Icam1",
+      "cell_type": "immune"
+    },
+    {
+      "module": "On-target Icam1",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": -0.19553929567337036,
+      "n_genes": 1,
+      "perturbation": "Icam1",
+      "cell_type": "immune"
+    },
+    {
+      "module": "IFN / inflammatory chemokines",
+      "obs_sign_match_rate": 0.8,
+      "obs_mean_delta": -0.26620193421840666,
+      "n_genes": 5,
+      "perturbation": "Icam1",
+      "cell_type": "myeloid"
+    }
+  ],
+  "best_lung_bcam": [
+    {
+      "module": "On-target Bcam",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": -0.04536227881908417,
+      "n_genes": 1,
+      "perturbation": "Bcam",
+      "cell_type": "fibroblast"
+    },
+    {
+      "module": "Spp1 / osteopontin",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": 0.014285385608673096,
+      "n_genes": 1,
+      "perturbation": "Bcam",
+      "cell_type": "myeloid"
+    },
+    {
+      "module": "On-target Bcam",
+      "obs_sign_match_rate": 1.0,
+      "obs_mean_delta": -0.1697051227092743,
+      "n_genes": 1,
+      "perturbation": "Bcam",
+      "cell_type": "immune"
+    },
+    {
+      "module": "Cd44\u2013integrin axis",
+      "obs_sign_match_rate": 0.75,
+      "obs_mean_delta": -0.01249481737613678,
+      "n_genes": 4,
+      "perturbation": "Bcam",
+      "cell_type": "myeloid"
+    },
+    {
+      "module": "T cell exhaustion",
+      "obs_sign_match_rate": 0.75,
+      "obs_mean_delta": 0.04434266872704029,
+      "n_genes": 4,
+      "perturbation": "Bcam",
+      "cell_type": "immune"
+    }
+  ],
+  "lung_all_findings_rows": 30,
+  "lung_all_modules_obs_support": 14
+}

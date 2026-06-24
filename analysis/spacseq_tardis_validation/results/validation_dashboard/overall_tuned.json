@@ -1,0 +1,46 @@
+{
+  "tag": "tuned",
+  "n_metrics": 8,
+  "metrics": [
+    {
+      "category": "Direct sgP DEG",
+      "metric": "median_pearson_r",
+      "value": 0.16590554575499963
+    },
+    {
+      "category": "Spatial niche DEG",
+      "metric": "median_pearson_r",
+      "value": -0.21950438869085567
+    },
+    {
+      "category": "Paper modules (obs)",
+      "metric": "frac_support",
+      "value": 0.5098039215686274
+    },
+    {
+      "category": "Paper modules (pred)",
+      "metric": "frac_support",
+      "value": 0.7647058823529411
+    },
+    {
+      "category": "Lung Icam1 (obs)",
+      "metric": "frac_support",
+      "value": 0.6
+    },
+    {
+      "category": "Lung Bcam (obs)",
+      "metric": "frac_support",
+      "value": 0.3333333333333333
+    },
+    {
+      "category": "\u03b2-Leiden niche",
+      "metric": "median_pearson_r",
+      "value": 0.08586396430910538
+    },
+    {
+      "category": "Spatial kNN (script 13)",
+      "metric": "median_pearson_r",
+      "value": -0.2328831101065061
+    }
+  ]
+}

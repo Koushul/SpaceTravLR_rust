@@ -1,0 +1,16 @@
+module,obs_sign_match_rate,obs_mean_delta,n_genes,perturbation,cell_type
+Cd44–integrin axis,0.5,-0.012704625725746155,4,Bcam,fibroblast
+ECM remodeling,0.0,-0.041204631328582764,4,Bcam,fibroblast
+On-target Bcam,1.0,-0.04536227881908417,1,Bcam,fibroblast
+Spp1 / osteopontin,0.0,-0.08926013112068176,1,Bcam,fibroblast
+T cell exhaustion,0.5,-0.026523749344050884,4,Bcam,fibroblast
+Cd44–integrin axis,0.75,-0.01249481737613678,4,Bcam,myeloid
+ECM remodeling,0.0,-0.1281317863613367,4,Bcam,myeloid
+On-target Bcam,0.0,0.04607763886451721,1,Bcam,myeloid
+Spp1 / osteopontin,1.0,0.014285385608673096,1,Bcam,myeloid
+T cell exhaustion,0.5,-0.0028059198521077633,4,Bcam,myeloid
+Cd44–integrin axis,0.5,-0.02091968059539795,4,Bcam,immune
+ECM remodeling,0.5,0.01717008277773857,4,Bcam,immune
+On-target Bcam,1.0,-0.1697051227092743,1,Bcam,immune
+Spp1 / osteopontin,0.0,-0.3621816337108612,1,Bcam,immune
+T cell exhaustion,0.75,0.04434266872704029,4,Bcam,immune

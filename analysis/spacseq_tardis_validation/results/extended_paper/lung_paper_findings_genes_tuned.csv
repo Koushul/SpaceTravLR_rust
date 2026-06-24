@@ -1,0 +1,91 @@
+finding_id,title,perturbation,cell_type,slice,module,expected_sign,gene,obs_delta,pred_delta,obs_sign_ok,pred_sign_ok,concordant,tag,cohort
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,On-target Icam1,-1,Icam1,-0.18426969647407532,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Cxcl9,-0.7076409459114075,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Cxcl10,-0.08430230617523193,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Stat1,-0.43180251121520996,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Ifit3,0.0015260577201843262,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Isg15,0.3131614923477173,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,LFA-1 immune synapse,-1,Itgal,-0.24321559071540833,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,LFA-1 immune synapse,-1,Itgb2,0.05745822191238403,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Cd8a,-0.02288971096277237,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Cd3e,0.005828766152262688,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Gzmb,0.00202996376901865,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Prf1,0.0,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Spp1,0.2677832841873169,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Cd163,0.06845057010650635,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Mrc1,-0.02664037048816681,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Arg1,-0.05035926401615143,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,On-target Icam1,-1,Icam1,-0.001354604959487915,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Cxcl9,-0.7561663389205933,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Cxcl10,-0.294921338558197,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Stat1,-0.7832949161529541,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Ifit3,0.04723656177520752,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Isg15,0.2278328537940979,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,LFA-1 immune synapse,-1,Itgal,-0.20050457119941711,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,LFA-1 immune synapse,-1,Itgb2,0.23972702026367188,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Cd8a,-0.15133632719516754,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Cd3e,-0.06238269805908203,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Gzmb,0.0,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Prf1,-0.022741099819540977,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Spp1,0.5342958569526672,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Cd163,0.09243721514940262,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Mrc1,0.15438756346702576,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Arg1,-0.19547928869724274,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,On-target Icam1,-1,Icam1,-0.28582364320755005,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,IFN / inflammatory chemokines,-1,Cxcl9,-0.5457095503807068,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,IFN / inflammatory chemokines,-1,Cxcl10,-0.4280605912208557,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,IFN / inflammatory chemokines,-1,Stat1,-0.2902427911758423,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,IFN / inflammatory chemokines,-1,Ifit3,0.29219356179237366,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,IFN / inflammatory chemokines,-1,Isg15,0.16072280704975128,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,LFA-1 immune synapse,-1,Itgal,-0.5231505632400513,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,LFA-1 immune synapse,-1,Itgb2,-0.3067007064819336,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,T cell effector,-1,Cd8a,-0.35375550389289856,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,T cell effector,-1,Cd3e,0.15490815043449402,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,T cell effector,-1,Gzmb,0.08779501169919968,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,T cell effector,-1,Prf1,0.0,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,M2 / suppressive macrophage,1,Spp1,-0.39494648575782776,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,M2 / suppressive macrophage,1,Cd163,0.09146258234977722,,1,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,M2 / suppressive macrophage,1,Mrc1,-0.027072548866271973,,0,,,tuned,lung_M001
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,pooled,M2 / suppressive macrophage,1,Arg1,-0.10886376351118088,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,Spp1 / osteopontin,1,Spp1,-0.08926013112068176,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,Cd44–integrin axis,1,Cd44,-0.03528112173080444,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,Cd44–integrin axis,1,Itgav,0.06859719753265381,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,Cd44–integrin axis,1,Itgb1,0.17080318927764893,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,Cd44–integrin axis,1,Fn1,-0.2549377679824829,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,ECM remodeling,1,Mmp9,-0.1094847321510315,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,ECM remodeling,1,Postn,-0.008393436670303345,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,ECM remodeling,1,Col1a2,-0.0029639005661010742,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,ECM remodeling,1,Mmp2,-0.04397645592689514,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,T cell exhaustion,1,Pdcd1,0.003316342830657959,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,T cell exhaustion,1,Lag3,-0.05210472270846367,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,T cell exhaustion,1,Tigit,0.0,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,T cell exhaustion,1,Havcr2,-0.05730661749839783,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Lung_Metastasis_M001,On-target Bcam,-1,Bcam,-0.04536227881908417,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,Spp1 / osteopontin,1,Spp1,0.014285385608673096,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,Cd44–integrin axis,1,Cd44,0.14920306205749512,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,Cd44–integrin axis,1,Itgav,0.05482161045074463,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,Cd44–integrin axis,1,Itgb1,0.03876715898513794,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,Cd44–integrin axis,1,Fn1,-0.2927711009979248,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,ECM remodeling,1,Mmp9,-0.000592350959777832,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,ECM remodeling,1,Postn,-0.05550052225589752,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,ECM remodeling,1,Col1a2,-0.3610314726829529,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,ECM remodeling,1,Mmp2,-0.0954027995467186,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,T cell exhaustion,1,Pdcd1,-0.05794478952884674,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,T cell exhaustion,1,Lag3,-0.007897656410932541,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,T cell exhaustion,1,Tigit,0.010014718398451805,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,T cell exhaustion,1,Havcr2,0.04460404813289642,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Lung_Metastasis_M001,On-target Bcam,-1,Bcam,0.04607763886451721,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,Spp1 / osteopontin,1,Spp1,-0.3621816337108612,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,Cd44–integrin axis,1,Cd44,0.00532841682434082,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,Cd44–integrin axis,1,Itgav,0.046244800090789795,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,Cd44–integrin axis,1,Itgb1,-0.01506739854812622,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,Cd44–integrin axis,1,Fn1,-0.12018454074859619,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,ECM remodeling,1,Mmp9,-0.07856637239456177,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,ECM remodeling,1,Postn,0.13749846816062927,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,ECM remodeling,1,Col1a2,-0.06250613927841187,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,ECM remodeling,1,Mmp2,0.07225437462329865,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,T cell exhaustion,1,Pdcd1,0.07069721817970276,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,T cell exhaustion,1,Lag3,-0.02395538240671158,,0,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,T cell exhaustion,1,Tigit,0.0,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,T cell exhaustion,1,Havcr2,0.13062883913516998,,1,,,tuned,lung_M001
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Lung_Metastasis_M001,On-target Bcam,-1,Bcam,-0.1697051227092743,,1,,,tuned,lung_M001

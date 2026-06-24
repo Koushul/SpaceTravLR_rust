@@ -439,6 +439,87 @@ def evaluate_finding(
     return pd.DataFrame(gene_rows), pd.DataFrame(module_rows)
 
 
+def evaluate_finding_obs_only(
+    finding: PaperFinding,
+    slices: list[str],
+    data_root: Path,
+    tag: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Score observed SPAC-seq only (no SpaceTravLR predictions required)."""
+    gene_rows: list[dict] = []
+    module_rows: list[dict] = []
+
+    for cell_type in finding.cell_types:
+        pools = []
+        for sl in slices:
+            pool = load_pool_for_finding(sl, finding.perturbation, data_root, finding.sparse_from_guides)
+            if pool is None:
+                continue
+            pools.append(pool)
+        if not pools:
+            continue
+        pool_all = sc.concat(pools, join="outer") if finding.pool_slices or len(pools) > 1 else pools[0]
+        ntc_n = int(((pool_all.obs["cell_type"].astype(str) == cell_type) & (pool_all.obs["target_gene"].astype(str) == "non-targeting")).sum())
+        pert_n = int(((pool_all.obs["cell_type"].astype(str) == cell_type) & (pool_all.obs["target_gene"].astype(str) == finding.perturbation)).sum())
+        if ntc_n < finding.min_ntc or pert_n < finding.min_pert:
+            continue
+        for mod in finding.modules:
+            o = observed_delta(pool_all, finding.perturbation, cell_type, mod.genes)
+            for g in mod.genes:
+                if g not in o.index:
+                    continue
+                obs = float(o[g])
+                obs_ok = int(
+                    np.sign(obs) == mod.expected_sign
+                    or (mod.expected_sign == -1 and obs <= 0)
+                    or (mod.expected_sign == +1 and obs >= 0)
+                )
+                gene_rows.append({
+                    "finding_id": finding.finding_id,
+                    "title": finding.title,
+                    "perturbation": finding.perturbation,
+                    "cell_type": cell_type,
+                    "slice": "pooled" if finding.pool_slices or len(slices) > 1 else slices[0],
+                    "module": mod.name,
+                    "expected_sign": mod.expected_sign,
+                    "gene": g,
+                    "obs_delta": obs,
+                    "pred_delta": np.nan,
+                    "obs_sign_ok": obs_ok,
+                    "pred_sign_ok": np.nan,
+                    "concordant": np.nan,
+                    "tag": tag,
+                })
+        ct_genes = [r for r in gene_rows if r["finding_id"] == finding.finding_id and r["cell_type"] == cell_type]
+        if not ct_genes:
+            continue
+        gdf = pd.DataFrame(ct_genes)
+        for mod_name, sub in gdf.groupby("module"):
+            n = len(sub)
+            obs_rate = float(sub.obs_sign_ok.mean())
+            module_rows.append({
+                "finding_id": finding.finding_id,
+                "title": finding.title,
+                "perturbation": finding.perturbation,
+                "cell_type": cell_type,
+                "module": mod_name,
+                "expected_sign": int(sub.expected_sign.iloc[0]),
+                "n_genes_scored": n,
+                "obs_sign_match_rate": obs_rate,
+                "pred_sign_match_rate": np.nan,
+                "obs_pred_concordance_rate": np.nan,
+                "obs_binom_p": float(stats.binomtest(int(sub.obs_sign_ok.sum()), n, 0.5, alternative="greater").pvalue),
+                "pred_binom_p": np.nan,
+                "obs_mean_delta": float(sub.obs_delta.mean()),
+                "pred_mean_delta": np.nan,
+                "paper_recapitulated_obs": obs_rate >= 0.6,
+                "paper_recapitulated_pred": np.nan,
+                "tag": tag,
+            })
+
+    return pd.DataFrame(gene_rows), pd.DataFrame(module_rows)
+
+
 def plot_scorecard(mod_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     if mod_df.empty:
         return

@@ -1,0 +1,16 @@
+finding_id,title,perturbation,cell_type,module,expected_sign,n_genes_scored,obs_sign_match_rate,pred_sign_match_rate,obs_pred_concordance_rate,obs_binom_p,pred_binom_p,obs_mean_delta,pred_mean_delta,paper_recapitulated_obs,paper_recapitulated_pred,tag
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,IFN / inflammatory chemokines,-1,5,0.0,0.2,0.8,1.0,0.96875,0.11760938465595246,0.4297197566998541,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,LFA-1 immune synapse,-1,2,1.0,1.0,1.0,0.25,0.25,-0.18943102657794952,-0.6538164273889489,True,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,M2 / suppressive macrophage,1,4,0.25,1.0,0.25,0.9375,0.0625,0.01516660233028233,0.342006702003015,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,On-target Icam1,-1,1,0.0,1.0,0.0,1.0,0.5,0.07964597642421722,-0.18351961999624256,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,T cell effector,-1,4,0.75,0.0,0.25,0.3125,1.0,-0.015052689705044031,0.7386748234259024,True,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,IFN / inflammatory chemokines,-1,5,0.4,0.6,0.8,0.8125,0.5,-0.1599799118936062,-1.3580153817588607,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,LFA-1 immune synapse,-1,2,0.5,0.5,1.0,0.75,0.75,-0.06085176765918732,-0.5737943036035441,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,M2 / suppressive macrophage,1,4,0.0,0.25,0.75,1.0,0.9375,-0.0584068747702986,-0.2684679365346345,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,On-target Icam1,-1,1,1.0,1.0,1.0,0.5,0.5,-0.08605670183897018,-0.6458405470886901,True,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,T cell effector,-1,4,0.25,0.0,0.75,0.9375,1.0,-0.010969562456011772,3.05599654105148,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,IFN / inflammatory chemokines,-1,5,0.4,0.4,0.2,0.8125,0.8125,0.148478601872921,-1.5209662029662507,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,LFA-1 immune synapse,-1,2,0.5,0.5,1.0,0.75,0.75,0.021075576543807983,-0.9328838599708549,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,M2 / suppressive macrophage,1,4,0.5,0.75,0.25,0.6875,0.3125,0.18419861374422908,1.2772755223735814,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,On-target Icam1,-1,1,1.0,1.0,1.0,0.5,0.5,-0.16452157497406006,-0.8372791020360042,True,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,immune,T cell effector,-1,4,0.5,0.25,0.75,0.6875,0.9375,-0.0034968145191669464,2.2594629496076943,False,False,tuned

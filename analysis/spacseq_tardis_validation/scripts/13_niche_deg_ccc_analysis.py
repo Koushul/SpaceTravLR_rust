@@ -341,8 +341,11 @@ def run_spatial_analysis(
         if not exp_dfs:
             continue
         exp_all = pd.concat(exp_dfs).groupby("gene", as_index=False).agg(
-            log2fc=("log2fc", "mean"), pval_adj=("pval_adj", "min"), abs_log2fc=("abs_log2fc", "mean"),
+            log2fc=("log2fc", "mean"), abs_log2fc=("abs_log2fc", "mean"),
         )
+        if "pval_adj" in pd.concat(exp_dfs).columns:
+            pvals = pd.concat(exp_dfs).groupby("gene", as_index=False).agg(pval_adj=("pval_adj", "min"))
+            exp_all = exp_all.merge(pvals, on="gene", how="left")
         pred_all = pd.concat(pred_dfs).groupby("gene", as_index=False).agg(log2fc=("log2fc", "mean"))
 
         save = fig_dir / f"spatial_{perturb}_{source_ct}_to_{neighbor_ct}_{tag}.png"
