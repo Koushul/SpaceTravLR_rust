@@ -462,7 +462,7 @@ Outputs (`--tag pooled`):
 Three‑model scorecard: `results/scorecard/prediction_scorecard.csv` (pooled / tuned / extra).
 
 **Python env.** Analysis scripts re‑exec under Rust Python + mc38 site‑packages via
-`scripts/_py_boot.py` (`PYTHONNOUSERSSITE=1`) to avoid broken user‑site scanpy.
+`scripts/_py_boot.py` (`PYTHONNOUSERSITE=1`) to avoid broken user‑site scanpy.
 
 ### 14. Perturbed‑cell / niche DEG + Spp1 biology recovery
 

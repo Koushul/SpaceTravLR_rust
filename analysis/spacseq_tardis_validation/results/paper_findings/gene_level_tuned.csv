@@ -1,0 +1,385 @@
+finding_id,title,perturbation,cell_type,slice,module,expected_sign,gene,obs_delta,pred_delta,obs_sign_ok,pred_sign_ok,concordant,tag
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,On-target Icam1,-1,Icam1,0.07964597642421722,-0.18351961999624256,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Cxcl9,0.14195245504379272,-1.4559521578893113,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Cxcl10,0.05748666822910309,1.583741400833522,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Stat1,0.033157944679260254,0.31340588210752607,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Ifit3,0.1424182653427124,0.46844670362207197,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,IFN / inflammatory chemokines,-1,Isg15,0.2130315899848938,1.2389569548254618,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,LFA-1 immune synapse,-1,Itgal,-0.0704491138458252,-0.21013410266826932,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,LFA-1 immune synapse,-1,Itgb2,-0.30841293931007385,-1.0974987521096284,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Cd8a,-0.015408282168209553,0.04758511178258558,1,0,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Cd3e,-0.014289666898548603,0.013252855931771515,1,0,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Gzmb,-0.06374886631965637,1.112883544878313,1,0,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,T cell effector,-1,Prf1,0.0332360565662384,1.7809777811109395,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Spp1,0.4249969720840454,0.126394364483712,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Cd163,-0.0034775463864207268,0.04777621164009942,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Mrc1,-0.10443058609962463,0.5030633770286498,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,pooled,M2 / suppressive macrophage,1,Arg1,-0.2564224302768707,0.6907928548595987,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,On-target Icam1,-1,Icam1,-0.08605670183897018,-0.6458405470886901,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Cxcl9,-0.7792918682098389,-6.593770770037302,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Cxcl10,0.25595757365226746,0.1322233751746813,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Stat1,-0.3333207964897156,-3.289430651950854,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Ifit3,0.025075364857912064,-0.02429127508047324,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,IFN / inflammatory chemokines,-1,Isg15,0.031680166721343994,2.985192413099644,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,LFA-1 immune synapse,-1,Itgal,-0.34106114506721497,-1.5837223212791243,1,1,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,LFA-1 immune synapse,-1,Itgb2,0.21935760974884033,0.43613371407203605,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Cd8a,0.0808134377002716,2.676152535923046,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Cd3e,0.002339288592338562,2.3734570829316906,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Gzmb,-0.17431113123893738,3.983409628917498,1,0,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,T cell effector,-1,Prf1,0.04728015512228012,3.190966916433686,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Spp1,-0.13496220111846924,0.7212283464834988,0,1,0.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Cd163,-0.009663672186434269,-0.0011672679783664673,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Mrc1,-0.08501607179641724,-1.334923886965258,0,0,1.0,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,pooled,M2 / suppressive macrophage,1,Arg1,-0.003985553979873657,-0.45900893767841233,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,Spp1 / osteopontin,1,Spp1,0.5550118684768677,1.9404734884963926,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,Cd44–integrin axis,1,Cd44,0.1993006467819214,0.4044877406347212,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,Cd44–integrin axis,1,Itgb1,0.18819016218185425,-0.00823749542236328,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,ECM remodeling,1,Postn,0.05842405557632446,3.863877563770836,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,ECM remodeling,1,Col1a2,0.1294724941253662,-17.912890421588507,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,ECM remodeling,1,Mmp2,-0.11156752705574036,4.310144313217125,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,T cell exhaustion,1,Pdcd1,-0.023791193962097168,3.1266514140124166,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,T cell exhaustion,1,Lag3,-0.016818270087242126,1.58367527061606,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,T cell exhaustion,1,Havcr2,0.01630926877260208,-0.2586036679550411,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-1,On-target Bcam,-1,Bcam,-0.031169749796390533,-0.06391375870671515,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,Spp1 / osteopontin,1,Spp1,0.3468214273452759,3.327929183659758,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,Cd44–integrin axis,1,Cd44,0.09931230545043945,-0.07721348809794605,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,Cd44–integrin axis,1,Itgb1,0.17012588679790497,0.0,1,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,ECM remodeling,1,Postn,0.131046324968338,3.729874071964934,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,ECM remodeling,1,Col1a2,0.5965441465377808,-6.205908301555382,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,ECM remodeling,1,Mmp2,0.02014189213514328,2.6805499796039123,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,T cell exhaustion,1,Pdcd1,-0.03158397227525711,1.2378696838664816,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,T cell exhaustion,1,Lag3,-0.02081736922264099,0.3663311643362673,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,T cell exhaustion,1,Havcr2,0.029424745589494705,-0.17554498497437673,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-2,On-target Bcam,-1,Bcam,0.005055387504398823,-0.0109021557742558,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,Spp1 / osteopontin,1,Spp1,0.25475502014160156,2.644743347698766,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,Cd44–integrin axis,1,Cd44,0.11492496728897095,0.19271077616618607,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,Cd44–integrin axis,1,Itgb1,-0.0027865469455718994,-0.007734657163686376,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,ECM remodeling,1,Postn,-0.0085124671459198,3.812843071382188,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,ECM remodeling,1,Col1a2,0.5189813375473022,-6.6109033393647305,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,ECM remodeling,1,Mmp2,-0.03259003907442093,2.8407723902023934,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,T cell exhaustion,1,Pdcd1,-0.008696332573890686,1.464859432489456,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,T cell exhaustion,1,Lag3,-0.03500324487686157,0.41227476670155394,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,T cell exhaustion,1,Havcr2,-0.008006550371646881,-0.20320307675011184,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-3,On-target Bcam,-1,Bcam,0.010074201039969921,-0.017109778275861152,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,Spp1 / osteopontin,1,Spp1,0.059847354888916016,1.9300968977261823,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,Cd44–integrin axis,1,Cd44,0.1172826886177063,0.03947384515774796,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,Cd44–integrin axis,1,Itgb1,0.09064821898937225,0.0,1,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,ECM remodeling,1,Postn,0.07351323962211609,2.7315807856457224,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,ECM remodeling,1,Col1a2,0.6532912254333496,-5.119521320896118,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,ECM remodeling,1,Mmp2,-0.02899177372455597,1.460362323445671,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,T cell exhaustion,1,Pdcd1,-0.0026713931001722813,0.7843700655412451,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,T cell exhaustion,1,Lag3,-0.00893375650048256,0.12221403598343888,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,T cell exhaustion,1,Havcr2,-0.007509797811508179,-0.18006934111300027,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,subQ-4,On-target Bcam,-1,Bcam,0.00851406529545784,-0.015848706510084028,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,Spp1 / osteopontin,1,Spp1,0.28589749336242676,1.2604045471589085,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,Cd44–integrin axis,1,Cd44,0.16662049293518066,-2.777726767457833,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,Cd44–integrin axis,1,Itgb1,-0.038329362869262695,0.0,0,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,ECM remodeling,1,Postn,0.02698218822479248,3.5316271879926577,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,ECM remodeling,1,Col1a2,0.10753762722015381,-7.735825090971886,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,ECM remodeling,1,Mmp2,-0.1782950460910797,-0.6248576509182102,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,T cell exhaustion,1,Pdcd1,-0.04164739325642586,5.203171963458082,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,T cell exhaustion,1,Lag3,-0.04168595373630524,3.1689878520143497,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,T cell exhaustion,1,Havcr2,-0.027243435382843018,-0.2828102426468383,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-1,On-target Bcam,-1,Bcam,-0.01576300710439682,-0.06202306038416064,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,Spp1 / osteopontin,1,Spp1,-0.1843203902244568,0.3605266785490048,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,Cd44–integrin axis,1,Cd44,0.061422884464263916,-0.9898249322965679,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,Cd44–integrin axis,1,Itgb1,0.061131760478019714,-0.08809596773177858,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,ECM remodeling,1,Postn,-0.0027085095643997192,1.3524016864835504,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,ECM remodeling,1,Col1a2,-0.024218738079071045,-3.1319051235594357,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,ECM remodeling,1,Mmp2,0.02428334951400757,-0.07731522868852203,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,T cell exhaustion,1,Pdcd1,-0.07459220290184021,1.3266562161453124,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,T cell exhaustion,1,Lag3,-0.027385666966438293,0.20547691929956827,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,T cell exhaustion,1,Havcr2,-0.06490430980920792,0.044132048279582684,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-2,On-target Bcam,-1,Bcam,0.03807841241359711,-0.008659437296705498,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,Spp1 / osteopontin,1,Spp1,0.30134016275405884,1.2749883130819233,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,Cd44–integrin axis,1,Cd44,0.21091926097869873,-1.759314407676587,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,Cd44–integrin axis,1,Itgb1,0.0687115490436554,-0.0498441345063015,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,ECM remodeling,1,Postn,-0.026536792516708374,2.027283041452027,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,ECM remodeling,1,Col1a2,0.25463199615478516,-3.744623562146171,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,ECM remodeling,1,Mmp2,-0.09796246886253357,-0.310530535781151,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,T cell exhaustion,1,Pdcd1,-0.008655168116092682,2.6940850450275735,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,T cell exhaustion,1,Lag3,-0.006305111572146416,0.9963631088682358,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,T cell exhaustion,1,Havcr2,0.0069067031145095825,-0.10522790410499673,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-3,On-target Bcam,-1,Bcam,0.0,-0.020966348225981767,1,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,Spp1 / osteopontin,1,Spp1,-0.08078181743621826,-0.16858397190000024,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,Cd44–integrin axis,1,Cd44,-0.11263012886047363,-1.4708373918677446,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,Cd44–integrin axis,1,Itgb1,-0.12597039341926575,0.0,0,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,ECM remodeling,1,Postn,-0.06310676038265228,0.9738998209371348,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,ECM remodeling,1,Col1a2,0.31160056591033936,-3.445613532954812,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,ECM remodeling,1,Mmp2,0.03571505844593048,-0.2328620957717315,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,T cell exhaustion,1,Pdcd1,-0.00731249526143074,1.5433489424324207,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,T cell exhaustion,1,Lag3,0.04025278612971306,0.34025308246977437,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,T cell exhaustion,1,Havcr2,-0.031044118106365204,-0.021088740862243785,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,subQ-4,On-target Bcam,-1,Bcam,0.0,-0.018012803173605204,1,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,Spp1 / osteopontin,1,Spp1,0.8797037601470947,3.863970701877314,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,Cd44–integrin axis,1,Cd44,0.034407734870910645,-3.0050332237186215,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,Cd44–integrin axis,1,Itgb1,0.09127295017242432,-0.08900271456665788,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,ECM remodeling,1,Postn,0.06308239698410034,-1.778328567734526,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,ECM remodeling,1,Col1a2,0.03468489646911621,-16.18054783913511,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,ECM remodeling,1,Mmp2,-0.0758170336484909,2.9147797030601206,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,T cell exhaustion,1,Pdcd1,0.019662097096443176,0.1662823127031413,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,T cell exhaustion,1,Lag3,0.041547589004039764,5.798136593185437,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,T cell exhaustion,1,Havcr2,0.07945661246776581,0.9969121437274315,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-1,On-target Bcam,-1,Bcam,-0.02528056688606739,-0.03821607049307472,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,Spp1 / osteopontin,1,Spp1,0.12811630964279175,1.414401241621295,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,Cd44–integrin axis,1,Cd44,0.24583089351654053,-1.606956860237806,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,Cd44–integrin axis,1,Itgb1,-0.008431732654571533,-0.034406262636184695,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,ECM remodeling,1,Postn,-0.029081538319587708,-0.10455051071437169,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,ECM remodeling,1,Col1a2,0.18678176403045654,-9.095533999121589,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,ECM remodeling,1,Mmp2,-0.09697102755308151,1.2880237441012348,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,T cell exhaustion,1,Pdcd1,0.040738023817539215,0.9632469991018345,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,T cell exhaustion,1,Lag3,-0.043496325612068176,2.0834950268255215,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,T cell exhaustion,1,Havcr2,-0.13524474203586578,0.7520314554012344,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-2,On-target Bcam,-1,Bcam,0.0,-0.0049746643304388275,1,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,Spp1 / osteopontin,1,Spp1,0.03559046983718872,3.4863641871262523,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,Cd44–integrin axis,1,Cd44,0.30825352668762207,-2.4267600002362473,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,Cd44–integrin axis,1,Itgb1,-0.009534746408462524,-0.007335385497735471,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,ECM remodeling,1,Postn,0.13773757219314575,-0.675780794136072,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,ECM remodeling,1,Col1a2,0.01740109920501709,-11.44952545348449,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,ECM remodeling,1,Mmp2,-0.12539713084697723,2.4091032819684397,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,T cell exhaustion,1,Pdcd1,-0.002257663756608963,1.0560437636351363,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,T cell exhaustion,1,Lag3,0.00015213526785373688,4.499637861172305,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,T cell exhaustion,1,Havcr2,0.0839233547449112,1.5882756423533997,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-3,On-target Bcam,-1,Bcam,0.0,-0.01995563066557967,1,1,,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,Spp1 / osteopontin,1,Spp1,0.1530463695526123,3.7548905942757282,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,Cd44–integrin axis,1,Cd44,0.07041209936141968,-1.9153777519552497,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,Cd44–integrin axis,1,Itgb1,-0.03311321139335632,-0.023211414163762874,0,0,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,ECM remodeling,1,Postn,0.015440255403518677,-0.5078439814658648,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,ECM remodeling,1,Col1a2,0.22414100170135498,-10.382201136481276,1,0,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,ECM remodeling,1,Mmp2,-0.03128916025161743,1.735855655143901,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,T cell exhaustion,1,Pdcd1,0.09523028880357742,0.8615524705621653,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,T cell exhaustion,1,Lag3,0.030933961272239685,2.135147690889433,1,1,1.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,T cell exhaustion,1,Havcr2,-0.02479499578475952,0.5900250878461156,0,1,0.0,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,subQ-4,On-target Bcam,-1,Bcam,0.0,-0.009028810510327194,1,1,,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,On-target Il4ra,-1,Il4ra,-0.09998083114624023,-1.2515411062274653,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,MHC-II presentation,-1,H2-Aa,-0.6041871309280396,-42.660669750085425,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,MHC-II presentation,-1,H2-Ab1,-0.5325531959533691,-30.971239440605757,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,MHC-II presentation,-1,Cd74,-0.5272293090820312,-61.48158499407922,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,Il4 / Th2 macrophage,-1,Arg1,0.38165283203125,3.147717430785029,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,Il4 / Th2 macrophage,-1,Mrc1,-0.21164175868034363,-1.6467280166814966,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,MHC-I / cross-presentation,-1,H2-K1,-0.16739463806152344,-22.36729933357507,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,MHC-I / cross-presentation,-1,B2m,0.15223705768585205,-1.8510827575580318,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-1,MHC-I / cross-presentation,-1,Tap1,-0.18791091442108154,2.5830289763653527,1,0,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,On-target Il4ra,-1,Il4ra,0.013049788773059845,-0.6955449242894247,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,MHC-II presentation,-1,H2-Aa,-0.08782660961151123,-24.520246175132385,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,MHC-II presentation,-1,H2-Ab1,0.18471181392669678,-13.81131140382065,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,MHC-II presentation,-1,Cd74,-0.22082996368408203,-29.511970203119837,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,Il4 / Th2 macrophage,-1,Arg1,-0.06722071766853333,1.544357880730693,1,0,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,Il4 / Th2 macrophage,-1,Mrc1,-0.03144371509552002,-0.26897671014878766,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,MHC-I / cross-presentation,-1,H2-K1,-0.2644280195236206,-6.724745333679499,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,MHC-I / cross-presentation,-1,B2m,0.3832244873046875,-0.45488958715006433,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-2,MHC-I / cross-presentation,-1,Tap1,0.0890282392501831,-0.3567010380065716,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,On-target Il4ra,-1,Il4ra,-0.10904113948345184,-1.111300286302362,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,MHC-II presentation,-1,H2-Aa,-0.19492149353027344,-35.141342182707206,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,MHC-II presentation,-1,H2-Ab1,-0.3505885601043701,-19.755167560562406,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,MHC-II presentation,-1,Cd74,-0.2072908878326416,-42.30232515825303,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,Il4 / Th2 macrophage,-1,Arg1,0.13834784924983978,1.6267995496842067,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,Il4 / Th2 macrophage,-1,Mrc1,-0.014439404010772705,-0.7144069977970603,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,MHC-I / cross-presentation,-1,H2-K1,-0.004656791687011719,-10.329994197981481,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,MHC-I / cross-presentation,-1,B2m,0.252819299697876,0.049145311545220005,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-3,MHC-I / cross-presentation,-1,Tap1,0.03196382522583008,-0.10892217736408626,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,On-target Il4ra,-1,Il4ra,-0.09039392322301865,-0.9225365354372612,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,MHC-II presentation,-1,H2-Aa,-0.2402186393737793,-28.32509361820062,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,MHC-II presentation,-1,H2-Ab1,-0.3360484838485718,-17.97819844759062,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,MHC-II presentation,-1,Cd74,-0.4506685733795166,-36.17665899852256,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,Il4 / Th2 macrophage,-1,Arg1,0.0300142765045166,1.9573815321596575,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,Il4 / Th2 macrophage,-1,Mrc1,-0.030207008123397827,-0.34472495268748987,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,MHC-I / cross-presentation,-1,H2-K1,-0.20476019382476807,-8.46565774301939,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,MHC-I / cross-presentation,-1,B2m,0.1515660285949707,-0.7007566435298298,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,subQ-4,MHC-I / cross-presentation,-1,Tap1,-0.02723217010498047,-0.7822951660750193,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,On-target Il4ra,-1,Il4ra,0.00041678547859191895,-1.0583731482079513,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,MHC-II presentation,-1,H2-Aa,-0.23511624336242676,-39.77690635238458,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,MHC-II presentation,-1,H2-Ab1,-0.32303905487060547,-29.862898051156698,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,MHC-II presentation,-1,Cd74,-0.24793028831481934,-54.91174797263071,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,Il4 / Th2 macrophage,-1,Arg1,0.5329089164733887,-0.33708867565991474,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,Il4 / Th2 macrophage,-1,Mrc1,-0.16963395476341248,-1.7984696046395527,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,MHC-I / cross-presentation,-1,H2-K1,-0.020392894744873047,-22.69292910322301,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,MHC-I / cross-presentation,-1,B2m,-0.013114571571350098,-4.0916094186260885,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-1,MHC-I / cross-presentation,-1,Tap1,0.21829140186309814,3.9598891277061283,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,On-target Il4ra,-1,Il4ra,-0.009940452873706818,-0.7809715784504694,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,MHC-II presentation,-1,H2-Aa,-0.35857176780700684,-24.326691908523888,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,MHC-II presentation,-1,H2-Ab1,-0.07297384738922119,-13.65115396388969,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,MHC-II presentation,-1,Cd74,-0.22051072120666504,-26.42645795742041,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,Il4 / Th2 macrophage,-1,Arg1,0.10496896505355835,-0.6429913189332978,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,Il4 / Th2 macrophage,-1,Mrc1,-0.07056853175163269,-0.9697968466707577,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,MHC-I / cross-presentation,-1,H2-K1,0.1069638729095459,-7.643133085223172,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,MHC-I / cross-presentation,-1,B2m,0.1838691234588623,-1.4944429334565081,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-2,MHC-I / cross-presentation,-1,Tap1,0.15972566604614258,1.612190374281544,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,On-target Il4ra,-1,Il4ra,-0.06801659613847733,-0.7885544987705847,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,MHC-II presentation,-1,H2-Aa,-0.07917022705078125,-27.4212551180378,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,MHC-II presentation,-1,H2-Ab1,0.04817318916320801,-17.450665826573392,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,MHC-II presentation,-1,Cd74,-0.22234010696411133,-36.10465860529438,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,Il4 / Th2 macrophage,-1,Arg1,0.1437581181526184,-0.4713677667535806,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,Il4 / Th2 macrophage,-1,Mrc1,-0.033708930015563965,-1.0980902782886903,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,MHC-I / cross-presentation,-1,H2-K1,-0.27207672595977783,-12.877616024168873,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,MHC-I / cross-presentation,-1,B2m,0.12300896644592285,-1.2003478665289502,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-3,MHC-I / cross-presentation,-1,Tap1,0.21967649459838867,2.7368990831607993,0,0,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,On-target Il4ra,-1,Il4ra,0.056656867265701294,-0.7649076169694684,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,MHC-II presentation,-1,H2-Aa,0.12282800674438477,-20.207948239789204,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,MHC-II presentation,-1,H2-Ab1,0.22508609294891357,-12.437714959944477,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,MHC-II presentation,-1,Cd74,0.1046152114868164,-25.90438344819662,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,Il4 / Th2 macrophage,-1,Arg1,-0.0857728123664856,-0.5371761746312872,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,Il4 / Th2 macrophage,-1,Mrc1,-0.01047566533088684,-0.9339082783816715,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,MHC-I / cross-presentation,-1,H2-K1,-0.19910335540771484,-11.041485008278325,1,1,1.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,MHC-I / cross-presentation,-1,B2m,0.20890235900878906,-0.7777604422424108,0,1,0.0,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,subQ-4,MHC-I / cross-presentation,-1,Tap1,-0.2956278324127197,2.027822478748062,1,0,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-1,On-target Cd83,-1,Cd83,-0.10177802294492722,-0.5489686697630778,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-1,MHC-II presentation,-1,H2-Aa,-0.4475090503692627,-42.660669750085425,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-1,MHC-II presentation,-1,H2-Ab1,-0.4480781555175781,-30.971239440605757,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-1,MHC-II presentation,-1,Cd74,-0.402083158493042,-61.48158499407922,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-1,T cell costimulation,-1,Cd86,0.06552401185035706,0.0,0,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-1,Immune checkpoint ligands,-1,Cd274,-0.043667688965797424,0.2009920550476119,1,0,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-2,On-target Cd83,-1,Cd83,-0.015288269147276878,-0.1465076051419601,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-2,MHC-II presentation,-1,H2-Aa,-0.06229138374328613,-24.520246175132385,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-2,MHC-II presentation,-1,H2-Ab1,0.0703045129776001,-13.81131140382065,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-2,MHC-II presentation,-1,Cd74,-0.11301445960998535,-29.511970203119837,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-2,T cell costimulation,-1,Cd86,0.009917296469211578,-0.004300206899642944,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-2,Immune checkpoint ligands,-1,Cd274,-0.048607707023620605,0.1455432227658413,1,0,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-3,On-target Cd83,-1,Cd83,-0.009138457477092743,-0.20010061608827898,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-3,MHC-II presentation,-1,H2-Aa,-0.24667000770568848,-35.141342182707206,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-3,MHC-II presentation,-1,H2-Ab1,-0.47013866901397705,-19.755167560562406,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-3,MHC-II presentation,-1,Cd74,-0.30590057373046875,-42.30232515825303,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-3,T cell costimulation,-1,Cd86,-0.049195289611816406,-0.0028709051560382452,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-3,Immune checkpoint ligands,-1,Cd274,-0.03476172685623169,0.5588427283069063,1,0,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-4,On-target Cd83,-1,Cd83,-0.02228298783302307,-0.16701345052652786,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-4,MHC-II presentation,-1,H2-Aa,-0.13760709762573242,-28.32509361820062,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-4,MHC-II presentation,-1,H2-Ab1,-0.382357120513916,-17.97819844759062,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-4,MHC-II presentation,-1,Cd74,-0.2627217769622803,-36.17665899852256,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-4,T cell costimulation,-1,Cd86,0.02124503254890442,0.0,0,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,subQ-4,Immune checkpoint ligands,-1,Cd274,-0.057697802782058716,-0.19610488118334987,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-1,On-target Cd83,-1,Cd83,-0.004286214709281921,-0.2272557856909617,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-1,MHC-II presentation,-1,H2-Aa,-0.3173184394836426,-39.77690635238458,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-1,MHC-II presentation,-1,H2-Ab1,-0.3934590816497803,-29.862898051156698,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-1,MHC-II presentation,-1,Cd74,-0.25914740562438965,-54.91174797263071,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-1,T cell costimulation,-1,Cd86,-0.015626758337020874,0.0,1,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-1,Immune checkpoint ligands,-1,Cd274,0.01712687313556671,-0.28339363976047216,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-2,On-target Cd83,-1,Cd83,0.019735971465706825,-0.059109265673594556,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-2,MHC-II presentation,-1,H2-Aa,-0.024840593338012695,-24.326691908523888,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-2,MHC-II presentation,-1,H2-Ab1,-0.08508706092834473,-13.65115396388969,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-2,MHC-II presentation,-1,Cd74,-0.12556052207946777,-26.42645795742041,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-2,T cell costimulation,-1,Cd86,-0.051062099635601044,0.0,1,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-2,Immune checkpoint ligands,-1,Cd274,-0.003077104687690735,0.047885953316061394,1,0,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-3,On-target Cd83,-1,Cd83,0.0,-0.07765597323884155,1,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-3,MHC-II presentation,-1,H2-Aa,-0.12197661399841309,-27.4212551180378,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-3,MHC-II presentation,-1,H2-Ab1,-0.1795104742050171,-17.450665826573392,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-3,MHC-II presentation,-1,Cd74,-0.12960147857666016,-36.10465860529438,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-3,T cell costimulation,-1,Cd86,0.0012164711952209473,0.0,0,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-3,Immune checkpoint ligands,-1,Cd274,0.06873154640197754,-0.07437493533384373,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-4,On-target Cd83,-1,Cd83,-0.001056775450706482,-0.10042933642135693,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-4,MHC-II presentation,-1,H2-Aa,0.20578765869140625,-20.207948239789204,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-4,MHC-II presentation,-1,H2-Ab1,0.09852027893066406,-12.437714959944477,0,1,0.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-4,MHC-II presentation,-1,Cd74,-0.033170223236083984,-25.90438344819662,1,1,1.0,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-4,T cell costimulation,-1,Cd86,0.061636172235012054,0.0,0,1,,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,subQ-4,Immune checkpoint ligands,-1,Cd274,-0.004663288593292236,-0.05439164149609069,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-1,On-target Cd74,-1,Cd74,-0.17589139938354492,-58.05517154923901,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-1,MHC-II presentation,-1,H2-Aa,-0.16039109230041504,-32.222728148696085,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-1,MHC-II presentation,-1,H2-Ab1,-0.14512085914611816,-21.787347962538508,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-1,Antigen processing,-1,H2-K1,-0.05174422264099121,-17.14106951066257,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-1,Antigen processing,-1,B2m,0.08071064949035645,-5.285832722064296,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-1,Antigen processing,-1,Tap1,0.30234408378601074,4.2235510108859105,0,0,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-2,On-target Cd74,-1,Cd74,0.05956149101257324,-32.92541605076462,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-2,MHC-II presentation,-1,H2-Aa,-0.0002586841583251953,-19.452687822617104,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-2,MHC-II presentation,-1,H2-Ab1,0.13819122314453125,-8.34123049092839,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-2,Antigen processing,-1,H2-K1,0.28089308738708496,-5.908452361938884,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-2,Antigen processing,-1,B2m,0.3094414472579956,-1.355796580985912,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-2,Antigen processing,-1,Tap1,-0.1412447690963745,2.145049307781086,1,0,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-3,On-target Cd74,-1,Cd74,0.09249472618103027,-40.88178654867618,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-3,MHC-II presentation,-1,H2-Aa,-0.12068891525268555,-21.307327455780445,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-3,MHC-II presentation,-1,H2-Ab1,0.22687053680419922,-10.966234430653662,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-3,Antigen processing,-1,H2-K1,0.19193363189697266,-9.657521384238505,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-3,Antigen processing,-1,B2m,-0.1136925220489502,-1.224149091400535,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-3,Antigen processing,-1,Tap1,0.28034746646881104,3.0957738530228713,0,0,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-4,On-target Cd74,-1,Cd74,0.34471607208251953,-31.9393632217761,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-4,MHC-II presentation,-1,H2-Aa,0.3277573585510254,-15.263664227797278,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-4,MHC-II presentation,-1,H2-Ab1,0.5291204452514648,-6.912962629220198,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-4,Antigen processing,-1,H2-K1,0.1496717929840088,-9.044634928656583,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-4,Antigen processing,-1,B2m,0.022412538528442383,-0.7920865079855933,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,subQ-4,Antigen processing,-1,Tap1,-0.06498968601226807,2.4236771708807434,1,0,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-1,On-target Cd74,-1,Cd74,-0.19171929359436035,-63.92603902290204,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-1,MHC-II presentation,-1,H2-Aa,-0.2738535404205322,-40.2033225744296,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-1,MHC-II presentation,-1,H2-Ab1,-0.07804656028747559,-23.91731292033339,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-1,Antigen processing,-1,H2-K1,0.028468847274780273,-19.921792053605586,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-1,Antigen processing,-1,B2m,0.11775779724121094,-6.855436147611184,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-1,Antigen processing,-1,Tap1,0.12992286682128906,1.6356367362177682,0,0,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-2,On-target Cd74,-1,Cd74,-0.2577826976776123,-34.24595886040479,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-2,MHC-II presentation,-1,H2-Aa,-0.22748959064483643,-20.702567993308303,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-2,MHC-II presentation,-1,H2-Ab1,0.008378148078918457,-9.772575797706676,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-2,Antigen processing,-1,H2-K1,-0.1011284589767456,-6.829396197529927,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-2,Antigen processing,-1,B2m,0.2816355228424072,-2.968573711024517,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-2,Antigen processing,-1,Tap1,-0.09301471710205078,-0.567919338389643,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-3,On-target Cd74,-1,Cd74,-0.056299448013305664,-45.23361196931528,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-3,MHC-II presentation,-1,H2-Aa,-0.24111509323120117,-31.51733413915895,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-3,MHC-II presentation,-1,H2-Ab1,-0.2685354948043823,-13.944106853436145,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-3,Antigen processing,-1,H2-K1,0.4433705806732178,-9.421583346488163,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-3,Antigen processing,-1,B2m,0.14506173133850098,-4.447831139226969,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-3,Antigen processing,-1,Tap1,-0.010694384574890137,-0.3036665443504192,1,1,1.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-4,On-target Cd74,-1,Cd74,0.0924534797668457,-40.73325379633091,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-4,MHC-II presentation,-1,H2-Aa,0.14748859405517578,-23.998536012030755,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-4,MHC-II presentation,-1,H2-Ab1,0.2811836004257202,-12.449062063105792,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-4,Antigen processing,-1,H2-K1,0.1725403070449829,-7.794075474724906,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-4,Antigen processing,-1,B2m,0.0797576904296875,-3.739937339207808,0,1,0.0,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,subQ-4,Antigen processing,-1,Tap1,0.09385693073272705,-1.0198402609491461,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine receptors,-1,Ccr2,0.032198160886764526,-0.5694454893631014,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine receptors,-1,Ccr5,0.08606809377670288,-0.5884143696961565,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine receptors,-1,Ccr7,-0.12380191683769226,6.450291782322548,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine receptors,-1,Cxcr3,-0.024136632680892944,0.23504740200500487,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine receptors,-1,Cxcr4,0.024922825396060944,0.2596883798618968,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine ligands,-1,Ccl5,-0.3800601363182068,-4.637680739191857,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine ligands,-1,Cxcl9,0.2299875020980835,-10.929087289255337,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-1,Chemokine ligands,-1,Cxcl10,0.06805551052093506,5.303266855611073,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine receptors,-1,Ccr2,0.04816259443759918,-0.3579160315446156,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine receptors,-1,Ccr5,-0.0029958486557006836,-0.2540283302221133,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine receptors,-1,Ccr7,0.0,2.8445698319283794,1,0,,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine receptors,-1,Cxcr3,-0.013529293239116669,0.2597093828734696,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine receptors,-1,Cxcr4,-0.007059488445520401,0.1636151486440604,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine ligands,-1,Ccl5,0.1886598914861679,-0.4636289720410889,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine ligands,-1,Cxcl9,0.2396337389945984,-5.676151625146471,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-2,Chemokine ligands,-1,Cxcl10,0.1649622619152069,2.6624259972967237,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine receptors,-1,Ccr2,0.10484687983989716,-0.7265640978765368,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine receptors,-1,Ccr5,-0.08693399280309677,-0.29393095466125185,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine receptors,-1,Ccr7,0.0,5.480714324994869,1,0,,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine receptors,-1,Cxcr3,-0.016817066818475723,0.3230158290560396,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine receptors,-1,Cxcr4,-0.025839505717158318,-0.18661103141896285,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine ligands,-1,Ccl5,-0.058322012424468994,-1.6110573967462023,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine ligands,-1,Cxcl9,0.1561877727508545,-7.53103878463108,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-3,Chemokine ligands,-1,Cxcl10,0.26426002383232117,4.79509436984246,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine receptors,-1,Ccr2,-0.06152452528476715,-0.4905958885993665,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine receptors,-1,Ccr5,-0.09175828099250793,-0.4731880384029463,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine receptors,-1,Ccr7,-0.017666269093751907,3.1671732006411855,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine receptors,-1,Cxcr3,0.0,0.15725205838228723,1,0,,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine receptors,-1,Cxcr4,-0.05379217490553856,0.16930648172344745,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine ligands,-1,Ccl5,0.14445003867149353,-1.0581187009248139,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine ligands,-1,Cxcl9,-0.1963566541671753,-7.970230212779117,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,subQ-4,Chemokine ligands,-1,Cxcl10,-0.03638339042663574,3.118989601700726,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine receptors,-1,Ccr2,-0.018725335597991943,-0.8815502630834835,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine receptors,-1,Ccr5,-0.010499358177185059,-1.1474513512507465,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine receptors,-1,Ccr7,-0.0021734479814767838,-0.06190407670676562,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine receptors,-1,Cxcr3,-0.004899324383586645,2.961591386731819,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine receptors,-1,Cxcr4,-0.054760612547397614,2.217031770282729,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine ligands,-1,Ccl5,-0.07321763038635254,-2.762781470973263,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine ligands,-1,Cxcl9,0.06888794898986816,-8.68568338466749,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-1,Chemokine ligands,-1,Cxcl10,0.2220045030117035,0.887049905372536,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine receptors,-1,Ccr2,-0.02311798930168152,-0.45785027072006906,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine receptors,-1,Ccr5,-0.014606714248657227,-0.26217445048987753,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine receptors,-1,Ccr7,0.0,-0.00034118288395628603,1,1,,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine receptors,-1,Cxcr3,-0.010691841132938862,0.30028156921343985,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine receptors,-1,Cxcr4,-0.027395719662308693,0.6117154319588658,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine ligands,-1,Ccl5,-0.011116504669189453,-0.3448611292319462,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine ligands,-1,Cxcl9,0.24356061220169067,-5.032101064868501,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-2,Chemokine ligands,-1,Cxcl10,0.09648951888084412,-0.1856039684375394,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine receptors,-1,Ccr2,0.014632396399974823,-0.6841767427862862,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine receptors,-1,Ccr5,-0.0028230249881744385,-0.6351301526569011,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine receptors,-1,Ccr7,-0.013678628019988537,-0.060257040785920306,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine receptors,-1,Cxcr3,-0.0046015167608857155,0.8891133388514504,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine receptors,-1,Cxcr4,-0.05427270382642746,1.500193031242242,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine ligands,-1,Ccl5,0.2006763517856598,-1.0051319139588433,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine ligands,-1,Cxcl9,0.2638735771179199,-5.8929822995806465,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-3,Chemokine ligands,-1,Cxcl10,0.19079065322875977,0.2646824219795757,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine receptors,-1,Ccr2,0.037990227341651917,-0.4894831478225621,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine receptors,-1,Ccr5,-0.06390777230262756,-0.43657355732225295,1,1,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine receptors,-1,Ccr7,0.0,-0.004333305504885962,1,1,,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine receptors,-1,Cxcr3,0.021235307678580284,0.2531787188279108,0,0,1.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine receptors,-1,Cxcr4,-0.013656113296747208,0.8982298649164646,1,0,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine ligands,-1,Ccl5,0.037368565797805786,-0.6076019969969345,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine ligands,-1,Cxcl9,0.08864820003509521,-4.38394263941289,0,1,0.0,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,subQ-4,Chemokine ligands,-1,Cxcl10,0.010976701974868774,-0.32442456229442934,0,1,0.0,tuned

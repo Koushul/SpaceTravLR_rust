@@ -1,0 +1,52 @@
+finding_id,title,perturbation,cell_type,module,expected_sign,n_genes_scored,obs_sign_match_rate,pred_sign_match_rate,obs_pred_concordance_rate,obs_binom_p,pred_binom_p,obs_mean_delta,pred_mean_delta,paper_recapitulated_obs,paper_recapitulated_pred,tag
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,IFN / inflammatory chemokines,-1,5,0.0,0.2,0.8,1.0,0.96875,0.11760938465595246,0.4297197566998541,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,LFA-1 immune synapse,-1,2,1.0,1.0,1.0,0.25,0.25,-0.18943102657794952,-0.6538164273889489,True,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,M2 / suppressive macrophage,1,4,0.25,1.0,0.25,0.9375,0.0625,0.01516660233028233,0.342006702003015,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,On-target Icam1,-1,1,0.0,1.0,0.0,1.0,0.5,0.07964597642421722,-0.18351961999624256,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,tumor,T cell effector,-1,4,0.75,0.0,0.25,0.3125,1.0,-0.015052689705044031,0.7386748234259024,True,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,IFN / inflammatory chemokines,-1,5,0.4,0.6,0.8,0.8125,0.5,-0.1599799118936062,-1.3580153817588607,False,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,LFA-1 immune synapse,-1,2,0.5,0.5,1.0,0.75,0.75,-0.06085176765918732,-0.5737943036035441,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,M2 / suppressive macrophage,1,4,0.0,0.25,0.75,1.0,0.9375,-0.0584068747702986,-0.2684679365346345,False,False,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,On-target Icam1,-1,1,1.0,1.0,1.0,0.5,0.5,-0.08605670183897018,-0.6458405470886901,True,True,tuned
+icam1_immune_escape,Icam1 KO → immune exclusion program,Icam1,myeloid,T cell effector,-1,4,0.25,0.0,0.75,0.9375,1.0,-0.010969562456011772,3.05599654105148,False,False,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Cd44–integrin axis,1,8,0.875,0.625,0.6666666666666666,0.03515625,0.36328125,0.12212479114532471,0.06793584015933243,True,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,ECM remodeling,1,12,0.6666666666666666,0.6666666666666666,0.3333333333333333,0.19384765625,0.19384765625,0.16664607574542364,-0.8682682403476631,True,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,On-target Bcam,-1,4,0.25,1.0,0.25,0.9375,0.0625,-0.0018815239891409874,-0.02694359981672903,False,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,Spp1 / osteopontin,1,4,1.0,1.0,1.0,0.0625,0.0625,0.3041089177131653,2.460810729395275,True,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,fibroblast,T cell exhaustion,1,12,0.16666666666666666,0.6666666666666666,0.16666666666666666,0.996826171875,0.19384765625,-0.009841488868308565,0.6900687302295322,False,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Cd44–integrin axis,1,8,0.625,0.25,0.16666666666666666,0.36328125,0.96484375,0.03648450784385204,-0.8919554501921015,True,False,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,ECM remodeling,1,12,0.5,0.3333333333333333,0.3333333333333333,0.61279296875,0.927001953125,0.030660205831130345,-0.9515267569938791,False,False,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,On-target Bcam,-1,4,0.75,1.0,0.5,0.3125,0.0625,0.005578851327300072,-0.02741541227011328,True,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,Spp1 / osteopontin,1,4,0.5,0.75,0.75,0.6875,0.3125,0.08053386211395264,0.6818338917224591,False,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,myeloid,T cell exhaustion,1,12,0.16666666666666666,0.75,0.25,0.996826171875,0.072998046875,-0.023634697155406077,1.2594456908650684,False,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Cd44–integrin axis,1,8,0.625,0.0,0.375,0.36328125,1.0,0.08738718926906586,-1.1385104516265332,True,False,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,ECM remodeling,1,12,0.5833333333333334,0.3333333333333333,0.08333333333333333,0.38720703125,0.927001953125,0.026726091280579567,-3.485545824833301,False,False,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,On-target Bcam,-1,4,1.0,1.0,1.0,0.0625,0.0625,-0.006320141721516848,-0.018043793999855104,True,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,Spp1 / osteopontin,1,4,1.0,1.0,1.0,0.0625,0.0625,0.2991142272949219,3.1299066812251475,True,True,tuned
+cd44_spp1_axis,Cd44–Spp1 macrophage crosstalk (sgBcam proxy),Bcam,immune,T cell exhaustion,1,12,0.6666666666666666,1.0,0.6666666666666666,0.19384765625,0.000244140625,0.015487527940422297,1.7908989206169297,True,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,Il4 / Th2 macrophage,-1,8,0.625,0.5,0.875,0.36328125,0.63671875,0.02438279427587986,0.662677464505594,True,False,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,MHC-I / cross-presentation,-1,12,0.5,0.8333333333333334,0.5,0.61279296875,0.019287109375,0.017038017511367798,-4.125847474169039,False,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,MHC-II presentation,-1,12,0.9166666666666666,1.0,0.9166666666666666,0.003173828125,0.000244140625,-0.29730425278345746,-31.886317327723308,True,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,immune,On-target Il4ra,-1,4,0.75,1.0,0.75,0.3125,0.0625,-0.07159152626991272,-0.9952307130641284,True,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,Il4 / Th2 macrophage,-1,8,0.625,1.0,0.625,0.36328125,0.00390625,0.05143451318144798,-0.8486111179948441,True,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,MHC-I / cross-presentation,-1,12,0.4166666666666667,0.6666666666666666,0.5833333333333334,0.80615234375,0.19384765625,0.03501020868619283,-4.2902102348209,False,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,MHC-II presentation,-1,12,0.6666666666666666,1.0,0.6666666666666666,0.19384765625,0.000244140625,-0.1049124797185262,-27.37354020032015,True,True,tuned
+il4ra_mhc2,Il4ra KO → MHC-II / antigen presentation down,Il4ra,myeloid,On-target Il4ra,-1,4,0.5,1.0,0.5,0.6875,0.0625,-0.0052208490669727325,-0.8482017105996185,False,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,Immune checkpoint ligands,-1,4,1.0,0.25,0.25,0.0625,0.9375,-0.04618373140692711,0.1773182812342524,True,False,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,MHC-II presentation,-1,12,0.9166666666666666,1.0,0.9166666666666666,0.003173828125,0.000244140625,-0.26733891169230145,-31.886317327723308,True,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,On-target Cd83,-1,4,1.0,1.0,1.0,0.0625,0.0625,-0.03712193435057998,-0.2656475853799612,True,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,immune,T cell costimulation,-1,4,0.25,1.0,0.5,0.9375,0.0625,0.011872762814164162,-0.0017927780139202973,False,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,Immune checkpoint ligands,-1,4,0.5,0.75,0.25,0.6875,0.3125,0.01952950656414032,-0.0910685658185863,False,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,MHC-II presentation,-1,12,0.8333333333333334,1.0,0.8333333333333334,0.019287109375,0.000244140625,-0.11378032962481181,-27.37354020032015,True,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,On-target Cd83,-1,4,0.75,1.0,0.6666666666666666,0.3125,0.0625,0.0035982453264296055,-0.11611259025618868,True,True,tuned
+cd83_costimulation,Cd83 KO → DC activation / MHC-II down,Cd83,myeloid,T cell costimulation,-1,4,0.5,1.0,,0.6875,0.0625,-0.000959053635597229,0.0,False,True,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,Antigen processing,-1,12,0.3333333333333333,0.6666666666666666,0.3333333333333333,0.927001953125,0.19384765625,0.10384029150009155,-3.2101243121135226,False,True,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,MHC-II presentation,-1,8,0.5,1.0,0.5,0.63671875,0.00390625,0.0994350016117096,-17.031772896028958,False,True,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,myeloid,On-target Cd74,-1,4,0.25,1.0,0.25,0.9375,0.0625,0.08022022247314453,-40.950434342613974,False,True,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,Antigen processing,-1,12,0.25,0.9166666666666666,0.3333333333333333,0.980712890625,0.003173828125,0.10729455947875977,-5.186201234740875,False,True,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,MHC-II presentation,-1,8,0.625,1.0,0.625,0.36328125,0.00390625,-0.08149874210357666,-22.063102294188703,True,True,tuned
+cd74_mhc2,Cd74 (invariant chain) KO → MHC-II down,Cd74,immune,On-target Cd74,-1,4,0.75,1.0,0.75,0.3125,0.0625,-0.10333698987960815,-46.03471591223825,True,True,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,Chemokine ligands,-1,12,0.3333333333333333,0.6666666666666666,0.5,0.927001953125,0.19384765625,0.06542287891109784,-1.9997680746887487,False,True,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,immune,Chemokine receptors,-1,20,0.75,0.45,0.35294117647058826,0.020694732666015625,0.7482776641845703,-0.011482822056859732,0.7784844795324068,True,False,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,Chemokine ligands,-1,12,0.16666666666666666,0.8333333333333334,0.3333333333333333,0.996826171875,0.019287109375,0.11157854149738948,-2.3394485085891974,False,True,tuned
+tf_chemokine_axis,TF–chemokine receptor axis (paper model),Il4ra,myeloid,Chemokine receptors,-1,20,0.85,0.6,0.5,0.0012884140014648438,0.2517223358154297,-0.012297608540393412,0.2255054785005607,True,True,tuned
