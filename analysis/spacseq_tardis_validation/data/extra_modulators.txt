@@ -1,0 +1,65 @@
+# Extra Lasso modulators: genes that are not TFs / ligands / receptors in the GRN
+# but carry biological signal for immune niches, MHC presentation, and validation
+# perturbation pathways (SPAC-seq subQ MC38). Used via [grn].extra_modulators_file.
+#
+# These are merged at train time (fourth modulator block). Each target gene excludes
+# itself from extras automatically.
+
+# MHC / antigen presentation
+B2m
+Tap1
+Tap2
+Nlrc5
+H2-Eb1
+
+# Immune receptors & checkpoints (when not already LR modulators)
+Il4ra
+Cd83
+Cd86
+Cd74
+Cd274
+Pdcd1
+Lag3
+Tigit
+Havcr2
+
+# Cytokines / effector
+Ifng
+Il10
+Il6
+Ccl5
+
+# T cell state
+Cd3d
+Cd3e
+Cd8a
+Gzmb
+Prf1
+Nkg7
+Foxp3
+
+# Myeloid / macrophage
+Mrc1
+Cd163
+Arg1
+Chil3
+Ms4a4a
+Ms4a7
+Trem2
+Irf5
+Irf7
+
+# Stromal / tumor interface
+Col1a2
+Dcn
+Postn
+Acta2
+Apoe
+Spp1
+Vegfa
+Tgfb1
+
+# Validation KO targets (modulate other genes' GRNs; excluded when training self)
+Bcam
+Cks1b
+Ptk6

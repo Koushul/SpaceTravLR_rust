@@ -60,8 +60,11 @@ def load_baseline(baseline_path: Path) -> sc.AnnData:
 
 def load_pool(slice_name: str, data_root: Path) -> sc.AnnData:
     pool = sc.read_h5ad(data_root / "slices" / slice_name / "perturbed_pool.h5ad")
-    sc.pp.normalize_total(pool, target_sum=10000)
-    sc.pp.log1p(pool)
+    x = pool.X
+    mx = float(x.max()) if not sparse.issparse(x) else float(x.max())
+    if mx > 30:
+        sc.pp.normalize_total(pool, target_sum=10000)
+        sc.pp.log1p(pool)
     return pool
 
 

@@ -491,6 +491,21 @@ python3 scripts/11_beta_leiden_microniches.py \
 
 # 12. Publication figures for microniche validation
 python3 scripts/12_beta_leiden_report_figures.py --tag pooled
+
+# 13. Extra-modulator retrain (pooled NTC + data/extra_modulators.txt)
+GENES=$(paste -sd, data/target_genes.txt)
+SPACETRAVLR_FORCE_CPU=1 spacetravlr --plain --training-mode seed \
+  --config spaceship_config_pooled_extra.toml \
+  --h5ad data/pooled/baseline_ntc.h5ad \
+  --output-dir runs/baseline_pooled_extra_seed \
+  --max-ligands 200 --genes "$GENES" --parallel 8
+
+# 14. Beta scale sweep + tuned predictions
+python3 scripts/15_beta_scale_sweep.py --scales 75 100 125 150 --write-tuned
+
+# 15. Full re-validation for extra / tuned models
+python3 scripts/16_rerun_validation.py --model pooled_extra --skip-train --tag extra
+python3 scripts/16_rerun_validation.py --model pooled_tuned --skip-train --tag tuned
 ```
 
 ## Limitations and next steps

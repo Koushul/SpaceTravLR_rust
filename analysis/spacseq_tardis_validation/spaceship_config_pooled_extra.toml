@@ -1,5 +1,5 @@
-# SpaceTravLR config: pooled sgNTC from subQ-1..4 (4915 cells).
-# Same hyperparameters as subQ-1 seed run; train with --training-mode seed.
+# Pooled NTC training with extra_modulators (immune/MHC/T-cell pathway genes).
+# Retrain after adding data/extra_modulators.txt — fourth Lasso modulator block.
 
 [data]
 adata_path     = "data/pooled/baseline_ntc.h5ad"
@@ -35,7 +35,6 @@ max_lr            = 200
 use_tf_modulators = true
 use_lr_modulators = true
 use_tfl_modulators = true
-# Non-TF/L/R modulators for immune/MHC/T-cell pathway genes (see data/extra_modulators.txt)
 extra_modulators_file = "data/extra_modulators.txt"
 
 [cnn]
@@ -70,7 +69,7 @@ score_threshold = 0.05
 
 [execution]
 n_parallel  = 8
-output_dir  = "runs/baseline_pooled_seed"
+output_dir  = "runs/baseline_pooled_extra_seed"
 stale_lock_secs = 3600
 
 [perturbation]

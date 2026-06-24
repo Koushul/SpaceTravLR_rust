@@ -39,6 +39,7 @@ max_lr            = 200
 use_tf_modulators = true
 use_lr_modulators = true
 use_tfl_modulators = true
+extra_modulators_file = "data/extra_modulators.txt"
 
 [cnn]
 adam_beta_1 = 0.9
