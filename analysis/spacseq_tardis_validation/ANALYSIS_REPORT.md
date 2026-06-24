@@ -404,6 +404,24 @@ Outputs: `results/beta_leiden/niche_corr_pooled.csv`,
 `results/beta_leiden/summary_pooled.csv`,
 `figures/beta_leiden/fig_compare_niche_methods_pooled.png`.
 
+### 12. Extra modulators + beta_scale_factor tuning
+
+**Problem.** Seed training used TF / LR / TFL modulators only (`extra_modulators = []`
+in the saved repro TOML). Pathway genes central to validation — **Cd74, Cd83, Il4ra,
+B2m, MHC‑II, T‑cell markers** — were targets but not predictors in other genes' GRNs,
+weakening cross‑gene immune niche concordance.
+
+**Fix — extra_modulators (`extra_genes`).** `data/extra_modulators.txt` (44 genes)
+is merged as a **fourth Lasso modulator block** via `extra_modulators_file` in
+`spaceship_config_pooled.toml` and `spaceship_config_pooled_extra.toml`
+(output → `runs/baseline_pooled_extra_seed`).
+
+**Fix — beta_scale_factor.** Ligand splash during in‑silico KO scales LR/TFL
+derivatives (`[perturbation].beta_scale_factor`). `scripts/15_beta_scale_sweep.py`
+sweeps scales against 4‑slice concordance and can write `results/predictions_tuned/`.
+
+**Orchestration:** `config/validation_runs.json` + `scripts/16_rerun_validation.py`.
+
 ## Reproduce
 
 ```bash
