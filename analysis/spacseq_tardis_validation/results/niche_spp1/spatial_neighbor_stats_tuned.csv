@@ -1,0 +1,7 @@
+pearson_r,spearman_r,n_genes,concordant_up,concordant_down,perturbation,neighbor_cell_type,analysis,tag
+-0.25911621415920594,-0.20904298987764844,2148,296,173,Il4ra,immune,spatial_knn,tuned
+-0.1798925632225054,-0.18329151793317688,2148,293,150,Il4ra,myeloid,spatial_knn,tuned
+-0.27450398223703376,-0.19448382067566145,2148,316,179,Cd83,immune,spatial_knn,tuned
+-0.3566915932682869,-0.330852294580333,2148,162,250,Cd74,immune,spatial_knn,tuned
+-0.07603712639438613,-0.09616892858962742,2148,219,215,Bcam,fibroblast,spatial_knn,tuned
+-0.11550791002985625,-0.20259768888756932,2148,217,233,Bcam,myeloid,spatial_knn,tuned

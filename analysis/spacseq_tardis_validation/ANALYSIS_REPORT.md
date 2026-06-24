@@ -462,7 +462,91 @@ Outputs (`--tag pooled`):
 Three‑model scorecard: `results/scorecard/prediction_scorecard.csv` (pooled / tuned / extra).
 
 **Python env.** Analysis scripts re‑exec under Rust Python + mc38 site‑packages via
-`scripts/_py_boot.py` (`PYTHONNOUSERSITE=1`) to avoid broken user‑site scanpy.
+`scripts/_py_boot.py` (`PYTHONNOUSERSSITE=1`) to avoid broken user‑site scanpy.
+
+### 14. Perturbed‑cell / niche DEG + Spp1 biology recovery
+
+`scripts/18_perturbation_niche_spp1.py` asks two questions on the **β‑tuned**
+model (`results/predictions_tuned/`, β=50, n_prop=3):
+
+1. Does SpaceTravLR recover **DEG profiles in cells receiving CRISPR** or in
+   their **spatial niche**?
+2. Can it recover **Spp1 / Cd44‑axis biology** when sgSpp1 is absent from
+   subQ‑1…4?
+
+**Direct perturbed cells (sgP vs NTC within cell type).** Pseudobulk log1p Δ
+(observed) vs imputed_count Δ on NTC substrate (predicted), pooled over four
+slices:
+
+| Metric | Value |
+| --- | --- |
+| Cases tested | 10 perturbation × cell‑type pairs |
+| **Median Pearson r** | **+0.166** |
+| Best pairs | sgCks1b/immune r = +0.25; sgIl4ra/immune +0.24; sgCd83/immune +0.23 |
+
+SpaceTravLR concordance is strongest for **immune KOs in the cells that actually
+receive the guide** — consistent with §12 pseudobulk validation, but now
+explicitly restricted to sgP cells rather than whole‑section pseudobulk.
+
+**Spatial niche DEG (prediction‑compatible contrast).** Classical kNN bystander
+analysis (neighbors of sgP vs NTC *sources*) is **not identifiable on the
+predicted side**: in pooled CRISPR sections, NTC source neighborhoods contain
+**zero NTC bystanders** (all nearby cells carry other sgRNAs). SpaceTravLR
+predictions exist only on **NTC substrate** cells.
+
+We therefore compare:
+
+- **Observed:** NTC cells **near** sgP sources vs NTC cells **far** from sgP
+  sources (same cell type; k=25).
+- **Predicted:** mean(pred − baseline) in the near set minus mean(pred − baseline)
+  in the far set (prep CellID barcode mapping via `prep_barcode()`).
+
+| Metric | Value |
+| --- | --- |
+| Cases | 6 (Il4ra, Cd83, Cd74, Bcam × neighbor cell types) |
+| Median Pearson r | **−0.22** (weak / discordant) |
+| Best case | sgBcam/fibroblast r = −0.08 |
+
+Niche‑level DEG concordance is **weaker than direct sgP‑cell concordance** and
+can be negative — local spatial bystander effects in the CRISPR pool are driven
+by **multi‑guide neighborhood structure** that a single‑gene in‑silico KO on NTC
+cells does not fully capture. β‑Leiden microniches (§11) remain the stronger
+niche‑level readout (+0.08 median r).
+
+**Spp1 biology (no sgSpp1 in subQ‑1…4).** `guide_summary.json` reports
+`spp1_cells: 0`; Spp1 is assessed via **sgBcam** (Cd44 axis) and in‑silico
+`predicted_KO_Spp1.feather`.
+
+| Observation | Result |
+| --- | --- |
+| sgBcam → observed Spp1 Δ | **+0.30** log1p in fibroblast & immune (pooled 4 slices) |
+| sgBcam → predicted Spp1 Δ | **+2.5 / +3.1** imputed_count in fibroblast / immune (sign concordant; scale differs from log1p pool) |
+| Spp1 obs vs pred across perturbations | Pearson r = **+0.63** (p ≈ 0.001), partly driven by cell‑type structure |
+| Spp1 axis modules (Cd44, Mmp9, ECM) | Observed sgBcam‑specific up in stromal/immune; predicted module Δ **constant per cell type** for Bcam/Il4ra/Cd83 (Spp1 prediction identical across these KOs on NTC substrate) |
+
+**Interpretation:** SpaceTravLR **captures the direction** of Spp1 induction
+under sgBcam in fibroblast/immune compartments but **does not yet produce
+perturbation‑specific Spp1 responses** for unrelated immune KOs (Il4ra, Cd83
+predictions for Spp1 are identical to Bcam on the same NTC cells). Direct
+sgSpp1 validation requires the **Day7 lung‑metastasis** cohort (paper headline
+Spp1/Cd44 perturbations).
+
+**Outputs**
+
+| Artifact | Path |
+| --- | --- |
+| Direct sgP DEG grid | `figures/niche_spp1/fig10_direct_cell_deg_grid_tuned.png` |
+| Spatial niche DEG grid | `figures/niche_spp1/fig11_spatial_niche_deg_tuned.png` |
+| Spp1 recovery panel | `figures/niche_spp1/fig12_spp1_recovery_tuned.png` |
+| Stats tables | `results/niche_spp1/direct_cell_deg_stats_tuned.csv`, `spatial_neighbor_stats_tuned.csv`, `spp1_tracking_tuned.csv`, `spp1_module_tuned.csv` |
+
+```bash
+# Niche DEG + Spp1 (tuned model)
+python3 scripts/18_perturbation_niche_spp1.py --tag tuned --skip-spp1-perturb
+
+# Original niche DEG / CCC (barcode‑fixed, tuned predictions)
+python3 scripts/13_niche_deg_ccc_analysis.py --pred-dir results/predictions_tuned --tag tuned
+```
 
 ```bash
 cd analysis/spacseq_tardis_validation
@@ -628,6 +712,11 @@ in the cell compartments where the perturbed genes are biologically active
     sgCd83/immune meta r = **+0.24**.
   - **Extra immune modulators (44 genes):** comparable immune r (+0.141);
     more Stouffer‑significant meta pairs (11 vs 8) but lower combined median r.
+  - **Direct perturbed‑cell DEG concordance:** median Pearson r **+0.17** on
+    sgP cells (best sgCks1b/immune +0.25); stronger than spatial kNN niche DEG.
+  - **Spp1 / Cd44 axis:** sgBcam raises observed Spp1 in fibroblast/immune;
+    model predicts positive Spp1 Δ with correct sign but lacks perturbation
+    specificity for unrelated immune KOs (subQ‑1…4 has no sgSpp1).
   - **Top‑15 predicted‑magnitude sign agreement**: 80 % (binomial p = 0.018)
     for sgCd83/immune and sgIl4ra/myeloid; 67 % median across seven
     immune/myeloid pairs.

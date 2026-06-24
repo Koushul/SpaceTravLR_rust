@@ -43,6 +43,42 @@ TCELL_STATE = {
     "Treg / suppressive": ["Foxp3", "Il2ra", "Ikzf2", "Ctla4", "Tnfrsf18"],
 }
 
+SPP1_AXIS = {
+    "Spp1 / osteopontin": ["Spp1", "Cd44", "Itgav", "Itgb1", "Fn1", "Mmp9"],
+    "Macrophage recruitment": ["Spp1", "Cd44", "Ccr2", "Ccl2", "Mrc1", "Arg1"],
+    "ECM remodeling": ["Spp1", "Mmp2", "Mmp9", "Col1a2", "Postn", "Tnc"],
+    "Tumor-immune crosstalk": ["Spp1", "Cd44", "Il6", "Tnf", "Cxcl12", "Vegfa"],
+}
+
+
+def prep_barcode(slice_id: str, pool_barcode: str) -> str:
+    """Map slice pool barcode to pooled prep / prediction CellID."""
+    return f"{slice_id}__{pool_barcode}@{slice_id}"
+
+
+def pool_pred_names(pool: ad.AnnData, slice_id: str) -> pd.Index:
+    return pd.Index([prep_barcode(slice_id, b) for b in pool.obs_names], name="pred_id")
+
+
+def load_pred_feather(path: str | Path) -> pd.DataFrame:
+    pred = pd.read_feather(path)
+    if "CellID" in pred.columns:
+        pred = pred.set_index("CellID")
+    return pred
+
+
+def align_pool_pred(
+    pool: ad.AnnData,
+    pred: pd.DataFrame,
+    slice_id: str,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Return pred rows aligned to pool.obs_names via prep barcodes."""
+    names = pool_pred_names(pool, slice_id)
+    aligned = pred.reindex(names)
+    aligned.index = pool.obs_names
+    ok = aligned.notna().all(axis=1)
+    return aligned, ok
+
 
 def _dense_mean(adata: sc.AnnData, genes: list[str]) -> pd.Series:
     keep = [g for g in genes if g in adata.var_names]
@@ -138,6 +174,181 @@ def get_spatial_perturbation_degs(
     deg_df.attrs["n_perturbed_neighbors"] = n_p
     deg_df.attrs["n_control_neighbors"] = n_c
     return deg_df
+
+
+def spatial_neighbor_indices(
+    adata: sc.AnnData,
+    gene: str,
+    k_neighbors: int = 25,
+    exclude_perturbed: bool = True,
+    cell_type: str | None = "immune",
+    source_cell_type: str | None = None,
+    restrict_to_ntc: bool = False,
+    cell_type_col: str = "cell_type",
+    target_col: str = "target_gene",
+    ntc_label: str = "non-targeting",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return bystander neighbor indices near sgP vs NTC sources."""
+    if "spatial" not in adata.obsm:
+        raise ValueError("adata.obsm['spatial'] not found.")
+    src_ct = source_cell_type or cell_type
+    perturbed_source_mask = adata.obs[target_col].astype(str) == gene
+    if src_ct:
+        perturbed_source_mask &= adata.obs[cell_type_col].astype(str) == src_ct
+    perturbed_source_indices = np.where(perturbed_source_mask)[0]
+    if len(perturbed_source_indices) == 0:
+        raise ValueError(f"No source cells with target_gene == '{gene}'.")
+
+    unperturbed_mask = adata.obs[target_col].astype(str) == ntc_label
+    if src_ct:
+        unperturbed_mask &= adata.obs[cell_type_col].astype(str) == src_ct
+    control_source_indices = np.where(unperturbed_mask)[0]
+    if len(control_source_indices) == 0:
+        raise ValueError("No matched NTC source cells found.")
+
+    spatial_coords = adata.obsm["spatial"]
+    tree = KDTree(spatial_coords)
+    actual_k = min(k_neighbors, adata.n_obs - 1)
+    _, neighbor_idx_p = tree.query(spatial_coords[perturbed_source_indices], k=actual_k + 1)
+    _, neighbor_idx_c = tree.query(spatial_coords[control_source_indices], k=actual_k + 1)
+    niche_perturbed_idx = np.unique(neighbor_idx_p.flatten())
+    niche_control_idx = np.unique(neighbor_idx_c.flatten())
+    niche_perturbed_idx = np.setdiff1d(niche_perturbed_idx, perturbed_source_indices)
+    niche_control_idx = np.setdiff1d(niche_control_idx, control_source_indices)
+    if exclude_perturbed:
+        global_ntc = adata.obs[target_col].astype(str) == ntc_label
+        all_perturbed_indices = np.where(~global_ntc)[0]
+        niche_perturbed_idx = np.setdiff1d(niche_perturbed_idx, all_perturbed_indices)
+        niche_control_idx = np.setdiff1d(niche_control_idx, perturbed_source_indices)
+    if cell_type:
+        type_indices = np.where(adata.obs[cell_type_col].astype(str) == cell_type)[0]
+        niche_perturbed_idx = np.intersect1d(niche_perturbed_idx, type_indices)
+        niche_control_idx = np.intersect1d(niche_control_idx, type_indices)
+    if restrict_to_ntc:
+        ntc_indices = np.where(adata.obs[target_col].astype(str) == ntc_label)[0]
+        niche_perturbed_idx = np.intersect1d(niche_perturbed_idx, ntc_indices)
+        niche_control_idx = np.intersect1d(niche_control_idx, ntc_indices)
+    return niche_perturbed_idx, niche_control_idx
+
+
+def spatial_ntc_niche_indices(
+    adata: sc.AnnData,
+    gene: str,
+    k_neighbors: int = 25,
+    cell_type: str | None = "immune",
+    source_cell_type: str | None = None,
+    cell_type_col: str = "cell_type",
+    target_col: str = "target_gene",
+    ntc_label: str = "non-targeting",
+) -> tuple[np.ndarray, np.ndarray]:
+    """NTC bystanders near sgP sources vs matched NTC cells outside that niche.
+
+    SpaceTravLR predictions exist only on NTC substrate cells. In pooled CRISPR
+    sections, NTC source neighborhoods rarely contain other NTC bystanders, so
+    the sgP-vs-NTC-source kNN contrast has no predicted control arm.
+    """
+    if "spatial" not in adata.obsm:
+        raise ValueError("adata.obsm['spatial'] not found.")
+    src_ct = source_cell_type or cell_type
+    perturbed_source_mask = adata.obs[target_col].astype(str) == gene
+    if src_ct:
+        perturbed_source_mask &= adata.obs[cell_type_col].astype(str) == src_ct
+    perturbed_source_indices = np.where(perturbed_source_mask)[0]
+    if len(perturbed_source_indices) == 0:
+        raise ValueError(f"No source cells with target_gene == '{gene}'.")
+
+    global_ntc = adata.obs[target_col].astype(str) == ntc_label
+    spatial_coords = adata.obsm["spatial"]
+    tree = KDTree(spatial_coords)
+    actual_k = min(k_neighbors, adata.n_obs - 1)
+    _, neighbor_idx_p = tree.query(spatial_coords[perturbed_source_indices], k=actual_k + 1)
+    near_idx = np.unique(neighbor_idx_p.flatten())
+    near_idx = np.setdiff1d(near_idx, perturbed_source_indices)
+    all_sgP = np.where(~global_ntc)[0]
+    near_idx = np.setdiff1d(near_idx, all_sgP)
+    near_idx = np.intersect1d(near_idx, np.where(global_ntc)[0])
+    if cell_type:
+        type_indices = np.where(adata.obs[cell_type_col].astype(str) == cell_type)[0]
+        near_idx = np.intersect1d(near_idx, type_indices)
+
+    ntc_type = np.where(global_ntc)[0]
+    if cell_type:
+        ntc_type = np.intersect1d(ntc_type, np.where(adata.obs[cell_type_col].astype(str) == cell_type)[0])
+    far_idx = np.setdiff1d(ntc_type, near_idx)
+    return near_idx, far_idx
+
+
+def spatial_ntc_niche_pseudobulk(
+    adata: sc.AnnData,
+    gene: str,
+    k_neighbors: int = 25,
+    cell_type: str | None = "immune",
+    source_cell_type: str | None = None,
+    **kwargs,
+) -> pd.DataFrame:
+    near_idx, far_idx = spatial_ntc_niche_indices(
+        adata, gene, k_neighbors=k_neighbors, cell_type=cell_type,
+        source_cell_type=source_cell_type, **kwargs,
+    )
+    if len(near_idx) < 3 or len(far_idx) < 3:
+        raise ValueError(f"Insufficient NTC niche cells (near: {len(near_idx)}, far: {len(far_idx)}).")
+    df = pseudobulk_delta_df(adata[near_idx], adata[far_idx])
+    df.attrs["n_perturbed_neighbors"] = len(near_idx)
+    df.attrs["n_control_neighbors"] = len(far_idx)
+    return df
+
+
+def spatial_neighbor_pseudobulk(
+    adata: sc.AnnData,
+    gene: str,
+    k_neighbors: int = 25,
+    exclude_perturbed: bool = True,
+    cell_type: str | None = "immune",
+    source_cell_type: str | None = None,
+    restrict_to_ntc: bool = False,
+    cell_type_col: str = "cell_type",
+    target_col: str = "target_gene",
+    ntc_label: str = "non-targeting",
+) -> pd.DataFrame:
+    """Mean expression difference in spatial kNN neighbor niches (fast pseudobulk)."""
+    niche_perturbed_idx, niche_control_idx = spatial_neighbor_indices(
+        adata, gene, k_neighbors=k_neighbors, exclude_perturbed=exclude_perturbed,
+        cell_type=cell_type, source_cell_type=source_cell_type,
+        restrict_to_ntc=restrict_to_ntc,
+        cell_type_col=cell_type_col, target_col=target_col, ntc_label=ntc_label,
+    )
+    if len(niche_perturbed_idx) < 3 or len(niche_control_idx) < 3:
+        raise ValueError(
+            f"Insufficient niche cells (P: {len(niche_perturbed_idx)}, C: {len(niche_control_idx)})."
+        )
+    df = pseudobulk_delta_df(adata[niche_perturbed_idx], adata[niche_control_idx])
+    df.attrs["n_perturbed_neighbors"] = len(niche_perturbed_idx)
+    df.attrs["n_control_neighbors"] = len(niche_control_idx)
+    return df
+
+
+def direct_cell_pseudobulk(
+    adata: sc.AnnData,
+    gene: str,
+    cell_type: str | None = None,
+    cell_type_col: str = "cell_type",
+    target_col: str = "target_gene",
+    ntc_label: str = "non-targeting",
+) -> pd.DataFrame:
+    """Mean expression sgP vs NTC within cell type (direct perturbed cells)."""
+    pert_mask = adata.obs[target_col].astype(str) == gene
+    ntc_mask = adata.obs[target_col].astype(str) == ntc_label
+    if cell_type:
+        ct_mask = adata.obs[cell_type_col].astype(str) == cell_type
+        pert_mask &= ct_mask
+        ntc_mask &= ct_mask
+    n_p, n_c = int(pert_mask.sum()), int(ntc_mask.sum())
+    if n_p < 10 or n_c < 10:
+        raise ValueError(f"Insufficient direct cells (P: {n_p}, C: {n_c}).")
+    df = pseudobulk_delta_df(adata[pert_mask], adata[ntc_mask])
+    df.attrs["n_perturbed_cells"] = n_p
+    df.attrs["n_control_cells"] = n_c
+    return df
 
 
 def find_neighbors(

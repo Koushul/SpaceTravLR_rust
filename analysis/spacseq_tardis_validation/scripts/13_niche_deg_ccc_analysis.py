@@ -102,9 +102,17 @@ def spatial_experimental_de(
     perturb: str,
     neighbor_ct: str,
     k_neighbors: int = 25,
+    source_cell_type: str | None = None,
+    niche_mode: str = "ntc_near_far",
 ) -> pd.DataFrame:
-    return ndu.get_spatial_perturbation_degs(
+    if niche_mode == "ntc_near_far":
+        return ndu.spatial_ntc_niche_pseudobulk(
+            pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+            source_cell_type=source_cell_type,
+        )
+    return ndu.spatial_neighbor_pseudobulk(
         pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+        source_cell_type=source_cell_type, restrict_to_ntc=(niche_mode == "ntc_source_knn"),
     )
 
 
@@ -114,50 +122,65 @@ def spatial_predicted_de(
     pred: pd.DataFrame,
     perturb: str,
     neighbor_ct: str,
+    slice_id: str,
     k_neighbors: int = 25,
+    source_cell_type: str | None = None,
+    niche_mode: str = "ntc_near_far",
 ) -> pd.DataFrame:
-    """Predicted Δ in same spatial neighbor sets as experimental."""
-    ntc_mask = pool.obs["target_gene"].astype(str) == "non-targeting"
-    pert_mask = pool.obs["target_gene"].astype(str) == perturb
-    coords = pool.obsm["spatial"]
-    from scipy.spatial import KDTree
-    tree = KDTree(coords)
-    actual_k = min(k_neighbors, pool.n_obs - 1)
-    p_src = np.where(pert_mask)[0]
-    c_src = np.where(ntc_mask)[0]
-    if len(p_src) == 0 or len(c_src) == 0:
+    """Predicted Δ in spatial niche sets matched to experimental."""
+    try:
+        if niche_mode == "ntc_near_far":
+            idx_p, idx_c = ndu.spatial_ntc_niche_indices(
+                pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+                source_cell_type=source_cell_type,
+            )
+        else:
+            idx_p, idx_c = ndu.spatial_neighbor_indices(
+                pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+                source_cell_type=source_cell_type,
+                restrict_to_ntc=(niche_mode == "ntc_source_knn"),
+            )
+    except ValueError:
+        return pd.DataFrame(columns=["gene", "log2fc"])
+    if len(idx_p) < 3 or len(idx_c) < 3:
         return pd.DataFrame(columns=["gene", "log2fc"])
 
-    _, n_p = tree.query(coords[p_src], k=actual_k + 1)
-    _, n_c = tree.query(coords[c_src], k=actual_k + 1)
-    idx_p = np.unique(n_p.flatten())
-    idx_c = np.unique(n_c.flatten())
-    idx_p = np.setdiff1d(idx_p, p_src)
-    idx_c = np.setdiff1d(idx_c, c_src)
-    all_pert = np.where(~ntc_mask)[0]
-    idx_p = np.setdiff1d(idx_p, all_pert)
-    idx_c = np.setdiff1d(idx_c, all_pert)
-    ct_mask = pool.obs["cell_type"].astype(str) == neighbor_ct
-    ct_idx = np.where(ct_mask)[0]
-    idx_p = np.intersect1d(idx_p, ct_idx)
-    idx_c = np.intersect1d(idx_c, ct_idx)
-
-    genes = sorted(set(baseline.var_names) & set(pred.columns))
     sub_p = pool[idx_p]
     sub_c = pool[idx_c]
-    obs_d = pseudobulk_from_pool(sub_p, sub_c, genes)
+    genes = sorted(set(baseline.var_names) & set(pred.columns))
+    if "slice_id" in baseline.obs.columns:
+        base_sl = baseline[baseline.obs["slice_id"].astype(str) == slice_id]
+    else:
+        base_sl = baseline
 
-    base_p = baseline[baseline.obs_names.isin(sub_p.obs_names) & baseline.obs_names.isin(pred.index)]
-    base_c = baseline[baseline.obs_names.isin(sub_c.obs_names) & baseline.obs_names.isin(pred.index)]
-    if base_p.n_obs < 3 or base_c.n_obs < 3:
-        return obs_d.rename(columns={"log2fc": "log2fc"})  # empty pred
+    def niche_pred_delta(sub_pool: sc.AnnData) -> pd.Series:
+        pred_aligned, ok = ndu.align_pool_pred(sub_pool, pred, slice_id)
+        if ok.sum() < 3:
+            return pd.Series(dtype=float)
+        sub = sub_pool[ok.values]
+        bc_map = {b: ndu.prep_barcode(slice_id, b) for b in sub.obs_names}
+        base = base_sl[base_sl.obs_names.isin(bc_map.values())]
+        if base.n_obs < 3:
+            return pd.Series(dtype=float)
+        common = [g for g in genes if g in base.var_names]
+        expr = dense(base, common)
+        pr = pred_aligned.loc[sub.obs_names, common]
+        pr_rows = []
+        ex_rows = []
+        for ob, prep in bc_map.items():
+            if prep in base.obs_names:
+                pr_rows.append(pr.loc[ob, common])
+                ex_rows.append(expr.loc[prep, common])
+        if len(pr_rows) < 3:
+            return pd.Series(dtype=float)
+        return pd.DataFrame(pr_rows).mean(0) - pd.DataFrame(ex_rows).mean(0)
 
-    pred_p = predicted_delta_cells(base_p, pred, genes)
-    pred_c = predicted_delta_cells(base_c, pred, genes)
-    pred_d = pd.DataFrame({
-        "gene": genes,
-        "log2fc": pred_p.set_index("gene").loc[genes, "log2fc"].values - pred_c.set_index("gene").loc[genes, "log2fc"].values,
-    })
+    d_p = niche_pred_delta(sub_p)
+    d_c = niche_pred_delta(sub_c)
+    if d_p.empty or d_c.empty:
+        return pd.DataFrame(columns=["gene", "log2fc"])
+    common = d_p.index.intersection(d_c.index)
+    pred_d = pd.DataFrame({"gene": common, "log2fc": (d_p.loc[common] - d_c.loc[common]).values})
     pred_d["abs_log2fc"] = pred_d.log2fc.abs()
     return pred_d
 
@@ -255,13 +278,15 @@ def ccc_state_analysis(
         except ValueError:
             pval = float("nan")
 
-        base_p = baseline[baseline.obs_names.isin(pool_p.obs_names) & baseline.obs_names.isin(pred.index)]
+        sl = str(pool.obs["slice_id"].iloc[0])
+        pred_aligned, ok = ndu.align_pool_pred(pool_p, pred, sl)
         pred_delta = float("nan")
-        if base_p.n_obs >= 5:
-            common = [g for g in genes if g in pred.columns and g in base_p.var_names]
+        if ok.sum() >= 5:
+            sub = pool_p[ok.values]
+            common = [g for g in genes if g in pred.columns and g in sub.var_names]
             if common:
-                expr = dense(base_p, common)
-                pr = pred.loc[base_p.obs_names, common]
+                expr = dense(sub, common)
+                pr = pred_aligned.loc[sub.obs_names, common]
                 pred_delta = float((pr - expr).mean().mean())
 
         rows.append({
@@ -298,10 +323,15 @@ def run_spatial_analysis(
             pool.obs["slice_id"] = sl
             sc.pp.normalize_total(pool, target_sum=10000)
             sc.pp.log1p(pool)
-            pred = pd.read_feather(pred_dir / f"predicted_KO_{perturb}.feather").set_index("CellID")
+            pred = ndu.load_pred_feather(pred_dir / f"predicted_KO_{perturb}.feather")
             try:
-                exp = spatial_experimental_de(pool, perturb, neighbor_ct, k_neighbors=k)
-                pred_df = spatial_predicted_de(pool, baseline, pred, perturb, neighbor_ct, k_neighbors=k)
+                exp = spatial_experimental_de(
+                    pool, perturb, neighbor_ct, k_neighbors=k, source_cell_type=source_ct,
+                )
+                pred_df = spatial_predicted_de(
+                    pool, baseline, pred, perturb, neighbor_ct, sl,
+                    k_neighbors=k, source_cell_type=source_ct,
+                )
                 exp_dfs.append(exp)
                 pred_dfs.append(pred_df)
             except (ValueError, KeyError) as e:
@@ -366,7 +396,7 @@ def run_beta_leiden_deg(
         exp_agg, pred_agg = [], []
         for sl in slices:
             pool = assign_labeled_pool(sl, data_root, betadata_dir, [cell_type])
-            pred = pd.read_feather(pred_dir / f"predicted_KO_{perturb}.feather").set_index("CellID")
+            pred = ndu.load_pred_feather(pred_dir / f"predicted_KO_{perturb}.feather")
             base_sl = baseline[baseline.obs["slice_id"].astype(str) == sl].copy()
             bl = _bl11.baseline_labels_from_pool(base_sl, pool, pool.obs["beta_leiden"])
             base_sl.obs["beta_leiden"] = base_sl.obs_names.map(bl).astype(str)
@@ -464,7 +494,7 @@ def run_ccc_analysis(
         sc.pp.log1p(pool)
         base_sl = baseline[baseline.obs["slice_id"].astype(str) == sl]
         for perturb, src, neighbor in ccc_cases:
-            pred = pd.read_feather(pred_dir / f"predicted_KO_{perturb}.feather").set_index("CellID")
+            pred = ndu.load_pred_feather(pred_dir / f"predicted_KO_{perturb}.feather")
             for r in ccc_state_analysis(pool, base_sl, pred, perturb, neighbor):
                 r.update({"slice": sl, "source_cell_type": src})
                 rows.append(r)

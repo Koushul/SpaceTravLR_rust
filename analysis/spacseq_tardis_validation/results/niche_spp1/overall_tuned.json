@@ -1,0 +1,101 @@
+{
+  "tag": "tuned",
+  "note": "subQ-1\u20264 has zero sgSpp1 cells; Spp1 assessed via downstream \u0394 and sgBcam proxy",
+  "direct_cases": 10,
+  "direct_median_pearson": 0.16590554575499963,
+  "spatial_cases": 6,
+  "spatial_median_pearson": -0.21950438869085567,
+  "spp1_rows": 96,
+  "best_direct": [
+    {
+      "pearson_r": 0.24794083279583726,
+      "spearman_r": -0.1306753950044323,
+      "n_genes": 2148,
+      "concordant_up": 68,
+      "concordant_down": 464,
+      "perturbation": "Cks1b",
+      "cell_type": "immune",
+      "analysis": "direct_cell",
+      "tag": "tuned"
+    },
+    {
+      "pearson_r": 0.2394806503001382,
+      "spearman_r": -0.0017644796273013305,
+      "n_genes": 2148,
+      "concordant_up": 66,
+      "concordant_down": 559,
+      "perturbation": "Il4ra",
+      "cell_type": "immune",
+      "analysis": "direct_cell",
+      "tag": "tuned"
+    },
+    {
+      "pearson_r": 0.23089366037933814,
+      "spearman_r": 0.15021230622970239,
+      "n_genes": 2148,
+      "concordant_up": 57,
+      "concordant_down": 673,
+      "perturbation": "Cd83",
+      "cell_type": "immune",
+      "analysis": "direct_cell",
+      "tag": "tuned"
+    }
+  ],
+  "best_spatial": [
+    {
+      "pearson_r": -0.07603712639438613,
+      "spearman_r": -0.09616892858962742,
+      "n_genes": 2148,
+      "concordant_up": 219,
+      "concordant_down": 215,
+      "perturbation": "Bcam",
+      "neighbor_cell_type": "fibroblast",
+      "analysis": "spatial_knn",
+      "tag": "tuned"
+    },
+    {
+      "pearson_r": -0.11550791002985625,
+      "spearman_r": -0.20259768888756932,
+      "n_genes": 2148,
+      "concordant_up": 217,
+      "concordant_down": 233,
+      "perturbation": "Bcam",
+      "neighbor_cell_type": "myeloid",
+      "analysis": "spatial_knn",
+      "tag": "tuned"
+    },
+    {
+      "pearson_r": -0.1798925632225054,
+      "spearman_r": -0.18329151793317688,
+      "n_genes": 2148,
+      "concordant_up": 293,
+      "concordant_down": 150,
+      "perturbation": "Il4ra",
+      "neighbor_cell_type": "myeloid",
+      "analysis": "spatial_knn",
+      "tag": "tuned"
+    }
+  ],
+  "bcam_spp1": [
+    {
+      "cell_type": "fibroblast",
+      "obs": 0.3041089177131653,
+      "pred": 2.460810729395275
+    },
+    {
+      "cell_type": "immune",
+      "obs": 0.2991142272949219,
+      "pred": 3.1299066812251475
+    },
+    {
+      "cell_type": "myeloid",
+      "obs": 0.08053386211395264,
+      "pred": 0.681833891722459
+    },
+    {
+      "cell_type": "tumor",
+      "obs": -0.293451651930809,
+      "pred": 0.09128955128349861
+    }
+  ]
+}
