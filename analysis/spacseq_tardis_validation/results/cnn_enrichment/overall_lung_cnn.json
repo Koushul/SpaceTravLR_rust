@@ -1,0 +1,21 @@
+{
+  "tag": "lung_cnn",
+  "per_cell_betas": true,
+  "n_enrichment_tests": 2,
+  "median_pearson_r": NaN,
+  "mean_pearson_r": NaN,
+  "best_cases": [
+    {
+      "slice": "Lung_Metastasis_M001",
+      "perturbation": "Icam1",
+      "pearson_r": NaN,
+      "n_niches": 0
+    },
+    {
+      "slice": "Lung_Metastasis_M001",
+      "perturbation": "Bcam",
+      "pearson_r": NaN,
+      "n_niches": 0
+    }
+  ]
+}

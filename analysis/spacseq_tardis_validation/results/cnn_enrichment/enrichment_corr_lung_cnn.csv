@@ -1,0 +1,3 @@
+n_niches,pearson_r,spearman_r,p_pearson,slice,perturbation,n_pert_cells,tag
+0,,,,Lung_Metastasis_M001,Icam1,1500,lung_cnn
+0,,,,Lung_Metastasis_M001,Bcam,1283,lung_cnn

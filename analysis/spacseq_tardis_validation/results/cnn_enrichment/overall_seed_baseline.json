@@ -1,0 +1,39 @@
+{
+  "tag": "seed_baseline",
+  "per_cell_betas": true,
+  "n_enrichment_tests": 26,
+  "median_pearson_r": -0.16544010215208801,
+  "mean_pearson_r": -0.1138312185908333,
+  "best_cases": [
+    {
+      "slice": "subQ-3",
+      "perturbation": "Bcam",
+      "pearson_r": 0.4986624698445123,
+      "n_niches": 9
+    },
+    {
+      "slice": "subQ-1",
+      "perturbation": "Cks1b",
+      "pearson_r": 0.3855968735534301,
+      "n_niches": 6
+    },
+    {
+      "slice": "subQ-4",
+      "perturbation": "Il4ra",
+      "pearson_r": 0.3611934916183409,
+      "n_niches": 11
+    },
+    {
+      "slice": "subQ-4",
+      "perturbation": "Cd74",
+      "pearson_r": 0.31348978885248635,
+      "n_niches": 12
+    },
+    {
+      "slice": "subQ-4",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.20213635475723274,
+      "n_niches": 4
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "tag": "cnn",
+  "per_cell_betas": true,
+  "n_enrichment_tests": 9,
+  "median_pearson_r": 0.22982611857111654,
+  "mean_pearson_r": 0.23354808105557318,
+  "best_cases": [
+    {
+      "slice": "subQ-3",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.9581759225177102,
+      "n_niches": 3
+    },
+    {
+      "slice": "Lung_Metastasis_M001",
+      "perturbation": "Icam1",
+      "pearson_r": 0.8911292127116053,
+      "n_niches": 4
+    },
+    {
+      "slice": "subQ-2",
+      "perturbation": "Cd74",
+      "pearson_r": 0.48064414908489567,
+      "n_niches": 8
+    },
+    {
+      "slice": "subQ-2",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.447426109734742,
+      "n_niches": 4
+    },
+    {
+      "slice": "subQ-4",
+      "perturbation": "Cd74",
+      "pearson_r": 0.22982611857111654,
+      "n_niches": 10
+    }
+  ]
+}

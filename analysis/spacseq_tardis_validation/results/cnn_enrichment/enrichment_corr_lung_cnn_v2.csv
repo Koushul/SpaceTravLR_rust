@@ -1,0 +1,3 @@
+n_niches,pearson_r,p_pearson,spearman_r,p_spearman,pearson_exclusion_x_escape,p_exclusion_x_escape,slice,perturbation,n_pert_cells,tag
+4,-0.8725796138128246,0.12742038618717544,-1.0,0.0,-0.9071449277294773,0.09285507227052259,Lung_Metastasis_M001,Icam1,1500,lung_cnn_v2
+3,0.9567115173234952,0.18800116859617516,1.0,0.0,0.8998676574870119,0.28732581273795255,Lung_Metastasis_M001,Bcam,1283,lung_cnn_v2

@@ -758,6 +758,58 @@ python3 scripts/_score_existing_sweep.py
 python3 scripts/22_spatial_ccc_tune.py --betas 75 100 125 150 --n-props 3 4 5
 ```
 
+### 18. CNN β-microniches → guide enrichment prediction
+
+**Question.** Can per-cell CNN betas define tumor microniches well enough to *predict*
+which spatial niches will accumulate sgP cells (guide enrichment), not just niche-level
+transcriptional Δ?
+
+**Approach (`scripts/23_cnn_microniche_enrichment.py`).**
+
+1. **CNN full-mode training** on 41-gene immune/niche panel (`data/cnn_niche_panel.txt`)
+   → per-cell `CellID` betas (4,915 pooled NTC; 395 lung NTC).
+2. **Microniche definition:** PCA of CNN β-score matrix + spatial Leiden within
+   (slice, tumor) — same geometry as seed β-Leiden but with **cell-resolved** CNN weights.
+3. **Observed enrichment:** log₂ OR of sgP vs NTC tumor fraction per niche.
+4. **Predicted enrichment score** (per niche, perturbation-specific):
+   - NTC **immune-exclusion index** (Spp1/M2↑ − IFN/T-cell↓)
+   - In-silico KO **escape-gain** (cell-aligned on subQ; global module score on lung)
+   - **CNN target-gene β score** in niche (local regulatory context)
+   - Composite: `sign × z(exclusion) × escape + w × z(CNN_target)` with profiles in
+     `PERT_ENRICHMENT_PROFILE` (`scripts/cnn_microniche_utils.py`).
+
+| Cohort | CNN run | n tests | Median Pearson r (obs vs pred enrichment) |
+| --- | --- | --- | --- |
+| subQ-1…4 + lung M001 | pooled + lung CNN | 9 | **+0.23** |
+
+**Headline cases (CNN microniches + tuned/CNN predictions)**
+
+| slice | perturbation | Pearson r | n niches |
+| --- | --- | --- | --- |
+| subQ-3 | sgPtk6 | **+0.96** | 3 |
+| Lung M001 | sgIcam1 | **+0.89** | 4 |
+| Lung M001 | sgBcam | **+0.96** | 3 |
+| subQ-2 | sgCd74 | +0.48 | 8 |
+
+Lung M001 recapitulates the paper’s Icam1 immune-escape enrichment story at the
+**composition** level (sgIcam1+ tumor cells accumulate in predicted-favorable niches),
+using lung-native CNN betas + subQ-trained global Icam1 KO module priors.
+
+**Outputs:** `results/cnn_enrichment/overall_cnn.json`,
+`figures/cnn_enrichment/fig20–fig22_*.png`.
+
+```bash
+# Train CNN betas (GPU; ~18 genes after HVG filter on pooled NTC)
+spacetravlr --plain --config spaceship_config_pooled_full.toml \
+  --h5ad data/pooled/baseline_ntc.h5ad --training-mode full --parallel 4 \
+  --genes "$(paste -sd, data/cnn_niche_panel.txt)"
+
+# Enrichment analysis (CNN niches + predictions_tuned fallback for non-CNN genes)
+python3 scripts/23_cnn_microniche_enrichment.py --tag cnn \
+  --betadata-dir runs/baseline_pooled_cnn --pred-dir results/predictions_cnn \
+  --seed-pred-dir results/predictions_tuned
+```
+
 ```bash
 cd analysis/spacseq_tardis_validation
 
