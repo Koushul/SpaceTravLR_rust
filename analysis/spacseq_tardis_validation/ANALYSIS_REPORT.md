@@ -422,7 +422,47 @@ sweeps scales against 4‑slice concordance and can write `results/predictions_t
 
 **Orchestration:** `config/validation_runs.json` + `scripts/16_rerun_validation.py`.
 
-## Reproduce
+**Results (4 slices × 6 perturbations × 4 cell types).**
+
+| Model | β / n_prop | Immune median r | Focus median r* | Combined median r |
+|-------|------------|-----------------|-------------------|-------------------|
+| pooled (baseline) | 100 / 4 | **+0.147** | +0.073 | +0.054 |
+| **tuned** | **50 / 3** | **+0.156** | **+0.087** | **+0.062** |
+| extra modulators | 100 / 4 | +0.141 | — | +0.043 |
+
+\*Focus = immune + myeloid + fibroblast (grid-search objective in `scripts/17_iterative_tune.py`).
+
+- **β / n_prop sweep** (`results/iteration/sweep_results.csv`): lower ligand splash
+  (β=50) with fewer propagation steps (n=3) wins on immune and stromal compartments;
+  default β=100/n=4 is mid-pack. Heatmap: `figures/iteration/fig_iteration_dashboard_tuned.png`.
+- **Tuned highlights:** subQ‑1 immune r **+0.21** (vs +0.19 pooled); Stouffer meta
+  sgCd83/immune r = **+0.24**; sgIl4ra/immune **+0.23**; β‑Leiden microniche median
+  r = **+0.086** (vs +0.080 pooled, +0.017 graphclust).
+- **Extra modulators retrain** (307 genes, 44 immune/MHC/T‑cell pathway predictors):
+  completes all validation targets (`SPACETRAVLR_FORCE_KEEP_GENES` from pooled seed
+  gene list). Immune r = +0.141 (comparable to pooled); **11** Stouffer‑significant
+  perturbation×compartment pairs vs 8 for pooled — strongest for sgCd83/fibroblast and
+  sgPtk6/immune. Extra modulators alone do not beat β‑tuning on focus concordance.
+
+### 13. Spatial neighbor DEG + CCC / T‑cell validation
+
+`scripts/13_niche_deg_ccc_analysis.py` compares Wilcoxon DEGs in spatial kNN
+bystander niches (sgP vs NTC sources) and β‑Leiden microniches against SpaceTravLR
+predicted pseudobulk Δ, plus antigen‑presentation / T‑cell state scores.
+
+Outputs (`--tag pooled`):
+
+| Artifact | Path |
+|----------|------|
+| Spatial neighbor grid | `figures/niche_deg/fig6_spatial_neighbor_grid_pooled.png` |
+| β‑Leiden DEG grid | `figures/niche_deg/fig7_beta_leiden_deg_grid_pooled.png` |
+| T‑cell / CCC state | `figures/niche_deg/fig8_ccc_tcell_state_pooled.png` |
+| Pathway concordance | `figures/niche_deg/fig9_pathway_concordance_pooled.png` |
+
+Three‑model scorecard: `results/scorecard/prediction_scorecard.csv` (pooled / tuned / extra).
+
+**Python env.** Analysis scripts re‑exec under Rust Python + mc38 site‑packages via
+`scripts/_py_boot.py` (`PYTHONNOUSERSITE=1`) to avoid broken user‑site scanpy.
 
 ```bash
 cd analysis/spacseq_tardis_validation
@@ -518,12 +558,20 @@ SPACETRAVLR_FORCE_CPU=1 spacetravlr --plain --training-mode seed \
   --output-dir runs/baseline_pooled_extra_seed \
   --max-ligands 200 --genes "$GENES" --parallel 8
 
-# 14. Beta scale sweep + tuned predictions
+# 14. Iterative β × n_propagation sweep (recommended)
+python3 scripts/17_iterative_tune.py --tag tuned
+
+# 15. Beta scale sweep (legacy single-axis)
 python3 scripts/15_beta_scale_sweep.py --scales 75 100 125 150 --write-tuned
 
-# 15. Full re-validation for extra / tuned models
+# 16. Full re-validation for extra / tuned models
+bash scripts/run_extra_retrain.sh   # or scripts/16_rerun_validation.py --model pooled_extra
 python3 scripts/16_rerun_validation.py --model pooled_extra --skip-train --tag extra
-python3 scripts/16_rerun_validation.py --model pooled_tuned --skip-train --tag tuned
+python3 scripts/17_iterative_tune.py --tag tuned --skip-sweep   # validation only
+
+# 17. Spatial DEG + CCC figures
+python3 scripts/13_niche_deg_ccc_analysis.py --pred-dir results/predictions_pooled --tag pooled
+python3 scripts/10_sharpened_scorecard.py --models pooled tuned extra
 ```
 
 ## Limitations and next steps
@@ -575,6 +623,11 @@ in the cell compartments where the perturbed genes are biologically active
     sgIl4ra/immune r = +0.15 across four slices.
   - **Pooled NTC training (n=4,915):** immune median r +0.15 (vs +0.09
     single‑slice); fibroblast r turns positive (+0.07 vs −0.01).
+  - **Hyperparameter tuning (β=50, n_prop=3):** immune median r **+0.156**
+    (+6% vs pooled); focus compartments +0.087 (+19%); subQ‑1 immune r **+0.21**;
+    sgCd83/immune meta r = **+0.24**.
+  - **Extra immune modulators (44 genes):** comparable immune r (+0.141);
+    more Stouffer‑significant meta pairs (11 vs 8) but lower combined median r.
   - **Top‑15 predicted‑magnitude sign agreement**: 80 % (binomial p = 0.018)
     for sgCd83/immune and sgIl4ra/myeloid; 67 % median across seven
     immune/myeloid pairs.

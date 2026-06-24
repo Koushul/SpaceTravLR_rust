@@ -1,0 +1,177 @@
+pathway,perturbation,neighbor_cell_type,obs_neighbor_delta,pred_delta_on_neighbors,obs_pval,n_pert_neighbors,n_ctrl_neighbors,slice,source_cell_type
+MHC-II presentation,Il4ra,immune,-0.17109620571136475,,0.05691540986299515,28,163,subQ-1,immune
+MHC-I / cross-presentation,Il4ra,immune,-0.13603591918945312,,0.301852285861969,28,163,subQ-1,immune
+T cell recruitment (CXCL),Il4ra,immune,-0.13915681838989258,,0.11442990601062775,28,163,subQ-1,immune
+T cell costimulation,Il4ra,immune,-0.05396533012390137,,0.44764992594718933,28,163,subQ-1,immune
+Immune checkpoint / exhaustion,Il4ra,immune,-0.021753020584583282,,0.635768711566925,28,163,subQ-1,immune
+Il4 / Th2 signaling,Il4ra,immune,0.022404074668884277,,0.8968573212623596,28,163,subQ-1,immune
+Macrophage M1,Il4ra,immune,-0.03179013729095459,,0.37843939661979675,28,163,subQ-1,immune
+Macrophage M2,Il4ra,immune,0.0159321129322052,,0.8837544322013855,28,163,subQ-1,immune
+Effector / cytotoxic,Il4ra,immune,0.11213091015815735,,0.1865578144788742,28,163,subQ-1,immune
+Exhaustion / checkpoint,Il4ra,immune,-0.03294551372528076,,0.4457381069660187,28,163,subQ-1,immune
+Treg / suppressive,Il4ra,immune,-0.04285149276256561,,0.3557444214820862,28,163,subQ-1,immune
+MHC-II presentation,Il4ra,myeloid,-0.16422045230865479,,0.001074539846740663,68,367,subQ-1,immune
+MHC-I / cross-presentation,Il4ra,myeloid,0.011329293251037598,,0.9184455871582031,68,367,subQ-1,immune
+T cell recruitment (CXCL),Il4ra,myeloid,-0.1238940954208374,,0.05362953618168831,68,367,subQ-1,immune
+T cell costimulation,Il4ra,myeloid,-0.039880722761154175,,0.45521441102027893,68,367,subQ-1,immune
+Immune checkpoint / exhaustion,Il4ra,myeloid,-0.032173119485378265,,0.2554491460323334,68,367,subQ-1,immune
+Il4 / Th2 signaling,Il4ra,myeloid,-0.004126220941543579,,0.9916919469833374,68,367,subQ-1,immune
+Macrophage M1,Il4ra,myeloid,-0.10464203357696533,,0.07704050093889236,68,367,subQ-1,immune
+Macrophage M2,Il4ra,myeloid,0.01955750584602356,,0.6274410486221313,68,367,subQ-1,immune
+Effector / cytotoxic,Il4ra,myeloid,0.004955261945724487,,0.6049008369445801,68,367,subQ-1,immune
+Exhaustion / checkpoint,Il4ra,myeloid,-0.03982968628406525,,0.07289943844079971,68,367,subQ-1,immune
+Treg / suppressive,Il4ra,myeloid,-0.0032615438103675842,,0.9637628793716431,68,367,subQ-1,immune
+MHC-II presentation,Cd83,immune,-0.13107800483703613,,0.04750862717628479,50,163,subQ-1,immune
+MHC-I / cross-presentation,Cd83,immune,-0.08961832523345947,,0.29709887504577637,50,163,subQ-1,immune
+T cell recruitment (CXCL),Cd83,immune,-0.16789615154266357,,0.04742904379963875,50,163,subQ-1,immune
+T cell costimulation,Cd83,immune,-0.037719786167144775,,0.5592114329338074,50,163,subQ-1,immune
+Immune checkpoint / exhaustion,Cd83,immune,-0.029464110732078552,,0.44813165068626404,50,163,subQ-1,immune
+Il4 / Th2 signaling,Cd83,immune,0.04242819547653198,,0.5454356670379639,50,163,subQ-1,immune
+Macrophage M1,Cd83,immune,-0.07902449369430542,,0.12303517013788223,50,163,subQ-1,immune
+Macrophage M2,Cd83,immune,0.054987818002700806,,0.28258708119392395,50,163,subQ-1,immune
+Effector / cytotoxic,Cd83,immune,0.05598202347755432,,0.6785931587219238,50,163,subQ-1,immune
+Exhaustion / checkpoint,Cd83,immune,-0.019504524767398834,,0.6487526893615723,50,163,subQ-1,immune
+Treg / suppressive,Cd83,immune,-0.0408022403717041,,0.424058735370636,50,163,subQ-1,immune
+MHC-II presentation,Cd74,immune,-0.1660100221633911,,0.017448794096708298,55,163,subQ-1,myeloid
+MHC-I / cross-presentation,Cd74,immune,-0.027218341827392578,,0.906515896320343,55,163,subQ-1,myeloid
+T cell recruitment (CXCL),Cd74,immune,-0.1338096261024475,,0.10429109632968903,55,163,subQ-1,myeloid
+T cell costimulation,Cd74,immune,-0.08370167762041092,,0.07335726916790009,55,163,subQ-1,myeloid
+Immune checkpoint / exhaustion,Cd74,immune,-0.005862526595592499,,0.7855777740478516,55,163,subQ-1,myeloid
+Il4 / Th2 signaling,Cd74,immune,0.042197614908218384,,0.5549030303955078,55,163,subQ-1,myeloid
+Macrophage M1,Cd74,immune,-0.05270075798034668,,0.2332993745803833,55,163,subQ-1,myeloid
+Macrophage M2,Cd74,immune,0.030246257781982422,,0.6490904092788696,55,163,subQ-1,myeloid
+Effector / cytotoxic,Cd74,immune,0.1051703691482544,,0.18191492557525635,55,163,subQ-1,myeloid
+Exhaustion / checkpoint,Cd74,immune,-0.013099305331707,,0.8002085089683533,55,163,subQ-1,myeloid
+Treg / suppressive,Cd74,immune,-0.007027201354503632,,0.8510744571685791,55,163,subQ-1,myeloid
+MHC-II presentation,Il4ra,immune,-0.14126873016357422,,0.4070500135421753,39,160,subQ-2,immune
+MHC-I / cross-presentation,Il4ra,immune,0.11308878660202026,,0.3629103899002075,39,160,subQ-2,immune
+T cell recruitment (CXCL),Il4ra,immune,-0.09765651822090149,,0.2482564002275467,39,160,subQ-2,immune
+T cell costimulation,Il4ra,immune,-0.010019350796937943,,0.8397489190101624,39,160,subQ-2,immune
+Immune checkpoint / exhaustion,Il4ra,immune,0.015935733914375305,,0.5301907658576965,39,160,subQ-2,immune
+Il4 / Th2 signaling,Il4ra,immune,0.017189130187034607,,0.7353324890136719,39,160,subQ-2,immune
+Macrophage M1,Il4ra,immune,-0.04418104887008667,,0.4666636288166046,39,160,subQ-2,immune
+Macrophage M2,Il4ra,immune,0.03210344910621643,,0.49318554997444153,39,160,subQ-2,immune
+Effector / cytotoxic,Il4ra,immune,0.025303900241851807,,0.7494562268257141,39,160,subQ-2,immune
+Exhaustion / checkpoint,Il4ra,immune,-0.01892656460404396,,0.613706111907959,39,160,subQ-2,immune
+Treg / suppressive,Il4ra,immune,-0.03640018031001091,,0.5287072062492371,39,160,subQ-2,immune
+MHC-II presentation,Il4ra,myeloid,-0.3525254726409912,,0.0063720219768583775,50,189,subQ-2,immune
+MHC-I / cross-presentation,Il4ra,myeloid,0.14125943183898926,,0.1260811984539032,50,189,subQ-2,immune
+T cell recruitment (CXCL),Il4ra,myeloid,-0.07231014966964722,,0.30286699533462524,50,189,subQ-2,immune
+T cell costimulation,Il4ra,myeloid,0.024164341390132904,,0.5621886253356934,50,189,subQ-2,immune
+Immune checkpoint / exhaustion,Il4ra,myeloid,0.02136099338531494,,0.385469913482666,50,189,subQ-2,immune
+Il4 / Th2 signaling,Il4ra,myeloid,0.06810387969017029,,0.4920431971549988,50,189,subQ-2,immune
+Macrophage M1,Il4ra,myeloid,-0.01030421257019043,,0.5726146101951599,50,189,subQ-2,immune
+Macrophage M2,Il4ra,myeloid,0.13667505979537964,,0.01684405840933323,50,189,subQ-2,immune
+Effector / cytotoxic,Il4ra,myeloid,0.007710717618465424,,0.7518433928489685,50,189,subQ-2,immune
+Exhaustion / checkpoint,Il4ra,myeloid,0.01914302259683609,,0.3955693244934082,50,189,subQ-2,immune
+Treg / suppressive,Il4ra,myeloid,0.011047082021832466,,0.3944563567638397,50,189,subQ-2,immune
+MHC-II presentation,Cd83,immune,-0.06895136833190918,,0.4944922924041748,84,160,subQ-2,immune
+MHC-I / cross-presentation,Cd83,immune,0.1459159255027771,,0.08355726301670074,84,160,subQ-2,immune
+T cell recruitment (CXCL),Cd83,immune,-0.014830559492111206,,0.905273973941803,84,160,subQ-2,immune
+T cell costimulation,Cd83,immune,-0.0009944215416908264,,0.9162090420722961,84,160,subQ-2,immune
+Immune checkpoint / exhaustion,Cd83,immune,0.022067628800868988,,0.36948758363723755,84,160,subQ-2,immune
+Il4 / Th2 signaling,Cd83,immune,0.07857346534729004,,0.11233928054571152,84,160,subQ-2,immune
+Macrophage M1,Cd83,immune,0.04081428050994873,,0.6943069696426392,84,160,subQ-2,immune
+Macrophage M2,Cd83,immune,0.06460627913475037,,0.19110757112503052,84,160,subQ-2,immune
+Effector / cytotoxic,Cd83,immune,0.05384320020675659,,0.35334134101867676,84,160,subQ-2,immune
+Exhaustion / checkpoint,Cd83,immune,0.023221362382173538,,0.3298138678073883,84,160,subQ-2,immune
+Treg / suppressive,Cd83,immune,0.021643303334712982,,0.5821837782859802,84,160,subQ-2,immune
+MHC-II presentation,Cd74,immune,-0.028661608695983887,,0.7478618025779724,75,160,subQ-2,myeloid
+MHC-I / cross-presentation,Cd74,immune,0.07434552907943726,,0.4190616011619568,75,160,subQ-2,myeloid
+T cell recruitment (CXCL),Cd74,immune,-0.048752278089523315,,0.4781191051006317,75,160,subQ-2,myeloid
+T cell costimulation,Cd74,immune,0.01061791181564331,,0.7049304842948914,75,160,subQ-2,myeloid
+Immune checkpoint / exhaustion,Cd74,immune,-0.003967791795730591,,0.8723673224449158,75,160,subQ-2,myeloid
+Il4 / Th2 signaling,Cd74,immune,0.07526904344558716,,0.14534825086593628,75,160,subQ-2,myeloid
+Macrophage M1,Cd74,immune,0.005107909440994263,,0.9416986703872681,75,160,subQ-2,myeloid
+Macrophage M2,Cd74,immune,0.06505802273750305,,0.2136361449956894,75,160,subQ-2,myeloid
+Effector / cytotoxic,Cd74,immune,0.04607599973678589,,0.33200618624687195,75,160,subQ-2,myeloid
+Exhaustion / checkpoint,Cd74,immune,0.012606989592313766,,0.6361342668533325,75,160,subQ-2,myeloid
+Treg / suppressive,Cd74,immune,-0.0016114264726638794,,0.972384512424469,75,160,subQ-2,myeloid
+MHC-II presentation,Il4ra,immune,-0.41382813453674316,,0.009597602300345898,36,196,subQ-3,immune
+MHC-I / cross-presentation,Il4ra,immune,0.011698007583618164,,0.6217777729034424,36,196,subQ-3,immune
+T cell recruitment (CXCL),Il4ra,immune,-0.12060794234275818,,0.2598000168800354,36,196,subQ-3,immune
+T cell costimulation,Il4ra,immune,-0.03884213790297508,,0.42846864461898804,36,196,subQ-3,immune
+Immune checkpoint / exhaustion,Il4ra,immune,-0.015629982575774193,,0.5860475301742554,36,196,subQ-3,immune
+Il4 / Th2 signaling,Il4ra,immune,0.1037711650133133,,0.17304347455501556,36,196,subQ-3,immune
+Macrophage M1,Il4ra,immune,-0.0949634313583374,,0.18179982900619507,36,196,subQ-3,immune
+Macrophage M2,Il4ra,immune,0.07828378677368164,,0.10553932934999466,36,196,subQ-3,immune
+Effector / cytotoxic,Il4ra,immune,0.026262372732162476,,0.7788087725639343,36,196,subQ-3,immune
+Exhaustion / checkpoint,Il4ra,immune,0.0009522028267383575,,0.8957381248474121,36,196,subQ-3,immune
+Treg / suppressive,Il4ra,immune,-0.04291268438100815,,0.1819552332162857,36,196,subQ-3,immune
+MHC-II presentation,Il4ra,myeloid,-0.2621370553970337,,0.00986489374190569,47,201,subQ-3,immune
+MHC-I / cross-presentation,Il4ra,myeloid,0.03681063652038574,,0.7186381220817566,47,201,subQ-3,immune
+T cell recruitment (CXCL),Il4ra,myeloid,-0.16304877400398254,,0.023120282217860222,47,201,subQ-3,immune
+T cell costimulation,Il4ra,myeloid,0.01646609604358673,,0.4913383424282074,47,201,subQ-3,immune
+Immune checkpoint / exhaustion,Il4ra,myeloid,-0.006492931395769119,,0.9477840662002563,47,201,subQ-3,immune
+Il4 / Th2 signaling,Il4ra,myeloid,0.14629104733467102,,0.03249039500951767,47,201,subQ-3,immune
+Macrophage M1,Il4ra,myeloid,-0.019489824771881104,,0.636140763759613,47,201,subQ-3,immune
+Macrophage M2,Il4ra,myeloid,0.08503633737564087,,0.2529697120189667,47,201,subQ-3,immune
+Effector / cytotoxic,Il4ra,myeloid,-0.0030725672841072083,,0.8640748858451843,47,201,subQ-3,immune
+Exhaustion / checkpoint,Il4ra,myeloid,0.003743387758731842,,0.6649201512336731,47,201,subQ-3,immune
+Treg / suppressive,Il4ra,myeloid,-0.029798559844493866,,0.16621586680412292,47,201,subQ-3,immune
+MHC-II presentation,Cd83,immune,-0.4741792678833008,,8.32776931929402e-05,57,196,subQ-3,immune
+MHC-I / cross-presentation,Cd83,immune,-0.07215523719787598,,0.38636770844459534,57,196,subQ-3,immune
+T cell recruitment (CXCL),Cd83,immune,-0.12940055131912231,,0.10128770023584366,57,196,subQ-3,immune
+T cell costimulation,Cd83,immune,-0.012973643839359283,,0.5361093282699585,57,196,subQ-3,immune
+Immune checkpoint / exhaustion,Cd83,immune,0.01021689921617508,,0.6150847673416138,57,196,subQ-3,immune
+Il4 / Th2 signaling,Cd83,immune,0.07281439006328583,,0.16698609292507172,57,196,subQ-3,immune
+Macrophage M1,Cd83,immune,-0.03513765335083008,,0.4447333812713623,57,196,subQ-3,immune
+Macrophage M2,Cd83,immune,0.010933607816696167,,0.5180841088294983,57,196,subQ-3,immune
+Effector / cytotoxic,Cd83,immune,0.05009913444519043,,0.3869801163673401,57,196,subQ-3,immune
+Exhaustion / checkpoint,Cd83,immune,0.01957424357533455,,0.5135606527328491,57,196,subQ-3,immune
+Treg / suppressive,Cd83,immune,-0.04140232503414154,,0.12705908715724945,57,196,subQ-3,immune
+MHC-II presentation,Cd74,immune,-0.23265624046325684,,0.020282283425331116,65,196,subQ-3,myeloid
+MHC-I / cross-presentation,Cd74,immune,0.06658494472503662,,0.3409912586212158,65,196,subQ-3,myeloid
+T cell recruitment (CXCL),Cd74,immune,-0.017620205879211426,,0.9174634218215942,65,196,subQ-3,myeloid
+T cell costimulation,Cd74,immune,0.0035247504711151123,,0.9761164784431458,65,196,subQ-3,myeloid
+Immune checkpoint / exhaustion,Cd74,immune,-0.01989256963133812,,0.3457111716270447,65,196,subQ-3,myeloid
+Il4 / Th2 signaling,Cd74,immune,0.03631366789340973,,0.519498348236084,65,196,subQ-3,myeloid
+Macrophage M1,Cd74,immune,-0.06118243932723999,,0.4145162105560303,65,196,subQ-3,myeloid
+Macrophage M2,Cd74,immune,-0.005876824259757996,,0.7931737303733826,65,196,subQ-3,myeloid
+Effector / cytotoxic,Cd74,immune,-0.00045800209045410156,,0.9027431011199951,65,196,subQ-3,myeloid
+Exhaustion / checkpoint,Cd74,immune,-0.020093269646167755,,0.3999529778957367,65,196,subQ-3,myeloid
+Treg / suppressive,Cd74,immune,-0.03229448199272156,,0.20370794832706451,65,196,subQ-3,myeloid
+MHC-II presentation,Il4ra,immune,-0.10341405868530273,,0.5532698631286621,33,176,subQ-4,immune
+MHC-I / cross-presentation,Il4ra,immune,-0.0667121410369873,,0.6902862191200256,33,176,subQ-4,immune
+T cell recruitment (CXCL),Il4ra,immune,-0.09763357043266296,,0.3910275399684906,33,176,subQ-4,immune
+T cell costimulation,Il4ra,immune,0.034812211990356445,,0.332724004983902,33,176,subQ-4,immune
+Immune checkpoint / exhaustion,Il4ra,immune,-0.019302360713481903,,0.574041485786438,33,176,subQ-4,immune
+Il4 / Th2 signaling,Il4ra,immune,0.05151207745075226,,0.30421850085258484,33,176,subQ-4,immune
+Macrophage M1,Il4ra,immune,-0.03577911853790283,,0.5232095718383789,33,176,subQ-4,immune
+Macrophage M2,Il4ra,immune,0.030767157673835754,,0.5700754523277283,33,176,subQ-4,immune
+Effector / cytotoxic,Il4ra,immune,0.007152765989303589,,0.7848552465438843,33,176,subQ-4,immune
+Exhaustion / checkpoint,Il4ra,immune,-0.0004372633993625641,,0.9799277782440186,33,176,subQ-4,immune
+Treg / suppressive,Il4ra,immune,-0.027088776230812073,,0.5049480199813843,33,176,subQ-4,immune
+MHC-II presentation,Il4ra,myeloid,-0.14357995986938477,,0.23100610077381134,45,155,subQ-4,immune
+MHC-I / cross-presentation,Il4ra,myeloid,0.005968689918518066,,0.9079957008361816,45,155,subQ-4,immune
+T cell recruitment (CXCL),Il4ra,myeloid,-0.06060329079627991,,0.4528876543045044,45,155,subQ-4,immune
+T cell costimulation,Il4ra,myeloid,0.04529326409101486,,0.2578299641609192,45,155,subQ-4,immune
+Immune checkpoint / exhaustion,Il4ra,myeloid,0.014720965176820755,,0.6809218525886536,45,155,subQ-4,immune
+Il4 / Th2 signaling,Il4ra,myeloid,0.06869372725486755,,0.3236813247203827,45,155,subQ-4,immune
+Macrophage M1,Il4ra,myeloid,-0.0685286819934845,,0.24620242416858673,45,155,subQ-4,immune
+Macrophage M2,Il4ra,myeloid,0.02213078737258911,,0.6859698295593262,45,155,subQ-4,immune
+Effector / cytotoxic,Il4ra,myeloid,0.03642364591360092,,0.2132723480463028,45,155,subQ-4,immune
+Exhaustion / checkpoint,Il4ra,myeloid,0.028288517147302628,,0.3038374185562134,45,155,subQ-4,immune
+Treg / suppressive,Il4ra,myeloid,0.007882270961999893,,0.9317991137504578,45,155,subQ-4,immune
+MHC-II presentation,Cd83,immune,-0.22172141075134277,,0.02850903756916523,73,176,subQ-4,immune
+MHC-I / cross-presentation,Cd83,immune,-0.1297129988670349,,0.1443524807691574,73,176,subQ-4,immune
+T cell recruitment (CXCL),Cd83,immune,-0.07836651802062988,,0.2416585385799408,73,176,subQ-4,immune
+T cell costimulation,Cd83,immune,0.0026778504252433777,,0.9501813650131226,73,176,subQ-4,immune
+Immune checkpoint / exhaustion,Cd83,immune,-0.010060928761959076,,0.700526773929596,73,176,subQ-4,immune
+Il4 / Th2 signaling,Cd83,immune,0.01732802391052246,,0.7095191478729248,73,176,subQ-4,immune
+Macrophage M1,Cd83,immune,-0.0675763189792633,,0.23311001062393188,73,176,subQ-4,immune
+Macrophage M2,Cd83,immune,-0.0038441717624664307,,0.8941560983657837,73,176,subQ-4,immune
+Effector / cytotoxic,Cd83,immune,0.061731815338134766,,0.07257579267024994,73,176,subQ-4,immune
+Exhaustion / checkpoint,Cd83,immune,-0.007159367203712463,,0.781923234462738,73,176,subQ-4,immune
+Treg / suppressive,Cd83,immune,0.00017944350838661194,,0.7810345888137817,73,176,subQ-4,immune
+MHC-II presentation,Cd74,immune,-0.2132474184036255,,0.06557641923427582,63,176,subQ-4,myeloid
+MHC-I / cross-presentation,Cd74,immune,-0.09138929843902588,,0.5034216642379761,63,176,subQ-4,myeloid
+T cell recruitment (CXCL),Cd74,immune,-0.07252639532089233,,0.3796340823173523,63,176,subQ-4,myeloid
+T cell costimulation,Cd74,immune,0.010193593800067902,,0.6343173384666443,63,176,subQ-4,myeloid
+Immune checkpoint / exhaustion,Cd74,immune,0.009871430695056915,,0.7324158549308777,63,176,subQ-4,myeloid
+Il4 / Th2 signaling,Cd74,immune,0.0386880487203598,,0.4380963444709778,63,176,subQ-4,myeloid
+Macrophage M1,Cd74,immune,0.013384222984313965,,0.8719825744628906,63,176,subQ-4,myeloid
+Macrophage M2,Cd74,immune,-0.020378440618515015,,0.6018090844154358,63,176,subQ-4,myeloid
+Effector / cytotoxic,Cd74,immune,0.012176722288131714,,0.6652849316596985,63,176,subQ-4,myeloid
+Exhaustion / checkpoint,Cd74,immune,0.019045013934373856,,0.43796563148498535,63,176,subQ-4,myeloid
+Treg / suppressive,Cd74,immune,0.03002975508570671,,0.47175323963165283,63,176,subQ-4,myeloid

@@ -1,0 +1,65 @@
+pathway,n_genes,n_niches,kruskal_H,kruskal_p,niche_type
+M1/inflam macrophage,15,21,141.49850463867188,2.6292136102802587e-20,beta_leiden
+M2/suppressive macrophage,15,21,107.92649841308594,4.6836493694914563e-14,beta_leiden
+Antigen processing (MHC-I),6,21,28.74318504333496,0.09294063597917557,beta_leiden
+Antigen presentation (MHC-II),3,21,187.4152374267578,3.410601954198959e-29,beta_leiden
+T-cell effector,7,21,431.5511474609375,0.0,beta_leiden
+T-cell exhaustion / Treg,5,21,55.2684211730957,3.743527486221865e-05,beta_leiden
+ECM/fibroblast,12,21,220.84088134765625,8.11420920642252e-36,beta_leiden
+Interferon response,9,21,99.26062774658203,1.7078641018769547e-12,beta_leiden
+M1/inflam macrophage,15,10,386.4466247558594,0.0,graphclust
+M2/suppressive macrophage,15,10,47.7271614074707,2.8720720024466573e-07,graphclust
+Antigen processing (MHC-I),6,10,40.003204345703125,7.588374501210637e-06,graphclust
+Antigen presentation (MHC-II),3,10,535.869140625,0.0,graphclust
+T-cell effector,7,10,109.37855529785156,1.9675606270931003e-19,graphclust
+T-cell exhaustion / Treg,5,10,40.09759521484375,7.295306659216294e-06,graphclust
+ECM/fibroblast,12,10,274.12109375,0.0,graphclust
+Interferon response,9,10,175.13250732421875,5.254106365186409e-33,graphclust
+M1/inflam macrophage,15,26,93.75624084472656,6.911162753198141e-10,beta_leiden
+M2/suppressive macrophage,15,26,137.96987915039062,1.340980045009523e-17,beta_leiden
+Antigen processing (MHC-I),6,26,125.56542205810547,2.284598842367696e-15,beta_leiden
+Antigen presentation (MHC-II),3,26,57.171714782714844,0.000253510195761919,beta_leiden
+T-cell effector,7,26,200.4000701904297,2.568974179620383e-29,beta_leiden
+T-cell exhaustion / Treg,5,26,41.8722038269043,0.018549423664808273,beta_leiden
+ECM/fibroblast,12,26,139.10935974121094,8.324968196318447e-18,beta_leiden
+Interferon response,9,26,151.6718292236328,4.144544515226903e-20,beta_leiden
+M1/inflam macrophage,15,10,199.8629913330078,3.5394879429948754e-38,graphclust
+M2/suppressive macrophage,15,10,47.36351776123047,3.357770310685737e-07,graphclust
+Antigen processing (MHC-I),6,10,129.8767852783203,1.2571811978104016e-23,graphclust
+Antigen presentation (MHC-II),3,10,297.93505859375,0.0,graphclust
+T-cell effector,7,10,69.5347671508789,1.8784633570856357e-11,graphclust
+T-cell exhaustion / Treg,5,10,21.424816131591797,0.010892044752836227,graphclust
+ECM/fibroblast,12,10,166.02867126464844,4.141875974218385e-31,graphclust
+Interferon response,9,10,119.91958618164062,1.3877783418264214e-21,graphclust
+M1/inflam macrophage,15,26,113.12799835205078,3.539464186151642e-13,beta_leiden
+M2/suppressive macrophage,15,26,159.10055541992188,1.7365160522968048e-21,beta_leiden
+Antigen processing (MHC-I),6,26,93.28915405273438,8.254561478793221e-10,beta_leiden
+Antigen presentation (MHC-II),3,26,120.64004516601562,1.707265378332254e-14,beta_leiden
+T-cell effector,7,26,250.8032684326172,3.7533653250078436e-39,beta_leiden
+T-cell exhaustion / Treg,5,26,29.764829635620117,0.23321549594402313,beta_leiden
+ECM/fibroblast,12,26,182.94935607910156,5.615366454264612e-26,beta_leiden
+Interferon response,9,26,90.6662368774414,2.2267268029452225e-09,beta_leiden
+M1/inflam macrophage,15,7,365.3047180175781,0.0,graphclust
+M2/suppressive macrophage,15,7,60.56344223022461,3.4578846730415336e-11,graphclust
+Antigen processing (MHC-I),6,7,52.31537628173828,1.6114038992043334e-09,graphclust
+Antigen presentation (MHC-II),3,7,451.49700927734375,0.0,graphclust
+T-cell effector,7,7,74.40845489501953,5.080419930776105e-14,graphclust
+T-cell exhaustion / Treg,5,7,10.93907642364502,0.09027770161628723,graphclust
+ECM/fibroblast,12,7,255.8968505859375,0.0,graphclust
+Interferon response,9,7,174.14500427246094,5.937443202961861e-35,graphclust
+M1/inflam macrophage,15,24,122.1526870727539,1.7031275588574456e-15,beta_leiden
+M2/suppressive macrophage,15,24,119.71450805664062,4.682826307576609e-15,beta_leiden
+Antigen processing (MHC-I),6,24,105.90888977050781,1.3219581679324577e-12,beta_leiden
+Antigen presentation (MHC-II),3,24,99.43113708496094,1.7648110403611916e-11,beta_leiden
+T-cell effector,7,24,247.075439453125,1.8829807984518297e-39,beta_leiden
+T-cell exhaustion / Treg,5,24,18.41891860961914,0.734386682510376,beta_leiden
+ECM/fibroblast,12,24,154.9681854248047,1.487821757557197e-21,beta_leiden
+Interferon response,9,24,137.92745971679688,2.238087694133701e-18,beta_leiden
+M1/inflam macrophage,15,7,271.549072265625,0.0,graphclust
+M2/suppressive macrophage,15,7,30.321298599243164,3.414766615605913e-05,graphclust
+Antigen processing (MHC-I),6,7,52.096981048583984,1.7829270282376797e-09,graphclust
+Antigen presentation (MHC-II),3,7,321.5330505371094,0.0,graphclust
+T-cell effector,7,7,82.68863677978516,9.935576827889143e-16,graphclust
+T-cell exhaustion / Treg,5,7,8.134444236755371,0.22841817140579224,graphclust
+ECM/fibroblast,12,7,109.50786590576172,2.5842216896439797e-21,graphclust
+Interferon response,9,7,143.0059814453125,2.324931350979502e-28,graphclust

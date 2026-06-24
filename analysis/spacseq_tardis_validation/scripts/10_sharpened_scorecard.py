@@ -7,10 +7,17 @@ metrics into one comparison table and summary figure.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _py_boot import ensure_boot
+
+ensure_boot()
+
 import argparse
 import importlib.util
 import json
-from pathlib import Path
 
 import matplotlib
 
@@ -25,9 +32,13 @@ ROOT = HERE.parent
 DEFAULT_SLICES = ["subQ-1", "subQ-2", "subQ-3", "subQ-4"]
 
 
-def load_multislice(path: Path) -> pd.DataFrame:
+def load_multislice(path: Path, model: str) -> pd.DataFrame:
     if path.exists():
         return pd.read_csv(path)
+    if model == "seed":
+        alt = path.parent / "per_celltype_corr_all_slices_multislice.csv"
+        if alt.exists():
+            return pd.read_csv(alt)
     return pd.DataFrame()
 
 
@@ -57,8 +68,8 @@ def main() -> None:
 
     scorecard = []
     for model in args.models:
-        ms = load_multislice(args.results_root / "multislice" / f"per_celltype_corr_all_slices_{model}.csv")
-        sp = load_multislice(args.results_root / "spatial" / f"niche_corr_{model}.csv")
+        ms = load_multislice(args.results_root / "multislice" / f"per_celltype_corr_all_slices_{model}.csv", model)
+        sp = load_multislice(args.results_root / "spatial" / f"niche_corr_{model}.csv", model)
         if ms.empty and model != "seed":
             print(f"skip {model}: no multislice results")
             continue

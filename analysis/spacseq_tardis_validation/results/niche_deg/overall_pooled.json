@@ -1,0 +1,44 @@
+{
+  "tag": "pooled",
+  "spatial_cases": 0,
+  "spatial_median_pearson": null,
+  "beta_leiden_cases": 6,
+  "beta_median_pearson": -0.005389673655227444,
+  "ccc_pathways": 176,
+  "best_spatial": [],
+  "best_beta": [
+    {
+      "pearson_r": 0.06940370702904215,
+      "spearman_r": 0.08392586655611788,
+      "n_genes": 2148,
+      "concordant_up": 132,
+      "concordant_down": 332,
+      "perturbation": "Il4ra",
+      "cell_type": "immune",
+      "analysis": "beta_leiden",
+      "n_niches": 10
+    },
+    {
+      "pearson_r": 0.03362264775520551,
+      "spearman_r": 0.06034911317253134,
+      "n_genes": 2148,
+      "concordant_up": 101,
+      "concordant_down": 342,
+      "perturbation": "Cks1b",
+      "cell_type": "myeloid",
+      "analysis": "beta_leiden",
+      "n_niches": 16
+    },
+    {
+      "pearson_r": -0.0033024751162364675,
+      "spearman_r": 0.017979022300510183,
+      "n_genes": 2148,
+      "concordant_up": 95,
+      "concordant_down": 355,
+      "perturbation": "Cd74",
+      "cell_type": "myeloid",
+      "analysis": "beta_leiden",
+      "n_niches": 18
+    }
+  ]
+}

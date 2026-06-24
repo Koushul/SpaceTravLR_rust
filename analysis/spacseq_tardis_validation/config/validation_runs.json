@@ -13,7 +13,7 @@
     "pooled_extra": {
       "run_dir": "runs/baseline_pooled_extra_seed",
       "run_toml": "runs/baseline_pooled_extra_seed/spacetravlr_run_repro.toml",
-      "baseline_h5ad": "runs/baseline_pooled_extra_seed/spacetravlr_prep/baseline_ntc_0c6fbac5e6cd947c_fullprep.h5ad",
+      "baseline_h5ad": "runs/baseline_pooled_seed/spacetravlr_prep/baseline_ntc_0c6fbac5e6cd947c_fullprep.h5ad",
       "betadata_dir": "runs/baseline_pooled_extra_seed",
       "pred_dir": "results/predictions_extra",
       "beta_scale_factor": 100.0,
@@ -30,5 +30,5 @@
       "extra_modulators": false
     }
   },
-  "recommended_tag": "extra_tuned"
+  "recommended_tag": "tuned"
 }

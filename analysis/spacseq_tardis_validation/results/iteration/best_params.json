@@ -1,0 +1,6 @@
+{
+  "beta_scale_factor": 50.0,
+  "n_propagation": 3,
+  "pred_dir": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/spacseq_tardis_validation/results/iteration_sweep/beta50_np3",
+  "median_r_focus": 0.0865396601797933
+}

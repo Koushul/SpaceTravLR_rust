@@ -16,8 +16,15 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _py_boot import PY, ensure_boot
+
+ensure_boot()
 
 import matplotlib
 

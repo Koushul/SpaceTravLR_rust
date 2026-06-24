@@ -1,0 +1,13 @@
+slice,cell_type,n_cells,n_niches,silhouette
+subQ-1,immune,163,6,
+subQ-1,myeloid,367,9,0.0038726542779157123
+subQ-1,fibroblast,350,8,0.03004944324183206
+subQ-2,immune,160,6,
+subQ-2,myeloid,189,7,
+subQ-2,fibroblast,410,12,0.04519643128632404
+subQ-3,immune,196,8,
+subQ-3,myeloid,201,9,0.04994808992118655
+subQ-3,fibroblast,431,13,0.01814452934892216
+subQ-4,immune,176,8,0.04879385495768327
+subQ-4,myeloid,155,7,0.0594048940151986
+subQ-4,fibroblast,369,12,0.031400892816258436

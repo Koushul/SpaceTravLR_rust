@@ -3,11 +3,18 @@
 
 from __future__ import annotations
 
-import argparse
-import json
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _py_boot import PY, ensure_boot
+
+ensure_boot()
+
+import argparse
+import json
+import os
+import subprocess
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -31,8 +38,12 @@ def main() -> None:
     tag = args.tag or args.model.replace("pooled_", "")
 
     if not args.skip_train and args.model == "pooled_extra":
-        genes = (ROOT / "data/target_genes.txt").read_text().strip().replace("\n", ",")
-        run([
+        betadata = sorted((ROOT / "runs/baseline_pooled_seed").glob("*_betadata.feather"))
+        genes = ",".join(p.name.replace("_betadata.feather", "") for p in betadata)
+        env = os.environ.copy()
+        env["SPACETRAVLR_FORCE_KEEP_GENES"] = genes
+        env["SPACETRAVLR_FORCE_CPU"] = "1"
+        subprocess.run([
             "spacetravlr", "--plain", "--training-mode", "seed",
             "--config", "spaceship_config_pooled_extra.toml",
             "--h5ad", "data/pooled/baseline_ntc.h5ad",
@@ -40,7 +51,7 @@ def main() -> None:
             "--max-ligands", "200",
             "--genes", genes,
             "--parallel", "8",
-        ])
+        ], check=True, cwd=ROOT, env=env)
 
     run_toml = ROOT / cfg["run_toml"]
     pred_dir = ROOT / cfg["pred_dir"]
@@ -80,29 +91,36 @@ def main() -> None:
         base = h5[0]
 
     run([
-        sys.executable, "scripts/08_multislice_validation.py",
+        str(PY), "scripts/08_multislice_validation.py",
         "--baseline-h5ad", str(base),
         "--pred-dir", str(pred_dir),
-        "--out-dir", f"results/multislice",
+        "--out-dir", "results/multislice",
         "--fig-dir", "figures/multislice",
         "--tag", tag,
     ])
     run([
-        sys.executable, "scripts/11_beta_leiden_microniches.py",
+        str(PY), "scripts/11_beta_leiden_microniches.py",
         "--baseline-h5ad", str(base),
         "--betadata-dir", str(ROOT / cfg["betadata_dir"]),
         "--pred-dir", str(pred_dir),
         "--tag", tag,
     ])
     run([
-        sys.executable, "scripts/12_beta_leiden_report_figures.py",
+        str(PY), "scripts/12_beta_leiden_report_figures.py",
         "--baseline-h5ad", str(base),
         "--betadata-dir", str(ROOT / cfg["betadata_dir"]),
         "--pred-dir", str(pred_dir),
         "--tag", tag,
     ])
     if (HERE / "13_niche_deg_ccc_analysis.py").exists():
-        run([sys.executable, "scripts/13_niche_deg_ccc_analysis.py", "--tag", tag])
+        run([
+            str(PY), "scripts/13_niche_deg_ccc_analysis.py",
+            "--baseline-h5ad", str(base),
+            "--betadata-dir", str(ROOT / cfg["betadata_dir"]),
+            "--pred-dir", str(pred_dir),
+            "--tag", tag,
+        ])
+    run([str(PY), "scripts/10_sharpened_scorecard.py", "--models", "pooled", tag])
 
 
 if __name__ == "__main__":
