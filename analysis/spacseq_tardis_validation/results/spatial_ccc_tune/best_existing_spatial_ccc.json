@@ -1,0 +1,10 @@
+{
+  "spatial_median_r": -0.27894832991697777,
+  "spatial_n_cases": 4,
+  "ccc_pearson_r": -0.34655808323586806,
+  "ccc_n_pathways": 33,
+  "pred_dir": "/ix1/ylee/kor11/tools/SpaceTravLR_rust/analysis/spacseq_tardis_validation/results/iteration_sweep/beta150_np4",
+  "beta_scale_factor": 150.0,
+  "n_propagation": 4,
+  "composite": -0.3071190604665154
+}

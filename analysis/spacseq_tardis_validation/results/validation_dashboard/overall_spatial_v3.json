@@ -1,0 +1,26 @@
+{
+  "tag": "spatial_v3",
+  "n_metrics": 4,
+  "metrics": [
+    {
+      "category": "Spatial kNN (autonomous pred)",
+      "metric": "median_pearson_r",
+      "value": 0.09141120537932423
+    },
+    {
+      "category": "CCC pathway concordance",
+      "metric": "median_pearson_r",
+      "value": 0.643721283144252
+    },
+    {
+      "category": "Paper modules (pred)",
+      "metric": "frac_support",
+      "value": 0.7647058823529411
+    },
+    {
+      "category": "Direct sgP DEG",
+      "metric": "median_pearson_r",
+      "value": 0.16590554575499963
+    }
+  ]
+}

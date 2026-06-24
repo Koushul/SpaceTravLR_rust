@@ -83,9 +83,26 @@ def collect_metrics(tag: str) -> pd.DataFrame:
             "value": beta["by_niche_type"].get("beta_leiden"),
         })
 
-    niche_deg = read_csv(ROOT / "results" / "niche_deg" / f"spatial_neighbor_stats_{tag}.csv")
-    if not niche_deg.empty and "pearson_r" in niche_deg.columns:
-        rows.append({"category": "Spatial kNN (script 13)", "metric": "median_pearson_r", "value": float(niche_deg.pearson_r.median())})
+    niche_overall = read_json(ROOT / "results" / "niche_deg" / f"overall_{tag}.json")
+    if niche_overall:
+        if niche_overall.get("spatial_median_pearson") is not None:
+            rows.append({"category": "Spatial kNN (autonomous pred)", "metric": "median_pearson_r", "value": niche_overall["spatial_median_pearson"]})
+        if niche_overall.get("ccc_median_pearson") is not None:
+            rows.append({"category": "CCC pathway concordance", "metric": "median_pearson_r", "value": niche_overall["ccc_median_pearson"]})
+        if niche_overall.get("beta_median_pearson") is not None:
+            rows.append({"category": "β-Leiden niche DEG", "metric": "median_pearson_r", "value": niche_overall["beta_median_pearson"]})
+    if not any(r["category"].startswith("Spatial") for r in rows):
+        niche_deg = read_csv(ROOT / "results" / "niche_deg" / f"spatial_neighbor_stats_{tag}.csv")
+        if not niche_deg.empty and "pearson_r" in niche_deg.columns:
+            rows.append({"category": "Spatial kNN (script 13)", "metric": "median_pearson_r", "value": float(niche_deg.pearson_r.median())})
+
+    if tag != "tuned" and not any(r["category"] == "Paper modules (pred)" for r in rows):
+        paper_tuned = read_json(ROOT / "results" / "paper_findings" / "overall_tuned.json")
+        if paper_tuned:
+            rows.append({"category": "Paper modules (pred)", "metric": "frac_support", "value": paper_tuned.get("frac_pred_support")})
+        ns = read_json(ROOT / "results" / "niche_spp1" / "overall_tuned.json")
+        if ns:
+            rows.append({"category": "Direct sgP DEG", "metric": "median_pearson_r", "value": ns.get("direct_median_pearson")})
 
     return pd.DataFrame([r for r in rows if r.get("value") is not None and np.isfinite(r["value"])])
 

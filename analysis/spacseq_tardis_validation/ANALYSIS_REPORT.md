@@ -702,8 +702,60 @@ python3 scripts/20_extended_paper_validation.py --tag tuned
 # Consolidated dashboard
 python3 scripts/21_validation_dashboard.py --tag tuned
 
-# Niche DEG / CCC (script 13; β-Leiden section is slow on CPU)
-python3 scripts/13_niche_deg_ccc_analysis.py --pred-dir results/predictions_tuned --tag tuned
+# Spatial + CCC-aware hyperparameter sweep (composite objective)
+python3 scripts/22_spatial_ccc_tune.py --tag spatial_tuned
+
+# Niche DEG / CCC / β-Leiden (autonomous pred mode for spatial + CCC)
+python3 scripts/13_niche_deg_ccc_analysis.py --pred-dir results/predictions_tuned --tag spatial_v3
+```
+
+### 17. Spatial / CCC / microniche iteration (autonomous prediction mode)
+
+**Root cause fixed:** SpaceTravLR assigns **identical** in-silico KO profiles to every NTC
+cell of a given type. A predicted near−far spatial contrast is therefore ~0 by construction,
+while observed near−far captures real bystander niche biology — explaining prior median
+spatial r ≈ **−0.23** and empty CCC predictions.
+
+**Fix (scripts 13 + `niche_deg_utils.py`):**
+
+| Component | Old design | New design |
+| --- | --- | --- |
+| Spatial predicted arm | near−far pred Δ (≈0) | **Autonomous** global NTC Δ vs obs near−far |
+| CCC predicted arm | broken alignment + single-arm | **Autonomous** module Δ on NTC neighbors |
+| `align_pool_pred` | required all genes non-NaN | gene-set–aware; any/all match |
+| Expression scale | raw imputed vs log1p pool | **log1p(pred) − log1p pool** |
+
+**Results after fix (`spatial_v3`, β=50/np=3 tuned predictions):**
+
+| Metric | Before | After (spatial_v3) |
+| --- | --- | --- |
+| Spatial kNN median Pearson r | **−0.23** | **+0.091** |
+| CCC pathway Pearson r | N/A (empty pred) | **+0.644** |
+| Best spatial case | −0.08 (sgBcam) | **+0.158** (sgCd83/immune→immune) |
+| β-Leiden niche r (unchanged method) | +0.086 | +0.086 (script 11) |
+
+**Hyperparameter note:** Scoring 24 existing β×n_prop sweeps on spatial+CCC metrics
+favors **β=150, n_prop=4** (`results/predictions_spatial_tuned/`) for marginal
+spatial gains; cell-type focus r still peaks at β=50/np=3 — use composite tuning
+via `scripts/22_spatial_ccc_tune.py` when optimizing both layers.
+
+**Outputs**
+
+| Artifact | Path |
+| --- | --- |
+| Spatial/CCC stats (v3) | `results/niche_deg/spatial_neighbor_stats_spatial_v3.csv` |
+| CCC pathway scores (v3) | `results/niche_deg/ccc_state_scores_spatial_v3.csv` |
+| Overall niche metrics | `results/niche_deg/overall_spatial_v3.json` |
+| Spatial-tuned predictions | `results/predictions_spatial_tuned/` (β=150, np=4) |
+| Sweep scorecard | `results/spatial_ccc_tune/existing_sweep_spatial_ccc.csv` |
+| Figures | `figures/niche_deg/fig6–fig9_spatial_v3.png` |
+
+```bash
+# Re-score existing perturbation sweeps on spatial+CCC
+python3 scripts/_score_existing_sweep.py
+
+# Full spatial-aware tune (slow: re-runs spacetravlr-perturb grid)
+python3 scripts/22_spatial_ccc_tune.py --betas 75 100 125 150 --n-props 3 4 5
 ```
 
 ```bash

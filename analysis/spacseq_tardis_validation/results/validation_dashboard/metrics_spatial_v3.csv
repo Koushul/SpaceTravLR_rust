@@ -1,0 +1,5 @@
+category,metric,value
+Spatial kNN (autonomous pred),median_pearson_r,0.09141120537932423
+CCC pathway concordance,median_pearson_r,0.643721283144252
+Paper modules (pred),frac_support,0.7647058823529411
+Direct sgP DEG,median_pearson_r,0.16590554575499963

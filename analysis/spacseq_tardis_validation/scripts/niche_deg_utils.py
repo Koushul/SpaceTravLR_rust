@@ -71,13 +71,98 @@ def align_pool_pred(
     pool: ad.AnnData,
     pred: pd.DataFrame,
     slice_id: str,
+    genes: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Return pred rows aligned to pool.obs_names via prep barcodes."""
     names = pool_pred_names(pool, slice_id)
-    aligned = pred.reindex(names)
+    if genes:
+        cols = [g for g in genes if g in pred.columns]
+        aligned = pred.reindex(names)[cols] if cols else pred.reindex(names).iloc[:, :0]
+    else:
+        aligned = pred.reindex(names)
     aligned.index = pool.obs_names
-    ok = aligned.notna().all(axis=1)
+    if aligned.shape[1] == 0:
+        ok = pd.Series(False, index=pool.obs_names)
+        return aligned, ok
+    ok = aligned.notna().all(axis=1) if genes else aligned.notna().any(axis=1)
     return aligned, ok
+
+
+def log1p_pred_minus_expr(pred_df: pd.DataFrame, expr_df: pd.DataFrame) -> pd.DataFrame:
+    """Element-wise log1p(pred) − expr on matched log1p expression scale."""
+    pr = np.log1p(np.maximum(pred_df.to_numpy(dtype=float), 0.0))
+    ex = expr_df.to_numpy(dtype=float)
+    return pd.DataFrame(pr - ex, index=pred_df.index, columns=pred_df.columns)
+
+
+def module_score_delta(
+    adata_near: sc.AnnData,
+    adata_far: sc.AnnData,
+    genes: list[str],
+) -> float:
+    near = module_score(adata_near, genes, "_")
+    far = module_score(adata_far, genes, "_")
+    if np.isnan(near).all() or np.isnan(far).all():
+        return float("nan")
+    return float(np.nanmean(near) - np.nanmean(far))
+
+
+def predicted_module_score_autonomous(
+    pool: sc.AnnData,
+    neighbor_ct: str,
+    pred: pd.DataFrame,
+    slice_id: str,
+    genes: list[str],
+) -> float:
+    """Global autonomous module Δ on NTC neighbor cells (not spatially split)."""
+    ntc = pool[(pool.obs["target_gene"].astype(str) == "non-targeting") &
+               (pool.obs["cell_type"].astype(str) == neighbor_ct)]
+    common = _unique_genes(genes, ntc.var_names)
+    common = [g for g in common if g in pred.columns]
+    if len(common) < 2 or ntc.n_obs < 10:
+        return float("nan")
+    pred_aligned, ok = align_pool_pred(ntc, pred, slice_id, genes=common)
+    if ok.sum() < 10:
+        return float("nan")
+    sub = ntc[ok.values]
+    use = _unique_genes(common, sub.var_names)
+    if len(use) < 2:
+        return float("nan")
+    expr = sub[:, use].X.toarray() if sparse.issparse(sub.X) else np.asarray(sub[:, use].X)
+    pr = pred_aligned.loc[sub.obs_names, use].to_numpy(dtype=float)
+    delta = np.log1p(np.maximum(pr, 0.0)) - expr
+    return float(np.nanmean(delta))
+
+
+def predicted_module_score_delta(
+    pool_near: sc.AnnData,
+    pool_far: sc.AnnData,
+    pred: pd.DataFrame,
+    slice_id: str,
+    genes: list[str],
+) -> float:
+    common = _unique_genes(genes, pool_near.var_names)
+    common = [g for g in common if g in pred.columns]
+    if len(common) < 2:
+        return float("nan")
+
+    def arm_delta(sub: sc.AnnData) -> float:
+        use = _unique_genes(common, sub.var_names)
+        if len(use) < 2:
+            return float("nan")
+        pred_aligned, ok = align_pool_pred(sub, pred, slice_id, genes=use)
+        if ok.sum() < 3:
+            return float("nan")
+        sub = sub[ok.values]
+        expr = sub[:, use].X.toarray() if sparse.issparse(sub.X) else np.asarray(sub[:, use].X)
+        pr = pred_aligned.loc[sub.obs_names, use].to_numpy(dtype=float)
+        delta = np.log1p(np.maximum(pr, 0.0)) - expr
+        return float(np.nanmean(delta))
+
+    d_near, d_far = arm_delta(pool_near), arm_delta(pool_far)
+    if not np.isfinite(d_near) or not np.isfinite(d_far):
+        return float("nan")
+    return d_near - d_far
 
 
 def _dense_mean(adata: sc.AnnData, genes: list[str]) -> pd.Series:
@@ -89,8 +174,20 @@ def _dense_mean(adata: sc.AnnData, genes: list[str]) -> pd.Series:
     return pd.Series(arr.mean(axis=0), index=keep)
 
 
+def _unique_genes(genes: list[str], var_names) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in genes:
+        if g in seen:
+            continue
+        if g in var_names:
+            seen.add(g)
+            out.append(g)
+    return out
+
+
 def module_score(adata: sc.AnnData, genes: list[str], name: str) -> np.ndarray:
-    keep = [g for g in genes if g in adata.var_names]
+    keep = _unique_genes(genes, adata.var_names)
     if len(keep) < 2:
         return np.full(adata.n_obs, np.nan)
     sub = adata[:, keep]

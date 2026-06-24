@@ -126,62 +126,72 @@ def spatial_predicted_de(
     k_neighbors: int = 25,
     source_cell_type: str | None = None,
     niche_mode: str = "ntc_near_far",
+    pred_mode: str = "autonomous",
 ) -> pd.DataFrame:
-    """Predicted Δ in spatial niche sets matched to experimental."""
-    try:
-        if niche_mode == "ntc_near_far":
-            idx_p, idx_c = ndu.spatial_ntc_niche_indices(
-                pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
-                source_cell_type=source_cell_type,
-            )
-        else:
-            idx_p, idx_c = ndu.spatial_neighbor_indices(
-                pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
-                source_cell_type=source_cell_type,
-                restrict_to_ntc=(niche_mode == "ntc_source_knn"),
-            )
-    except ValueError:
-        return pd.DataFrame(columns=["gene", "log2fc"])
-    if len(idx_p) < 3 or len(idx_c) < 3:
-        return pd.DataFrame(columns=["gene", "log2fc"])
+    """Predicted Δ matched to experimental spatial contrast.
 
-    sub_p = pool[idx_p]
-    sub_c = pool[idx_c]
-    genes = sorted(set(baseline.var_names) & set(pred.columns))
-    if "slice_id" in baseline.obs.columns:
-        base_sl = baseline[baseline.obs["slice_id"].astype(str) == slice_id]
-    else:
-        base_sl = baseline
+    pred_mode='autonomous' (default): global in-silico KO Δ on NTC neighbor cells.
+    SpaceTravLR assigns the same prediction to every NTC cell of a type, so a
+    near−far predicted contrast is ~0 by construction. We instead compare the
+    observed spatial near−far vector to the autonomous predicted program.
 
-    def niche_pred_delta(sub_pool: sc.AnnData) -> pd.Series:
-        pred_aligned, ok = ndu.align_pool_pred(sub_pool, pred, slice_id)
-        if ok.sum() < 3:
-            return pd.Series(dtype=float)
-        sub = sub_pool[ok.values]
-        bc_map = {b: ndu.prep_barcode(slice_id, b) for b in sub.obs_names}
-        base = base_sl[base_sl.obs_names.isin(bc_map.values())]
-        if base.n_obs < 3:
-            return pd.Series(dtype=float)
-        common = [g for g in genes if g in base.var_names]
-        expr = dense(base, common)
-        pr = pred_aligned.loc[sub.obs_names, common]
-        pr_rows = []
-        ex_rows = []
-        for ob, prep in bc_map.items():
-            if prep in base.obs_names:
-                pr_rows.append(pr.loc[ob, common])
-                ex_rows.append(expr.loc[prep, common])
-        if len(pr_rows) < 3:
-            return pd.Series(dtype=float)
-        return pd.DataFrame(pr_rows).mean(0) - pd.DataFrame(ex_rows).mean(0)
+    pred_mode='niche_contrast': legacy near−far predicted contrast (usually ~0).
+    """
+    genes = sorted(set(pool.var_names) & set(pred.columns))
+    if pred_mode == "niche_contrast":
+        try:
+            if niche_mode == "ntc_near_far":
+                idx_p, idx_c = ndu.spatial_ntc_niche_indices(
+                    pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+                    source_cell_type=source_cell_type,
+                )
+            else:
+                idx_p, idx_c = ndu.spatial_neighbor_indices(
+                    pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+                    source_cell_type=source_cell_type,
+                    restrict_to_ntc=(niche_mode == "ntc_source_knn"),
+                )
+        except ValueError:
+            return pd.DataFrame(columns=["gene", "log2fc"])
+        if len(idx_p) < 3 or len(idx_c) < 3:
+            return pd.DataFrame(columns=["gene", "log2fc"])
+        sub_p, sub_c = pool[idx_p], pool[idx_c]
 
-    d_p = niche_pred_delta(sub_p)
-    d_c = niche_pred_delta(sub_c)
-    if d_p.empty or d_c.empty:
+        def niche_pred_delta(sub_pool: sc.AnnData) -> pd.Series:
+            common = [g for g in genes if g in sub_pool.var_names and g in pred.columns]
+            if len(common) < 10:
+                return pd.Series(dtype=float)
+            pred_aligned, ok = ndu.align_pool_pred(sub_pool, pred, slice_id, genes=common)
+            if ok.sum() < 3:
+                return pd.Series(dtype=float)
+            sub = sub_pool[ok.values]
+            expr = dense(sub, common)
+            pr = pred_aligned.loc[sub.obs_names, common]
+            return ndu.log1p_pred_minus_expr(pr, expr).mean(0)
+
+        d_p, d_c = niche_pred_delta(sub_p), niche_pred_delta(sub_c)
+        if d_p.empty or d_c.empty:
+            return pd.DataFrame(columns=["gene", "log2fc"])
+        common = d_p.index.intersection(d_c.index)
+        pred_d = pd.DataFrame({"gene": common, "log2fc": (d_p.loc[common] - d_c.loc[common]).values})
+        pred_d["abs_log2fc"] = pred_d.log2fc.abs()
+        return pred_d
+
+    ntc = pool[(pool.obs["target_gene"].astype(str) == "non-targeting") &
+               (pool.obs["cell_type"].astype(str) == neighbor_ct)]
+    if ntc.n_obs < 10:
         return pd.DataFrame(columns=["gene", "log2fc"])
-    common = d_p.index.intersection(d_c.index)
-    pred_d = pd.DataFrame({"gene": common, "log2fc": (d_p.loc[common] - d_c.loc[common]).values})
-    pred_d["abs_log2fc"] = pred_d.log2fc.abs()
+    common = [g for g in genes if g in ntc.var_names and g in pred.columns]
+    if len(common) < 10:
+        return pd.DataFrame(columns=["gene", "log2fc"])
+    pred_aligned, ok = ndu.align_pool_pred(ntc, pred, slice_id, genes=common)
+    if ok.sum() < 10:
+        return pd.DataFrame(columns=["gene", "log2fc"])
+    sub = ntc[ok.values]
+    expr = dense(sub, common)
+    pr = pred_aligned.loc[sub.obs_names, common]
+    delta = ndu.log1p_pred_minus_expr(pr, expr).mean(0)
+    pred_d = pd.DataFrame({"gene": common, "log2fc": delta.values, "abs_log2fc": np.abs(delta.values)})
     return pred_d
 
 
@@ -233,9 +243,13 @@ def beta_leiden_predicted_de(
     if sub.n_obs < 6:
         return pd.DataFrame(columns=["gene", "log2fc"])
     common = [g for g in genes if g in sub.var_names and g in pred.columns]
-    expr = dense(sub, common)
+    if not common:
+        return pd.DataFrame(columns=["gene", "log2fc"])
+    expr_raw = dense(sub, common)
+    expr_log = np.log1p(np.maximum(expr_raw.to_numpy(dtype=float), 0.0))
+    expr_df = pd.DataFrame(expr_log, index=sub.obs_names, columns=common)
     pred_sub = pred.loc[sub.obs_names, common]
-    delta = (pred_sub - expr).mean(0)
+    delta = ndu.log1p_pred_minus_expr(pred_sub, expr_df).mean(0)
     return pd.DataFrame({"gene": common, "log2fc": delta.values, "abs_log2fc": np.abs(delta.values)})
 
 
@@ -246,58 +260,50 @@ def ccc_state_analysis(
     perturb: str,
     neighbor_ct: str,
     k_neighbors: int = 25,
+    source_cell_type: str | None = None,
 ) -> list[dict]:
-    """Compare CCC/T-cell pathway scores: observed neighbor shift vs predicted."""
+    """Compare CCC/T-cell pathway scores: NTC near sgP vs far NTC (obs + pred)."""
     rows = []
-    ntc_mask = pool.obs["target_gene"].astype(str) == "non-targeting"
-    pert_mask = pool.obs["target_gene"].astype(str) == perturb
-    from scipy.spatial import KDTree
-    tree = KDTree(pool.obsm["spatial"])
-    actual_k = min(k_neighbors, pool.n_obs - 1)
-    p_src, c_src = np.where(pert_mask)[0], np.where(ntc_mask)[0]
-    if len(p_src) == 0 or len(c_src) == 0:
+    sl = str(pool.obs["slice_id"].iloc[0])
+    src = source_cell_type or neighbor_ct
+    try:
+        near_idx, far_idx = ndu.spatial_ntc_niche_indices(
+            pool, perturb, k_neighbors=k_neighbors, cell_type=neighbor_ct,
+            source_cell_type=src,
+        )
+    except ValueError:
         return rows
-    _, n_p = tree.query(pool.obsm["spatial"][p_src], k=actual_k + 1)
-    _, n_c = tree.query(pool.obsm["spatial"][c_src], k=actual_k + 1)
-    idx_p = np.intersect1d(np.unique(n_p.flatten()), np.where(pool.obs["cell_type"].astype(str) == neighbor_ct)[0])
-    idx_c = np.intersect1d(np.unique(n_c.flatten()), np.where(pool.obs["cell_type"].astype(str) == neighbor_ct)[0])
-    idx_p = np.setdiff1d(idx_p, np.where(~ntc_mask)[0])
-    idx_c = np.setdiff1d(idx_c, np.where(~ntc_mask)[0])
+    if len(near_idx) < 5 or len(far_idx) < 5:
+        return rows
 
-    pool_p, pool_c = pool[idx_p], pool[idx_c]
+    pool_near, pool_far = pool[near_idx], pool[far_idx]
     all_pathways = {**ndu.CCC_PATHWAYS, **ndu.TCELL_STATE}
 
     for pname, genes in all_pathways.items():
-        obs_p = ndu.module_score(pool_p, genes, pname)
-        obs_c = ndu.module_score(pool_c, genes, pname)
-        if np.isnan(obs_p).all() or np.isnan(obs_c).all():
+        obs_delta = ndu.module_score_delta(pool_near, pool_far, genes)
+        if not np.isfinite(obs_delta):
             continue
-        obs_delta = float(np.nanmean(obs_p) - np.nanmean(obs_c))
+        near_sc = ndu.module_score(pool_near, genes, pname)
+        far_sc = ndu.module_score(pool_far, genes, pname)
         try:
-            _, pval = stats.mannwhitneyu(obs_p[~np.isnan(obs_p)], obs_c[~np.isnan(obs_c)], alternative="two-sided")
+            _, pval = stats.mannwhitneyu(
+                near_sc[~np.isnan(near_sc)], far_sc[~np.isnan(far_sc)], alternative="two-sided",
+            )
         except ValueError:
             pval = float("nan")
 
-        sl = str(pool.obs["slice_id"].iloc[0])
-        pred_aligned, ok = ndu.align_pool_pred(pool_p, pred, sl)
-        pred_delta = float("nan")
-        if ok.sum() >= 5:
-            sub = pool_p[ok.values]
-            common = [g for g in genes if g in pred.columns and g in sub.var_names]
-            if common:
-                expr = dense(sub, common)
-                pr = pred_aligned.loc[sub.obs_names, common]
-                pred_delta = float((pr - expr).mean().mean())
+        pred_delta = ndu.predicted_module_score_autonomous(pool, neighbor_ct, pred, sl, genes)
 
         rows.append({
             "pathway": pname,
             "perturbation": perturb,
             "neighbor_cell_type": neighbor_ct,
+            "source_cell_type": src,
             "obs_neighbor_delta": obs_delta,
             "pred_delta_on_neighbors": pred_delta,
             "obs_pval": float(pval),
-            "n_pert_neighbors": int(len(obs_p)),
-            "n_ctrl_neighbors": int(len(obs_c)),
+            "n_near_ntc": int(len(near_idx)),
+            "n_far_ntc": int(len(far_idx)),
         })
     return rows
 
@@ -354,10 +360,10 @@ def run_spatial_analysis(
             exp_all, pred_all,
             label1="SPAC-seq neighbors", label2="SpaceTravLR",
             highlight_genes=HIGHLIGHT.get(perturb, []),
-            top_n_labels=12, target_ko=perturb,
+            top_n_labels=0, target_ko=perturb,
             neighbor_ct=neighbor_ct, source_ct=f"sg{perturb} {source_ct}",
             axis_lim=1.5, save_path=str(save) if ax is None else None,
-            show=False, ax=ax, use_size=True,
+            show=False, ax=ax, use_size=False,
             title_suffix=f"pooled {len(slices)} slices",
         )
         st.update({
@@ -389,6 +395,8 @@ def run_beta_leiden_deg(
     pred_dir: Path,
     fig_dir: Path,
     tag: str,
+    leiden_resolution: float = 0.6,
+    leiden_spatial_weight: float = 0.35,
 ) -> pd.DataFrame:
     stats_rows = []
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
@@ -398,7 +406,10 @@ def run_beta_leiden_deg(
     for perturb, cell_type in BETA_CASES:
         exp_agg, pred_agg = [], []
         for sl in slices:
-            pool = assign_labeled_pool(sl, data_root, betadata_dir, [cell_type])
+            pool = assign_labeled_pool(
+                sl, data_root, betadata_dir, [cell_type],
+                resolution=leiden_resolution, spatial_weight=leiden_spatial_weight,
+            )
             pred = ndu.load_pred_feather(pred_dir / f"predicted_KO_{perturb}.feather")
             base_sl = baseline[baseline.obs["slice_id"].astype(str) == sl].copy()
             bl = _bl11.baseline_labels_from_pool(base_sl, pool, pool.obs["beta_leiden"])
@@ -454,7 +465,15 @@ def run_beta_leiden_deg(
     return pd.DataFrame(stats_rows)
 
 
-def assign_labeled_pool(sl: str, data_root: Path, betadata_dir: Path, cell_types: list[str]) -> sc.AnnData:
+def assign_labeled_pool(
+    sl: str,
+    data_root: Path,
+    betadata_dir: Path,
+    cell_types: list[str],
+    n_pcs: int = 15,
+    resolution: float = 0.6,
+    spatial_weight: float = 0.35,
+) -> sc.AnnData:
     pool = load_pool(sl, data_root)
     pool.obs["slice_id"] = sl
     sc.pp.normalize_total(pool, target_sum=10000)
@@ -464,7 +483,7 @@ def assign_labeled_pool(sl: str, data_root: Path, betadata_dir: Path, cell_types
     ntc = pool[pool.obs["target_gene"].astype(str) == "non-targeting"]
     ntc_beta = pool_beta[pool.obs["target_gene"].astype(str) == "non-targeting"]
     labels = _bl11.assign_compartment_microniches(
-        ntc, ntc_beta, [sl], cell_types, n_pcs=15, resolution=0.6, spatial_weight=0.35,
+        ntc, ntc_beta, [sl], cell_types, n_pcs=n_pcs, resolution=resolution, spatial_weight=spatial_weight,
     )
     full = pd.Series("unassigned", index=pool.obs_names, dtype=str)
     full.loc[ntc.obs_names] = labels.loc[ntc.obs_names]
@@ -498,7 +517,7 @@ def run_ccc_analysis(
         base_sl = baseline[baseline.obs["slice_id"].astype(str) == sl]
         for perturb, src, neighbor in ccc_cases:
             pred = ndu.load_pred_feather(pred_dir / f"predicted_KO_{perturb}.feather")
-            for r in ccc_state_analysis(pool, base_sl, pred, perturb, neighbor):
+            for r in ccc_state_analysis(pool, base_sl, pred, perturb, neighbor, source_cell_type=src):
                 r.update({"slice": sl, "source_cell_type": src})
                 rows.append(r)
 
@@ -531,8 +550,10 @@ def run_ccc_analysis(
     ax.axhline(0, color="gray", lw=0.5)
     ax.axvline(0, color="gray", lw=0.5)
     if len(show) >= 3:
-        r, p = stats.pearsonr(show.obs_neighbor_delta, show.pred_delta_on_neighbors)
-        ax.text(0.05, 0.95, f"Pearson r = {r:+.2f}\np = {p:.3f}", transform=ax.transAxes, va="top", fontsize=9)
+        valid = show.dropna(subset=["obs_neighbor_delta", "pred_delta_on_neighbors"])
+        if len(valid) >= 3:
+            r, p = stats.pearsonr(valid.obs_neighbor_delta, valid.pred_delta_on_neighbors)
+            ax.text(0.05, 0.95, f"Pearson r = {r:+.2f}\np = {p:.3f}\nn = {len(valid)}", transform=ax.transAxes, va="top", fontsize=9)
     ax.set_xlabel("Observed pathway Δ (spatial neighbors)")
     ax.set_ylabel("SpaceTravLR predicted Δ\n(on matched NTC neighbors)")
     ax.set_title("B  CCC / immune-state concordance", fontweight="bold", loc="left")
@@ -580,6 +601,9 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=ROOT / "results/niche_deg")
     ap.add_argument("--fig-dir", type=Path, default=ROOT / "figures/niche_deg")
     ap.add_argument("--tag", default="pooled")
+    ap.add_argument("--skip-beta-leiden", action="store_true")
+    ap.add_argument("--leiden-resolution", type=float, default=0.6)
+    ap.add_argument("--leiden-spatial-weight", type=float, default=0.35)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -595,10 +619,14 @@ def main() -> None:
     spatial_stats.to_csv(args.out_dir / f"spatial_neighbor_stats_{args.tag}.csv", index=False)
 
     print("β-Leiden niche DEG analysis…")
-    beta_stats = run_beta_leiden_deg(
-        args.slices, args.data_root, baseline, args.betadata_dir, args.pred_dir, args.fig_dir, args.tag,
-    )
-    beta_stats.to_csv(args.out_dir / f"beta_leiden_deg_stats_{args.tag}.csv", index=False)
+    if args.skip_beta_leiden:
+        beta_stats = pd.DataFrame()
+    else:
+        beta_stats = run_beta_leiden_deg(
+            args.slices, args.data_root, baseline, args.betadata_dir, args.pred_dir, args.fig_dir, args.tag,
+            leiden_resolution=args.leiden_resolution, leiden_spatial_weight=args.leiden_spatial_weight,
+        )
+        beta_stats.to_csv(args.out_dir / f"beta_leiden_deg_stats_{args.tag}.csv", index=False)
 
     print("CCC / T-cell state analysis…")
     ccc_df = run_ccc_analysis(
@@ -612,6 +640,14 @@ def main() -> None:
         "beta_leiden_cases": len(beta_stats),
         "beta_median_pearson": float(beta_stats.pearson_r.median()) if len(beta_stats) else None,
         "ccc_pathways": int(len(ccc_df)),
+        "ccc_median_pearson": float(
+            ccc_df.dropna(subset=["obs_neighbor_delta", "pred_delta_on_neighbors"])
+            .groupby(["perturbation", "pathway", "neighbor_cell_type"], as_index=False)
+            .agg(obs=("obs_neighbor_delta", "mean"), pred=("pred_delta_on_neighbors", "mean"))
+            .pipe(lambda d: stats.pearsonr(d.obs, d.pred)[0] if len(d) >= 3 else float("nan"))
+        ) if not ccc_df.empty else None,
+        "leiden_resolution": args.leiden_resolution,
+        "leiden_spatial_weight": args.leiden_spatial_weight,
         "best_spatial": spatial_stats.nlargest(3, "pearson_r").to_dict("records") if len(spatial_stats) else [],
         "best_beta": beta_stats.nlargest(3, "pearson_r").to_dict("records") if len(beta_stats) else [],
     }

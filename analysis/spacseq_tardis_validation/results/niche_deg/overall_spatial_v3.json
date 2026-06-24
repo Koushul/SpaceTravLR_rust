@@ -1,0 +1,53 @@
+{
+  "tag": "spatial_v3",
+  "spatial_cases": 7,
+  "spatial_median_pearson": 0.09141120537932423,
+  "beta_leiden_cases": 0,
+  "beta_median_pearson": null,
+  "ccc_pathways": 176,
+  "ccc_median_pearson": 0.643721283144252,
+  "leiden_resolution": 0.6,
+  "leiden_spatial_weight": 0.35,
+  "best_spatial": [
+    {
+      "pearson_r": 0.15837601035578605,
+      "spearman_r": 0.02458450332996549,
+      "n_genes": 2148,
+      "concordant_up": 713,
+      "concordant_down": 69,
+      "perturbation": "Cd83",
+      "source_cell_type": "immune",
+      "neighbor_cell_type": "immune",
+      "analysis": "spatial_knn",
+      "tag": "spatial_v3",
+      "n_slices": 4
+    },
+    {
+      "pearson_r": 0.13956162431470773,
+      "spearman_r": -0.08151337629045521,
+      "n_genes": 2148,
+      "concordant_up": 544,
+      "concordant_down": 72,
+      "perturbation": "Il4ra",
+      "source_cell_type": "immune",
+      "neighbor_cell_type": "immune",
+      "analysis": "spatial_knn",
+      "tag": "spatial_v3",
+      "n_slices": 4
+    },
+    {
+      "pearson_r": 0.09901961816567291,
+      "spearman_r": -0.04053707412567856,
+      "n_genes": 2148,
+      "concordant_up": 575,
+      "concordant_down": 45,
+      "perturbation": "Cks1b",
+      "source_cell_type": "immune",
+      "neighbor_cell_type": "myeloid",
+      "analysis": "spatial_knn",
+      "tag": "spatial_v3",
+      "n_slices": 3
+    }
+  ],
+  "best_beta": []
+}
