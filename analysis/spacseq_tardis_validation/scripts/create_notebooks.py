@@ -246,13 +246,44 @@ plt.show()
         "06_cnn_guide_enrichment.ipynb",
         "CNN beta microniches & guide enrichment",
         [
-            cell("markdown", "# CNN β-microniches → guide enrichment\n\nScatter/heatmap from cached enrichment tables. Refresh with `--sections cnn`."),
-            cell("code", BOOTSTRAP),
+            cell("markdown", """\
+# CNN β-microniches → guide enrichment
+
+## Link to Zhang et al. Cell 2026 (SPAC-seq)
+
+The paper shows that CRISPR KOs reshape **where** cells survive in tissue, not just **what** they express:
+
+| Paper theme | Perturbation | Spatial/composition phenotype | Our proxy |
+| --- | --- | --- | --- |
+| **Immune exclusion** | sgIcam1 (lung M001) | sgIcam1+ tumor accumulates in immune-cold niches; IFN/LFA-1↓, T cells↓, M2/Spp1↑ | Predicted exclusion index + Icam1 CNN β; validate log₂ OR across CNN microniches |
+| **Cd44–Spp1 crosstalk** | sgCd44 / sgSpp1 (lung); sgBcam in subQ | Macrophage Spp1 couples to T-cell Cd44; exhaustion/ECM programs | sgBcam in subQ/lung; Spp1/ECM escape module in predicted score |
+| **Antigen presentation** | sgIl4ra, sgCd83, sgCd74 (subQ expanded) | MHC-II / costimulation down in immune niches | Immune-infiltration vs exclusion balance in niche score |
+
+**This notebook:** each scatter point is a **tumor microniche** (CNN β-Leiden cluster). We ask whether niches SpaceTravLR scores as guide-favorable match niches where sgP cells are actually over-represented vs NTC.
+
+Refresh data (higher niche resolution + spatial maps): set `REFRESH_CNN=True` below or run:
+`python3 scripts/23_cnn_microniche_enrichment.py --leiden-resolution 0.9`
+"""),
+            cell("code", BOOTSTRAP + "\nfrom nb_common import run_script\n"),
+            cell("code", """\
+REFRESH_CNN = False
+LEIDEN_RESOLUTION = 0.9  # higher → more microniches (default was 0.55)
+if REFRESH_CNN:
+    proc = run_script(
+        "23_cnn_microniche_enrichment.py",
+        "--tag", CFG["cnn_tag"],
+        "--leiden-resolution", str(LEIDEN_RESOLUTION),
+        "--min-ntc", "2", "--min-pert", "2",
+    )
+    print(proc.stdout[-3000:] if proc.stdout else proc.stderr)
+"""),
             cell("code", LOAD_CACHE),
             cell("code", """\
 summary = bundle.json("cnn", "overall")
 enrich = bundle.table("cnn", "enrichment")
 corr = bundle.table("cnn", "corr")
+print("Leiden resolution:", summary.get("leiden_resolution", "unknown"))
+print("Median n niches:", corr["n_niches"].median())
 summary, corr.sort_values("pearson_r", ascending=False).head(8)
 """),
             cell("code", """\
@@ -264,6 +295,34 @@ plt.show()
             cell("code", """\
 fig, ax = nb_viz.plot_cnn_enrichment_heatmap(corr, tag=CFG["cnn_tag"], cmap="RdBu_r")
 plt.show()
+"""),
+            cell("code", """\
+# Spatial microniche map on tissue (cached parquet from script 23)
+SPATIAL_SLICE = "Lung_Metastasis_M001"
+SPATIAL_PERT = "Icam1"
+spatial = bundle.spatial_tumor(SPATIAL_SLICE)
+print("Available slices:", bundle.spatial_slices())
+if spatial.empty:
+    print("Run with REFRESH_CNN=True to generate spatial_tumor_*.parquet")
+else:
+    fig, axes = nb_viz.plot_microniche_spatial(
+        spatial,
+        slice_id=SPATIAL_SLICE,
+        perturb=SPATIAL_PERT,
+        panel="triple",
+        point_size=3.5,
+        title=f"{SPATIAL_SLICE} — paper Icam1 immune-exclusion niches (sg{SPATIAL_PERT})",
+    )
+    plt.show()
+"""),
+            cell("code", """\
+# All tumor microniches on tissue (single panel)
+if not spatial.empty:
+    fig, ax = nb_viz.plot_microniche_spatial(
+        spatial, slice_id=SPATIAL_SLICE, panel="all", point_size=4,
+        title=f"{SPATIAL_SLICE} CNN β-microniches ({spatial['cnn_leiden'].nunique()} niches)",
+    )
+    plt.show()
 """),
         ],
     ),

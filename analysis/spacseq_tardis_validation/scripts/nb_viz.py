@@ -399,6 +399,77 @@ def plot_cnn_enrichment_heatmap(
     return fig, ax
 
 
+def _microniche_color_map(labels: pd.Series) -> dict[str, tuple]:
+    uniq = sorted(labels.unique())
+    cmap = plt.colormaps.get_cmap("tab20")
+    return {lab: cmap(i % 20) for i, lab in enumerate(uniq)}
+
+
+def plot_microniche_spatial(
+    spatial_df: pd.DataFrame,
+    *,
+    slice_id: str = "",
+    perturb: str | None = None,
+    panel: str = "all",
+    point_size: float = 4.0,
+    figsize: tuple[float, float] | None = None,
+    title: str | None = None,
+) -> tuple[plt.Figure, plt.Axes | list[plt.Axes]]:
+    """Spatial scatter of CNN β-Leiden tumor microniches on tissue coordinates.
+
+    panel: 'all' | 'ntc' | 'pert' | 'triple' (NTC / sgP / all side-by-side)
+    """
+    if spatial_df.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No spatial tumor data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    df = spatial_df.copy()
+    if slice_id:
+        df = df[df["slice"].astype(str) == slice_id]
+    if perturb and panel in ("pert", "triple"):
+        pass
+
+    colors = _microniche_color_map(df["cnn_leiden"].astype(str))
+
+    def _draw(ax: plt.Axes, sub: pd.DataFrame, subtitle: str) -> None:
+        for lab in sorted(sub["cnn_leiden"].astype(str).unique()):
+            m = sub["cnn_leiden"].astype(str) == lab
+            c = "#dddddd" if lab in ("unassigned", "nan") else colors.get(lab, "#888888")
+            ax.scatter(sub.loc[m, "x"], sub.loc[m, "y"], c=[c], s=point_size, alpha=0.78, rasterized=True)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title(subtitle, fontsize=9)
+
+    if panel == "triple" and perturb:
+        fig, axes = plt.subplots(1, 3, figsize=figsize or (14, 4.5))
+        ntc = df[df["target_gene"].astype(str) == "non-targeting"]
+        pert = df[df["target_gene"].astype(str) == perturb]
+        _draw(axes[0], ntc, f"NTC tumor (n={len(ntc)})")
+        _draw(axes[1], pert, f"sg{perturb} tumor (n={len(pert)})")
+        _draw(axes[2], df, f"All tumor (n={len(df)})")
+        n_n = df["cnn_leiden"].astype(str).nunique()
+        fig.suptitle(
+            title or f"{slice_id or df['slice'].iloc[0]} — {n_n} CNN β-microniches on tissue",
+            fontweight="bold",
+        )
+        fig.tight_layout()
+        return fig, list(axes)
+
+    if panel == "ntc":
+        df = df[df["target_gene"].astype(str) == "non-targeting"]
+    elif panel == "pert" and perturb:
+        df = df[df["target_gene"].astype(str) == perturb]
+
+    fig, ax = plt.subplots(figsize=figsize or (7, 6))
+    _draw(ax, df, f"n={len(df)} cells")
+    n_n = spatial_df["cnn_leiden"].astype(str).nunique()
+    ax.set_title(title or f"{slice_id or ''} tumor microniches (n={n_n} niches)", fontweight="bold")
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_direct_deg_bars(
     direct_deg: pd.DataFrame,
     *,

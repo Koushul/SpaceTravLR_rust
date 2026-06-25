@@ -154,6 +154,18 @@ class ValidationBundle:
         arts = self.manifest.get("sections", {}).get(section, {}).get("artifacts", {})
         return bool(arts)
 
+    def spatial_tumor(self, slice_id: str) -> pd.DataFrame:
+        path = self.root / "results" / "cnn_enrichment" / f"spatial_tumor_{slice_id}_{self.cnn_tag}.parquet"
+        return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+    def spatial_slices(self) -> list[str]:
+        paths = sorted((self.root / "results" / "cnn_enrichment").glob(f"spatial_tumor_*_{self.cnn_tag}.parquet"))
+        out = []
+        for p in paths:
+            name = p.stem.replace("spatial_tumor_", "").replace(f"_{self.cnn_tag}", "")
+            out.append(name)
+        return out
+
 
 def default_config_from_manifest(manifest: dict[str, Any]) -> dict[str, str]:
     cfg = manifest.get("config", {})

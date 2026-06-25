@@ -59,9 +59,10 @@ def assign_pool_niches(
     pool: sc.AnnData,
     beta_matrix: np.ndarray,
     slice_id: str,
+    leiden_kw: dict | None = None,
 ) -> tuple[sc.AnnData, sc.AnnData]:
     cmu.ensure_cluster_id(prep)
-    labels = cmu.assign_slice_microniches(prep, beta_matrix, slice_id, "tumor")
+    labels = cmu.assign_slice_microniches(prep, beta_matrix, slice_id, "tumor", **(leiden_kw or {}))
     prep = prep.copy()
     prep.obs["cnn_leiden"] = labels
 
@@ -94,6 +95,9 @@ def run_slice_enrichment(
     tag: str,
     global_baseline: sc.AnnData | None = None,
     fallback_pred_dir: Path | None = None,
+    leiden_kw: dict | None = None,
+    min_ntc: int = 2,
+    min_pert: int = 2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, sc.AnnData, sc.AnnData]:
     pool = load_pool(slice_id, data_root)
     pool.obs["slice_id"] = slice_id
@@ -104,7 +108,7 @@ def run_slice_enrichment(
     cmu.ensure_cluster_id(prep)
 
     beta_matrix, score_genes = cmu.build_beta_score_matrix(prep, betadata_dir)
-    prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id)
+    prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw)
 
     all_enrich: list[pd.DataFrame] = []
     all_corr: list[dict] = []
@@ -129,10 +133,12 @@ def run_slice_enrichment(
             tumor_mask = prep.obs["cell_type"].astype(str) == "tumor"
             beta_tumor = beta_matrix[np.where(tumor_mask.values)[0]]
             cnn_by_cell = pd.Series(beta_tumor[:, target_idx], index=prep.obs_names[tumor_mask])
-        obs_df = cmu.observed_log_enrichment(pool, pert, "tumor", "cnn_leiden")
+        obs_df = cmu.observed_log_enrichment(pool, pert, "tumor", "cnn_leiden", min_ntc=min_ntc, min_pert=min_pert)
         pred_df = cmu.predicted_niche_scores(
             prep, pool, pred, pert, "tumor", "cnn_leiden", score_genes, profile, cnn_by_cell,
             global_baseline=global_baseline,
+            min_ntc_per_niche=min_ntc,
+            min_pert_per_niche=min_pert,
         )
         merged = cmu.merge_obs_pred_enrichment(obs_df, pred_df)
         corr = cmu.enrichment_correlation(merged)
@@ -195,29 +201,78 @@ def plot_heatmap(corr_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     plt.close(fig)
 
 
+def export_spatial_tumor(pool: sc.AnnData, slice_id: str, out_dir: Path, tag: str) -> Path | None:
+    ct = pool[pool.obs["cell_type"].astype(str) == "tumor"].copy()
+    if ct.n_obs == 0 or "cnn_leiden" not in ct.obs.columns:
+        return None
+    df = pd.DataFrame({
+        "x": ct.obsm["spatial"][:, 0],
+        "y": ct.obsm["spatial"][:, 1],
+        "cnn_leiden": ct.obs["cnn_leiden"].astype(str).values,
+        "target_gene": ct.obs["target_gene"].astype(str).values,
+        "slice": slice_id,
+        "tag": tag,
+    })
+    path = out_dir / f"spatial_tumor_{slice_id}_{tag}.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def _niche_colors(labels: pd.Series) -> dict[str, tuple]:
+    uniq = sorted(l for l in labels.unique() if l not in ("unassigned", "nan", "0") or labels.nunique() <= 2)
+    if not uniq:
+        uniq = sorted(labels.unique())
+    cmap = plt.colormaps.get_cmap("tab20")
+    return {lab: cmap(i % 20) for i, lab in enumerate(uniq)}
+
+
 def plot_niche_maps(slice_id: str, pool: sc.AnnData, perturb: str, fig_dir: Path, tag: str) -> None:
     ct = pool[pool.obs["cell_type"].astype(str) == "tumor"].copy()
     if "cnn_leiden" not in ct.obs.columns or ct.n_obs < 20:
         return
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.8))
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
     ntc = ct[ct.obs["target_gene"].astype(str) == "non-targeting"]
     pert = ct[ct.obs["target_gene"].astype(str) == perturb]
-    cmap = plt.colormaps["tab10"]
+    colors = _niche_colors(ct.obs["cnn_leiden"].astype(str))
     for ax, (sub, title) in zip(axes, [(ntc, "NTC tumor"), (pert, f"sg{perturb} tumor"), (ct, "All tumor")]):
         if sub.n_obs == 0:
             ax.axis("off")
             continue
         labs = sub.obs["cnn_leiden"].astype(str)
-        for i, lab in enumerate(sorted(labs.unique())):
+        for lab in sorted(labs.unique()):
             m = labs == lab
-            c = "#dddddd" if lab in ("unassigned", "nan") else cmap(i % 10)
-            ax.scatter(sub.obsm["spatial"][m, 0], sub.obsm["spatial"][m, 1], c=[c], s=2, alpha=0.7, rasterized=True)
-        ax.set_title(title, fontsize=9)
+            c = "#dddddd" if lab in ("unassigned", "nan") else colors.get(lab, "#888888")
+            ax.scatter(sub.obsm["spatial"][m, 0], sub.obsm["spatial"][m, 1], c=[c], s=3, alpha=0.75, rasterized=True)
+        ax.set_title(f"{title} (n={sub.n_obs})", fontsize=9)
         ax.set_aspect("equal")
         ax.axis("off")
-    fig.suptitle(f"{slice_id} CNN β-Leiden tumor niches — sg{perturb} ({tag})", fontsize=10)
+    n_niches = ct.obs["cnn_leiden"].astype(str).nunique()
+    fig.suptitle(
+        f"{slice_id} CNN β-Leiden tumor microniches (n={n_niches}) — sg{perturb} ({tag})",
+        fontsize=10, fontweight="bold",
+    )
     fig.tight_layout()
-    fig.savefig(fig_dir / f"fig22_cnn_niche_map_{slice_id}_{perturb}_{tag}.png", dpi=160, bbox_inches="tight")
+    fig.savefig(fig_dir / f"fig22_cnn_niche_map_{slice_id}_{perturb}_{tag}.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_spatial_overview(pool: sc.AnnData, slice_id: str, fig_dir: Path, tag: str) -> None:
+    """Single-panel spatial map of all tumor microniches (no perturbation split)."""
+    ct = pool[pool.obs["cell_type"].astype(str) == "tumor"].copy()
+    if "cnn_leiden" not in ct.obs.columns or ct.n_obs < 20:
+        return
+    fig, ax = plt.subplots(figsize=(7, 6))
+    labs = ct.obs["cnn_leiden"].astype(str)
+    colors = _niche_colors(labs)
+    for lab in sorted(labs.unique()):
+        m = labs == lab
+        c = "#dddddd" if lab in ("unassigned", "nan") else colors.get(lab, "#888888")
+        ax.scatter(ct.obsm["spatial"][m, 0], ct.obsm["spatial"][m, 1], c=[c], s=4, alpha=0.8, rasterized=True, label=lab.split("|")[-1])
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title(f"{slice_id} tumor CNN β-microniches on tissue (n={labs.nunique()} niches)", fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(fig_dir / f"fig23_spatial_microniches_{slice_id}_{tag}.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -231,7 +286,17 @@ def main() -> None:
     ap.add_argument("--slices", nargs="+", default=SUBQ_SLICES + [LUNG_SLICE])
     ap.add_argument("--seed-betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_seed")
     ap.add_argument("--seed-pred-dir", type=Path, default=ROOT / "results/predictions_tuned")
+    ap.add_argument("--leiden-resolution", type=float, default=cmu.DEFAULT_LEIDEN_KW["resolution"])
+    ap.add_argument("--spatial-weight", type=float, default=cmu.DEFAULT_LEIDEN_KW["spatial_weight"])
+    ap.add_argument("--min-ntc", type=int, default=2, help="Min NTC tumor cells per niche (obs + pred)")
+    ap.add_argument("--min-pert", type=int, default=2, help="Min sgP tumor cells per niche (observed)")
     args = ap.parse_args()
+
+    leiden_kw = {
+        "resolution": args.leiden_resolution,
+        "spatial_weight": args.spatial_weight,
+        "min_cells": cmu.DEFAULT_LEIDEN_KW["min_cells"],
+    }
 
     out_dir = ROOT / "results" / "cnn_enrichment"
     fig_dir = ROOT / "figures" / "cnn_enrichment"
@@ -263,7 +328,10 @@ def main() -> None:
         enrich, corr, prep, pool = run_slice_enrichment(
             sl, perts, args.data_root, baseline, bd, pd_dir, args.tag,
             global_baseline=gb, fallback_pred_dir=args.seed_pred_dir,
+            leiden_kw=leiden_kw, min_ntc=args.min_ntc, min_pert=args.min_pert,
         )
+        export_spatial_tumor(pool, sl, out_dir, args.tag)
+        plot_spatial_overview(pool, sl, fig_dir, args.tag)
         if not enrich.empty:
             all_enrich.append(enrich)
         if not corr.empty:
@@ -281,6 +349,10 @@ def main() -> None:
     summary = {
         "tag": args.tag,
         "per_cell_betas": per_cell,
+        "leiden_resolution": args.leiden_resolution,
+        "spatial_weight": args.spatial_weight,
+        "min_ntc": args.min_ntc,
+        "min_pert": args.min_pert,
         "n_enrichment_tests": int(len(corr_df)),
         "median_pearson_r": float(corr_df["pearson_r"].median()) if not corr_df.empty else None,
         "mean_pearson_r": float(corr_df["pearson_r"].mean()) if not corr_df.empty else None,

@@ -143,14 +143,23 @@ def build_beta_score_matrix(
     return np.column_stack(scores), genes
 
 
+DEFAULT_LEIDEN_KW = {
+    "n_pcs": 12,
+    "n_neighbors": 12,
+    "resolution": 0.9,
+    "spatial_weight": 0.4,
+    "min_cells": 20,
+}
+
+
 def leiden_microniches(
     ad: sc.AnnData,
     beta_scores: np.ndarray,
-    n_pcs: int = 12,
-    n_neighbors: int = 12,
-    resolution: float = 0.55,
-    spatial_weight: float = 0.4,
-    min_cells: int = 25,
+    n_pcs: int = DEFAULT_LEIDEN_KW["n_pcs"],
+    n_neighbors: int = DEFAULT_LEIDEN_KW["n_neighbors"],
+    resolution: float = DEFAULT_LEIDEN_KW["resolution"],
+    spatial_weight: float = DEFAULT_LEIDEN_KW["spatial_weight"],
+    min_cells: int = DEFAULT_LEIDEN_KW["min_cells"],
     key: str = "cnn_leiden",
 ) -> pd.Series:
     if ad.n_obs < min_cells:
@@ -240,7 +249,7 @@ def observed_log_enrichment(
     cell_type: str,
     niche_key: str,
     pseudocount: float = 0.5,
-    min_ntc: int = 3,
+    min_ntc: int = 2,
     min_pert: int = 2,
 ) -> pd.DataFrame:
     ct = pool[pool.obs["cell_type"].astype(str) == cell_type].copy()
@@ -300,7 +309,7 @@ def predicted_niche_scores(
     profile: dict,
     cell_cnn_scores: pd.Series | None = None,
     global_baseline: sc.AnnData | None = None,
-    min_ntc_per_niche: int = 3,
+    min_ntc_per_niche: int = 2,
     min_pert_per_niche: int = 2,
 ) -> pd.DataFrame:
     ct_mask = pool.obs["cell_type"].astype(str) == cell_type
