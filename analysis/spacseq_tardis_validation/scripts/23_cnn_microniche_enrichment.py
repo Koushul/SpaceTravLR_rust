@@ -170,6 +170,35 @@ def plot_scatter(enrich_df: pd.DataFrame, corr_df: pd.DataFrame, fig_dir: Path, 
     plt.close(fig)
 
 
+def plot_scatter_histology(
+    enrich_df: pd.DataFrame,
+    corr_df: pd.DataFrame,
+    pool_by_slice: dict[str, sc.AnnData],
+    fig_dir: Path,
+    tag: str,
+    *,
+    mc38_dir: Path,
+    top_n: int = 6,
+    slice_filter: str | None = None,
+    out_stem: str | None = None,
+) -> None:
+    if enrich_df.empty or corr_df.empty or not pool_by_slice:
+        return
+    import nb_viz
+    fig, _ = nb_viz.plot_cnn_enrichment_scatter_with_histology(
+        enrich_df,
+        corr_df,
+        pool_by_slice,
+        top_n=top_n,
+        tag=tag,
+        mc38_dir=mc38_dir,
+        slice_filter=slice_filter,
+    )
+    stem = out_stem or (f"fig20_enrichment_scatter_histology_{tag}" if not slice_filter else f"fig25_lung_enrichment_scatter_histology_{tag}")
+    fig.savefig(fig_dir / f"{stem}.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_heatmap(corr_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     if corr_df.empty:
         return
@@ -306,6 +335,7 @@ def main() -> None:
     ap.add_argument("--slices", nargs="+", default=SUBQ_SLICES + [LUNG_SLICE])
     ap.add_argument("--seed-betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_seed")
     ap.add_argument("--seed-pred-dir", type=Path, default=ROOT / "results/predictions_tuned")
+    ap.add_argument("--mc38-dir", type=Path, default=ROOT.parent / "mc38_visiumhd")
     ap.add_argument("--leiden-resolution", type=float, default=cmu.DEFAULT_LEIDEN_KW["resolution"])
     ap.add_argument("--spatial-weight", type=float, default=cmu.DEFAULT_LEIDEN_KW["spatial_weight"])
     ap.add_argument("--min-ntc", type=int, default=2, help="Min NTC tumor cells per niche (obs + pred)")
@@ -332,6 +362,7 @@ def main() -> None:
 
     all_enrich: list[pd.DataFrame] = []
     all_corr: list[pd.DataFrame] = []
+    pool_by_slice: dict[str, sc.AnnData] = {}
 
     for sl in args.slices:
         bd, bl_path, pd_dir = resolve_paths(args, sl)
@@ -352,6 +383,7 @@ def main() -> None:
         )
         export_spatial_tumor(pool, sl, out_dir, args.tag, genes=cmu.PAPER_LUNG_GENES)
         plot_spatial_overview(pool, sl, fig_dir, args.tag)
+        pool_by_slice[sl] = pool
         if sl == LUNG_SLICE and not enrich.empty:
             for pert in perts:
                 if (pool.obs["target_gene"].astype(str) == pert).sum() >= 20:
@@ -387,6 +419,12 @@ def main() -> None:
     }
     (out_dir / f"overall_{args.tag}.json").write_text(json.dumps(summary, indent=2))
     plot_scatter(enrich_df, corr_df, fig_dir, args.tag)
+    plot_scatter_histology(enrich_df, corr_df, pool_by_slice, fig_dir, args.tag, mc38_dir=args.mc38_dir)
+    plot_scatter_histology(
+        enrich_df, corr_df, pool_by_slice, fig_dir, args.tag,
+        mc38_dir=args.mc38_dir, top_n=2, slice_filter=LUNG_SLICE,
+        out_stem=f"fig25_lung_enrichment_scatter_histology_{args.tag}",
+    )
     plot_heatmap(corr_df, fig_dir, args.tag)
     print(json.dumps(summary, indent=2))
 

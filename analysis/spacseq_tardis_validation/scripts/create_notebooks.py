@@ -299,6 +299,27 @@ fig, ax = nb_viz.plot_cnn_enrichment_heatmap(corr, tag=CFG["cnn_tag"], cmap="RdB
 plt.show()
 """),
             cell("code", """\
+# Enrichment scatter paired with H&E microniche maps (sc.pl.spatial)
+from pathlib import Path
+import spatial_histology as sh
+
+MC38 = Path(CFG.get("mc38_dir", ROOT.parent / "mc38_visiumhd"))
+pool_by_slice = {}
+for sl in corr["slice"].dropna().unique():
+    pq = ROOT / "results" / "cnn_enrichment" / f"spatial_tumor_{sl}_{CFG['cnn_tag']}.parquet"
+    if pq.exists():
+        pool_by_slice[str(sl)] = sh.tumor_adata_from_parquet(pq, str(sl))
+fig, _ = nb_viz.plot_cnn_enrichment_scatter_with_histology(
+    enrich, corr, pool_by_slice, top_n=6, tag=CFG["cnn_tag"], mc38_dir=MC38,
+)
+plt.show()
+fig, _ = nb_viz.plot_cnn_enrichment_scatter_with_histology(
+    enrich, corr, pool_by_slice, top_n=2, tag=CFG["cnn_tag"], mc38_dir=MC38,
+    slice_filter="Lung_Metastasis_M001",
+)
+plt.show()
+"""),
+            cell("code", """\
 # Lung M001 — paired enrichment + spatial transcriptomics + microniches
 LUNG_SLICE = "Lung_Metastasis_M001"
 LUNG_PERT = "Icam1"  # try "Bcam" for Cd44/Spp1 axis

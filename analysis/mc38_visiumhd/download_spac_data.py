@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Download SPAC-seq Visium HD subQ datasets from spac.pku-genomics.org."""
+    """Download SPAC-seq Visium HD datasets from spac.pku-genomics.org.
+
+    The ``raw`` component contains ``tissue_hires_image.png`` and
+    ``scalefactors_json.json`` used by ``spatial_histology.attach_histology``.
+    """
 
 from __future__ import annotations
 

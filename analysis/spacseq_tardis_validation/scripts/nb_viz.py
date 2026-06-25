@@ -415,6 +415,136 @@ def plot_cnn_enrichment_scatter(
     return fig, axes
 
 
+def plot_cnn_enrichment_scatter_with_histology(
+    enrich_df: pd.DataFrame,
+    corr_df: pd.DataFrame,
+    pool_by_slice: dict,
+    *,
+    top_n: int = 6,
+    tag: str = "cnn",
+    mc38_dir=None,
+    slice_filter: str | None = None,
+    perturb_filter: str | None = None,
+    spot_size: float = 1.4,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Side-by-side enrichment scatter and sc.pl.spatial microniche maps on H&E."""
+    import scanpy as sc
+    from pathlib import Path
+
+    import spatial_histology as sh
+
+    if enrich_df.empty or corr_df.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No enrichment data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, np.array([[ax]])
+
+    mc38 = Path(mc38_dir) if mc38_dir is not None else sh.DEFAULT_MC38
+    pairs = corr_df.dropna(subset=["pearson_r"]).sort_values("pearson_r", ascending=False)
+    if slice_filter:
+        pairs = pairs[pairs["slice"] == slice_filter]
+    if perturb_filter:
+        pairs = pairs[pairs["perturbation"] == perturb_filter]
+    pairs = pairs.head(top_n)
+    if pairs.empty:
+        pairs = corr_df.head(top_n)
+
+    n = len(pairs)
+    fig, axes = plt.subplots(
+        n, 2,
+        figsize=figsize or (11.5, 3.8 * n),
+        squeeze=False,
+        gridspec_kw={"width_ratios": [1.05, 1.35], "wspace": 0.28, "hspace": 0.35},
+    )
+
+    for i, (_, row) in enumerate(pairs.iterrows()):
+        ax_sc, ax_sp = axes[i]
+        sl = str(row["slice"])
+        pert = str(row["perturbation"])
+        sub = enrich_df[(enrich_df["slice"] == sl) & (enrich_df["perturbation"] == pert)].copy()
+        if sub.empty:
+            ax_sc.axis("off")
+            ax_sp.axis("off")
+            continue
+
+        colors = _microniche_color_map(sub["niche"].astype(str))
+        cvals = [colors.get(n, "#2563eb") for n in sub["niche"]]
+        ax_sc.scatter(
+            sub["pred_enrichment_score"], sub["obs_log2_enrichment"],
+            s=90, alpha=0.92, c=cvals, edgecolors="k", linewidths=0.45, zorder=3,
+        )
+        if len(sub) >= 3:
+            x, y = sub["pred_enrichment_score"].to_numpy(), sub["obs_log2_enrichment"].to_numpy()
+            if np.std(x) > 1e-8:
+                m, b = np.polyfit(x, y, 1)
+                xs = np.linspace(x.min(), x.max(), 50)
+                ax_sc.plot(xs, m * xs + b, color="#111827", lw=1.2, ls="--", alpha=0.8)
+        for _, pt in sub.iterrows():
+            ax_sc.annotate(
+                str(pt["niche"]).split("|")[-1],
+                (pt["pred_enrichment_score"], pt["obs_log2_enrichment"]),
+                fontsize=8, ha="center", va="bottom",
+            )
+        ax_sc.axhline(0, color="k", lw=0.4, alpha=0.35)
+        ax_sc.axvline(0, color="k", lw=0.4, alpha=0.35)
+        ax_sc.grid(True, alpha=0.25)
+        r = float(row.get("pearson_r", float("nan")))
+        p = float(row.get("p_pearson", float("nan")))
+        ax_sc.set_title(
+            f"sg{pert} | {sl}\nr={r:+.2f}, p={p:.2g}, n={int(row['n_niches'])} niches",
+            fontsize=10, fontweight="bold",
+        )
+        ax_sc.set_xlabel("Predicted enrichment score")
+        ax_sc.set_ylabel("Observed log₂ OR (sgP vs NTC)")
+
+        pool = pool_by_slice.get(sl)
+        if pool is None or "cnn_leiden" not in pool.obs.columns:
+            ax_sp.text(0.5, 0.5, "No spatial pool", ha="center", va="center", transform=ax_sp.transAxes)
+            ax_sp.axis("off")
+            continue
+
+        if "cell_type" in pool.obs.columns:
+            ct = pool[pool.obs["cell_type"].astype(str) == "tumor"].copy()
+        else:
+            ct = pool.copy()
+        ct.obs["microniche"] = ct.obs["cnn_leiden"].astype(str).str.split("|").str[-1]
+        order = [str(x).split("|")[-1] for x in sub["niche"].astype(str)]
+        extra = sorted(set(ct.obs["microniche"].astype(str)) - set(order))
+        ct.obs["microniche"] = pd.Categorical(ct.obs["microniche"], categories=order + extra, ordered=True)
+        palette = {lab.split("|")[-1]: colors.get(lab, "#888888") for lab in colors}
+        for lab in ct.obs["microniche"].astype(str).unique():
+            palette.setdefault(lab, "#888888")
+
+        try:
+            sh.attach_histology(ct, sl, mc38)
+            sc.pl.spatial(
+                ct,
+                color="microniche",
+                library_id=sl,
+                img_key="hires",
+                ax=ax_sp,
+                show=False,
+                size=spot_size,
+                alpha=0.88,
+                palette=palette,
+                title="",
+                legend_loc="right margin",
+                frameon=False,
+            )
+            ax_sp.set_title(f"Tumor CNN β-microniches on H&E", fontsize=10, fontweight="bold")
+        except Exception as exc:
+            ax_sp.text(0.5, 0.5, f"Histology unavailable\n{exc}", ha="center", va="center", transform=ax_sp.transAxes)
+            ax_sp.axis("off")
+
+    title = f"CNN β-microniche guide enrichment + tissue histology ({tag})"
+    if slice_filter:
+        title = f"{slice_filter} — guide enrichment + H&E microniches ({tag})"
+    fig.suptitle(title, fontsize=12, fontweight="bold")
+    fig.subplots_adjust(top=0.94, hspace=0.42, wspace=0.25)
+    return fig, axes
+
+
 def plot_cnn_enrichment_heatmap(
     corr_df: pd.DataFrame,
     *,
