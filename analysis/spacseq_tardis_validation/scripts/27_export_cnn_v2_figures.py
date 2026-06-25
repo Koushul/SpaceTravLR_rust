@@ -36,6 +36,11 @@ def main() -> None:
         check=True,
     )
 
+    subprocess.run(
+        [py, str(HERE / "28_paper_spatial_enrichment_figure.py"), "--tag", args.tag, "--fig-dir", str(args.fig_dir)],
+        check=True,
+    )
+
     n_png = len(list(args.fig_dir.glob("*.png")))
     n_svg = len(list(args.fig_dir.glob("*.svg")))
     print(f"Done: {n_png} PNG + {n_svg} SVG in {args.fig_dir}")
