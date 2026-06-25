@@ -32,6 +32,15 @@ PERT_ENRICHMENT_PROFILE = {
     "Ptk6": {"exclusion_sign": 0.0, "escape_up": ["Vim", "Snai1"], "escape_dn": ["Epcam", "Cdh1"]},
 }
 
+PAPER_LUNG_GENES = [
+    "Icam1", "Spp1", "Cxcl9", "Cxcl10", "Cd8a", "Stat1", "Ifit3",
+    "Cd163", "H2-Aa", "Bcam", "Itgal", "Itgb2",
+]
+
+
+def niche_short_label(niche: str) -> str:
+    return str(niche).split("|")[-1]
+
 
 def map_pool_to_prep(slice_id: str, pool_barcode: str, prep_names: pd.Index) -> str | None:
     for key in (prep_barcode(slice_id, pool_barcode), pool_barcode):

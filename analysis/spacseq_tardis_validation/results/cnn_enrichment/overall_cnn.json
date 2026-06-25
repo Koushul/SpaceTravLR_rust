@@ -1,39 +1,43 @@
 {
   "tag": "cnn",
   "per_cell_betas": true,
-  "n_enrichment_tests": 9,
-  "median_pearson_r": 0.22982611857111654,
-  "mean_pearson_r": 0.23354808105557318,
+  "leiden_resolution": 0.9,
+  "spatial_weight": 0.4,
+  "min_ntc": 2,
+  "min_pert": 2,
+  "n_enrichment_tests": 26,
+  "median_pearson_r": 0.16710196121449256,
+  "mean_pearson_r": 0.12266539031635858,
   "best_cases": [
     {
-      "slice": "subQ-3",
-      "perturbation": "Ptk6",
-      "pearson_r": 0.9581759225177102,
+      "slice": "Lung_Metastasis_M001",
+      "perturbation": "Bcam",
+      "pearson_r": 0.9997514944994286,
       "n_niches": 3
     },
     {
-      "slice": "Lung_Metastasis_M001",
-      "perturbation": "Icam1",
-      "pearson_r": 0.8911292127116053,
+      "slice": "subQ-4",
+      "perturbation": "Il4ra",
+      "pearson_r": 0.5599687421637262,
+      "n_niches": 11
+    },
+    {
+      "slice": "subQ-3",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.5445007229613917,
       "n_niches": 4
     },
     {
-      "slice": "subQ-2",
-      "perturbation": "Cd74",
-      "pearson_r": 0.48064414908489567,
-      "n_niches": 8
+      "slice": "subQ-3",
+      "perturbation": "Bcam",
+      "pearson_r": 0.5419987258757548,
+      "n_niches": 11
     },
     {
       "slice": "subQ-2",
       "perturbation": "Ptk6",
-      "pearson_r": 0.447426109734742,
+      "pearson_r": 0.33190448243151155,
       "n_niches": 4
-    },
-    {
-      "slice": "subQ-4",
-      "perturbation": "Cd74",
-      "pearson_r": 0.22982611857111654,
-      "n_niches": 10
     }
   ]
 }

@@ -287,9 +287,11 @@ print("Median n niches:", corr["n_niches"].median())
 summary, corr.sort_values("pearson_r", ascending=False).head(8)
 """),
             cell("code", """\
-TOP_N = 6
-POINT_COLOR = "#2563eb"
-fig, axes = nb_viz.plot_cnn_enrichment_scatter(enrich, corr, top_n=TOP_N, tag=CFG["cnn_tag"], point_color=POINT_COLOR)
+# Improved enrichment scatter (niche labels, colors, regression)
+fig, axes = nb_viz.plot_cnn_enrichment_scatter(
+    enrich, corr, top_n=6, tag=CFG["cnn_tag"],
+    label_niches=True, color_by_niche=True, show_regression=True, point_size=80,
+)
 plt.show()
 """),
             cell("code", """\
@@ -297,32 +299,45 @@ fig, ax = nb_viz.plot_cnn_enrichment_heatmap(corr, tag=CFG["cnn_tag"], cmap="RdB
 plt.show()
 """),
             cell("code", """\
-# Spatial microniche map on tissue (cached parquet from script 23)
-SPATIAL_SLICE = "Lung_Metastasis_M001"
-SPATIAL_PERT = "Icam1"
-spatial = bundle.spatial_tumor(SPATIAL_SLICE)
-print("Available slices:", bundle.spatial_slices())
-if spatial.empty:
-    print("Run with REFRESH_CNN=True to generate spatial_tumor_*.parquet")
-else:
-    fig, axes = nb_viz.plot_microniche_spatial(
-        spatial,
-        slice_id=SPATIAL_SLICE,
-        perturb=SPATIAL_PERT,
-        panel="triple",
-        point_size=3.5,
-        title=f"{SPATIAL_SLICE} — paper Icam1 immune-exclusion niches (sg{SPATIAL_PERT})",
-    )
+# Lung M001 — paired enrichment + spatial transcriptomics + microniches
+LUNG_SLICE = "Lung_Metastasis_M001"
+LUNG_PERT = "Icam1"  # try "Bcam" for Cd44/Spp1 axis
+spatial = bundle.spatial_tumor(LUNG_SLICE)
+print("Spatial columns:", [c for c in spatial.columns if c.startswith("expr_")])
+fig, _ = nb_viz.plot_lung_m001_composite(
+    enrich, corr, spatial,
+    perturb=LUNG_PERT, slice_id=LUNG_SLICE, tag=CFG["cnn_tag"],
+    paper_genes=("Icam1", "Spp1", "Cxcl9"),
+)
+plt.show()
+"""),
+            cell("code", """\
+# Bcam / Cd44-Spp1 axis composite (lung)
+fig, _ = nb_viz.plot_lung_m001_composite(
+    enrich, corr, spatial,
+    perturb="Bcam", slice_id=LUNG_SLICE, tag=CFG["cnn_tag"],
+    paper_genes=("Bcam", "Spp1", "Cxcl9"),
+)
+plt.show()
+"""),
+            cell("code", """\
+# Individual spatial ST panels (editable)
+for gene in ["Icam1", "Spp1", "Cxcl9"]:
+    fig, ax = nb_viz.plot_gene_expression_spatial(spatial, gene, slice_id=LUNG_SLICE, point_size=4)
     plt.show()
 """),
             cell("code", """\
-# All tumor microniches on tissue (single panel)
-if not spatial.empty:
-    fig, ax = nb_viz.plot_microniche_spatial(
-        spatial, slice_id=SPATIAL_SLICE, panel="all", point_size=4,
-        title=f"{SPATIAL_SLICE} CNN β-microniches ({spatial['cnn_leiden'].nunique()} niches)",
-    )
-    plt.show()
+fig, axes = nb_viz.plot_microniche_spatial(
+    spatial, slice_id=LUNG_SLICE, perturb=LUNG_PERT, panel="triple", point_size=3.5,
+    title=f"{LUNG_SLICE} CNN β-microniches vs sg{LUNG_PERT}",
+)
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_niche_field_spatial(
+    spatial, enrich, slice_id=LUNG_SLICE, perturb=LUNG_PERT, value_col="obs_log2_enrichment",
+)
+plt.show()
 """),
         ],
     ),

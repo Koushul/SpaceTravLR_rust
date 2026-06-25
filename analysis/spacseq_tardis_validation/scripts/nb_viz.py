@@ -341,8 +341,14 @@ def plot_cnn_enrichment_scatter(
     *,
     top_n: int = 6,
     tag: str = "cnn",
-    point_color: str = "#2563eb",
+    point_color: str | None = None,
     figsize: tuple[float, float] | None = None,
+    label_niches: bool = True,
+    color_by_niche: bool = True,
+    show_regression: bool = True,
+    point_size: float = 70,
+    slice_filter: str | None = None,
+    perturb_filter: str | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     if enrich_df.empty or corr_df.empty:
         fig, ax = plt.subplots(figsize=(6, 3))
@@ -350,27 +356,58 @@ def plot_cnn_enrichment_scatter(
         ax.axis("off")
         return fig, np.array([[ax]])
 
-    pairs = corr_df.dropna(subset=["pearson_r"]).sort_values("pearson_r", ascending=False).head(top_n)
+    pairs = corr_df.dropna(subset=["pearson_r"]).sort_values("pearson_r", ascending=False)
+    if slice_filter:
+        pairs = pairs[pairs["slice"] == slice_filter]
+    if perturb_filter:
+        pairs = pairs[pairs["perturbation"] == perturb_filter]
+    pairs = pairs.head(top_n)
     if pairs.empty:
         pairs = corr_df.head(top_n)
     n = len(pairs)
     cols = min(3, max(n, 1))
     rows = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=figsize or (4.2 * cols, 3.8 * rows), squeeze=False)
+    fig, axes = plt.subplots(rows, cols, figsize=figsize or (4.8 * cols, 4.2 * rows), squeeze=False)
     for ax, (_, row) in zip(axes.ravel(), pairs.iterrows()):
         sub = enrich_df[
             (enrich_df["slice"] == row["slice"]) & (enrich_df["perturbation"] == row["perturbation"])
-        ]
-        ax.scatter(sub["pred_enrichment_score"], sub["obs_log2_enrichment"], s=35, alpha=0.85, c=point_color)
-        ax.axhline(0, color="k", lw=0.4, alpha=0.4)
-        ax.axvline(0, color="k", lw=0.4, alpha=0.4)
+        ].copy()
+        if sub.empty:
+            ax.axis("off")
+            continue
+        if color_by_niche:
+            colors = _microniche_color_map(sub["niche"].astype(str))
+            cvals = [colors.get(n, "#2563eb") for n in sub["niche"]]
+        else:
+            cvals = point_color or "#2563eb"
+        ax.scatter(
+            sub["pred_enrichment_score"], sub["obs_log2_enrichment"],
+            s=point_size, alpha=0.9, c=cvals, edgecolors="k", linewidths=0.4,
+        )
+        if show_regression and len(sub) >= 3:
+            x, y = sub["pred_enrichment_score"].to_numpy(), sub["obs_log2_enrichment"].to_numpy()
+            if np.std(x) > 1e-8:
+                m, b = np.polyfit(x, y, 1)
+                xs = np.linspace(x.min(), x.max(), 50)
+                ax.plot(xs, m * xs + b, color="#111827", lw=1.2, ls="--", alpha=0.8)
+        if label_niches:
+            for _, pt in sub.iterrows():
+                ax.annotate(
+                    str(pt["niche"]).split("|")[-1],
+                    (pt["pred_enrichment_score"], pt["obs_log2_enrichment"]),
+                    fontsize=7, ha="center", va="bottom",
+                )
+        ax.axhline(0, color="k", lw=0.4, alpha=0.35)
+        ax.axvline(0, color="k", lw=0.4, alpha=0.35)
+        ax.grid(True, alpha=0.25)
         r = row.get("pearson_r", float("nan"))
+        p = row.get("p_pearson", float("nan"))
         ax.set_title(
-            f"sg{row['perturbation']} | {row['slice']}\nr={r:+.2f}, n={int(row['n_niches'])}",
+            f"sg{row['perturbation']} | {row['slice']}\nr={r:+.2f}, p={p:.2g}, n={int(row['n_niches'])} niches",
             fontsize=9,
         )
         ax.set_xlabel("Predicted enrichment score")
-        ax.set_ylabel("Observed log2 OR")
+        ax.set_ylabel("Observed log₂ OR (sgP vs NTC)")
     for ax in axes.ravel()[n:]:
         ax.axis("off")
     fig.suptitle(f"CNN β-microniche guide enrichment ({tag})", fontsize=11, fontweight="bold")
@@ -468,6 +505,184 @@ def plot_microniche_spatial(
     ax.set_title(title or f"{slice_id or ''} tumor microniches (n={n_n} niches)", fontweight="bold")
     fig.tight_layout()
     return fig, ax
+
+
+def plot_gene_expression_spatial(
+    spatial_df: pd.DataFrame,
+    gene: str,
+    *,
+    slice_id: str = "",
+    cell_filter: str = "all",
+    perturb: str | None = None,
+    point_size: float = 3.5,
+    figsize: tuple[float, float] = (6, 5),
+    title: str | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Spatial tumor map colored by log-normalized expression of one gene."""
+    col = f"expr_{gene}"
+    df = spatial_df.copy()
+    if slice_id:
+        df = df[df["slice"].astype(str) == slice_id]
+    if cell_filter == "ntc":
+        df = df[df["target_gene"].astype(str) == "non-targeting"]
+    elif cell_filter == "pert" and perturb:
+        df = df[df["target_gene"].astype(str) == perturb]
+    if df.empty or col not in df.columns:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, f"No data for {gene}", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+    vals = df[col].to_numpy(dtype=float)
+    vmax = float(np.nanpercentile(np.abs(vals - np.nanmedian(vals)), 95)) if np.isfinite(vals).any() else 1.0
+    vmax = max(vmax, 0.05)
+    from matplotlib.colors import TwoSlopeNorm
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=np.nanmedian(vals), vmax=vmax)
+    fig, ax = plt.subplots(figsize=figsize)
+    sc_plot = ax.scatter(df["x"], df["y"], c=vals, s=point_size, cmap="magma", norm=norm, alpha=0.85, rasterized=True)
+    fig.colorbar(sc_plot, ax=ax, shrink=0.75, label=f"{gene} expression")
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title(title or f"{gene} — tumor ST ({cell_filter})", fontweight="bold", fontsize=10)
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_niche_field_spatial(
+    spatial_df: pd.DataFrame,
+    enrich_df: pd.DataFrame,
+    *,
+    slice_id: str,
+    perturb: str,
+    value_col: str = "obs_log2_enrichment",
+    figsize: tuple[float, float] = (6, 5),
+) -> tuple[plt.Figure, plt.Axes]:
+    """Map per-niche enrichment score onto tumor cells by microniche label."""
+    df = spatial_df[spatial_df["slice"].astype(str) == slice_id].copy()
+    sub = enrich_df[
+        (enrich_df["slice"] == slice_id) & (enrich_df["perturbation"] == perturb)
+    ][["niche", value_col]]
+    if df.empty or sub.empty:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No niche field data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+    df = df.merge(sub, left_on="cnn_leiden", right_on="niche", how="left")
+    vals = df[value_col].fillna(0).to_numpy()
+    vmax = max(0.5, float(np.nanpercentile(np.abs(vals), 95)))
+    from matplotlib.colors import TwoSlopeNorm
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+    fig, ax = plt.subplots(figsize=figsize)
+    sc_plot = ax.scatter(df["x"], df["y"], c=vals, s=4, cmap="RdBu_r", norm=norm, alpha=0.9, rasterized=True)
+    fig.colorbar(sc_plot, ax=ax, shrink=0.75, label=value_col)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title(f"sg{perturb} observed niche enrichment on tissue", fontweight="bold", fontsize=10)
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_lung_m001_composite(
+    enrich_df: pd.DataFrame,
+    corr_df: pd.DataFrame,
+    spatial_df: pd.DataFrame,
+    *,
+    perturb: str = "Icam1",
+    slice_id: str = "Lung_Metastasis_M001",
+    tag: str = "cnn",
+    paper_genes: tuple[str, ...] = ("Icam1", "Spp1", "Cxcl9"),
+) -> tuple[plt.Figure, list[plt.Axes]]:
+    """Pair enrichment scatter with lung tumor ST + microniche maps (paper figure layout)."""
+    from matplotlib.colors import TwoSlopeNorm
+
+    fig = plt.figure(figsize=(16, 12), layout="constrained")
+    gs = fig.add_gridspec(3, 3, height_ratios=[1.1, 1, 1], hspace=0.32, wspace=0.28)
+
+    ax_sc = fig.add_subplot(gs[0, :])
+    sub_e = enrich_df[(enrich_df["slice"] == slice_id) & (enrich_df["perturbation"] == perturb)]
+    sub_c = corr_df[(corr_df["slice"] == slice_id) & (corr_df["perturbation"] == perturb)]
+    if not sub_e.empty:
+        colors = _microniche_color_map(sub_e["niche"].astype(str))
+        cvals = [colors.get(n, "#2563eb") for n in sub_e["niche"]]
+        ax_sc.scatter(
+            sub_e["pred_enrichment_score"], sub_e["obs_log2_enrichment"],
+            s=120, c=cvals, edgecolors="k", linewidths=0.5, zorder=3,
+        )
+        for _, pt in sub_e.iterrows():
+            ax_sc.annotate(str(pt["niche"]).split("|")[-1], (pt["pred_enrichment_score"], pt["obs_log2_enrichment"]), fontsize=9)
+        if len(sub_e) >= 3:
+            x, y = sub_e["pred_enrichment_score"].to_numpy(), sub_e["obs_log2_enrichment"].to_numpy()
+            if np.std(x) > 1e-8:
+                m, b = np.polyfit(x, y, 1)
+                xs = np.linspace(x.min(), x.max(), 50)
+                ax_sc.plot(xs, m * xs + b, "k--", lw=1.2, alpha=0.7)
+    ax_sc.axhline(0, color="k", lw=0.5, alpha=0.4)
+    ax_sc.axvline(0, color="k", lw=0.5, alpha=0.4)
+    ax_sc.grid(True, alpha=0.3)
+    r = float(sub_c["pearson_r"].iloc[0]) if not sub_c.empty else float("nan")
+    p = float(sub_c["p_pearson"].iloc[0]) if not sub_c.empty and "p_pearson" in sub_c.columns else float("nan")
+    ax_sc.set_xlabel("Predicted enrichment score (exclusion × escape × CNN β)")
+    ax_sc.set_ylabel("Observed log₂ OR (sgP vs NTC fraction per niche)")
+    ax_sc.set_title(
+        f"Lung M001 sg{perturb} — microniche guide enrichment\n"
+        f"Zhang et al. Cell 2026 — {perturb} spatial niche composition  |  r={r:+.2f}, p={p:.2g}, n={len(sub_e)} niches",
+        fontweight="bold",
+    )
+
+    for j, gene in enumerate(paper_genes):
+        ax = fig.add_subplot(gs[1, j])
+        col = f"expr_{gene}"
+        df = spatial_df[spatial_df["slice"].astype(str) == slice_id]
+        if df.empty or col not in df.columns:
+            ax.axis("off")
+            continue
+        vals = df[col].to_numpy(float)
+        vmax = float(np.nanpercentile(np.abs(vals - np.nanmedian(vals)), 95)) if np.isfinite(vals).any() else 1.0
+        vmax = max(vmax, 0.05)
+        norm = TwoSlopeNorm(vmin=-vmax, vcenter=np.nanmedian(vals), vmax=vmax)
+        sc_p = ax.scatter(df["x"], df["y"], c=vals, s=2.5, cmap="magma", norm=norm, rasterized=True)
+        fig.colorbar(sc_p, ax=ax, shrink=0.7, label=gene)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title(f"{gene} expression (tumor)", fontsize=9, fontweight="bold")
+
+    ax_n = fig.add_subplot(gs[2, 0])
+    df = spatial_df[spatial_df["slice"].astype(str) == slice_id]
+    colors = _microniche_color_map(df["cnn_leiden"].astype(str))
+    for lab in sorted(df["cnn_leiden"].astype(str).unique()):
+        m = df["cnn_leiden"].astype(str) == lab
+        ax_n.scatter(df.loc[m, "x"], df.loc[m, "y"], c=[colors.get(lab, "#888")], s=3, rasterized=True)
+    ax_n.set_aspect("equal")
+    ax_n.axis("off")
+    ax_n.set_title(f"CNN β-microniches (n={df['cnn_leiden'].nunique()})", fontweight="bold", fontsize=9)
+
+    ax_o = fig.add_subplot(gs[2, 1])
+    if not sub_e.empty:
+        df2 = df.merge(sub_e[["niche", "obs_log2_enrichment"]], left_on="cnn_leiden", right_on="niche", how="left")
+        vals = df2["obs_log2_enrichment"].fillna(0)
+        vmax = max(0.5, float(vals.abs().quantile(0.95)))
+        norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+        sc_o = ax_o.scatter(df2["x"], df2["y"], c=vals, s=3, cmap="RdBu_r", norm=norm, rasterized=True)
+        fig.colorbar(sc_o, ax=ax_o, shrink=0.7, label="log₂ OR")
+    ax_o.set_aspect("equal")
+    ax_o.axis("off")
+    ax_o.set_title(f"Observed sg{perturb} enrichment field", fontweight="bold", fontsize=9)
+
+    ax_p = fig.add_subplot(gs[2, 2])
+    ntc = df[df["target_gene"].astype(str) == "non-targeting"]
+    pert_cells = df[df["target_gene"].astype(str) == perturb]
+    ax_p.scatter(ntc["x"], ntc["y"], c="#d1d5db", s=2, rasterized=True, label="NTC")
+    ax_p.scatter(pert_cells["x"], pert_cells["y"], c="#dc2626", s=3, alpha=0.7, rasterized=True, label=f"sg{perturb}")
+    ax_p.set_aspect("equal")
+    ax_p.axis("off")
+    ax_p.legend(fontsize=7, loc="upper right")
+    ax_p.set_title("Guide occupancy (tumor)", fontweight="bold", fontsize=9)
+
+    fig.suptitle(
+        f"{slice_id} — spatial transcriptomics × CNN microniches ({tag})",
+        fontsize=13,
+        fontweight="bold",
+    )
+    return fig, [ax_sc, ax_n, ax_o, ax_p]
 
 
 def plot_direct_deg_bars(

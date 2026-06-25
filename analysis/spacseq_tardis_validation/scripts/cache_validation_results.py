@@ -181,6 +181,14 @@ def main() -> None:
 
     manifest = build_manifest(tag, args.spatial_tag, args.cnn_tag, cfg, sections)
     manifest_path = cache_dir / "manifest.json"
+    if args.manifest_only and manifest_path.exists() and set(sections) != set(DEFAULT_SECTIONS):
+        prev = json.loads(manifest_path.read_text())
+        prev_sections = prev.get("sections", {})
+        prev_sections.update(manifest.get("sections", {}))
+        manifest["sections"] = prev_sections
+        all_missing = set(prev.get("missing", []))
+        all_missing.update(manifest.get("missing", []))
+        manifest["missing"] = sorted(all_missing)
     manifest_path.write_text(json.dumps(manifest, indent=2))
     print(f"\nWrote {manifest_path}")
     print(f"Sections: {list(manifest['sections'].keys())}")

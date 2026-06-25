@@ -161,29 +161,12 @@ def run_slice_enrichment(
 def plot_scatter(enrich_df: pd.DataFrame, corr_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     if enrich_df.empty or corr_df.empty:
         return
-    pairs = corr_df.dropna(subset=["pearson_r"]).sort_values("pearson_r", ascending=False).head(6)
-    if pairs.empty:
-        pairs = corr_df.head(6)
-    n = len(pairs)
-    cols = min(3, max(n, 1))
-    rows = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), squeeze=False)
-    for ax, (_, row) in zip(axes.ravel(), pairs.iterrows()):
-        sub = enrich_df[
-            (enrich_df["slice"] == row["slice"]) & (enrich_df["perturbation"] == row["perturbation"])
-        ]
-        ax.scatter(sub["pred_enrichment_score"], sub["obs_log2_enrichment"], s=35, alpha=0.85, c="#2563eb")
-        ax.axhline(0, color="k", lw=0.4, alpha=0.4)
-        ax.axvline(0, color="k", lw=0.4, alpha=0.4)
-        r = row.get("pearson_r", float("nan"))
-        ax.set_title(f"sg{row['perturbation']} | {row['slice']}\nr={r:+.2f}, n={int(row['n_niches'])}", fontsize=9)
-        ax.set_xlabel("Predicted enrichment score")
-        ax.set_ylabel("Observed log2 OR")
-    for ax in axes.ravel()[n:]:
-        ax.axis("off")
-    fig.suptitle(f"CNN β-microniche guide enrichment ({tag})", fontsize=11, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(fig_dir / f"fig20_enrichment_scatter_{tag}.png", dpi=180, bbox_inches="tight")
+    import nb_viz
+    fig, _ = nb_viz.plot_cnn_enrichment_scatter(
+        enrich_df, corr_df, top_n=6, tag=tag,
+        label_niches=True, color_by_niche=True, show_regression=True,
+    )
+    fig.savefig(fig_dir / f"fig20_enrichment_scatter_{tag}.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -201,7 +184,13 @@ def plot_heatmap(corr_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     plt.close(fig)
 
 
-def export_spatial_tumor(pool: sc.AnnData, slice_id: str, out_dir: Path, tag: str) -> Path | None:
+def export_spatial_tumor(
+    pool: sc.AnnData,
+    slice_id: str,
+    out_dir: Path,
+    tag: str,
+    genes: list[str] | None = None,
+) -> Path | None:
     ct = pool[pool.obs["cell_type"].astype(str) == "tumor"].copy()
     if ct.n_obs == 0 or "cnn_leiden" not in ct.obs.columns:
         return None
@@ -213,6 +202,12 @@ def export_spatial_tumor(pool: sc.AnnData, slice_id: str, out_dir: Path, tag: st
         "slice": slice_id,
         "tag": tag,
     })
+    genes = genes or cmu.PAPER_LUNG_GENES
+    for g in genes:
+        if g in ct.var_names:
+            x = ct[:, g].X
+            arr = x.toarray().ravel() if hasattr(x, "toarray") else np.asarray(x).ravel()
+            df[f"expr_{g}"] = arr
     path = out_dir / f"spatial_tumor_{slice_id}_{tag}.parquet"
     df.to_parquet(path, index=False)
     return path
@@ -224,6 +219,31 @@ def _niche_colors(labels: pd.Series) -> dict[str, tuple]:
         uniq = sorted(labels.unique())
     cmap = plt.colormaps.get_cmap("tab20")
     return {lab: cmap(i % 20) for i, lab in enumerate(uniq)}
+
+
+def plot_lung_composite(
+    enrich: pd.DataFrame,
+    corr: pd.DataFrame,
+    pool: sc.AnnData,
+    slice_id: str,
+    perturb: str,
+    out_dir: Path,
+    fig_dir: Path,
+    tag: str,
+) -> None:
+    import nb_viz
+
+    spatial_path = out_dir / f"spatial_tumor_{slice_id}_{tag}.parquet"
+    if not spatial_path.exists():
+        export_spatial_tumor(pool, slice_id, out_dir, tag, genes=cmu.PAPER_LUNG_GENES)
+    if not spatial_path.exists():
+        return
+    spatial_df = pd.read_parquet(spatial_path)
+    fig, _ = nb_viz.plot_lung_m001_composite(
+        enrich, corr, spatial_df, perturb=perturb, slice_id=slice_id, tag=tag,
+    )
+    fig.savefig(fig_dir / f"fig24_lung_composite_{perturb}_{tag}.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_niche_maps(slice_id: str, pool: sc.AnnData, perturb: str, fig_dir: Path, tag: str) -> None:
@@ -330,8 +350,12 @@ def main() -> None:
             global_baseline=gb, fallback_pred_dir=args.seed_pred_dir,
             leiden_kw=leiden_kw, min_ntc=args.min_ntc, min_pert=args.min_pert,
         )
-        export_spatial_tumor(pool, sl, out_dir, args.tag)
+        export_spatial_tumor(pool, sl, out_dir, args.tag, genes=cmu.PAPER_LUNG_GENES)
         plot_spatial_overview(pool, sl, fig_dir, args.tag)
+        if sl == LUNG_SLICE and not enrich.empty:
+            for pert in perts:
+                if (pool.obs["target_gene"].astype(str) == pert).sum() >= 20:
+                    plot_lung_composite(enrich, corr, pool, sl, pert, out_dir, fig_dir, args.tag)
         if not enrich.empty:
             all_enrich.append(enrich)
         if not corr.empty:
