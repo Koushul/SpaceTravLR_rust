@@ -185,6 +185,9 @@ def plot_scatter_histology(
     if enrich_df.empty or corr_df.empty or not pool_by_slice:
         return
     import nb_viz
+    import spatial_histology as sh
+
+    sh.apply_publication_style()
     fig, _ = nb_viz.plot_cnn_enrichment_scatter_with_histology(
         enrich_df,
         corr_df,
@@ -195,7 +198,8 @@ def plot_scatter_histology(
         slice_filter=slice_filter,
     )
     stem = out_stem or (f"fig20_enrichment_scatter_histology_{tag}" if not slice_filter else f"fig25_lung_enrichment_scatter_histology_{tag}")
-    fig.savefig(fig_dir / f"{stem}.png", dpi=200, bbox_inches="tight")
+    fig.savefig(fig_dir / f"{stem}.svg", **sh.FIGURE_PARAMS)
+    fig.savefig(fig_dir / f"{stem}.png", dpi=300, bbox_inches="tight", transparent=True)
     plt.close(fig)
 
 

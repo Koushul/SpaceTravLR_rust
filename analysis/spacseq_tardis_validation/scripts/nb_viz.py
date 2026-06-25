@@ -471,7 +471,7 @@ def plot_cnn_enrichment_scatter_with_histology(
         cvals = [colors.get(n, "#2563eb") for n in sub["niche"]]
         ax_sc.scatter(
             sub["pred_enrichment_score"], sub["obs_log2_enrichment"],
-            s=90, alpha=0.92, c=cvals, edgecolors="k", linewidths=0.45, zorder=3,
+            s=65, alpha=0.92, c=cvals, edgecolors="k", linewidths=0.45, zorder=3,
         )
         if len(sub) >= 3:
             x, y = sub["pred_enrichment_score"].to_numpy(), sub["obs_log2_enrichment"].to_numpy()

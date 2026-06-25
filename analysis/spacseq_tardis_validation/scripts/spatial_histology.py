@@ -20,8 +20,51 @@ DOWNLOAD_SCRIPT = DEFAULT_MC38 / "download_spac_data.py"
 
 LUNG_SLICES = {"Lung_Metastasis_M001", "Lung_Metastasis_M002", "Lung_Metastasis_M003"}
 
+FIGURE_PARAMS = {
+    "dpi": 300,
+    "bbox_inches": "tight",
+    "format": "svg",
+    "transparent": True,
+}
 
-def dataset_type(slice_id: str) -> int:
+PUBLICATION_RCPARAMS = {
+    "text.usetex": False,
+    "svg.fonttype": "none",
+    "hatch.color": "black",
+    "hatch.linewidth": 1.0,
+}
+
+
+def apply_publication_style() -> None:
+    plt.rcParams.update(PUBLICATION_RCPARAMS)
+
+
+def segmentation_x_offset(mc38_dir: Path, slice_id: str) -> float:
+    """Align StarDist polygon centroids with Visium fullres bin/image coordinates."""
+    import geopandas as gpd
+
+    mc38_dir = Path(mc38_dir).resolve()
+    pos = pd.read_parquet(mc38_dir / slice_id / "raw" / "extracted" / "tissue_positions.parquet")
+    geo = mc38_dir / slice_id / "segmentation/extracted/segmentation/graphclust_annotated_cell_segmentations.geojson"
+    cells = gpd.read_file(geo)
+    poly_x_min = float(cells.geometry.bounds["minx"].min())
+    bin_x_min = float(pos.loc[pos.in_tissue == 1, "pxl_col_in_fullres"].min())
+    return bin_x_min - poly_x_min
+
+
+def tissue_hires_extent(mc38_dir: Path, slice_id: str) -> tuple[float, float, float, float]:
+    mc38_dir = Path(mc38_dir).resolve()
+    pos = pd.read_parquet(mc38_dir / slice_id / "raw" / "extracted" / "tissue_positions.parquet")
+    sf = json.loads((mc38_dir / slice_id / "raw" / "extracted" / "scalefactors_json.json").read_text())
+    scalef = float(sf["tissue_hires_scalef"])
+    it = pos.loc[pos.in_tissue == 1]
+    pad = 12.0
+    xmin = float(it.pxl_col_in_fullres.min()) * scalef - pad
+    xmax = float(it.pxl_col_in_fullres.max()) * scalef + pad
+    ymin = float(it.pxl_row_in_fullres.min()) * scalef - pad
+    ymax = float(it.pxl_row_in_fullres.max()) * scalef + pad
+    return xmin, xmax, ymin, ymax
+
     return 1 if slice_id in LUNG_SLICES or slice_id.startswith("Lung_") else 2
 
 
@@ -92,6 +135,7 @@ def attach_histology(
     img = imread(img_path)
     sf = json.loads(sf_path.read_text())
     lib = library_id or slice_id
+    x_offset = segmentation_x_offset(mc38_dir, slice_id)
     adata.uns["spatial"] = {
         lib: {
             "images": {img_key: img},
@@ -99,6 +143,9 @@ def attach_histology(
                 "tissue_hires_scalef": float(sf["tissue_hires_scalef"]),
                 "spot_diameter_fullres": float(sf.get("spot_diameter_fullres", 50.0)),
             },
+            "segmentation_x_offset": x_offset,
+            "mc38_dir": str(mc38_dir),
+            "slice_id": slice_id,
         }
     }
     return adata
@@ -116,8 +163,12 @@ def tumor_adata_from_parquet(parquet_path: Path, slice_id: str) -> sc.AnnData:
 
 
 def hires_coords(adata: sc.AnnData, library_id: str) -> np.ndarray:
-    scalef = float(adata.uns["spatial"][library_id]["scalefactors"]["tissue_hires_scalef"])
-    return adata.obsm["spatial"].astype(np.float64) * scalef
+    meta = adata.uns["spatial"][library_id]
+    scalef = float(meta["scalefactors"]["tissue_hires_scalef"])
+    xy = adata.obsm["spatial"].astype(np.float64).copy()
+    x_offset = float(meta.get("segmentation_x_offset", 0.0))
+    xy[:, 0] += x_offset
+    return xy * scalef
 
 
 def default_spot_size(adata: sc.AnnData, library_id: str) -> float:
@@ -125,9 +176,9 @@ def default_spot_size(adata: sc.AnnData, library_id: str) -> float:
     scalef = float(sf["tissue_hires_scalef"])
     diam_hires = float(sf.get("spot_diameter_fullres", 50.0)) * scalef
     density = max(adata.n_obs, 1)
-    base = max(diam_hires * 1.6, 2.5)
-    scale = float(np.clip((2200.0 / density) ** 0.35, 0.45, 1.25))
-    return float(np.clip((base * scale) ** 2, 10.0, 90.0))
+    base = max(diam_hires * 1.2, 2.0)
+    scale = float(np.clip((2200.0 / density) ** 0.35, 0.4, 1.05))
+    return float(np.clip((base * scale) ** 2 * 0.65, 6.0, 55.0))
 
 
 def plot_microniche_on_he(
@@ -151,8 +202,14 @@ def plot_microniche_on_he(
     img = lib["images"]["hires"]
     xy = hires_coords(adata, library_id)
     size = spot_size if spot_size is not None else default_spot_size(adata, library_id)
+    mc38_dir = Path(lib.get("mc38_dir", DEFAULT_MC38))
+    sl = str(lib.get("slice_id", library_id))
+    xmin, xmax, ymin, ymax = tissue_hires_extent(mc38_dir, sl)
 
-    ax.imshow(img, origin="upper", interpolation="bilinear", alpha=img_alpha, zorder=0)
+    ax.imshow(
+        img, origin="upper", interpolation="bilinear", alpha=img_alpha, zorder=0,
+        extent=(0, img.shape[1], img.shape[0], 0),
+    )
     labels = adata.obs[color_key].astype(str)
     for lab in labels.unique():
         if lab in ("nan", "unassigned"):
@@ -166,9 +223,11 @@ def plot_microniche_on_he(
             alpha=spot_alpha,
             edgecolors=edgecolor,
             linewidths=edge_width,
-            rasterized=True,
+            rasterized=False,
             zorder=2,
         )
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymax, ymin)
     ax.set_aspect("equal")
     ax.axis("off")
     if title:
