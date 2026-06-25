@@ -43,6 +43,7 @@ def default_config() -> dict[str, str]:
     return {
         "tag": "tuned",
         "spatial_tag": "spatial_v3",
+        "cnn_tag": "cnn",
         "pred_dir": "results/predictions_tuned",
         "pred_dir_cnn": "results/predictions_cnn",
         "betadata_dir": "runs/baseline_pooled_seed",
@@ -98,3 +99,10 @@ def show_figures(glob_pattern: str, max_images: int = 16) -> list[Path]:
 
 def artifact_status(paths: list[str]) -> dict[str, bool]:
     return {p: (ROOT / p).exists() for p in paths}
+
+
+def load_cache(tag: str | None = None):
+    """Load ValidationBundle from cache/{tag}/manifest.json."""
+    from nb_cache import load_cache as _load_cache
+
+    return _load_cache(tag or default_config()["tag"], root=ROOT)

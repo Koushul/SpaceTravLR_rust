@@ -1,42 +1,66 @@
 # SPAC-seq TARDIS validation notebooks
 
-Jupyter notebooks that drive the existing Python scripts under `../scripts/` and display
-result tables and figures. Each notebook uses `nb_common.run_script()` so analysis logic
-stays in the `.py` files.
+Interactive Jupyter notebooks that **load cached CSV/JSON** from `cache/{tag}/manifest.json`
+and render **editable matplotlib figures** via `nb_viz.py`. Heavy analysis runs once through
+the cache script—not on every notebook open.
 
-## Setup
-
-From `analysis/spacseq_tardis_validation/`:
+## Workflow
 
 ```bash
-pip install jupyter nbconvert ipython  # if needed
+cd analysis/spacseq_tardis_validation
+
+# 1. Index existing results (fast) or re-run analyses (slow)
+python3 scripts/cache_validation_results.py --manifest-only
+python3 scripts/cache_validation_results.py              # full re-run
+
+# 2. Regenerate notebooks after editing create_notebooks.py
+python3 scripts/create_notebooks.py
+
+# 3. Open in Jupyter
 jupyter lab notebooks/
 ```
 
-Notebooks expect pooled subQ data, tuned predictions (`results/predictions_tuned/`), and
-(optionally) CNN runs under `runs/baseline_pooled_cnn/`.
+Use `notebooks/00_refresh_cache.ipynb` to refresh the cache from the UI.
+
+## Cache layout
+
+| Path | Purpose |
+| --- | --- |
+| `cache/tuned/manifest.json` | Index of all artifact paths + config |
+| `results/*/` | Tables and summary JSON (written by `.py` scripts) |
+| `scripts/nb_cache.py` | `load_cache()` → `ValidationBundle` |
+| `scripts/nb_viz.py` | Plot functions returning `Figure` objects |
 
 ## Notebooks
 
-| Notebook | Scripts | Outputs |
+| Notebook | Cached sections | Plots (editable kwargs) |
 | --- | --- | --- |
-| `01_core_multislice_validation.ipynb` | `08`, `10` | `results/multislice/`, `figures/scorecard/` |
-| `02_spatial_graphclust_validation.ipynb` | `09` | `results/spatial/`, `figures/spatial/` |
-| `03_beta_leiden_microniches.ipynb` | `11`, `12` | `results/beta_leiden/`, `figures/beta_leiden/` |
-| `04_niche_deg_ccc_spp1.ipynb` | `13`, `18` | `results/niche_deg/`, `figures/niche_spp1/` |
-| `05_paper_findings.ipynb` | `19`, `20` | `results/paper_findings/`, `figures/extended_paper/` |
-| `06_cnn_guide_enrichment.ipynb` | `23` | `results/cnn_enrichment/`, `figures/cnn_enrichment/` |
-| `07_validation_dashboard.ipynb` | `21` | `results/validation_dashboard/` |
+| `00_refresh_cache.ipynb` | all | — (runs cache script) |
+| `01_core_multislice_validation.ipynb` | multislice, scorecard | meta bar, slice heatmap, cell-type boxplot, scorecard |
+| `02_spatial_graphclust_validation.ipynb` | spatial | niche concordance bars |
+| `03_beta_leiden_microniches.ipynb` | beta_leiden | β-Leiden niche concordance |
+| `04_niche_deg_ccc_spp1.ipynb` | niche_deg, niche_spp1 | direct DEG + spatial kNN bars |
+| `05_paper_findings.ipynb` | paper, extended_paper | scorecard, heatmap, lung module bars |
+| `06_cnn_guide_enrichment.ipynb` | cnn | scatter grid, correlation heatmap |
+| `07_validation_dashboard.ipynb` | dashboard, niche_spp1 | multi-panel dashboard |
 
-Regenerate notebooks after editing templates:
-
-```bash
-python3 scripts/create_notebooks.py
-```
-
-Headless smoke test (from repo validation root):
+## Smoke test
 
 ```bash
-python3 scripts/execute_notebooks.py --quick      # ~5 min
-python3 scripts/execute_notebooks.py            # all notebooks (~20–40 min)
+python3 scripts/execute_notebooks.py --quick   # load cache + plot, no re-analysis
+python3 scripts/execute_notebooks.py           # all notebooks
 ```
+
+## Tweaking plots
+
+Each plot cell exposes parameters you can change and re-run, e.g.:
+
+```python
+TOP_N = 12
+SUPPORT_THRESHOLD = 0.6
+fig, ax = nb_viz.plot_meta_analysis(meta, top_n=TOP_N)
+plt.show()
+```
+
+To add a new plot, implement a function in `scripts/nb_viz.py` and wire it in
+`scripts/create_notebooks.py`, then regenerate notebooks.

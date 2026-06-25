@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "tag": "tuned",
+  "spatial_tag": "spatial_v3",
+  "cnn_tag": "cnn",
+  "created_at": "2026-06-25T01:27:14.780261+00:00",
+  "config": {
+    "run_dir": "runs/baseline_pooled_seed",
+    "run_toml": "runs/baseline_pooled_seed/spacetravlr_run_repro.toml",
+    "baseline_h5ad": "runs/baseline_pooled_seed/spacetravlr_prep/baseline_ntc_0c6fbac5e6cd947c_fullprep.h5ad",
+    "betadata_dir": "runs/baseline_pooled_seed",
+    "pred_dir": "results/predictions_tuned",
+    "beta_scale_factor": "per-gene (see results/beta_sweep/best_scales.json)",
+    "extra_modulators": false
+  },
+  "sections": {
+    "multislice": {
+      "artifacts": {
+        "overall": "results/multislice/overall_summary_tuned.json",
+        "combined": "results/multislice/per_celltype_corr_all_slices_tuned.csv",
+        "meta": "results/multislice/meta_analysis_tuned.csv"
+      }
+    },
+    "spatial": {
+      "artifacts": {
+        "overall": "results/spatial/overall_spatial_tuned.json",
+        "summary": "results/spatial/spatial_summary_tuned.csv",
+        "niche_corr": "results/spatial/niche_corr_tuned.csv"
+      }
+    },
+    "scorecard": {
+      "artifacts": {
+        "summary": "results/scorecard/scorecard_summary.json",
+        "table": "results/scorecard/prediction_scorecard.csv"
+      }
+    },
+    "beta_leiden": {
+      "artifacts": {
+        "overall": "results/beta_leiden/overall_tuned.json",
+        "summary": "results/beta_leiden/summary_tuned.csv",
+        "niche_corr": "results/beta_leiden/niche_corr_tuned.csv",
+        "silhouette": "results/beta_leiden/silhouette_tuned.csv"
+      }
+    },
+    "niche_deg": {
+      "artifacts": {
+        "overall": "results/niche_deg/overall_spatial_v3.json",
+        "spatial_neighbor": "results/niche_deg/spatial_neighbor_stats_spatial_v3.csv",
+        "ccc": "results/niche_deg/ccc_state_scores_spatial_v3.csv"
+      }
+    },
+    "niche_spp1": {
+      "artifacts": {
+        "overall": "results/niche_spp1/overall_tuned.json",
+        "direct_deg": "results/niche_spp1/direct_cell_deg_stats_tuned.csv",
+        "spp1_module": "results/niche_spp1/spp1_module_tuned.csv",
+        "spp1_tracking": "results/niche_spp1/spp1_tracking_tuned.csv"
+      }
+    },
+    "paper": {
+      "artifacts": {
+        "overall": "results/paper_findings/overall_tuned.json",
+        "modules": "results/paper_findings/hypothesis_scores_tuned.csv",
+        "gene_level": "results/paper_findings/gene_level_tuned.csv"
+      }
+    },
+    "extended_paper": {
+      "artifacts": {
+        "overall": "results/extended_paper/overall_tuned.json",
+        "lung_icam1": "results/extended_paper/lung_icam1_modules_tuned.csv",
+        "lung_bcam": "results/extended_paper/lung_bcam_modules_tuned.csv",
+        "subq_icam1": "results/extended_paper/subq_icam1_modules_tuned.csv",
+        "subq_lung_icam1": "results/extended_paper/subq_vs_lung_icam1_tuned.csv",
+        "in_silico": "results/extended_paper/in_silico_spp1_cd44_tuned.csv"
+      }
+    },
+    "dashboard": {
+      "artifacts": {
+        "overall": "results/validation_dashboard/overall_spatial_v3.json",
+        "metrics": "results/validation_dashboard/metrics_spatial_v3.csv"
+      }
+    },
+    "cnn": {
+      "artifacts": {
+        "overall": "results/cnn_enrichment/overall_cnn.json",
+        "enrichment": "results/cnn_enrichment/niche_enrichment_cnn.csv",
+        "corr": "results/cnn_enrichment/enrichment_corr_cnn.csv"
+      }
+    }
+  },
+  "missing": []
+}

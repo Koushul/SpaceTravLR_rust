@@ -42,6 +42,8 @@ BOOTSTRAP = """\
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+
 ROOT = Path.cwd()
 if (ROOT / "scripts" / "nb_common.py").exists():
     pass
@@ -54,12 +56,34 @@ else:
     )
 
 sys.path.insert(0, str(ROOT / "scripts"))
-from nb_common import bootstrap, default_config, run_script, load_json, load_csv, show_figures, artifact_status
+from nb_common import bootstrap, default_config, run_script, load_cache
+import nb_viz
 
 bootstrap()
 CFG = default_config()
+CACHE_TAG = CFG["tag"]
 print("ROOT:", ROOT)
 print("Config:", CFG)
+"""
+
+CACHE_REFRESH = """\
+# Optional: refresh cached results (runs heavy .py scripts once; skip in normal notebook use)
+REFRESH_CACHE = False
+if REFRESH_CACHE:
+    proc = run_script(
+        "cache_validation_results.py",
+        "--manifest-only" if False else "--manifest-only",
+        "--tag", CACHE_TAG,
+    )
+    print(proc.stdout[-2000:] if proc.stdout else proc.stderr)
+"""
+
+LOAD_CACHE = """\
+bundle = load_cache(CACHE_TAG)
+print("Cached sections:", bundle.sections())
+if bundle.missing():
+    print(f"Warning: {len(bundle.missing())} artifacts missing from cache manifest")
+bundle.missing()[:5]
 """
 
 NOTEBOOKS: list[tuple[str, str, list[dict]]] = [
@@ -67,26 +91,34 @@ NOTEBOOKS: list[tuple[str, str, list[dict]]] = [
         "01_core_multislice_validation.ipynb",
         "Core multislice validation & scorecard",
         [
-            cell("markdown", "# Core multislice validation\n\nRuns pooled 4-slice cell-type validation and prediction scorecard using existing `.py` scripts."),
+            cell("markdown", "# Core multislice validation\n\nLoads cached multislice + scorecard tables and renders editable figures in-notebook.\n\nRun `python3 scripts/cache_validation_results.py --sections multislice,scorecard` once to refresh data."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-proc = run_script(
-    "08_multislice_validation.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
-)
-print(proc.stdout[-4000:] if len(proc.stdout) > 4000 else proc.stdout)
+combined = bundle.table("multislice", "combined")
+meta = bundle.table("multislice", "meta")
+scorecard = bundle.table("scorecard", "table")
+overall = bundle.json("multislice", "overall")
+overall
 """),
             cell("code", """\
-proc = run_script("10_sharpened_scorecard.py", "--models", "pooled", "seed")
-print(proc.stdout)
-scorecard = load_csv("results/scorecard/prediction_scorecard.csv")
+# Tweak plot parameters below
+TOP_N = 12
+fig, ax = nb_viz.plot_meta_analysis(meta, top_n=TOP_N)
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_slice_heatmap(combined, slices=["subQ-1", "subQ-2", "subQ-3", "subQ-4"])
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_celltype_boxplot(combined)
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_prediction_scorecard(scorecard, levels=["cell_type", "graphclust"])
+plt.show()
 scorecard.head(10)
-"""),
-            cell("code", """\
-show_figures("figures/multislice/fig2_meta_analysis_multislice.png")
-show_figures("figures/scorecard/fig_scorecard.png")
 """),
         ],
     ),
@@ -94,178 +126,185 @@ show_figures("figures/scorecard/fig_scorecard.png")
         "02_spatial_graphclust_validation.ipynb",
         "Spatial graphclust microniche validation",
         [
-            cell("markdown", "# Spatial validation (graphclust niches)\n\nCompares predicted vs observed KO effects within Space Ranger graphclust clusters."),
+            cell("markdown", "# Spatial validation (graphclust niches)\n\nInteractive plots from cached spatial niche concordance tables."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-proc = run_script(
-    "09_spatial_validation.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
-)
-print(proc.stdout[-3000:] if proc.stdout else proc.stderr)
-"""),
-            cell("code", """\
-overall = load_json(f"results/spatial/overall_{CFG['tag']}.json")
+overall = bundle.json("spatial", "overall")
+niche_corr = bundle.table("spatial", "niche_corr")
+summary = bundle.table("spatial", "summary")
 overall
 """),
-            cell("code", 'show_figures(f"figures/spatial/spatial_map_*_{CFG[\'tag\']}.png", max_images=6)'),
+            cell("code", """\
+NICHE_TYPE = "graphclust"
+CELL_TYPES = ["immune", "myeloid", "fibroblast"]
+fig, ax = nb_viz.plot_spatial_niche_corr(niche_corr, niche_type=NICHE_TYPE, cell_types=CELL_TYPES)
+plt.show()
+"""),
+            cell("code", """\
+summary.head(12) if not summary.empty else niche_corr.head(12)
+"""),
         ],
     ),
     (
         "03_beta_leiden_microniches.ipynb",
         "Beta-Leiden functional microniches",
         [
-            cell("markdown", "# β-Leiden functional microniches\n\nCNN/seed beta scores + spatial Leiden vs SPAC-seq concordance."),
+            cell("markdown", "# β-Leiden functional microniches\n\nExplore cached β-Leiden niche concordance and summary metrics."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-proc = run_script(
-    "11_beta_leiden_microniches.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--betadata-dir", CFG["betadata_dir"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
-)
-print(proc.stdout[-3000:] if proc.stdout else proc.stderr)
-"""),
-            cell("code", """\
-proc = run_script(
-    "12_beta_leiden_report_figures.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--betadata-dir", CFG["betadata_dir"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
-)
-print(proc.stdout)
-"""),
-            cell("code", """\
-summary = load_json(f"results/beta_leiden/overall_{CFG['tag']}.json")
+summary = bundle.json("beta_leiden", "overall")
+niche_corr = bundle.table("beta_leiden", "niche_corr")
+bl_summary = bundle.table("beta_leiden", "summary")
 summary
 """),
-            cell("code", 'show_figures(f"figures/beta_leiden/fig1_main_overview_{CFG[\'tag\']}.png")'),
-            cell("code", 'show_figures(f"figures/beta_leiden/fig2_spotlight_Il4ra_immune_{CFG[\'tag\']}.png")'),
+            cell("code", """\
+fig, ax = nb_viz.plot_spatial_niche_corr(
+    niche_corr, niche_type="beta_leiden", cell_types=["immune", "myeloid", "fibroblast", "tumor"]
+)
+plt.show()
+"""),
+            cell("code", """\
+bl_summary.sort_values("median_pearson_r", ascending=False).head(12)
+"""),
         ],
     ),
     (
         "04_niche_deg_ccc_spp1.ipynb",
         "Niche DEG, CCC, and Spp1 recovery",
         [
-            cell("markdown", "# Niche DEG + CCC + Spp1\n\nSpatial kNN niche DEGs and direct sgP-cell concordance. β-Leiden section skipped by default (slow on CPU)."),
+            cell("markdown", "# Niche DEG + CCC + Spp1\n\nDirect sgP-cell and spatial kNN concordance from cache."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-proc = run_script(
-    "13_niche_deg_ccc_analysis.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--betadata-dir", CFG["betadata_dir"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["spatial_tag"],
-    "--skip-beta-leiden",
+niche_overall = bundle.json("niche_deg", "overall")
+spp1_overall = bundle.json("niche_spp1", "overall")
+direct = bundle.table("niche_spp1", "direct_deg")
+spatial = bundle.table("niche_deg", "spatial_neighbor")
+ccc = bundle.table("niche_deg", "ccc")
+niche_overall, spp1_overall
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_direct_deg_bars(direct)
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_direct_deg_bars(
+    spatial,
+    title="Spatial kNN niche DEG concordance",
 )
-print(proc.stdout[-4000:] if proc.stdout else proc.stderr)
+plt.show()
 """),
             cell("code", """\
-proc = run_script(
-    "18_perturbation_niche_spp1.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
-    "--skip-spp1-perturb",
-)
-print(proc.stdout[-3000:] if proc.stdout else proc.stderr)
+spatial.sort_values("pearson_r", ascending=False).head(15)
 """),
-            cell("code", """\
-overall = load_json(f"results/niche_deg/overall_{CFG['spatial_tag']}.json")
-spp1 = load_json(f"results/niche_spp1/overall_{CFG['tag']}.json")
-overall, spp1
-"""),
-            cell("code", 'show_figures("figures/niche_deg/fig6_spatial_neighbor_grid_{}.png".format(CFG["spatial_tag"]), max_images=4)'),
-            cell("code", 'show_figures("figures/niche_spp1/fig12_spp1_recovery_{}.png".format(CFG["tag"]))'),
         ],
     ),
     (
         "05_paper_findings.ipynb",
         "Paper headline biology validation",
         [
-            cell("markdown", "# Paper findings (Zhang et al. Cell 2026)\n\nModule-level hypothesis tests for Icam1, Cd44–Spp1, Il4ra, Cd83, Cd74."),
+            cell("markdown", "# Paper findings (Zhang et al. Cell 2026)\n\nModule-level hypothesis tests — adjust thresholds and labels in the cells below."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-proc = run_script(
-    "19_paper_findings_validation.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
+paper = bundle.json("paper", "overall")
+modules = bundle.table("paper", "modules")
+lung_icam1 = bundle.table("extended_paper", "lung_icam1")
+lung_bcam = bundle.table("extended_paper", "lung_bcam")
+paper
+"""),
+            cell("code", """\
+SUPPORT_THRESHOLD = 0.6
+fig, axes = nb_viz.plot_paper_scorecard(modules, support_threshold=SUPPORT_THRESHOLD)
+plt.show()
+"""),
+            cell("code", """\
+fig, axes = nb_viz.plot_paper_module_heatmap(modules)
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_lung_module_bars(
+    lung_icam1,
+    title="Lung M001 sgIcam1 — paper immune-escape modules (observed)",
+    support_threshold=SUPPORT_THRESHOLD,
 )
-print(proc.stdout[-3000:] if proc.stdout else proc.stderr)
+plt.show()
 """),
             cell("code", """\
-proc = run_script(
-    "20_extended_paper_validation.py",
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-    "--pred-dir", CFG["pred_dir"],
-    "--tag", CFG["tag"],
+fig, ax = nb_viz.plot_lung_module_bars(
+    lung_bcam,
+    title="Lung M001 sgBcam — Cd44/Spp1 axis modules (observed)",
+    support_threshold=SUPPORT_THRESHOLD,
 )
-print(proc.stdout[-3000:] if proc.stdout else proc.stderr)
+plt.show()
 """),
-            cell("code", """\
-paper = load_json(f"results/paper_findings/overall_{CFG['tag']}.json")
-lung = load_json(f"results/extended_paper/overall_{CFG['tag']}.json")
-paper, lung
-"""),
-            cell("code", 'show_figures("figures/paper_findings/fig13_paper_findings_scorecard_{}.png".format(CFG["tag"]))'),
-            cell("code", 'show_figures("figures/extended_paper/fig15_lung_icam1_observed_{}.png".format(CFG["tag"]))'),
         ],
     ),
     (
         "06_cnn_guide_enrichment.ipynb",
         "CNN beta microniches & guide enrichment",
         [
-            cell("markdown", "# CNN β-microniches → guide enrichment\n\nPer-cell CNN betas define tumor niches; predicted enrichment vs observed sgP/NTC fractions."),
+            cell("markdown", "# CNN β-microniches → guide enrichment\n\nScatter/heatmap from cached enrichment tables. Refresh with `--sections cnn`."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-status = artifact_status([
-    CFG["betadata_dir_cnn"],
-    CFG["pred_dir"],
-    CFG["pred_dir_cnn"],
-])
-status
-"""),
-            cell("code", """\
-args = [
-    "23_cnn_microniche_enrichment.py",
-    "--tag", "cnn",
-    "--betadata-dir", CFG["betadata_dir_cnn"],
-    "--pred-dir", CFG["pred_dir_cnn"],
-    "--seed-pred-dir", CFG["pred_dir"],
-    "--baseline-h5ad", CFG["baseline_h5ad"],
-]
-proc = run_script(*args)
-print(proc.stdout)
-"""),
-            cell("code", """\
-summary = load_json("results/cnn_enrichment/overall_cnn.json")
-corr = load_csv("results/cnn_enrichment/enrichment_corr_cnn.csv")
+summary = bundle.json("cnn", "overall")
+enrich = bundle.table("cnn", "enrichment")
+corr = bundle.table("cnn", "corr")
 summary, corr.sort_values("pearson_r", ascending=False).head(8)
 """),
-            cell("code", 'show_figures("figures/cnn_enrichment/fig20_enrichment_scatter_cnn.png")'),
-            cell("code", 'show_figures("figures/cnn_enrichment/fig21_enrichment_heatmap_cnn.png")'),
-            cell("code", 'show_figures("figures/cnn_enrichment/fig22_cnn_niche_map_Lung_Metastasis_M001_Icam1_cnn.png")'),
+            cell("code", """\
+TOP_N = 6
+POINT_COLOR = "#2563eb"
+fig, axes = nb_viz.plot_cnn_enrichment_scatter(enrich, corr, top_n=TOP_N, tag=CFG["cnn_tag"], point_color=POINT_COLOR)
+plt.show()
+"""),
+            cell("code", """\
+fig, ax = nb_viz.plot_cnn_enrichment_heatmap(corr, tag=CFG["cnn_tag"], cmap="RdBu_r")
+plt.show()
+"""),
         ],
     ),
     (
         "07_validation_dashboard.ipynb",
         "Consolidated validation dashboard",
         [
-            cell("markdown", "# Validation dashboard\n\nAggregates metrics from niche DEG, paper findings, lung cohort, and β-Leiden pipelines."),
+            cell("markdown", "# Validation dashboard\n\nAll-in-one metrics panel from cached dashboard + direct DEG tables."),
             cell("code", BOOTSTRAP),
+            cell("code", LOAD_CACHE),
             cell("code", """\
-proc = run_script("21_validation_dashboard.py", "--tag", CFG["spatial_tag"])
-print(proc.stdout)
-"""),
-            cell("code", """\
-metrics = load_csv(f"results/validation_dashboard/metrics_{CFG['spatial_tag']}.csv")
+metrics = bundle.table("dashboard", "metrics")
+direct = bundle.table("niche_spp1", "direct_deg")
+dash_overall = bundle.json("dashboard", "overall")
 metrics
 """),
-            cell("code", 'show_figures("figures/validation_dashboard/fig20_validation_dashboard_{}.png".format(CFG["spatial_tag"]))'),
+            cell("code", """\
+SUPPORT_THRESHOLD = 0.6
+fig, axes = nb_viz.plot_validation_dashboard(
+    metrics, direct, tag=CFG["spatial_tag"], support_threshold=SUPPORT_THRESHOLD,
+)
+plt.show()
+"""),
+        ],
+    ),
+    (
+        "00_refresh_cache.ipynb",
+        "Refresh validation cache",
+        [
+            cell("markdown", "# Refresh validation cache\n\nRun this notebook (or the CLI) once to populate `cache/{tag}/manifest.json` and all result CSVs/JSONs.\n\n```bash\npython3 scripts/cache_validation_results.py --manifest-only  # index existing\npython3 scripts/cache_validation_results.py                  # full re-run\n```"),
+            cell("code", BOOTSTRAP + "\nfrom nb_common import run_script\n"),
+            cell("code", """\
+MANIFEST_ONLY = True  # set False to re-run all analysis scripts
+sections = "multislice,spatial,scorecard,beta_leiden,niche_deg,niche_spp1,paper,extended_paper,dashboard,cnn"
+args = ["cache_validation_results.py", "--tag", CACHE_TAG, "--sections", sections]
+if MANIFEST_ONLY:
+    args.append("--manifest-only")
+proc = run_script(*args)
+print(proc.stdout[-4000:] if proc.stdout else proc.stderr)
+"""),
+            cell("code", LOAD_CACHE),
         ],
     ),
 ]

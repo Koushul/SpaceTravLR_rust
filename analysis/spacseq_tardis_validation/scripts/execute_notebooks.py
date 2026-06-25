@@ -20,8 +20,9 @@ from nb_common import BOOT_PY, boot_env, MC38_SITE  # noqa: E402
 
 
 def run_cell(source: str, cwd: Path) -> None:
+    preamble = "import matplotlib; matplotlib.use('Agg')\n"
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
-        tmp.write(source)
+        tmp.write(preamble + source)
         tmp_path = tmp.name
     try:
         proc = subprocess.run(
