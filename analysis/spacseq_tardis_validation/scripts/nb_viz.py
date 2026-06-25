@@ -425,11 +425,10 @@ def plot_cnn_enrichment_scatter_with_histology(
     mc38_dir=None,
     slice_filter: str | None = None,
     perturb_filter: str | None = None,
-    spot_size: float = 1.4,
+    spot_size: float | None = None,
     figsize: tuple[float, float] | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
-    """Side-by-side enrichment scatter and sc.pl.spatial microniche maps on H&E."""
-    import scanpy as sc
+    """Side-by-side enrichment scatter and microniche maps on H&E."""
     from pathlib import Path
 
     import spatial_histology as sh
@@ -455,7 +454,7 @@ def plot_cnn_enrichment_scatter_with_histology(
         n, 2,
         figsize=figsize or (11.5, 3.8 * n),
         squeeze=False,
-        gridspec_kw={"width_ratios": [1.05, 1.35], "wspace": 0.28, "hspace": 0.35},
+        gridspec_kw={"width_ratios": [1.0, 1.55], "wspace": 0.32, "hspace": 0.35},
     )
 
     for i, (_, row) in enumerate(pairs.iterrows()):
@@ -509,30 +508,27 @@ def plot_cnn_enrichment_scatter_with_histology(
         else:
             ct = pool.copy()
         ct.obs["microniche"] = ct.obs["cnn_leiden"].astype(str).str.split("|").str[-1]
-        order = [str(x).split("|")[-1] for x in sub["niche"].astype(str)]
-        extra = sorted(set(ct.obs["microniche"].astype(str)) - set(order))
-        ct.obs["microniche"] = pd.Categorical(ct.obs["microniche"], categories=order + extra, ordered=True)
-        palette = {lab.split("|")[-1]: colors.get(lab, "#888888") for lab in colors}
-        for lab in ct.obs["microniche"].astype(str).unique():
-            palette.setdefault(lab, "#888888")
+        niche_colors = _microniche_color_map(ct.obs["cnn_leiden"].astype(str))
+        palette = {
+            str(n).split("|")[-1]: niche_colors.get(str(n), "#888888")
+            for n in ct.obs["cnn_leiden"].astype(str).unique()
+        }
+        for lab in colors:
+            palette[str(lab).split("|")[-1]] = colors[lab]
 
         try:
             sh.attach_histology(ct, sl, mc38)
-            sc.pl.spatial(
+            sh.plot_microniche_on_he(
                 ct,
-                color="microniche",
-                library_id=sl,
-                img_key="hires",
-                ax=ax_sp,
-                show=False,
-                size=spot_size,
-                alpha=0.88,
-                palette=palette,
-                title="",
-                legend_loc="right margin",
-                frameon=False,
+                "microniche",
+                ax_sp,
+                sl,
+                palette,
+                spot_size=spot_size,
+                title="Tumor CNN β-microniches on H&E",
+                legend=True,
+                legend_fontsize=5.5,
             )
-            ax_sp.set_title(f"Tumor CNN β-microniches on H&E", fontsize=10, fontweight="bold")
         except Exception as exc:
             ax_sp.text(0.5, 0.5, f"Histology unavailable\n{exc}", ha="center", va="center", transform=ax_sp.transAxes)
             ax_sp.axis("off")
