@@ -81,6 +81,8 @@ def tissue_hires_extent(mc38_dir: Path, slice_id: str) -> tuple[float, float, fl
     ymax = float(it.pxl_row_in_fullres.max()) * scalef + pad
     return xmin, xmax, ymin, ymax
 
+
+def dataset_type(slice_id: str) -> int:
     return 1 if slice_id in LUNG_SLICES or slice_id.startswith("Lung_") else 2
 
 
@@ -262,3 +264,125 @@ def plot_microniche_on_he(
                 handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5),
                 fontsize=legend_fontsize, frameon=False, borderaxespad=0.0,
             )
+
+
+def _draw_he_background(ax, adata: sc.AnnData, library_id: str, *, img_alpha: float = 1.0) -> tuple[np.ndarray, float, tuple]:
+    lib = adata.uns["spatial"][library_id]
+    img = lib["images"]["hires"]
+    xy = hires_coords(adata, library_id)
+    size = default_spot_size(adata, library_id)
+    mc38_dir = Path(lib.get("mc38_dir", DEFAULT_MC38))
+    sl = str(lib.get("slice_id", library_id))
+    xmin, xmax, ymin, ymax = tissue_hires_extent(mc38_dir, sl)
+    ax.imshow(
+        img, origin="upper", interpolation="bilinear", alpha=img_alpha, zorder=0,
+        extent=(0, img.shape[1], img.shape[0], 0),
+    )
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymax, ymin)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return xy, size, (xmin, xmax, ymin, ymax)
+
+
+def plot_continuous_on_he(
+    adata: sc.AnnData,
+    color_key: str,
+    ax,
+    library_id: str,
+    *,
+    cmap: str = "RdBu_r",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    vcenter: float | None = 0.0,
+    spot_size: float | None = None,
+    spot_alpha: float = 0.88,
+    title: str = "",
+    colorbar: bool = True,
+    colorbar_label: str = "",
+) -> None:
+    """H&E background with continuous score overlay (embedding-style)."""
+    from matplotlib.colors import TwoSlopeNorm
+
+    xy, size, _ = _draw_he_background(ax, adata, library_id)
+    vals = pd.to_numeric(adata.obs[color_key], errors="coerce").to_numpy(dtype=float)
+    if vmin is None:
+        vmin = float(np.nanmin(vals)) if np.isfinite(vals).any() else 0.0
+    if vmax is None:
+        vmax = float(np.nanmax(vals)) if np.isfinite(vals).any() else 1.0
+    if vcenter is not None:
+        from matplotlib.colors import TwoSlopeNorm
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+    else:
+        from matplotlib.colors import Normalize
+        norm = Normalize(vmin=vmin, vmax=vmax)
+    sc_plot = ax.scatter(
+        xy[:, 0], xy[:, 1], c=vals, s=spot_size or size, cmap=cmap, norm=norm,
+        alpha=spot_alpha, edgecolors="none", rasterized=False, zorder=2,
+    )
+    if title:
+        ax.set_title(title, fontsize=10, fontweight="bold")
+    if colorbar:
+        cb = plt.colorbar(sc_plot, ax=ax, fraction=0.046, pad=0.02, shrink=0.82)
+        cb.ax.tick_params(labelsize=7)
+        if colorbar_label:
+            cb.set_label(colorbar_label, fontsize=8)
+
+
+def plot_embedding_spatial(
+    adata: sc.AnnData,
+    color_key: str,
+    ax,
+    *,
+    cmap=None,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    vcenter: float | None = None,
+    categorical: bool = False,
+    palette: dict[str, object] | None = None,
+    title: str = "",
+    size: float = 8.0,
+    colorbar: bool = True,
+    colorbar_label: str = "",
+) -> None:
+    """sc.pl.embedding-style scatter on obsm['spatial'] without H&E."""
+    xy = adata.obsm["spatial"]
+    if categorical:
+        labels = adata.obs[color_key].astype(str)
+        palette = palette or {}
+        for lab in sorted(labels.unique()):
+            if lab in ("nan", "unassigned"):
+                continue
+            m = labels == lab
+            ax.scatter(
+                xy[m, 0], xy[m, 1], c=[palette.get(lab, "#888888")], s=size,
+                alpha=0.85, edgecolors="none", rasterized=True,
+            )
+    else:
+        vals = pd.to_numeric(adata.obs[color_key], errors="coerce").to_numpy(dtype=float)
+        if vcenter is not None:
+            if vmin is None or vmax is None:
+                lim = max(0.35, float(np.nanpercentile(np.abs(vals - vcenter), 95)) if np.isfinite(vals).any() else 1.0)
+                vmin, vmax = -lim, lim
+            from matplotlib.colors import TwoSlopeNorm
+            norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+        else:
+            from matplotlib.colors import Normalize
+            if vmin is None:
+                vmin = float(np.nanmin(vals)) if np.isfinite(vals).any() else 0.0
+            if vmax is None:
+                vmax = float(np.nanmax(vals)) if np.isfinite(vals).any() else 1.0
+            norm = Normalize(vmin=vmin, vmax=vmax)
+        sc_plot = ax.scatter(
+            xy[:, 0], xy[:, 1], c=vals, s=size, cmap=cmap or "RdBu_r", norm=norm,
+            alpha=0.9, edgecolors="none", rasterized=True,
+        )
+        if colorbar:
+            cb = plt.colorbar(sc_plot, ax=ax, fraction=0.046, pad=0.02, shrink=0.82)
+            cb.ax.tick_params(labelsize=7)
+            if colorbar_label:
+                cb.set_label(colorbar_label, fontsize=8)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if title:
+        ax.set_title(title, fontsize=10, fontweight="bold")

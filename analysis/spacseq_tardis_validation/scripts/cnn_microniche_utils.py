@@ -52,6 +52,57 @@ def niche_short_label(niche: str) -> str:
     return str(niche).split("|")[-1]
 
 
+def local_sgp_fraction(
+    pool: sc.AnnData,
+    perturb: str,
+    cell_type: str = "tumor",
+    k_neighbors: int = 50,
+) -> pd.Series:
+    """Per-cell fraction of sgP tumor cells among spatial kNN (continuous ground truth)."""
+    ct_mask = pool.obs["cell_type"].astype(str) == cell_type
+    ct = pool[ct_mask]
+    if ct.n_obs < 5:
+        return pd.Series(np.nan, index=pool.obs_names)
+    is_sgp = (ct.obs["target_gene"].astype(str) == perturb).to_numpy(dtype=float)
+    xy = ct.obsm["spatial"].astype(np.float64)
+    k = min(k_neighbors, ct.n_obs - 1)
+    if k < 3:
+        out = pd.Series(np.nan, index=pool.obs_names)
+        out.loc[ct.obs_names] = is_sgp
+        return out
+    nn = NearestNeighbors(n_neighbors=k + 1).fit(xy)
+    _, idx = nn.kneighbors(xy)
+    local = is_sgp[idx[:, 1:]].mean(axis=1)
+    out = pd.Series(np.nan, index=pool.obs_names)
+    out.loc[ct.obs_names] = local
+    return out
+
+
+def attach_niche_enrichment_to_cells(
+    pool: sc.AnnData,
+    enrich_sub: pd.DataFrame,
+    perturb: str,
+    *,
+    niche_key: str = "cnn_leiden",
+    k_neighbors: int = 50,
+) -> sc.AnnData:
+    """Map niche-level predicted/observed enrichment and local sgP fraction onto tumor cells."""
+    ad = pool.copy()
+    if enrich_sub.empty or niche_key not in ad.obs.columns:
+        return ad
+    scored = enrich_sub[
+        ["niche", "pred_enrichment_score", "obs_log2_enrichment"]
+    ].drop_duplicates("niche")
+    ad.obs = ad.obs.join(
+        scored.set_index("niche"),
+        on=ad.obs[niche_key].astype(str),
+        how="left",
+    )
+    ad.obs["microniche"] = ad.obs[niche_key].astype(str).map(niche_short_label)
+    ad.obs["local_sgp_frac"] = local_sgp_fraction(ad, perturb, k_neighbors=k_neighbors)
+    return ad
+
+
 def map_pool_to_prep(slice_id: str, pool_barcode: str, prep_names: pd.Index) -> str | None:
     for key in (prep_barcode(slice_id, pool_barcode), pool_barcode):
         if key in prep_names:

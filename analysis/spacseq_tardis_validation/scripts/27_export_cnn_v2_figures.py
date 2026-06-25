@@ -37,7 +37,7 @@ def main() -> None:
     )
 
     subprocess.run(
-        [py, str(HERE / "28_paper_spatial_enrichment_figure.py"), "--tag", args.tag, "--fig-dir", str(args.fig_dir)],
+        [py, str(HERE / "29_spatial_embedding_enrichment.py"), "--tag", args.tag, "--fig-dir", str(args.fig_dir)],
         check=True,
     )
 
