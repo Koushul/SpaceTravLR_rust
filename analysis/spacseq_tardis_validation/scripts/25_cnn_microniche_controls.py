@@ -178,19 +178,20 @@ def plot_controls_figures(
     tag: str = "cnn_v2",
 ) -> None:
     import nb_viz
+    import spatial_histology as sh
 
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     fig, _ = nb_viz.plot_microniche_control_comparison(corr_dfs)
-    fig.savefig(fig_dir / "fig26_microniche_control_comparison.png", dpi=200, bbox_inches="tight")
+    sh.save_figure_png_svg(fig, fig_dir / "fig26_microniche_control_comparison.png")
     plt.close(fig)
 
     fig, _ = nb_viz.plot_microniche_control_heatmap(corr_dfs)
-    fig.savefig(fig_dir / "fig27_microniche_control_heatmap.png", dpi=180, bbox_inches="tight")
+    sh.save_figure_png_svg(fig, fig_dir / "fig27_microniche_control_heatmap.png", dpi=180)
     plt.close(fig)
 
     fig, _ = nb_viz.plot_microniche_control_scatter(enrich_dfs, corr_dfs, top_n=3)
-    fig.savefig(fig_dir / "fig28_microniche_control_scatter.png", dpi=200, bbox_inches="tight")
+    sh.save_figure_png_svg(fig, fig_dir / "fig28_microniche_control_scatter.png")
     plt.close(fig)
 
     title_map = {
@@ -208,10 +209,10 @@ def plot_controls_figures(
             label_niches=True, color_by_niche=True, show_regression=True,
         )
         fig.suptitle(title_map.get(variant, variant), fontweight="bold", y=1.02)
-        fig.savefig(fig_dir / f"fig20_enrichment_scatter_{scatter_tag}.png", dpi=200, bbox_inches="tight")
+        sh.save_figure_png_svg(fig, fig_dir / f"fig20_enrichment_scatter_{scatter_tag}.png")
         plt.close(fig)
         fig, _ = nb_viz.plot_cnn_enrichment_heatmap(corr_dfs[variant], tag=scatter_tag)
-        fig.savefig(fig_dir / f"fig21_enrichment_heatmap_{scatter_tag}.png", dpi=180, bbox_inches="tight")
+        sh.save_figure_png_svg(fig, fig_dir / f"fig21_enrichment_heatmap_{scatter_tag}.png", dpi=180)
         plt.close(fig)
 
 

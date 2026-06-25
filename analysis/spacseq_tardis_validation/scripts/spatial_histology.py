@@ -39,6 +39,22 @@ def apply_publication_style() -> None:
     plt.rcParams.update(PUBLICATION_RCPARAMS)
 
 
+def save_figure_png_svg(
+    fig,
+    path: Path | str,
+    *,
+    dpi: int = 200,
+    transparent_png: bool = False,
+) -> None:
+    stem = Path(path).with_suffix("")
+    png_kw: dict = {"dpi": dpi, "bbox_inches": "tight"}
+    if transparent_png:
+        png_kw["transparent"] = True
+    fig.savefig(stem.with_suffix(".png"), **png_kw)
+    apply_publication_style()
+    fig.savefig(stem.with_suffix(".svg"), **FIGURE_PARAMS)
+
+
 def segmentation_x_offset(mc38_dir: Path, slice_id: str) -> float:
     """Align StarDist polygon centroids with Visium fullres bin/image coordinates."""
     import geopandas as gpd

@@ -185,11 +185,13 @@ def plot_scatter(enrich_df: pd.DataFrame, corr_df: pd.DataFrame, fig_dir: Path, 
     if enrich_df.empty or corr_df.empty:
         return
     import nb_viz
+    import spatial_histology as sh
+
     fig, _ = nb_viz.plot_cnn_enrichment_scatter(
         enrich_df, corr_df, top_n=6, tag=tag,
         label_niches=True, color_by_niche=True, show_regression=True,
     )
-    fig.savefig(fig_dir / f"fig20_enrichment_scatter_{tag}.png", dpi=200, bbox_inches="tight")
+    sh.save_figure_png_svg(fig, fig_dir / f"fig20_enrichment_scatter_{tag}.png")
     plt.close(fig)
 
 
@@ -221,14 +223,15 @@ def plot_scatter_histology(
         slice_filter=slice_filter,
     )
     stem = out_stem or (f"fig20_enrichment_scatter_histology_{tag}" if not slice_filter else f"fig25_lung_enrichment_scatter_histology_{tag}")
-    fig.savefig(fig_dir / f"{stem}.svg", **sh.FIGURE_PARAMS)
-    fig.savefig(fig_dir / f"{stem}.png", dpi=300, bbox_inches="tight", transparent=True)
+    sh.save_figure_png_svg(fig, fig_dir / f"{stem}.png", dpi=300, transparent_png=True)
     plt.close(fig)
 
 
 def plot_heatmap(corr_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     if corr_df.empty:
         return
+    import spatial_histology as sh
+
     pivot = corr_df.pivot_table(index="perturbation", columns="slice", values="pearson_r", aggfunc="first")
     if pivot.empty:
         return
@@ -236,7 +239,7 @@ def plot_heatmap(corr_df: pd.DataFrame, fig_dir: Path, tag: str) -> None:
     sns.heatmap(pivot, annot=True, fmt=".2f", cmap="RdBu_r", center=0, vmin=-1, vmax=1, ax=ax)
     ax.set_title(f"Obs vs pred niche enrichment correlation ({tag})")
     fig.tight_layout()
-    fig.savefig(fig_dir / f"fig21_enrichment_heatmap_{tag}.png", dpi=180, bbox_inches="tight")
+    sh.save_figure_png_svg(fig, fig_dir / f"fig21_enrichment_heatmap_{tag}.png", dpi=180)
     plt.close(fig)
 
 
@@ -298,7 +301,8 @@ def plot_lung_composite(
     fig, _ = nb_viz.plot_lung_m001_composite(
         enrich, corr, spatial_df, perturb=perturb, slice_id=slice_id, tag=tag,
     )
-    fig.savefig(fig_dir / f"fig24_lung_composite_{perturb}_{tag}.png", dpi=200, bbox_inches="tight")
+    import spatial_histology as sh
+    sh.save_figure_png_svg(fig, fig_dir / f"fig24_lung_composite_{perturb}_{tag}.png")
     plt.close(fig)
 
 
@@ -328,7 +332,8 @@ def plot_niche_maps(slice_id: str, pool: sc.AnnData, perturb: str, fig_dir: Path
         fontsize=10, fontweight="bold",
     )
     fig.tight_layout()
-    fig.savefig(fig_dir / f"fig22_cnn_niche_map_{slice_id}_{perturb}_{tag}.png", dpi=180, bbox_inches="tight")
+    import spatial_histology as sh
+    sh.save_figure_png_svg(fig, fig_dir / f"fig22_cnn_niche_map_{slice_id}_{perturb}_{tag}.png", dpi=180)
     plt.close(fig)
 
 
@@ -348,7 +353,8 @@ def plot_spatial_overview(pool: sc.AnnData, slice_id: str, fig_dir: Path, tag: s
     ax.axis("off")
     ax.set_title(f"{slice_id} tumor CNN β-microniches on tissue (n={labs.nunique()} niches)", fontweight="bold")
     fig.tight_layout()
-    fig.savefig(fig_dir / f"fig23_spatial_microniches_{slice_id}_{tag}.png", dpi=200, bbox_inches="tight")
+    import spatial_histology as sh
+    sh.save_figure_png_svg(fig, fig_dir / f"fig23_spatial_microniches_{slice_id}_{tag}.png")
     plt.close(fig)
 
 
