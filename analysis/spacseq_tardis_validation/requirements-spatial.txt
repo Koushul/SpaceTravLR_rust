@@ -1,0 +1,2 @@
+# Optional spatial clustering deps for microniche controls (script 25)
+pybanksy>=1.3.0

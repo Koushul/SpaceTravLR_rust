@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +216,31 @@ def shuffle_microniche_labels(labels: pd.Series, seed: int = 42) -> pd.Series:
     return out
 
 
+def _expression_clustering_matrix(ad: sc.AnnData, n_top_genes: int = 1500) -> sc.AnnData:
+    if "imputed_count" in ad.layers:
+        x = ad.layers["imputed_count"]
+    else:
+        x = ad.X
+    mat = x.toarray() if sparse.issparse(x) else np.asarray(x)
+    mat = np.nan_to_num(mat.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    mat = np.log1p(np.clip(mat, 0.0, None))
+
+    tmp = sc.AnnData(X=mat, obs=ad.obs.copy(), var=ad.var.copy())
+    tmp.obsm["spatial"] = ad.obsm["spatial"].copy()
+    sc.pp.filter_genes(tmp, min_cells=3)
+    gene_var = tmp.X.var(axis=0)
+    keep = gene_var > 1e-8
+    if int(keep.sum()) < 50:
+        keep = np.ones(tmp.n_vars, dtype=bool)
+    top_k = min(n_top_genes, int(keep.sum()))
+    top_idx = np.argsort(gene_var[keep])[-top_k:]
+    gene_idx = np.where(keep)[0][top_idx]
+    tmp = tmp[:, gene_idx].copy()
+    sc.pp.scale(tmp, max_value=10)
+    tmp.X = np.nan_to_num(tmp.X, nan=0.0)
+    return tmp
+
+
 def leiden_expression_clusters(
     ad: sc.AnnData,
     n_pcs: int = 15,
@@ -227,27 +255,8 @@ def leiden_expression_clusters(
     if ad.n_obs < min_cells:
         return pd.Series("0", index=ad.obs_names, name=key)
 
-    if "imputed_count" in ad.layers:
-        x = ad.layers["imputed_count"]
-    else:
-        x = ad.X
-    mat = x.toarray() if sparse.issparse(x) else np.asarray(x)
-    mat = np.nan_to_num(mat.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-    mat = np.log1p(np.clip(mat, 0.0, None))
-
-    gene_var = mat.var(axis=0)
-    keep = gene_var > 1e-8
-    if int(keep.sum()) < 50:
-        keep = np.ones(mat.shape[1], dtype=bool)
-    top_k = min(n_top_genes, int(keep.sum()))
-    top_idx = np.argsort(gene_var[keep])[-top_k:]
-    gene_idx = np.where(keep)[0][top_idx]
-    mat = mat[:, gene_idx]
-
-    tmp = sc.AnnData(X=mat)
-    sc.pp.scale(tmp, max_value=10)
-    tmp.X = np.nan_to_num(tmp.X, nan=0.0)
-    n_pcs = min(n_pcs, mat.shape[1] - 1, ad.n_obs - 1)
+    tmp = _expression_clustering_matrix(ad, n_top_genes=n_top_genes)
+    n_pcs = min(n_pcs, tmp.n_vars - 1, ad.n_obs - 1)
     sc.tl.pca(tmp, n_comps=n_pcs, svd_solver="arpack")
     expr_pca = tmp.obsm["X_pca"]
 
@@ -278,6 +287,93 @@ def assign_slice_expression_clusters(
     sub_labels = leiden_expression_clusters(sub, **leiden_kw)
     if prefix:
         sub_labels = sub_labels.astype(str).radd(f"{slice_id}|{cell_type}|expr|")
+    labels.loc[sub.obs_names] = sub_labels.values
+    return labels.fillna("unassigned")
+
+
+def banksy_clusters(
+    ad: sc.AnnData,
+    resolution: float = 0.9,
+    num_neighbours: int = 15,
+    lambda_param: float = 0.2,
+    min_cells: int = 20,
+    n_top_genes: int = 1500,
+    key: str = "banksy",
+    tmp_dir: Path | None = None,
+) -> pd.Series:
+    """BANKSY spatial clusters (expression + neighborhood-augmented features)."""
+    if ad.n_obs < min_cells:
+        return pd.Series("0", index=ad.obs_names, name=key)
+
+    try:
+        from banksy.initialize_banksy import initialize_banksy
+        from banksy.run_banksy import run_banksy_multiparam
+    except ImportError as exc:
+        raise SystemExit(
+            "pybanksy is required for BANKSY clustering. Install with: pip install pybanksy"
+        ) from exc
+
+    tmp = _expression_clustering_matrix(ad, n_top_genes=n_top_genes)
+    xy = tmp.obsm["spatial"]
+    tmp.obs["x"] = xy[:, 0]
+    tmp.obs["y"] = xy[:, 1]
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        banksy_dict = initialize_banksy(
+            tmp,
+            coord_keys=("x", "y", "spatial"),
+            num_neighbours=num_neighbours,
+            nbr_weight_decay="scaled_gaussian",
+            plt_edge_hist=False,
+            plt_nbr_weights=False,
+            plt_theta=False,
+        )
+        out_dir = Path(tmp_dir) if tmp_dir is not None else Path(tempfile.mkdtemp(prefix="banksy_"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        color_list = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+            "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+        ]
+        results = run_banksy_multiparam(
+            tmp,
+            banksy_dict,
+            lambda_list=[lambda_param],
+            resolutions=[resolution],
+            color_list=color_list,
+            max_m=1,
+            filepath=str(out_dir),
+            key=("x", "y", "spatial"),
+            annotation_key=None,
+            pca_dims=[20],
+            savefig=False,
+            add_nonspatial=False,
+            cluster_algorithm="leiden",
+        )
+
+    row = results.iloc[0]
+    labels = row["labels"]
+    if hasattr(labels, "dense"):
+        labels = labels.dense
+    return pd.Series(labels.astype(str), index=ad.obs_names, name=key)
+
+
+def assign_slice_banksy_clusters(
+    prep: sc.AnnData,
+    slice_id: str,
+    cell_type: str,
+    prefix: bool = True,
+    tmp_dir: Path | None = None,
+    **banksy_kw,
+) -> pd.Series:
+    mask = (prep.obs["slice_id"].astype(str) == slice_id) & (prep.obs["cell_type"].astype(str) == cell_type)
+    labels = pd.Series(index=prep.obs_names, dtype=str)
+    sub = prep[mask].copy()
+    if sub.n_obs == 0:
+        return labels
+    sub_labels = banksy_clusters(sub, tmp_dir=tmp_dir, **banksy_kw)
+    if prefix:
+        sub_labels = sub_labels.astype(str).radd(f"{slice_id}|{cell_type}|banksy|")
     labels.loc[sub.obs_names] = sub_labels.values
     return labels.fillna("unassigned")
 

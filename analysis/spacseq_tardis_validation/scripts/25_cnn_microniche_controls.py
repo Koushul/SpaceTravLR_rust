@@ -3,6 +3,7 @@
 
 1. Random niche labels — shuffle CNN β-Leiden labels (should not enrich).
 2. Expression Leiden — cluster tumor cells on gene expression + spatial coords.
+3. BANKSY — spatial clusters from neighborhood-augmented expression (pybanksy).
 """
 
 from __future__ import annotations
@@ -105,10 +106,27 @@ def run_control_variant(
         niche_key = "expr_leiden"
         labels = cmu.assign_slice_expression_clusters(prep, slice_id, "tumor", **leiden_kw)
         prep, pool = propagate_niche_labels(prep, pool, slice_id, labels, niche_key)
+    elif variant == "banksy":
+        niche_key = "banksy"
+        banksy_kw = {
+            "resolution": leiden_kw.get("resolution", cmu.DEFAULT_LEIDEN_KW["resolution"]),
+            "min_cells": leiden_kw.get("min_cells", cmu.DEFAULT_LEIDEN_KW["min_cells"]),
+            "num_neighbours": args.banksy_neighbours,
+            "lambda_param": args.banksy_lambda,
+        }
+        labels = cmu.assign_slice_banksy_clusters(
+            prep, slice_id, "tumor", tmp_dir=args.banksy_tmp_dir, **banksy_kw,
+        )
+        prep, pool = propagate_niche_labels(prep, pool, slice_id, labels, niche_key)
     else:
         raise ValueError(f"Unknown variant: {variant}")
 
-    tag = {"cnn": args.tag, "random_niche": "random_niche", "expr_leiden": "expr_leiden"}[variant]
+    tag = {
+        "cnn": args.tag,
+        "random_niche": "random_niche",
+        "expr_leiden": "expr_leiden",
+        "banksy": "banksy",
+    }[variant]
     enrich, corr, _, _ = run_slice_enrichment(
         slice_id,
         perts,
@@ -165,7 +183,10 @@ def main() -> None:
     ap.add_argument("--min-ntc", type=int, default=2)
     ap.add_argument("--min-pert", type=int, default=2)
     ap.add_argument("--random-seed", type=int, default=42)
-    ap.add_argument("--variants", nargs="+", default=["cnn", "random_niche", "expr_leiden"])
+    ap.add_argument("--banksy-lambda", type=float, default=0.2, help="BANKSY neighborhood weight λ")
+    ap.add_argument("--banksy-neighbours", type=int, default=15, help="BANKSY spatial neighbors k_geom")
+    ap.add_argument("--banksy-tmp-dir", type=Path, default=ROOT / "results" / "cnn_enrichment" / "banksy_tmp")
+    ap.add_argument("--variants", nargs="+", default=["cnn", "random_niche", "expr_leiden", "banksy"])
     args = ap.parse_args()
 
     leiden_kw = {
@@ -212,6 +233,8 @@ def main() -> None:
         "random_seed": args.random_seed,
         "leiden_resolution": args.leiden_resolution,
         "spatial_weight": args.spatial_weight,
+        "banksy_lambda": args.banksy_lambda,
+        "banksy_neighbours": args.banksy_neighbours,
         "variants": args.variants,
         "by_method": [summarize_corr(corr_dfs[v], v) for v in args.variants],
     }
@@ -231,16 +254,18 @@ def main() -> None:
     fig.savefig(fig_dir / "fig28_microniche_control_scatter.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-    for variant in ("random_niche", "expr_leiden"):
+    for variant in ("random_niche", "expr_leiden", "banksy"):
         if variant in enrich_dfs and not enrich_dfs[variant].empty:
+            title_map = {
+                "random_niche": "Random label control",
+                "expr_leiden": "Expression Leiden control",
+                "banksy": "BANKSY spatial clusters",
+            }
             fig, _ = nb_viz.plot_cnn_enrichment_scatter(
                 enrich_dfs[variant], corr_dfs[variant], top_n=6, tag=variant,
                 label_niches=True, color_by_niche=True, show_regression=True,
             )
-            fig.suptitle(
-                f"{'Random label' if variant == 'random_niche' else 'Expression Leiden'} control ({variant})",
-                fontweight="bold", y=1.02,
-            )
+            fig.suptitle(f"{title_map.get(variant, variant)} ({variant})", fontweight="bold", y=1.02)
             fig.savefig(fig_dir / f"fig20_enrichment_scatter_{variant}.png", dpi=200, bbox_inches="tight")
             plt.close(fig)
             fig, _ = nb_viz.plot_cnn_enrichment_heatmap(corr_dfs[variant], tag=variant)

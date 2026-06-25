@@ -573,6 +573,7 @@ def plot_microniche_control_comparison(
         "cnn": "CNN β-microniches",
         "random_niche": "Random labels (null)",
         "expr_leiden": "Expression Leiden",
+        "banksy": "BANKSY",
     }
     rows = []
     for method, df in corr_by_method.items():
@@ -596,7 +597,12 @@ def plot_microniche_control_comparison(
     ax0 = axes[0]
     data = [combined.loc[combined.method == m, "pearson_r"].values for m in order]
     bp = ax0.boxplot(data, tick_labels=order, patch_artist=True, widths=0.55)
-    palette = {"CNN β-microniches": "#2563eb", "Random labels (null)": "#9ca3af", "Expression Leiden": "#d97706"}
+    palette = {
+        "CNN β-microniches": "#2563eb",
+        "Random labels (null)": "#9ca3af",
+        "Expression Leiden": "#d97706",
+        "BANKSY": "#059669",
+    }
     for patch, m in zip(bp["boxes"], order):
         patch.set_facecolor(palette.get(m, "#aec7e8"))
         patch.set_alpha(0.85)
@@ -640,6 +646,7 @@ def plot_microniche_control_heatmap(
         "cnn": "CNN β-microniches",
         "random_niche": "Random labels",
         "expr_leiden": "Expression Leiden",
+        "banksy": "BANKSY",
     }
     methods = [m for m in corr_by_method if corr_by_method[m] is not None and not corr_by_method[m].empty]
     if not methods:
@@ -671,13 +678,14 @@ def plot_microniche_control_scatter(
     method_order: list[str] | None = None,
     method_labels: dict[str, str] | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
-    """Side-by-side scatter panels for CNN, random, and expression-Leiden controls."""
+    """Side-by-side scatter panels for CNN, random, expression-Leiden, and BANKSY controls."""
     labels = method_labels or {
         "cnn": "CNN β-microniches",
         "random_niche": "Random labels",
         "expr_leiden": "Expression Leiden",
+        "banksy": "BANKSY",
     }
-    order = method_order or ["cnn", "random_niche", "expr_leiden"]
+    order = method_order or ["cnn", "random_niche", "expr_leiden", "banksy"]
     order = [m for m in order if m in enrich_by_method and m in corr_by_method]
     if not order or corr_by_method.get("cnn") is None or corr_by_method["cnn"].empty:
         fig, ax = plt.subplots(figsize=(6, 3))
