@@ -367,6 +367,8 @@ def main() -> None:
     ap.add_argument("--spatial-weight", type=float, default=cmu.DEFAULT_LEIDEN_KW["spatial_weight"])
     ap.add_argument("--min-ntc", type=int, default=2, help="Min NTC tumor cells per niche (obs + pred)")
     ap.add_argument("--min-pert", type=int, default=2, help="Min sgP tumor cells per niche (observed)")
+    ap.add_argument("--fig-dir", type=Path, default=ROOT / "figures" / "cnn_enrichment")
+    ap.add_argument("--figures-only", action="store_true", help="Skip CSV writes; use cached enrich/corr if present")
     args = ap.parse_args()
 
     leiden_kw = {
@@ -377,7 +379,7 @@ def main() -> None:
     }
 
     out_dir = ROOT / "results" / "cnn_enrichment"
-    fig_dir = ROOT / "figures" / "cnn_enrichment"
+    fig_dir = args.fig_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -427,8 +429,16 @@ def main() -> None:
     enrich_df = pd.concat(all_enrich, ignore_index=True) if all_enrich else pd.DataFrame()
     corr_df = pd.concat(all_corr, ignore_index=True) if all_corr else pd.DataFrame()
 
-    enrich_df.to_csv(out_dir / f"niche_enrichment_{args.tag}.csv", index=False)
-    corr_df.to_csv(out_dir / f"enrichment_corr_{args.tag}.csv", index=False)
+    if args.figures_only:
+        enrich_path = out_dir / f"niche_enrichment_{args.tag}.csv"
+        corr_path = out_dir / f"enrichment_corr_{args.tag}.csv"
+        if enrich_df.empty and enrich_path.exists():
+            enrich_df = pd.read_csv(enrich_path)
+        if corr_df.empty and corr_path.exists():
+            corr_df = pd.read_csv(corr_path)
+    else:
+        enrich_df.to_csv(out_dir / f"niche_enrichment_{args.tag}.csv", index=False)
+        corr_df.to_csv(out_dir / f"enrichment_corr_{args.tag}.csv", index=False)
 
     summary = {
         "tag": args.tag,
@@ -445,7 +455,8 @@ def main() -> None:
             if not corr_df.empty else []
         ),
     }
-    (out_dir / f"overall_{args.tag}.json").write_text(json.dumps(summary, indent=2))
+    if not args.figures_only:
+        (out_dir / f"overall_{args.tag}.json").write_text(json.dumps(summary, indent=2))
     plot_scatter(enrich_df, corr_df, fig_dir, args.tag)
     plot_scatter_histology(enrich_df, corr_df, pool_by_slice, fig_dir, args.tag, mc38_dir=args.mc38_dir)
     plot_scatter_histology(

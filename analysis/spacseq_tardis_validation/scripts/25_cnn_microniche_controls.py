@@ -170,6 +170,51 @@ def summarize_corr(corr_df: pd.DataFrame, method: str) -> dict:
     }
 
 
+def plot_controls_figures(
+    enrich_dfs: dict[str, pd.DataFrame],
+    corr_dfs: dict[str, pd.DataFrame],
+    fig_dir: Path,
+    *,
+    tag: str = "cnn_v2",
+) -> None:
+    import nb_viz
+
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, _ = nb_viz.plot_microniche_control_comparison(corr_dfs)
+    fig.savefig(fig_dir / "fig26_microniche_control_comparison.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, _ = nb_viz.plot_microniche_control_heatmap(corr_dfs)
+    fig.savefig(fig_dir / "fig27_microniche_control_heatmap.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, _ = nb_viz.plot_microniche_control_scatter(enrich_dfs, corr_dfs, top_n=3)
+    fig.savefig(fig_dir / "fig28_microniche_control_scatter.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    title_map = {
+        "cnn": f"CNN β-microniches ({tag})",
+        "random_niche": "Random label control",
+        "expr_leiden": "Expression Leiden control",
+        "banksy": "BANKSY spatial clusters",
+    }
+    for variant in ("cnn", "random_niche", "expr_leiden", "banksy"):
+        if variant not in enrich_dfs or enrich_dfs[variant].empty:
+            continue
+        scatter_tag = tag if variant == "cnn" else variant
+        fig, _ = nb_viz.plot_cnn_enrichment_scatter(
+            enrich_dfs[variant], corr_dfs[variant], top_n=6, tag=scatter_tag,
+            label_niches=True, color_by_niche=True, show_regression=True,
+        )
+        fig.suptitle(title_map.get(variant, variant), fontweight="bold", y=1.02)
+        fig.savefig(fig_dir / f"fig20_enrichment_scatter_{scatter_tag}.png", dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        fig, _ = nb_viz.plot_cnn_enrichment_heatmap(corr_dfs[variant], tag=scatter_tag)
+        fig.savefig(fig_dir / f"fig21_enrichment_heatmap_{scatter_tag}.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", default="cnn_v2")
@@ -189,6 +234,8 @@ def main() -> None:
     ap.add_argument("--banksy-neighbours", type=int, default=15, help="BANKSY spatial neighbors k_geom")
     ap.add_argument("--banksy-tmp-dir", type=Path, default=ROOT / "results" / "cnn_enrichment" / "banksy_tmp")
     ap.add_argument("--variants", nargs="+", default=["cnn", "random_niche", "expr_leiden", "banksy"])
+    ap.add_argument("--fig-dir", type=Path, default=ROOT / "figures" / "cnn_enrichment")
+    ap.add_argument("--figures-only", action="store_true", help="Plot from cached controls CSVs without recomputing")
     args = ap.parse_args()
 
     leiden_kw = {
@@ -199,9 +246,32 @@ def main() -> None:
     }
 
     out_dir = ROOT / "results" / "cnn_enrichment"
-    fig_dir = ROOT / "figures" / "cnn_enrichment"
+    fig_dir = args.fig_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.figures_only:
+        enrich_path = out_dir / "niche_enrichment_controls.csv"
+        corr_path = out_dir / "enrichment_corr_controls.csv"
+        if not enrich_path.exists() or not corr_path.exists():
+            raise FileNotFoundError("Controls CSVs missing; run without --figures-only first")
+        all_enrich = pd.read_csv(enrich_path)
+        all_corr = pd.read_csv(corr_path)
+        enrich_dfs = {
+            v: all_enrich[all_enrich["niche_method"] == v].copy()
+            for v in args.variants
+            if "niche_method" in all_enrich.columns
+        }
+        corr_dfs = {
+            v: all_corr[all_corr["niche_method"] == v].copy()
+            for v in args.variants
+            if "niche_method" in all_corr.columns
+        }
+        plot_controls_figures(enrich_dfs, corr_dfs, fig_dir, tag=args.tag)
+        summary_path = out_dir / "overall_controls.json"
+        if summary_path.exists():
+            print(summary_path.read_text())
+        return
 
     pooled_baseline = load_baseline(args.baseline_h5ad)
     if "slice_id" not in pooled_baseline.obs.columns:
@@ -243,37 +313,7 @@ def main() -> None:
     }
     (out_dir / "overall_controls.json").write_text(json.dumps(summary, indent=2))
 
-    import nb_viz
-
-    fig, _ = nb_viz.plot_microniche_control_comparison(corr_dfs)
-    fig.savefig(fig_dir / "fig26_microniche_control_comparison.png", dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-    fig, _ = nb_viz.plot_microniche_control_heatmap(corr_dfs)
-    fig.savefig(fig_dir / "fig27_microniche_control_heatmap.png", dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-    fig, _ = nb_viz.plot_microniche_control_scatter(enrich_dfs, corr_dfs, top_n=3)
-    fig.savefig(fig_dir / "fig28_microniche_control_scatter.png", dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-    for variant in ("random_niche", "expr_leiden", "banksy"):
-        if variant in enrich_dfs and not enrich_dfs[variant].empty:
-            title_map = {
-                "random_niche": "Random label control",
-                "expr_leiden": "Expression Leiden control",
-                "banksy": "BANKSY spatial clusters",
-            }
-            fig, _ = nb_viz.plot_cnn_enrichment_scatter(
-                enrich_dfs[variant], corr_dfs[variant], top_n=6, tag=variant,
-                label_niches=True, color_by_niche=True, show_regression=True,
-            )
-            fig.suptitle(f"{title_map.get(variant, variant)} ({variant})", fontweight="bold", y=1.02)
-            fig.savefig(fig_dir / f"fig20_enrichment_scatter_{variant}.png", dpi=200, bbox_inches="tight")
-            plt.close(fig)
-            fig, _ = nb_viz.plot_cnn_enrichment_heatmap(corr_dfs[variant], tag=variant)
-            fig.savefig(fig_dir / f"fig21_enrichment_heatmap_{variant}.png", dpi=180, bbox_inches="tight")
-            plt.close(fig)
+    plot_controls_figures(enrich_dfs, corr_dfs, fig_dir, tag=args.tag)
 
     print(json.dumps(summary, indent=2))
 
