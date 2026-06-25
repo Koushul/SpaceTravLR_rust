@@ -200,6 +200,88 @@ def leiden_microniches(
     return pd.Series(tmp2.obs[key].astype(str).values, index=ad.obs_names, name=key)
 
 
+def shuffle_microniche_labels(labels: pd.Series, seed: int = 42) -> pd.Series:
+    """Permute niche labels among cells (negative control; destroys spatial coherence)."""
+    rng = np.random.default_rng(seed)
+    out = labels.copy().astype(str)
+    mask = out.notna() & ~out.isin(["unassigned", "nan", ""])
+    if int(mask.sum()) < 2:
+        return out
+    shuffled = out.loc[mask].values.copy()
+    rng.shuffle(shuffled)
+    out.loc[mask] = shuffled
+    return out
+
+
+def leiden_expression_clusters(
+    ad: sc.AnnData,
+    n_pcs: int = 15,
+    n_neighbors: int = 12,
+    resolution: float = 0.9,
+    spatial_weight: float = 0.4,
+    min_cells: int = 20,
+    n_top_genes: int = 1500,
+    key: str = "expr_leiden",
+) -> pd.Series:
+    """Leiden clusters from gene-expression PCA + spatial (control vs β-microniches)."""
+    if ad.n_obs < min_cells:
+        return pd.Series("0", index=ad.obs_names, name=key)
+
+    if "imputed_count" in ad.layers:
+        x = ad.layers["imputed_count"]
+    else:
+        x = ad.X
+    mat = x.toarray() if sparse.issparse(x) else np.asarray(x)
+    mat = np.nan_to_num(mat.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    mat = np.log1p(np.clip(mat, 0.0, None))
+
+    gene_var = mat.var(axis=0)
+    keep = gene_var > 1e-8
+    if int(keep.sum()) < 50:
+        keep = np.ones(mat.shape[1], dtype=bool)
+    top_k = min(n_top_genes, int(keep.sum()))
+    top_idx = np.argsort(gene_var[keep])[-top_k:]
+    gene_idx = np.where(keep)[0][top_idx]
+    mat = mat[:, gene_idx]
+
+    tmp = sc.AnnData(X=mat)
+    sc.pp.scale(tmp, max_value=10)
+    tmp.X = np.nan_to_num(tmp.X, nan=0.0)
+    n_pcs = min(n_pcs, mat.shape[1] - 1, ad.n_obs - 1)
+    sc.tl.pca(tmp, n_comps=n_pcs, svd_solver="arpack")
+    expr_pca = tmp.obsm["X_pca"]
+
+    xy = ad.obsm["spatial"].astype(np.float64)
+    xy = (xy - xy.mean(0)) / (xy.std(0) + 1e-8)
+    expr_n = expr_pca / (np.std(expr_pca, axis=0, keepdims=True) + 1e-8)
+    sw = spatial_weight
+    joint = np.hstack([expr_n * (1 - sw), xy * sw])
+
+    tmp2 = sc.AnnData(X=joint)
+    sc.pp.neighbors(tmp2, n_neighbors=min(n_neighbors, ad.n_obs - 1), use_rep="X")
+    sc.tl.leiden(tmp2, resolution=resolution, key_added=key, flavor="igraph", n_iterations=2, directed=False)
+    return pd.Series(tmp2.obs[key].astype(str).values, index=ad.obs_names, name=key)
+
+
+def assign_slice_expression_clusters(
+    prep: sc.AnnData,
+    slice_id: str,
+    cell_type: str,
+    prefix: bool = True,
+    **leiden_kw,
+) -> pd.Series:
+    mask = (prep.obs["slice_id"].astype(str) == slice_id) & (prep.obs["cell_type"].astype(str) == cell_type)
+    labels = pd.Series(index=prep.obs_names, dtype=str)
+    sub = prep[mask].copy()
+    if sub.n_obs == 0:
+        return labels
+    sub_labels = leiden_expression_clusters(sub, **leiden_kw)
+    if prefix:
+        sub_labels = sub_labels.astype(str).radd(f"{slice_id}|{cell_type}|expr|")
+    labels.loc[sub.obs_names] = sub_labels.values
+    return labels.fillna("unassigned")
+
+
 def assign_slice_microniches(
     prep: sc.AnnData,
     beta_matrix: np.ndarray,

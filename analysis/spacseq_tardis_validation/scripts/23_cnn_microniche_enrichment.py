@@ -54,27 +54,37 @@ def resolve_paths(args, slice_id: str) -> tuple[Path, Path, Path]:
     return bd, bl, pd_dir
 
 
+def propagate_niche_labels(
+    prep: sc.AnnData,
+    pool: sc.AnnData,
+    slice_id: str,
+    labels: pd.Series,
+    niche_key: str,
+) -> tuple[sc.AnnData, sc.AnnData]:
+    prep = prep.copy()
+    prep.obs[niche_key] = labels
+    pool = pool.copy()
+    pool_labels = pd.Series("unassigned", index=pool.obs_names, dtype=str)
+    prep_names = prep.obs_names
+    for bc in pool.obs_names:
+        key = cmu.map_pool_to_prep(slice_id, bc, prep_names)
+        if key is not None and key in prep.obs_names:
+            pool_labels[bc] = prep.obs.loc[key, niche_key]
+    pool.obs[niche_key] = cmu.knn_assign_perturbed(pool, pool_labels, "tumor")
+    return prep, pool
+
+
 def assign_pool_niches(
     prep: sc.AnnData,
     pool: sc.AnnData,
     beta_matrix: np.ndarray,
     slice_id: str,
     leiden_kw: dict | None = None,
+    niche_key: str = "cnn_leiden",
 ) -> tuple[sc.AnnData, sc.AnnData]:
     cmu.ensure_cluster_id(prep)
     labels = cmu.assign_slice_microniches(prep, beta_matrix, slice_id, "tumor", **(leiden_kw or {}))
-    prep = prep.copy()
-    prep.obs["cnn_leiden"] = labels
-
-    pool = pool.copy()
-    pool_labels = pd.Series("unassigned", index=pool.obs_names, dtype=str)
-    prep_names = prep.obs_names
-    for bc in pool.obs_names:
-        key = cmu.map_pool_to_prep(slice_id, bc, prep_names)
-        if key is not None:
-            pool_labels[bc] = prep.obs.loc[key, "cnn_leiden"]
-    pool.obs["cnn_leiden"] = cmu.knn_assign_perturbed(pool, pool_labels, "tumor")
-    return prep, pool
+    return propagate_niche_labels(prep, pool, slice_id, labels, niche_key)
 
 
 def resolve_pred_path(pred_dir: Path, fallback_dir: Path, perturb: str) -> Path | None:
@@ -98,17 +108,26 @@ def run_slice_enrichment(
     leiden_kw: dict | None = None,
     min_ntc: int = 2,
     min_pert: int = 2,
+    niche_key: str = "cnn_leiden",
+    prep: sc.AnnData | None = None,
+    pool: sc.AnnData | None = None,
+    score_genes: list[str] | None = None,
+    beta_matrix: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, sc.AnnData, sc.AnnData]:
-    pool = load_pool(slice_id, data_root)
-    pool.obs["slice_id"] = slice_id
+    if pool is None:
+        pool = load_pool(slice_id, data_root)
+        pool.obs["slice_id"] = slice_id
 
-    prep = baseline.copy()
-    if slice_id.startswith("subQ"):
-        prep = prep[prep.obs["slice_id"].astype(str) == slice_id].copy()
-    cmu.ensure_cluster_id(prep)
+    if prep is None:
+        prep = baseline.copy()
+        if slice_id.startswith("subQ"):
+            prep = prep[prep.obs["slice_id"].astype(str) == slice_id].copy()
+        cmu.ensure_cluster_id(prep)
 
-    beta_matrix, score_genes = cmu.build_beta_score_matrix(prep, betadata_dir)
-    prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw)
+    if beta_matrix is None or score_genes is None:
+        beta_matrix, score_genes = cmu.build_beta_score_matrix(prep, betadata_dir)
+    if niche_key not in pool.obs.columns:
+        prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw, niche_key=niche_key)
 
     all_enrich: list[pd.DataFrame] = []
     all_corr: list[dict] = []
@@ -133,9 +152,9 @@ def run_slice_enrichment(
             tumor_mask = prep.obs["cell_type"].astype(str) == "tumor"
             beta_tumor = beta_matrix[np.where(tumor_mask.values)[0]]
             cnn_by_cell = pd.Series(beta_tumor[:, target_idx], index=prep.obs_names[tumor_mask])
-        obs_df = cmu.observed_log_enrichment(pool, pert, "tumor", "cnn_leiden", min_ntc=min_ntc, min_pert=min_pert)
+        obs_df = cmu.observed_log_enrichment(pool, pert, "tumor", niche_key, min_ntc=min_ntc, min_pert=min_pert)
         pred_df = cmu.predicted_niche_scores(
-            prep, pool, pred, pert, "tumor", "cnn_leiden", score_genes, profile, cnn_by_cell,
+            prep, pool, pred, pert, "tumor", niche_key, score_genes, profile, cnn_by_cell,
             global_baseline=global_baseline,
             min_ntc_per_niche=min_ntc,
             min_pert_per_niche=min_pert,

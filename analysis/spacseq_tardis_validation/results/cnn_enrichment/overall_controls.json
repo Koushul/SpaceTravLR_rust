@@ -1,0 +1,34 @@
+{
+  "tag": "cnn",
+  "random_seed": 42,
+  "leiden_resolution": 0.8,
+  "spatial_weight": 0.4,
+  "variants": [
+    "cnn",
+    "random_niche",
+    "expr_leiden"
+  ],
+  "by_method": [
+    {
+      "method": "cnn",
+      "n_tests": 26,
+      "median_pearson_r": 0.15643460185365993,
+      "mean_pearson_r": 0.11768250424001812,
+      "frac_positive_r": 0.5769230769230769
+    },
+    {
+      "method": "random_niche",
+      "n_tests": 26,
+      "median_pearson_r": -0.09726064821041186,
+      "mean_pearson_r": -0.014204503108753435,
+      "frac_positive_r": 0.38461538461538464
+    },
+    {
+      "method": "expr_leiden",
+      "n_tests": 26,
+      "median_pearson_r": 0.2943044143034631,
+      "mean_pearson_r": 0.17461123333362952,
+      "frac_positive_r": 0.5
+    }
+  ]
+}

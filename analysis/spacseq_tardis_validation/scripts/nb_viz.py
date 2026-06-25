@@ -562,6 +562,166 @@ def plot_cnn_enrichment_heatmap(
     return fig, ax
 
 
+def plot_microniche_control_comparison(
+    corr_by_method: dict[str, pd.DataFrame],
+    *,
+    method_labels: dict[str, str] | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[plt.Figure, list[plt.Axes]]:
+    """Boxplot + per-test scatter comparing enrichment correlation across niche methods."""
+    labels = method_labels or {
+        "cnn": "CNN β-microniches",
+        "random_niche": "Random labels (null)",
+        "expr_leiden": "Expression Leiden",
+    }
+    rows = []
+    for method, df in corr_by_method.items():
+        if df is None or df.empty:
+            continue
+        sub = df.dropna(subset=["pearson_r"]).copy()
+        sub["method"] = labels.get(method, method)
+        rows.append(sub)
+    if not rows:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No control comparison data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, [ax]
+
+    combined = pd.concat(rows, ignore_index=True)
+    order = [labels.get(k, k) for k in corr_by_method if k in labels or k in corr_by_method]
+    order = [o for o in order if o in combined["method"].unique()]
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize or (11, 4.5))
+
+    ax0 = axes[0]
+    data = [combined.loc[combined.method == m, "pearson_r"].values for m in order]
+    bp = ax0.boxplot(data, tick_labels=order, patch_artist=True, widths=0.55)
+    palette = {"CNN β-microniches": "#2563eb", "Random labels (null)": "#9ca3af", "Expression Leiden": "#d97706"}
+    for patch, m in zip(bp["boxes"], order):
+        patch.set_facecolor(palette.get(m, "#aec7e8"))
+        patch.set_alpha(0.85)
+    rng = np.random.default_rng(0)
+    for i, m in enumerate(order, start=1):
+        vals = combined.loc[combined.method == m, "pearson_r"].to_numpy()
+        jitter = rng.uniform(-0.08, 0.08, size=len(vals))
+        ax0.scatter(np.full(len(vals), i) + jitter, vals, s=18, c="#111827", alpha=0.45, zorder=3)
+    ax0.axhline(0, color="k", lw=0.6, alpha=0.5)
+    ax0.set_ylabel("Pearson r (obs vs pred enrichment)")
+    ax0.set_title("Niche method comparison", fontweight="bold")
+    ax0.tick_params(axis="x", rotation=15)
+
+    ax1 = axes[1]
+    summary = combined.groupby("method", observed=True)["pearson_r"].agg(["median", "mean", "count"]).reindex(order)
+    x = np.arange(len(summary))
+    ax1.bar(x - 0.18, summary["median"], width=0.36, label="Median r", color="#1d4ed8", alpha=0.85)
+    ax1.bar(x + 0.18, summary["mean"], width=0.36, label="Mean r", color="#60a5fa", alpha=0.85)
+    ax1.axhline(0, color="k", lw=0.6, alpha=0.5)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(summary.index, rotation=15, ha="right")
+    ax1.set_ylabel("Pearson r")
+    ax1.set_title("Summary statistics", fontweight="bold")
+    ax1.legend(fontsize=8, frameon=False)
+    for i, (_, row) in enumerate(summary.iterrows()):
+        ax1.text(i, max(row["median"], row["mean"], 0) + 0.03, f"n={int(row['count'])}", ha="center", fontsize=8)
+
+    fig.suptitle("Microniche enrichment controls: CNN vs random vs expression Leiden", fontweight="bold", y=1.02)
+    fig.tight_layout()
+    return fig, list(axes)
+
+
+def plot_microniche_control_heatmap(
+    corr_by_method: dict[str, pd.DataFrame],
+    *,
+    method_labels: dict[str, str] | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Stacked heatmaps of Pearson r for each niche-assignment method."""
+    labels = method_labels or {
+        "cnn": "CNN β-microniches",
+        "random_niche": "Random labels",
+        "expr_leiden": "Expression Leiden",
+    }
+    methods = [m for m in corr_by_method if corr_by_method[m] is not None and not corr_by_method[m].empty]
+    if not methods:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No heatmap data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, np.array([[ax]])
+
+    pivots = []
+    for m in methods:
+        p = corr_by_method[m].pivot_table(index="perturbation", columns="slice", values="pearson_r", aggfunc="first")
+        pivots.append((labels.get(m, m), p))
+
+    n = len(pivots)
+    fig, axes = plt.subplots(n, 1, figsize=figsize or (0.75 * pivots[0][1].shape[1] + 2.5, 1.6 * n + 1), squeeze=False)
+    for ax, (title, pivot) in zip(axes.ravel(), pivots):
+        sns.heatmap(pivot, annot=True, fmt=".2f", cmap="RdBu_r", center=0, vmin=-1, vmax=1, ax=ax, cbar_kws={"shrink": 0.7})
+        ax.set_title(title, fontweight="bold")
+    fig.suptitle("Enrichment correlation by niche assignment method", fontweight="bold", y=1.01)
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_microniche_control_scatter(
+    enrich_by_method: dict[str, pd.DataFrame],
+    corr_by_method: dict[str, pd.DataFrame],
+    *,
+    top_n: int = 3,
+    method_order: list[str] | None = None,
+    method_labels: dict[str, str] | None = None,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Side-by-side scatter panels for CNN, random, and expression-Leiden controls."""
+    labels = method_labels or {
+        "cnn": "CNN β-microniches",
+        "random_niche": "Random labels",
+        "expr_leiden": "Expression Leiden",
+    }
+    order = method_order or ["cnn", "random_niche", "expr_leiden"]
+    order = [m for m in order if m in enrich_by_method and m in corr_by_method]
+    if not order or corr_by_method.get("cnn") is None or corr_by_method["cnn"].empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No control scatter data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, np.array([[ax]])
+
+    ref_pairs = corr_by_method["cnn"].dropna(subset=["pearson_r"]).nlargest(top_n, "pearson_r")
+    n_pairs = len(ref_pairs)
+    fig, axes = plt.subplots(len(order), n_pairs, figsize=(4.2 * n_pairs, 3.8 * len(order)), squeeze=False)
+
+    for row_i, method in enumerate(order):
+        enrich_df = enrich_by_method[method]
+        corr_df = corr_by_method[method]
+        for col_i, (_, pair) in enumerate(ref_pairs.iterrows()):
+            ax = axes[row_i, col_i]
+            sub = enrich_df[
+                (enrich_df["slice"] == pair["slice"]) & (enrich_df["perturbation"] == pair["perturbation"])
+            ]
+            if sub.empty:
+                ax.axis("off")
+                continue
+            colors = _microniche_color_map(sub["niche"].astype(str))
+            cvals = [colors.get(n, "#2563eb") for n in sub["niche"]]
+            ax.scatter(sub["pred_enrichment_score"], sub["obs_log2_enrichment"], s=55, c=cvals, edgecolors="k", linewidths=0.35)
+            match = corr_df[
+                (corr_df["slice"] == pair["slice"]) & (corr_df["perturbation"] == pair["perturbation"])
+            ]
+            r = float(match["pearson_r"].iloc[0]) if not match.empty else float("nan")
+            if col_i == 0:
+                ax.set_ylabel(f"{labels.get(method, method)}\nObs log₂ OR")
+            if row_i == 0:
+                ax.set_title(f"sg{pair['perturbation']} | {pair['slice']}", fontsize=9, fontweight="bold")
+            ax.axhline(0, color="k", lw=0.35, alpha=0.35)
+            ax.axvline(0, color="k", lw=0.35, alpha=0.35)
+            ax.set_xlabel("Pred score")
+            ax.text(0.05, 0.95, f"r={r:+.2f}", transform=ax.transAxes, va="top", fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8, ec="none"))
+
+    fig.suptitle("Top CNN cases under control niche assignments", fontweight="bold", y=1.01)
+    fig.tight_layout()
+    return fig, axes
+
+
 def _microniche_color_map(labels: pd.Series) -> dict[str, tuple]:
     uniq = sorted(labels.unique())
     cmap = plt.colormaps.get_cmap("tab20")
