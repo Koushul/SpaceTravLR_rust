@@ -1,0 +1,22 @@
+{
+  "median_pearson_r": 0.44856298128949673,
+  "mean_pearson_r": 0.30529830349617976,
+  "n_tests": 26,
+  "leiden_kw": {
+    "resolution": 0.7,
+    "spatial_weight": 0.45,
+    "n_pcs": 10,
+    "min_cells": 20
+  },
+  "betadata_dir": "runs/baseline_pooled_cnn_v2",
+  "pred_dir": "results/predictions_tuned",
+  "control_baselines": {
+    "expr_leiden": 0.294,
+    "banksy": 0.195,
+    "random_niche": -0.097
+  },
+  "beats_expr_leiden": true,
+  "beats_banksy": true,
+  "margin_vs_expr": 0.15456298128949675,
+  "margin_vs_banksy": 0.2535629812894967
+}

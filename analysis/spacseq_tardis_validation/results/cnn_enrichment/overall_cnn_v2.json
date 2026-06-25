@@ -1,0 +1,43 @@
+{
+  "tag": "cnn_v2",
+  "per_cell_betas": true,
+  "leiden_resolution": 0.7,
+  "spatial_weight": 0.45,
+  "min_ntc": 2,
+  "min_pert": 2,
+  "n_enrichment_tests": 26,
+  "median_pearson_r": 0.44856298128949673,
+  "mean_pearson_r": 0.30529830349617976,
+  "best_cases": [
+    {
+      "slice": "subQ-2",
+      "perturbation": "Cd83",
+      "pearson_r": 0.8615439576281251,
+      "n_niches": 4
+    },
+    {
+      "slice": "subQ-4",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.856199632763069,
+      "n_niches": 3
+    },
+    {
+      "slice": "subQ-2",
+      "perturbation": "Bcam",
+      "pearson_r": 0.8240368333923207,
+      "n_niches": 4
+    },
+    {
+      "slice": "subQ-4",
+      "perturbation": "Il4ra",
+      "pearson_r": 0.8037774430539287,
+      "n_niches": 5
+    },
+    {
+      "slice": "subQ-1",
+      "perturbation": "Cd74",
+      "pearson_r": 0.7616562400810192,
+      "n_niches": 6
+    }
+  ]
+}

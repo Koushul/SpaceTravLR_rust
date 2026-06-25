@@ -40,6 +40,13 @@ PAPER_LUNG_GENES = [
     "Cd163", "H2-Aa", "Bcam", "Itgal", "Itgb2",
 ]
 
+# Subset for β-score microniche clustering (perturbation targets + niche modules).
+MICRONICHE_CLUSTER_GENES = {
+    "Il4ra", "Cd83", "Cd74", "Bcam", "Cks1b", "Ptk6", "Icam1", "Cd44", "Spp1",
+    "Cxcl9", "Cxcl10", "Stat1", "Ifit3", "Itgal", "Itgb2", "Cd8a", "Cd163",
+    "Mrc1", "Arg1", "H2-Aa", "H2-Ab1", "Col1a2", "Postn", "Vim", "Epcam",
+}
+
 
 def niche_short_label(niche: str) -> str:
     return str(niche).split("|")[-1]
@@ -156,10 +163,10 @@ def build_beta_score_matrix(
 
 
 DEFAULT_LEIDEN_KW = {
-    "n_pcs": 12,
+    "n_pcs": 10,
     "n_neighbors": 12,
-    "resolution": 0.9,
-    "spatial_weight": 0.4,
+    "resolution": 0.7,
+    "spatial_weight": 0.45,
     "min_cells": 20,
 }
 
@@ -392,7 +399,8 @@ def assign_slice_microniches(
     if sub.n_obs == 0:
         return labels
     sub_scores = beta_matrix[np.where(mask.values)[0]]
-    sub_labels = leiden_microniches(sub, sub_scores, **leiden_kw)
+    kw = {**DEFAULT_LEIDEN_KW, **leiden_kw}
+    sub_labels = leiden_microniches(sub, sub_scores, **kw)
     if prefix:
         sub_labels = sub_labels.astype(str).radd(f"{slice_id}|{cell_type}|")
     labels.loc[sub.obs_names] = sub_labels.values

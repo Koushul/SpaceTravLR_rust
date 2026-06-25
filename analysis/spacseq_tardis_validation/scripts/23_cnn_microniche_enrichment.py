@@ -41,14 +41,16 @@ LUNG_PERTS = ["Icam1", "Bcam"]
 
 
 def resolve_paths(args, slice_id: str) -> tuple[Path, Path, Path]:
+    v2 = ROOT / "runs" / "baseline_pooled_cnn_v2"
+    pooled_cnn = v2 if cmu.betadata_ready(v2, min_genes=30) else args.betadata_dir
     if slice_id == LUNG_SLICE:
         bd = ROOT / "runs" / "lung_m001_cnn"
         if not (bd / "Icam1_betadata.feather").exists():
-            bd = args.betadata_dir if cmu.betadata_ready(args.betadata_dir, min_genes=5) else args.seed_betadata_dir
+            bd = pooled_cnn if cmu.betadata_ready(pooled_cnn, min_genes=5) else args.seed_betadata_dir
         bl = args.data_root / "slices" / slice_id / "baseline_ntc.h5ad"
         pd_dir = args.pred_dir if (args.pred_dir / "predicted_KO_Icam1.feather").exists() else args.seed_pred_dir
     else:
-        bd = args.betadata_dir if cmu.betadata_ready(args.betadata_dir) else args.seed_betadata_dir
+        bd = pooled_cnn if cmu.betadata_ready(pooled_cnn) else args.seed_betadata_dir
         bl = args.baseline_h5ad
         pd_dir = args.pred_dir if any(args.pred_dir.glob("predicted_KO_*.feather")) else args.seed_pred_dir
     return bd, bl, pd_dir
@@ -125,7 +127,9 @@ def run_slice_enrichment(
         cmu.ensure_cluster_id(prep)
 
     if beta_matrix is None or score_genes is None:
-        beta_matrix, score_genes = cmu.build_beta_score_matrix(prep, betadata_dir)
+        beta_matrix, score_genes = cmu.build_beta_score_matrix(
+            prep, betadata_dir, gene_filter=cmu.MICRONICHE_CLUSTER_GENES,
+        )
     if niche_key not in pool.obs.columns:
         prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw, niche_key=niche_key)
 
@@ -350,10 +354,10 @@ def plot_spatial_overview(pool: sc.AnnData, slice_id: str, fig_dir: Path, tag: s
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tag", default="cnn")
+    ap.add_argument("--tag", default="cnn_v2")
     ap.add_argument("--data-root", type=Path, default=ROOT / "data")
-    ap.add_argument("--betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_cnn")
-    ap.add_argument("--pred-dir", type=Path, default=ROOT / "results/predictions_cnn")
+    ap.add_argument("--betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_cnn_v2")
+    ap.add_argument("--pred-dir", type=Path, default=ROOT / "results/predictions_tuned")
     ap.add_argument("--baseline-h5ad", type=Path, default=ROOT / "data/pooled/baseline_ntc.h5ad")
     ap.add_argument("--slices", nargs="+", default=SUBQ_SLICES + [LUNG_SLICE])
     ap.add_argument("--seed-betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_seed")
@@ -368,6 +372,7 @@ def main() -> None:
     leiden_kw = {
         "resolution": args.leiden_resolution,
         "spatial_weight": args.spatial_weight,
+        "n_pcs": cmu.DEFAULT_LEIDEN_KW["n_pcs"],
         "min_cells": cmu.DEFAULT_LEIDEN_KW["min_cells"],
     }
 

@@ -68,7 +68,9 @@ def build_slice_context(
     pool.obs["slice_id"] = slice_id
     prep = baseline.copy()
     cmu.ensure_cluster_id(prep)
-    beta_matrix, score_genes = cmu.build_beta_score_matrix(prep, bd)
+    beta_matrix, score_genes = cmu.build_beta_score_matrix(
+        prep, bd, gene_filter=cmu.MICRONICHE_CLUSTER_GENES,
+    )
     return prep, pool, beta_matrix, score_genes, bd, pd_dir, perts, gb
 
 
@@ -170,10 +172,10 @@ def summarize_corr(corr_df: pd.DataFrame, method: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tag", default="cnn")
+    ap.add_argument("--tag", default="cnn_v2")
     ap.add_argument("--data-root", type=Path, default=ROOT / "data")
-    ap.add_argument("--betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_cnn")
-    ap.add_argument("--pred-dir", type=Path, default=ROOT / "results/predictions_cnn")
+    ap.add_argument("--betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_cnn_v2")
+    ap.add_argument("--pred-dir", type=Path, default=ROOT / "results/predictions_tuned")
     ap.add_argument("--baseline-h5ad", type=Path, default=ROOT / "data/pooled/baseline_ntc.h5ad")
     ap.add_argument("--slices", nargs="+", default=SUBQ_SLICES + [LUNG_SLICE])
     ap.add_argument("--seed-betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_seed")
@@ -192,6 +194,7 @@ def main() -> None:
     leiden_kw = {
         "resolution": args.leiden_resolution,
         "spatial_weight": args.spatial_weight,
+        "n_pcs": cmu.DEFAULT_LEIDEN_KW["n_pcs"],
         "min_cells": cmu.DEFAULT_LEIDEN_KW["min_cells"],
     }
 

@@ -1,0 +1,44 @@
+# Perturbation targets (must train first)
+Il4ra
+Cd83
+Cd74
+Bcam
+Cks1b
+Ptk6
+Icam1
+Cd44
+Spp1
+# Immune niche / exclusion module
+Cxcl9
+Cxcl10
+Stat1
+Ifit3
+Itgal
+Itgb2
+Cd8a
+Cd3e
+Gzmb
+Cd163
+Mrc1
+Arg1
+H2-Aa
+H2-Ab1
+B2m
+Tap1
+# Stroma / tumor state
+Epcam
+Krt8
+Vim
+Cdh1
+Col1a2
+Postn
+Pdcd1
+Lag3
+Tnf
+Ccl5
+Foxp3
+Trem2
+Vegfa
+Tgfb1
+Mertk
+Lyz2
