@@ -69,6 +69,106 @@ PERT_PATHWAY_EXPECTED_SIGN: dict[tuple[str, str], int] = {
     ("Ptk6", "EMT / mesenchymal"): +1,
 }
 
+PATHWAY_KIND_PRED_WEIGHTS: dict[str, dict[str, float]] = {
+    "immune": {"exclusion": 0.65, "escape": 0.35},
+    "antigen": {"pathway": 0.45, "escape": 0.30, "cnn": 0.25},
+    "prolif": {"pathway": 0.40, "cnn": 0.40, "escape": 0.20},
+    "emt": {"pathway": 0.50, "escape": 0.35, "cnn": 0.15},
+    "spp1_ecm": {"pathway": 0.45, "exclusion": 0.30, "escape": 0.25},
+    "tcell_exh": {"exclusion": 0.50, "pathway": 0.35, "escape": 0.15},
+    "default": {"pathway": 0.50, "escape": 0.30, "cnn": 0.20},
+}
+
+PERT_PATHWAY_PRED_WEIGHTS: dict[tuple[str, str], dict[str, float]] = {
+    ("Il4ra", "Antigen presentation (MHC-II)"): {"pathway": 0.70, "escape": 0.15, "cnn": 0.15},
+    ("Cd83", "Antigen presentation (MHC-II)"): {"pathway": 0.70, "escape": 0.15, "cnn": 0.15},
+    ("Cd74", "Antigen presentation (MHC-II)"): {"pathway": 0.50, "escape": 0.30, "cnn": 0.20},
+    ("Il4ra", "Immune infiltration index"): {"exclusion": 0.70, "escape": 0.30},
+    ("Cd83", "Immune infiltration index"): {"exclusion": 0.70, "escape": 0.30},
+    ("Il4ra", "M1/inflam macrophage"): {"exclusion": 0.50, "escape": 0.30, "pathway": 0.20},
+    ("Icam1", "Immune exclusion index"): {"exclusion": 0.70, "escape": 0.30},
+    ("Icam1", "Interferon response"): {"exclusion": 0.45, "escape": 0.35, "pathway": 0.20},
+    ("Icam1", "Spp1 / osteopontin"): {"exclusion": 0.40, "escape": 0.35, "pathway": 0.25},
+    ("Cks1b", "Proliferation"): {"exclusion": 0.45, "cnn": 0.45, "escape": 0.10},
+    ("Ptk6", "EMT / mesenchymal"): {"pathway": 0.50, "escape": 0.35, "cnn": 0.15},
+    ("Bcam", "Spp1 / osteopontin"): {"pathway": 0.45, "exclusion": 0.30, "escape": 0.25},
+    ("Bcam", "ECM/fibroblast"): {"pathway": 0.50, "exclusion": 0.25, "escape": 0.25},
+    ("Bcam", "T-cell exhaustion / Treg"): {"exclusion": 0.65, "escape": 0.35},
+}
+
+
+def _pathway_kind_key(pathway: str) -> str:
+    if "Immune infiltration" in pathway or "Immune exclusion" in pathway:
+        return "immune"
+    if any(k in pathway for k in ("Antigen", "M1/", "M2/", "Interferon", "T-cell effector")):
+        return "antigen"
+    if "Proliferation" in pathway:
+        return "prolif"
+    if "EMT" in pathway:
+        return "emt"
+    if "Spp1" in pathway or "ECM" in pathway:
+        return "spp1_ecm"
+    if "T-cell exhaustion" in pathway or "Treg" in pathway:
+        return "tcell_exh"
+    return "default"
+
+
+def _pathway_pred_weights(perturb: str, pathway: str) -> dict[str, float]:
+    return PERT_PATHWAY_PRED_WEIGHTS.get(
+        (perturb, pathway), PATHWAY_KIND_PRED_WEIGHTS[_pathway_kind_key(pathway)]
+    )
+
+
+def _zscore_niche_signal(values: np.ndarray) -> np.ndarray | None:
+    ok = np.isfinite(values)
+    if ok.sum() < 2 or np.nanstd(values[ok]) < 1e-8:
+        return None
+    out = np.full_like(values, np.nan, dtype=np.float64)
+    v = values[ok]
+    out[ok] = (v - v.mean()) / (v.std() + 1e-8)
+    return out
+
+
+def _compose_pathway_niche_pred(
+    df: pd.DataFrame,
+    esc_df: pd.DataFrame,
+    perturb: str,
+    pathway: str,
+    *,
+    gshift: float = 0.0,
+) -> pd.DataFrame:
+    """Blend cell-level pathway Δ with enrichment niche signals (pathway-specific weights)."""
+    if df.empty:
+        return df
+    merged = df.merge(esc_df, on="niche", how="left", suffixes=("", "_enr"))
+    weights = _pathway_pred_weights(perturb, pathway)
+    signal_cols = {
+        "pathway": "pred_pathway_raw",
+        "escape": "pred_escape_gain",
+        "exclusion": "pred_exclusion_index",
+        "cnn": "pred_cnn_target_score",
+    }
+    comp = np.zeros(len(merged), dtype=np.float64)
+    total_w = 0.0
+    for key, col in signal_cols.items():
+        wt = weights.get(key, 0.0)
+        if wt <= 0 or col not in merged.columns:
+            continue
+        z = _zscore_niche_signal(merged[col].to_numpy(dtype=float))
+        if z is None:
+            continue
+        comp += wt * np.where(np.isfinite(z), z, 0.0)
+        total_w += wt
+    out = df.copy()
+    if total_w < 1e-8:
+        return out
+    comp /= total_w
+    scale = max(abs(gshift), float(np.nanstd(out["pred_pathway_raw"].to_numpy(dtype=float))), 0.35)
+    if np.nanstd(comp) > 1e-8:
+        comp = comp / np.nanstd(comp) * scale
+    out["pred_pathway_delta"] = comp
+    return out
+
 
 def microniche_pathway_gene_sets(base_sets: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
     out = dict(base_sets or {})
@@ -344,27 +444,27 @@ def pathway_niche_deltas(
     if df.empty:
         return df
 
-    if use_global_pred:
-        profile = PERT_ENRICHMENT_PROFILE.get(perturb, {})
-        gshift = global_pathway_shift(pred, ref_base, pred_genes, signed=signed, cell_type=cell_type)
-        esc_df = pd.DataFrame()
-        if score_genes:
-            esc_df = predicted_niche_scores(
-                prep, pool, pred, perturb, cell_type, niche_key, score_genes, profile,
-                cell_cnn_scores, global_baseline=ref_base,
-                min_ntc_per_niche=min_ntc, min_pert_per_niche=min_pert,
-            )
+    df["pred_pathway_raw"] = df["pred_pathway_delta"]
+    profile = PERT_ENRICHMENT_PROFILE.get(perturb, {})
+    gshift = global_pathway_shift(pred, ref_base, pred_genes, signed=signed, cell_type=cell_type)
+
+    if not use_global_pred and df["pred_pathway_raw"].isna().all():
+        slice_mean = float(df["ntc_pathway_score"].mean())
+        cnn_w = float(profile.get("cnn_weight", 0.35))
+        z_cnn = _zscore(df["niche"].astype(str).map(cnn_by_niche).to_numpy(dtype=float))
+        for i, row in df.iterrows():
+            scale = float(row["ntc_pathway_score"] / slice_mean) if abs(slice_mean) > 1e-8 else 1.0
+            df.at[i, "pred_pathway_raw"] = gshift * scale + cnn_w * z_cnn[i] * max(abs(gshift), 0.25)
+
+    if score_genes:
+        esc_df = predicted_niche_scores(
+            prep, pool, pred, perturb, cell_type, niche_key, score_genes, profile,
+            cell_cnn_scores, global_baseline=ref_base,
+            min_ntc_per_niche=min_ntc, min_pert_per_niche=min_pert,
+        )
         if not esc_df.empty:
-            proxy = _pathway_enrichment_proxy(esc_df, pathway, perturb, profile)
-            scale = max(abs(gshift), 0.5)
-            if np.nanstd(proxy) > 1e-8:
-                proxy = proxy / np.nanstd(proxy) * scale
-            proxy_map = dict(zip(esc_df["niche"].astype(str), proxy))
-            for i, row in df.iterrows():
-                niche = str(row["niche"])
-                if niche in proxy_map:
-                    df.at[i, "pred_pathway_delta"] = float(proxy_map[niche])
-        if df["pred_pathway_delta"].isna().all():
+            df = _compose_pathway_niche_pred(df, esc_df, perturb, pathway, gshift=gshift)
+        elif use_global_pred and df["pred_pathway_delta"].isna().all():
             slice_mean = float(df["ntc_pathway_score"].mean())
             cnn_w = float(profile.get("cnn_weight", 0.35))
             z_cnn = _zscore(df["niche"].astype(str).map(cnn_by_niche).to_numpy(dtype=float))
@@ -372,7 +472,7 @@ def pathway_niche_deltas(
                 scale = float(row["ntc_pathway_score"] / slice_mean) if abs(slice_mean) > 1e-8 else 1.0
                 df.at[i, "pred_pathway_delta"] = gshift * scale + cnn_w * z_cnn[i] * max(abs(gshift), 0.25)
 
-    return df
+    return df.drop(columns=["pred_pathway_raw"], errors="ignore")
 
 
 def pathway_concordance_stats(delta_df: pd.DataFrame, *, min_niches: int = 4) -> dict:
