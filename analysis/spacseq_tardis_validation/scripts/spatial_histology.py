@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import scanpy as sc
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.image import imread
 
@@ -214,6 +215,7 @@ def plot_microniche_on_he(
     title: str = "",
     legend: bool = True,
     legend_fontsize: float = 6.0,
+    rasterize: bool = False,
 ) -> None:
     """Draw H&E background with visible cell-level microniche overlay."""
     lib = adata.uns["spatial"][library_id]
@@ -226,7 +228,7 @@ def plot_microniche_on_he(
 
     ax.imshow(
         img, origin="upper", interpolation="bilinear", alpha=img_alpha, zorder=0,
-        extent=(0, img.shape[1], img.shape[0], 0),
+        extent=(0, img.shape[1], img.shape[0], 0), rasterized=rasterize,
     )
     labels = adata.obs[color_key].astype(str)
     for lab in labels.unique():
@@ -241,7 +243,7 @@ def plot_microniche_on_he(
             alpha=spot_alpha,
             edgecolors=edgecolor,
             linewidths=edge_width,
-            rasterized=False,
+            rasterized=rasterize,
             zorder=2,
         )
     ax.set_xlim(xmin, xmax)
@@ -266,7 +268,9 @@ def plot_microniche_on_he(
             )
 
 
-def _draw_he_background(ax, adata: sc.AnnData, library_id: str, *, img_alpha: float = 1.0) -> tuple[np.ndarray, float, tuple]:
+def _draw_he_background(
+    ax, adata: sc.AnnData, library_id: str, *, img_alpha: float = 1.0, rasterize: bool = False,
+) -> tuple[np.ndarray, float, tuple]:
     lib = adata.uns["spatial"][library_id]
     img = lib["images"]["hires"]
     xy = hires_coords(adata, library_id)
@@ -276,7 +280,7 @@ def _draw_he_background(ax, adata: sc.AnnData, library_id: str, *, img_alpha: fl
     xmin, xmax, ymin, ymax = tissue_hires_extent(mc38_dir, sl)
     ax.imshow(
         img, origin="upper", interpolation="bilinear", alpha=img_alpha, zorder=0,
-        extent=(0, img.shape[1], img.shape[0], 0),
+        extent=(0, img.shape[1], img.shape[0], 0), rasterized=rasterize,
     )
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymax, ymin)
@@ -300,11 +304,10 @@ def plot_continuous_on_he(
     title: str = "",
     colorbar: bool = True,
     colorbar_label: str = "",
-) -> None:
+    rasterize: bool = False,
+) -> matplotlib.cm.ScalarMappable | None:
     """H&E background with continuous score overlay (embedding-style)."""
-    from matplotlib.colors import TwoSlopeNorm
-
-    xy, size, _ = _draw_he_background(ax, adata, library_id)
+    xy, size, _ = _draw_he_background(ax, adata, library_id, rasterize=rasterize)
     vals = pd.to_numeric(adata.obs[color_key], errors="coerce").to_numpy(dtype=float)
     if vmin is None:
         vmin = float(np.nanmin(vals)) if np.isfinite(vals).any() else 0.0
@@ -318,15 +321,16 @@ def plot_continuous_on_he(
         norm = Normalize(vmin=vmin, vmax=vmax)
     sc_plot = ax.scatter(
         xy[:, 0], xy[:, 1], c=vals, s=spot_size or size, cmap=cmap, norm=norm,
-        alpha=spot_alpha, edgecolors="none", rasterized=False, zorder=2,
+        alpha=spot_alpha, edgecolors="none", rasterized=rasterize, zorder=2,
     )
     if title:
-        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_title(title, fontsize=9, fontweight="bold", pad=2)
     if colorbar:
-        cb = plt.colorbar(sc_plot, ax=ax, fraction=0.046, pad=0.02, shrink=0.82)
-        cb.ax.tick_params(labelsize=7)
+        cb = plt.colorbar(sc_plot, ax=ax, fraction=0.05, pad=0.02, shrink=0.75)
+        cb.ax.tick_params(labelsize=6)
         if colorbar_label:
-            cb.set_label(colorbar_label, fontsize=8)
+            cb.set_label(colorbar_label, fontsize=7)
+    return sc_plot
 
 
 def plot_embedding_spatial(
@@ -344,7 +348,8 @@ def plot_embedding_spatial(
     size: float = 8.0,
     colorbar: bool = True,
     colorbar_label: str = "",
-) -> None:
+    rasterize: bool = True,
+) -> matplotlib.cm.ScalarMappable | None:
     """sc.pl.embedding-style scatter on obsm['spatial'] without H&E."""
     xy = adata.obsm["spatial"]
     if categorical:
@@ -375,14 +380,20 @@ def plot_embedding_spatial(
             norm = Normalize(vmin=vmin, vmax=vmax)
         sc_plot = ax.scatter(
             xy[:, 0], xy[:, 1], c=vals, s=size, cmap=cmap or "RdBu_r", norm=norm,
-            alpha=0.9, edgecolors="none", rasterized=True,
+            alpha=0.9, edgecolors="none", rasterized=rasterize,
         )
         if colorbar:
-            cb = plt.colorbar(sc_plot, ax=ax, fraction=0.046, pad=0.02, shrink=0.82)
-            cb.ax.tick_params(labelsize=7)
+            cb = plt.colorbar(sc_plot, ax=ax, fraction=0.05, pad=0.02, shrink=0.75)
+            cb.ax.tick_params(labelsize=6)
             if colorbar_label:
-                cb.set_label(colorbar_label, fontsize=8)
+                cb.set_label(colorbar_label, fontsize=7)
+        if title:
+            ax.set_title(title, fontsize=9, fontweight="bold", pad=2)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        return sc_plot
     ax.set_aspect("equal")
     ax.axis("off")
     if title:
-        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_title(title, fontsize=9, fontweight="bold", pad=2)
+    return None
