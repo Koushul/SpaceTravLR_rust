@@ -40,6 +40,229 @@ PAPER_LUNG_GENES = [
     "Cd163", "H2-Aa", "Bcam", "Itgal", "Itgb2",
 ]
 
+MICRONICHE_PATHWAY_EXTRA = {
+    "Immune exclusion index": IMMUNE_EXCLUSION_UP + IMMUNE_EXCLUSION_DN,
+    "Immune infiltration index": IMMUNE_INFILTRATION_UP + IMMUNE_INFILTRATION_DN,
+    "Spp1 / osteopontin": ["Spp1", "Cd44", "Itgav", "Itgb1", "Fn1", "Mmp9"],
+    "LFA-1 immune synapse": ["Itgal", "Itgb2", "Icam1"],
+    "Proliferation": ["Pcna", "Mki67", "Top2a"],
+    "EMT / mesenchymal": ["Vim", "Snai1", "Zeb1", "Cdh1", "Epcam"],
+}
+
+PERT_PATHWAY_EXPECTED_SIGN: dict[tuple[str, str], int] = {
+    ("Icam1", "Interferon response"): -1,
+    ("Icam1", "Immune exclusion index"): +1,
+    ("Icam1", "M2/suppressive macrophage"): +1,
+    ("Icam1", "T-cell effector"): -1,
+    ("Icam1", "LFA-1 immune synapse"): -1,
+    ("Icam1", "Spp1 / osteopontin"): +1,
+    ("Bcam", "Spp1 / osteopontin"): +1,
+    ("Bcam", "ECM/fibroblast"): +1,
+    ("Bcam", "T-cell exhaustion / Treg"): +1,
+    ("Il4ra", "Antigen presentation (MHC-II)"): -1,
+    ("Il4ra", "Immune infiltration index"): -1,
+    ("Il4ra", "M1/inflam macrophage"): -1,
+    ("Cd83", "Antigen presentation (MHC-II)"): -1,
+    ("Cd83", "Immune infiltration index"): -1,
+    ("Cd74", "Antigen presentation (MHC-II)"): -1,
+    ("Cks1b", "Proliferation"): -1,
+    ("Ptk6", "EMT / mesenchymal"): +1,
+}
+
+
+def microniche_pathway_gene_sets(base_sets: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
+    out = dict(base_sets or {})
+    for name, genes in MICRONICHE_PATHWAY_EXTRA.items():
+        out[name] = list(dict.fromkeys(genes))
+    return out
+
+
+def pathway_module_score(ad: sc.AnnData, genes: list[str], *, signed_index: bool = False) -> np.ndarray:
+    """Mean log-expression of pathway genes; optional up-minus-down for index pathways."""
+    if signed_index:
+        pair = _signed_index_genes(genes)
+        if pair is not None:
+            up, dn = pair
+            return niche_expression_index(ad, up, dn)
+    keep = [g for g in genes if g in ad.var_names]
+    if len(keep) < 2:
+        return np.full(ad.n_obs, np.nan)
+    expr = _dense(ad, keep)
+    return expr.mean(axis=1).to_numpy(dtype=np.float64)
+
+
+def _signed_index_genes(genes: list[str]) -> tuple[list[str], list[str]] | None:
+    s = set(genes)
+    if s >= set(IMMUNE_EXCLUSION_UP) | set(IMMUNE_EXCLUSION_DN):
+        return IMMUNE_EXCLUSION_UP, IMMUNE_EXCLUSION_DN
+    if s >= set(IMMUNE_INFILTRATION_UP) | set(IMMUNE_INFILTRATION_DN):
+        return IMMUNE_INFILTRATION_UP, IMMUNE_INFILTRATION_DN
+    return None
+
+
+def pathway_distinctness_ntc(
+    pool: sc.AnnData,
+    pathways: dict[str, list[str]],
+    niche_key: str = "cnn_leiden",
+    cell_type: str = "tumor",
+    min_cells: int = 5,
+) -> list[dict]:
+    rows: list[dict] = []
+    ct = pool[(pool.obs["cell_type"].astype(str) == cell_type) & (pool.obs["target_gene"].astype(str) == "non-targeting")]
+    if niche_key not in ct.obs.columns or ct.n_obs < 30:
+        return rows
+    niches = ct.obs[niche_key].astype(str)
+    valid = sorted(n for n in niches.unique() if n not in ("unassigned", "nan", ""))
+    if len(valid) < 2:
+        return rows
+    signed = {"Immune exclusion index", "Immune infiltration index"}
+    for pathway, genes in pathways.items():
+        scores = pathway_module_score(ct, genes, signed_index=pathway in signed)
+        groups = [scores[niches.to_numpy() == n] for n in valid if int((niches == n).sum()) >= min_cells]
+        groups = [g[np.isfinite(g)] for g in groups if len(g[np.isfinite(g)]) >= min_cells]
+        if len(groups) < 2:
+            continue
+        try:
+            h, p = stats.kruskal(*groups)
+        except ValueError:
+            continue
+        rows.append({
+            "pathway": pathway,
+            "n_genes": len([g for g in genes if g in ct.var_names]),
+            "n_niches": len(groups),
+            "kruskal_H": float(h),
+            "kruskal_p": float(p),
+            "significant": bool(p < 0.05),
+        })
+    return rows
+
+
+def pathway_niche_deltas(
+    prep: sc.AnnData,
+    pool: sc.AnnData,
+    pred: pd.DataFrame,
+    perturb: str,
+    pathway: str,
+    genes: list[str],
+    niche_key: str,
+    slice_id: str,
+    cell_type: str = "tumor",
+    min_ntc: int = 2,
+    min_pert: int = 2,
+    global_baseline: sc.AnnData | None = None,
+) -> pd.DataFrame:
+    """Per-niche observed and predicted pathway Δ for one perturbation."""
+    signed = pathway in {"Immune exclusion index", "Immune infiltration index"}
+    pool_ct = pool[pool.obs["cell_type"].astype(str) == cell_type].copy()
+    if niche_key not in pool_ct.obs.columns or pool_ct.n_obs == 0:
+        return pd.DataFrame()
+
+    ntc_mask = pool_ct.obs["target_gene"].astype(str) == "non-targeting"
+    pert_mask = pool_ct.obs["target_gene"].astype(str) == perturb
+    pool_scores = pathway_module_score(pool_ct, genes, signed_index=signed)
+
+    prep_names = prep.obs_names
+    pred_ids = pd.Index([
+        map_pool_to_prep(slice_id, b, prep_names) or prep_barcode(slice_id, b)
+        for b in pool_ct.obs_names[ntc_mask]
+    ])
+    ref_base = global_baseline if global_baseline is not None else prep
+    base_sub = ref_base[ref_base.obs["cell_type"].astype(str) == cell_type].copy()
+    if "slice_id" in base_sub.obs.columns and slice_id:
+        if slice_id.startswith("subQ"):
+            base_sub = base_sub[base_sub.obs["slice_id"].astype(str) == slice_id]
+    aligned = pred_ids.intersection(pred.index).intersection(base_sub.obs_names)
+    use_global_pred = len(aligned) < max(10, 0.2 * len(pred_ids))
+    pred_delta_cells: pd.Series | None = None
+    if not use_global_pred and len(aligned) >= 10:
+        common = [g for g in genes if g in pred.columns and g in base_sub.var_names]
+        if len(common) >= 2:
+            base_expr = _dense(base_sub, common).reindex(aligned)
+            pred_expr = pred.reindex(aligned)[common]
+            delta = pred_expr.mean(axis=1) - base_expr.mean(axis=1)
+            if signed:
+                up = [g for g in (IMMUNE_EXCLUSION_UP if pathway == "Immune exclusion index" else IMMUNE_INFILTRATION_UP) if g in common]
+                dn = [g for g in (IMMUNE_EXCLUSION_DN if pathway == "Immune exclusion index" else IMMUNE_INFILTRATION_DN) if g in common]
+                pred_delta_cells = pd.Series(
+                    (pred_expr[up].mean(axis=1) if up else 0)
+                    - (pred_expr[dn].mean(axis=1) if dn else 0),
+                    index=aligned,
+                )
+            else:
+                pred_delta_cells = delta
+
+    enrich = observed_log_enrichment(pool, perturb, cell_type, niche_key, min_ntc=min_ntc, min_pert=min_pert)
+    enrich_map = enrich.set_index("niche")["obs_log2_enrichment"].to_dict() if not enrich.empty else {}
+
+    rows = []
+    niches = sorted(pool_ct.obs[niche_key].astype(str).unique())
+    for niche in niches:
+        if niche in ("unassigned", "nan", ""):
+            continue
+        n_ntc = ntc_mask & pool_ct.obs[niche_key].astype(str).eq(niche)
+        n_pert = pert_mask & pool_ct.obs[niche_key].astype(str).eq(niche)
+        if int(n_ntc.sum()) < min_ntc or int(n_pert.sum()) < min_pert:
+            continue
+        obs_delta = float(np.nanmean(pool_scores[n_pert.to_numpy()]) - np.nanmean(pool_scores[(ntc_mask & n_ntc).to_numpy()]))
+        ntc_baseline = float(np.nanmean(pool_scores[(ntc_mask & n_ntc).to_numpy()]))
+
+        pred_delta = float("nan")
+        if pred_delta_cells is not None:
+            prep_ntc_ids = pd.Index([
+                map_pool_to_prep(slice_id, b, prep_names) or prep_barcode(slice_id, b)
+                for b in pool_ct.obs_names[ntc_mask & n_ntc]
+            ])
+            vals = pred_delta_cells.reindex(prep_ntc_ids).dropna()
+            if len(vals) >= min_ntc:
+                pred_delta = float(vals.mean())
+        elif use_global_pred:
+            profile = PERT_ENRICHMENT_PROFILE.get(perturb, {})
+            esc = global_escape_score(pred, ref_base, profile)
+            pred_delta = float("nan")
+
+        rows.append({
+            "niche": niche,
+            "n_ntc": int(n_ntc.sum()),
+            "n_pert": int(n_pert.sum()),
+            "obs_pathway_delta": obs_delta,
+            "pred_pathway_delta": pred_delta,
+            "ntc_pathway_score": ntc_baseline,
+            "obs_log2_enrichment": float(enrich_map.get(niche, np.nan)),
+        })
+    return pd.DataFrame(rows)
+
+
+def pathway_concordance_stats(delta_df: pd.DataFrame) -> dict:
+    if delta_df.empty or len(delta_df) < 3:
+        return {"n_niches": len(delta_df), "pearson_r": float("nan"), "spearman_r": float("nan"), "p_pearson": float("nan")}
+    obs = delta_df["obs_pathway_delta"].to_numpy(dtype=float)
+    pred = delta_df["pred_pathway_delta"].to_numpy(dtype=float)
+    ok = np.isfinite(obs) & np.isfinite(pred)
+    if ok.sum() < 3 or obs[ok].std() < 1e-8 or pred[ok].std() < 1e-8:
+        return {"n_niches": int(ok.sum()), "pearson_r": float("nan"), "spearman_r": float("nan"), "p_pearson": float("nan")}
+    r, p = stats.pearsonr(obs[ok], pred[ok])
+    rs, _ = stats.spearmanr(obs[ok], pred[ok])
+    return {"n_niches": int(ok.sum()), "pearson_r": float(r), "spearman_r": float(rs), "p_pearson": float(p)}
+
+
+def pathway_enrichment_tie_stats(delta_df: pd.DataFrame) -> dict:
+    """Correlate niche sgP enrichment with NTC pathway score and obs pathway Δ."""
+    out: dict = {}
+    if delta_df.empty or len(delta_df) < 3:
+        return out
+    y = delta_df["obs_log2_enrichment"].to_numpy(dtype=float)
+    for col, key in (("ntc_pathway_score", "or_vs_ntc_pathway"), ("obs_pathway_delta", "or_vs_obs_pathway")):
+        x = delta_df[col].to_numpy(dtype=float)
+        ok = np.isfinite(x) & np.isfinite(y)
+        if ok.sum() < 3 or x[ok].std() < 1e-8 or y[ok].std() < 1e-8:
+            out[f"{key}_r"] = float("nan")
+            out[f"{key}_p"] = float("nan")
+            continue
+        r, p = stats.pearsonr(x[ok], y[ok])
+        out[f"{key}_r"] = float(r)
+        out[f"{key}_p"] = float(p)
+    return out
+
 # Subset for β-score microniche clustering (perturbation targets + niche modules).
 MICRONICHE_CLUSTER_GENES = {
     "Il4ra", "Cd83", "Cd74", "Bcam", "Cks1b", "Ptk6", "Icam1", "Cd44", "Spp1",

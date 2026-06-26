@@ -1135,3 +1135,257 @@ def plot_spatial_niche_corr(
     ax.set_title(f"Spatial niche concordance ({niche_type or 'all niches'})")
     fig.tight_layout()
     return fig, ax
+
+
+def plot_pathway_distinctness_bars(
+    distinct_df: pd.DataFrame,
+    *,
+    tag: str = "cnn_v2",
+    figsize: tuple[float, float] = (8, 4.5),
+) -> tuple[plt.Figure, plt.Axes]:
+    """Fraction of pathways with significant Kruskal–Wallis separation across CNN microniches (NTC tumor)."""
+    fig, ax = plt.subplots(figsize=figsize)
+    if distinct_df.empty:
+        ax.text(0.5, 0.5, "No pathway distinctness data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    by_slice = distinct_df.groupby("slice", observed=True)["significant"].mean().sort_index()
+    x = np.arange(len(by_slice))
+    ax.bar(x, by_slice.values, color="#2563eb", alpha=0.88, edgecolor="white")
+    ax.set_xticks(x)
+    ax.set_xticklabels(by_slice.index, rotation=20, ha="right")
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Fraction pathways p < 0.05 across niches")
+    med = float(distinct_df["significant"].mean())
+    ax.set_title(
+        f"CNN β-microniches are functionally distinct by pathway ({tag})\n"
+        f"NTC tumor cells; pooled median {med:.0%} pathways separate niches",
+        fontweight="bold",
+    )
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_pathway_obs_pred_concordance(
+    concord_df: pd.DataFrame,
+    delta_df: pd.DataFrame | None = None,
+    *,
+    tag: str = "cnn_v2",
+    expected_only: bool = False,
+    figsize: tuple[float, float] = (7, 6),
+) -> tuple[plt.Figure, plt.Axes]:
+    """Scatter of niche-level observed vs predicted pathway Δ."""
+    fig, ax = plt.subplots(figsize=figsize)
+    if delta_df is not None and not delta_df.empty:
+        show = delta_df.dropna(subset=["obs_pathway_delta", "pred_pathway_delta"]).copy()
+        if expected_only and "expected_sign" in concord_df.columns:
+            keys = concord_df.dropna(subset=["expected_sign"])[["slice", "perturbation", "pathway"]]
+            show = show.merge(keys, on=["slice", "perturbation", "pathway"], how="inner")
+        if show.empty:
+            ax.text(0.5, 0.5, "No niche-level pathway deltas", ha="center", va="center", transform=ax.transAxes)
+            ax.axis("off")
+            return fig, ax
+        ax.scatter(
+            show["pred_pathway_delta"], show["obs_pathway_delta"],
+            s=22, c="#2563eb", alpha=0.45, edgecolors="none",
+        )
+        lim = max(float(np.nanmax(np.abs(show[["obs_pathway_delta", "pred_pathway_delta"]].values))), 0.05)
+        ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.7, alpha=0.5)
+        med_r = float(concord_df["pearson_r"].median()) if concord_df["pearson_r"].notna().any() else float("nan")
+        ax.set_xlabel("SpaceTravLR predicted pathway Δ per niche")
+        ax.set_ylabel("Observed SPAC-seq pathway Δ per niche (sgP − NTC)")
+        ax.set_title(
+            f"Niche-level pathway concordance ({tag})\n"
+            f"{len(show)} niche×pathway points; median test r={med_r:+.2f}",
+            fontweight="bold",
+        )
+        fig.tight_layout()
+        return fig, ax
+
+    if concord_df.empty:
+        ax.text(0.5, 0.5, "No pathway concordance data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    show = concord_df.dropna(subset=["bulk_obs_delta", "bulk_pred_delta"]).copy()
+    if show.empty:
+        ax.text(0.5, 0.5, "No bulk pathway deltas", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    colors = show["sign_match"].map({True: "#16a34a", False: "#dc2626"}).fillna("#6b7280")
+    ax.scatter(show["bulk_pred_delta"], show["bulk_obs_delta"], c=colors, s=42, alpha=0.75, edgecolors="white", linewidths=0.3)
+    lim = max(
+        float(np.nanmax(np.abs(show[["bulk_obs_delta", "bulk_pred_delta"]].values))),
+        0.05,
+    )
+    ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.7, alpha=0.5)
+    ax.axhline(0, color="k", lw=0.4, alpha=0.35)
+    ax.axvline(0, color="k", lw=0.4, alpha=0.35)
+    med_r = float(concord_df["pearson_r"].median()) if concord_df["pearson_r"].notna().any() else float("nan")
+    ax.set_xlabel("SpaceTravLR predicted pathway Δ (niche mean)")
+    ax.set_ylabel("Observed SPAC-seq pathway Δ (sgP − NTC, niche mean)")
+    ax.set_title(
+        f"Pathway direction concordance in CNN microniches ({tag})\n"
+        f"median niche-level r={med_r:+.2f}; green=expected sign match",
+        fontweight="bold",
+    )
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_pathway_microniche_heatmap(
+    concord_df: pd.DataFrame,
+    *,
+    tag: str = "cnn_v2",
+    expected_only: bool = True,
+    min_niches: int = 3,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    import seaborn as sns
+
+    if concord_df.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    df = concord_df.dropna(subset=["pearson_r"]).copy()
+    if min_niches > 0:
+        df = df[df["n_niches"] >= min_niches]
+    if expected_only:
+        df = df[df["expected_sign"].notna()]
+    if df.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No filtered concordance data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    pivot = df.pivot_table(
+        index="pathway", columns=["slice", "perturbation"], values="pearson_r", aggfunc="first",
+    )
+    if pivot.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No pivot data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    fig_h = max(6, 0.28 * len(pivot))
+    fig_w = max(8, 0.45 * pivot.shape[1] + 3)
+    fig, ax = plt.subplots(figsize=figsize or (fig_w, fig_h))
+    sns.heatmap(
+        pivot, cmap="RdBu_r", center=0, vmin=-1, vmax=1, ax=ax,
+        cbar_kws={"label": "Pearson r (obs vs pred pathway Δ across niches)"},
+    )
+    ax.set_title(f"Pathway–microniche concordance heatmap ({tag})", fontweight="bold")
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_pathway_enrichment_tie(
+    delta_df: pd.DataFrame,
+    concord_df: pd.DataFrame,
+    *,
+    tag: str = "cnn_v2",
+    top_n: int = 8,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Niche sgP enrichment vs NTC pathway score — ties pathways to microniche function."""
+    if delta_df.empty or concord_df.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No tie data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, np.array([[ax]])
+
+    ranked = (
+        concord_df.dropna(subset=["or_vs_ntc_pathway_r"])
+        .assign(abs_r=lambda d: d["or_vs_ntc_pathway_r"].abs())
+        .sort_values("abs_r", ascending=False)
+        .head(top_n)
+    )
+    n = len(ranked)
+    ncol = min(4, n)
+    nrow = int(np.ceil(n / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.2 * ncol, 3.0 * nrow), squeeze=False)
+
+    for ax, (_, row) in zip(axes.ravel(), ranked.iterrows()):
+        sub = delta_df[
+            (delta_df.slice == row.slice)
+            & (delta_df.perturbation == row.perturbation)
+            & (delta_df.pathway == row.pathway)
+        ]
+        if sub.empty:
+            ax.axis("off")
+            continue
+        ax.scatter(
+            sub["ntc_pathway_score"], sub["obs_log2_enrichment"],
+            s=40, c="#1d4ed8", alpha=0.8, edgecolors="white", linewidths=0.3,
+        )
+        ax.axhline(0, color="k", lw=0.4, alpha=0.4)
+        r = row.get("or_vs_ntc_pathway_r", float("nan"))
+        ax.set_title(
+            f"{row.slice} sg{row.perturbation}\n{str(row.pathway)[:24]}  r={r:+.2f}",
+            fontsize=8,
+        )
+        ax.set_xlabel("NTC pathway score", fontsize=7)
+        ax.set_ylabel("Obs log₂ OR", fontsize=7)
+
+    for ax in axes.ravel()[n:]:
+        ax.axis("off")
+    fig.suptitle(
+        f"Pathway–microniche tie: sgP enrichment vs baseline pathway ({tag})",
+        fontweight="bold", y=1.02,
+    )
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_pathway_niche_facets(
+    delta_df: pd.DataFrame,
+    concord_df: pd.DataFrame,
+    *,
+    top_n: int = 6,
+    tag: str = "cnn_v2",
+) -> tuple[plt.Figure, np.ndarray]:
+    """Per-niche observed vs predicted pathway Δ for top concordance cases."""
+    if delta_df.empty or concord_df.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No facet data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, np.array([[ax]])
+
+    ranked = concord_df.dropna(subset=["pearson_r"]).sort_values("pearson_r", ascending=False).head(top_n)
+    ncol = min(3, top_n)
+    nrow = int(np.ceil(top_n / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.5 * ncol, 3.2 * nrow), squeeze=False)
+
+    for ax, (_, row) in zip(axes.ravel(), ranked.iterrows()):
+        sub = delta_df[
+            (delta_df.slice == row.slice)
+            & (delta_df.perturbation == row.perturbation)
+            & (delta_df.pathway == row.pathway)
+        ].dropna(subset=["obs_pathway_delta", "pred_pathway_delta"])
+        if sub.empty:
+            ax.axis("off")
+            continue
+        labs = sub["niche"].astype(str).map(lambda s: s.split("|")[-1])
+        ax.scatter(
+            sub["pred_pathway_delta"], sub["obs_pathway_delta"],
+            s=50, c="#059669", alpha=0.85, edgecolors="white",
+        )
+        for x, y, lab in zip(sub["pred_pathway_delta"], sub["obs_pathway_delta"], labs):
+            ax.annotate(lab, (x, y), fontsize=6, alpha=0.8, xytext=(2, 2), textcoords="offset points")
+        lim = max(float(np.nanmax(np.abs(sub[["obs_pathway_delta", "pred_pathway_delta"]].values))), 0.05)
+        ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.6, alpha=0.45)
+        ax.set_title(
+            f"{row.slice} sg{row.perturbation} | {str(row.pathway)[:20]}\nr={row.pearson_r:+.2f}",
+            fontsize=8,
+        )
+        ax.set_xlabel("Pred Δ", fontsize=7)
+        ax.set_ylabel("Obs Δ", fontsize=7)
+
+    for ax in axes.ravel()[len(ranked):]:
+        ax.axis("off")
+    fig.suptitle(f"Top pathway concordance across CNN microniches ({tag})", fontweight="bold", y=1.02)
+    fig.tight_layout()
+    return fig, axes

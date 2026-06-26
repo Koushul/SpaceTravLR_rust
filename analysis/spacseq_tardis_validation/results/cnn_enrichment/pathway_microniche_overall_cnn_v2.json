@@ -1,0 +1,11 @@
+{
+  "tag": "cnn_v2",
+  "n_pathways": 14,
+  "n_distinct_tests": 70,
+  "frac_pathways_significant_ntc": 0.45714285714285713,
+  "n_concordance_tests": 336,
+  "median_pathway_concordance_r": -0.07449706783636331,
+  "frac_sign_match_expected": 0.1590909090909091,
+  "median_or_vs_ntc_pathway_r": -0.03174949796580194,
+  "median_or_vs_obs_pathway_r": 0.19539808137656461
+}
