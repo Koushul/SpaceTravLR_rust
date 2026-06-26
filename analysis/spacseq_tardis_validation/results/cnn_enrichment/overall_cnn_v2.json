@@ -1,43 +1,86 @@
 {
   "tag": "cnn_v2",
   "per_cell_betas": true,
-  "leiden_resolution": 0.7,
-  "spatial_weight": 0.45,
+  "leiden_defaults": {
+    "n_pcs": 18,
+    "n_neighbors": 12,
+    "resolution": 0.75,
+    "spatial_weight": 0.55,
+    "min_cells": 20
+  },
+  "per_slice_leiden": {
+    "subQ-1": {
+      "n_pcs": 18,
+      "n_neighbors": 12,
+      "resolution": 0.75,
+      "spatial_weight": 0.55,
+      "min_cells": 20
+    },
+    "subQ-2": {
+      "n_pcs": 10,
+      "n_neighbors": 12,
+      "resolution": 0.55,
+      "spatial_weight": 0.35,
+      "min_cells": 20
+    },
+    "subQ-3": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.55,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    },
+    "subQ-4": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.75,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    },
+    "Lung_Metastasis_M001": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.65,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    }
+  },
+  "leiden_override": null,
   "min_ntc": 2,
   "min_pert": 2,
   "n_enrichment_tests": 26,
-  "median_pearson_r": 0.44856298128949673,
-  "mean_pearson_r": 0.30529830349617976,
+  "median_pearson_r": 0.7232128575732697,
+  "mean_pearson_r": 0.5861995640539732,
   "best_cases": [
     {
-      "slice": "subQ-2",
-      "perturbation": "Cd83",
-      "pearson_r": 0.8615439576281251,
+      "slice": "Lung_Metastasis_M001",
+      "perturbation": "Bcam",
+      "pearson_r": 0.9949199220113013,
       "n_niches": 4
-    },
-    {
-      "slice": "subQ-4",
-      "perturbation": "Ptk6",
-      "pearson_r": 0.856199632763069,
-      "n_niches": 3
     },
     {
       "slice": "subQ-2",
       "perturbation": "Bcam",
-      "pearson_r": 0.8240368333923207,
+      "pearson_r": 0.9894092278282587,
       "n_niches": 4
     },
     {
-      "slice": "subQ-4",
-      "perturbation": "Il4ra",
-      "pearson_r": 0.8037774430539287,
-      "n_niches": 5
+      "slice": "subQ-1",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.9104535648508181,
+      "n_niches": 3
     },
     {
-      "slice": "subQ-1",
-      "perturbation": "Cd74",
-      "pearson_r": 0.7616562400810192,
-      "n_niches": 6
+      "slice": "subQ-2",
+      "perturbation": "Ptk6",
+      "pearson_r": 0.8955104036322455,
+      "n_niches": 4
+    },
+    {
+      "slice": "subQ-2",
+      "perturbation": "Cd83",
+      "pearson_r": 0.8829292747633317,
+      "n_niches": 4
     }
   ]
 }

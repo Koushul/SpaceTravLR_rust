@@ -214,12 +214,38 @@ def build_beta_score_matrix(
 
 
 DEFAULT_LEIDEN_KW = {
-    "n_pcs": 10,
+    "n_pcs": 18,
     "n_neighbors": 12,
-    "resolution": 0.7,
-    "spatial_weight": 0.45,
+    "resolution": 0.75,
+    "spatial_weight": 0.55,
     "min_cells": 20,
 }
+
+PER_SLICE_LEIDEN_PATH = Path(__file__).resolve().parent.parent / "results/cnn_enrichment/tune/per_slice_leiden.json"
+
+
+def load_per_slice_leiden_config(path: Path | None = None) -> dict[str, dict]:
+    p = path or PER_SLICE_LEIDEN_PATH
+    if not p.exists():
+        return {}
+    import json
+
+    data = json.loads(p.read_text())
+    return {str(k): dict(v) for k, v in data.get("slices", {}).items()}
+
+
+def resolve_leiden_kw(
+    slice_id: str,
+    leiden_kw: dict | None = None,
+    per_slice_config: dict[str, dict] | None = None,
+) -> dict:
+    kw = dict(DEFAULT_LEIDEN_KW)
+    cfg = per_slice_config if per_slice_config is not None else load_per_slice_leiden_config()
+    if slice_id in cfg:
+        kw.update(cfg[slice_id])
+    if leiden_kw:
+        kw.update(leiden_kw)
+    return kw
 
 
 def leiden_microniches(
@@ -242,7 +268,7 @@ def leiden_microniches(
         return pd.Series("0", index=ad.obs_names, name=key)
     scores = scores[:, keep]
 
-    n_pcs = min(n_pcs, scores.shape[1], ad.n_obs - 1)
+    n_pcs = min(n_pcs, max(1, scores.shape[1] - 1), max(1, ad.n_obs - 1))
     tmp = sc.AnnData(X=scores)
     sc.pp.scale(tmp, max_value=10)
     tmp.X = np.nan_to_num(tmp.X, nan=0.0)

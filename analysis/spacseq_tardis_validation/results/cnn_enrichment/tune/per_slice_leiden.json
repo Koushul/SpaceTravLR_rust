@@ -1,0 +1,92 @@
+{
+  "description": "Per-slice Leiden hyperparameters maximizing median obs vs pred enrichment r",
+  "slices": {
+    "subQ-1": {
+      "n_pcs": 18,
+      "n_neighbors": 12,
+      "resolution": 0.75,
+      "spatial_weight": 0.55,
+      "min_cells": 20
+    },
+    "subQ-2": {
+      "n_pcs": 10,
+      "n_neighbors": 12,
+      "resolution": 0.55,
+      "spatial_weight": 0.35,
+      "min_cells": 20
+    },
+    "subQ-3": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.55,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    },
+    "subQ-4": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.75,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    },
+    "Lung_Metastasis_M001": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.65,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    }
+  },
+  "summary": {
+    "subQ-1": {
+      "median_pearson_r": 0.6598560917051421,
+      "mean_pearson_r": 0.49490368215432917,
+      "n_tests": 6,
+      "n_valid_corr": 6,
+      "median_n_niches": 4.0,
+      "resolution": 0.75,
+      "spatial_weight": 0.55,
+      "n_pcs": 18
+    },
+    "subQ-2": {
+      "median_pearson_r": 0.8195457683314107,
+      "mean_pearson_r": 0.6994859485131998,
+      "n_tests": 6,
+      "n_valid_corr": 6,
+      "median_n_niches": 4.0,
+      "resolution": 0.55,
+      "spatial_weight": 0.35,
+      "n_pcs": 10
+    },
+    "subQ-3": {
+      "median_pearson_r": 0.7232128575732697,
+      "mean_pearson_r": 0.45200081719905255,
+      "n_tests": 6,
+      "n_valid_corr": 6,
+      "median_n_niches": 3.0,
+      "resolution": 0.55,
+      "spatial_weight": 0.45,
+      "n_pcs": 14
+    },
+    "subQ-4": {
+      "median_pearson_r": 0.8327617997799643,
+      "mean_pearson_r": 0.7411256647248573,
+      "n_tests": 6,
+      "n_valid_corr": 5,
+      "median_n_niches": 3.0,
+      "resolution": 0.75,
+      "spatial_weight": 0.55,
+      "n_pcs": 18
+    },
+    "Lung_Metastasis_M001": {
+      "median_pearson_r": 0.9917098079505245,
+      "mean_pearson_r": 0.9917098079505245,
+      "n_tests": 2,
+      "n_valid_corr": 1,
+      "median_n_niches": 2.5,
+      "resolution": 0.55,
+      "spatial_weight": 0.45,
+      "n_pcs": 14
+    }
+  }
+}

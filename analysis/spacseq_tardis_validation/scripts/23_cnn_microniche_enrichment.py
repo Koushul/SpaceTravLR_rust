@@ -83,9 +83,11 @@ def assign_pool_niches(
     slice_id: str,
     leiden_kw: dict | None = None,
     niche_key: str = "cnn_leiden",
+    per_slice_leiden: dict[str, dict] | None = None,
 ) -> tuple[sc.AnnData, sc.AnnData]:
     cmu.ensure_cluster_id(prep)
-    labels = cmu.assign_slice_microniches(prep, beta_matrix, slice_id, "tumor", **(leiden_kw or {}))
+    kw = cmu.resolve_leiden_kw(slice_id, leiden_kw, per_slice_leiden)
+    labels = cmu.assign_slice_microniches(prep, beta_matrix, slice_id, "tumor", **kw)
     return propagate_niche_labels(prep, pool, slice_id, labels, niche_key)
 
 
@@ -115,6 +117,7 @@ def run_slice_enrichment(
     pool: sc.AnnData | None = None,
     score_genes: list[str] | None = None,
     beta_matrix: np.ndarray | None = None,
+    per_slice_leiden: dict[str, dict] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, sc.AnnData, sc.AnnData]:
     if pool is None:
         pool = load_pool(slice_id, data_root)
@@ -131,7 +134,10 @@ def run_slice_enrichment(
             prep, betadata_dir, gene_filter=cmu.MICRONICHE_CLUSTER_GENES,
         )
     if niche_key not in pool.obs.columns:
-        prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw, niche_key=niche_key)
+        prep, pool = assign_pool_niches(
+            prep, pool, beta_matrix, slice_id,
+            leiden_kw=leiden_kw, niche_key=niche_key, per_slice_leiden=per_slice_leiden,
+        )
 
     all_enrich: list[pd.DataFrame] = []
     all_corr: list[dict] = []
@@ -369,20 +375,34 @@ def main() -> None:
     ap.add_argument("--seed-betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_seed")
     ap.add_argument("--seed-pred-dir", type=Path, default=ROOT / "results/predictions_tuned")
     ap.add_argument("--mc38-dir", type=Path, default=(ROOT.parent / "mc38_visiumhd").resolve())
-    ap.add_argument("--leiden-resolution", type=float, default=cmu.DEFAULT_LEIDEN_KW["resolution"])
-    ap.add_argument("--spatial-weight", type=float, default=cmu.DEFAULT_LEIDEN_KW["spatial_weight"])
+    ap.add_argument("--leiden-resolution", type=float, default=None)
+    ap.add_argument("--spatial-weight", type=float, default=None)
+    ap.add_argument("--n-pcs", type=int, default=None)
+    ap.add_argument(
+        "--per-slice-leiden",
+        type=Path,
+        default=cmu.PER_SLICE_LEIDEN_PATH,
+        help="JSON with per-slice Leiden params (used when file exists)",
+    )
+    ap.add_argument("--no-per-slice-leiden", action="store_true")
     ap.add_argument("--min-ntc", type=int, default=2, help="Min NTC tumor cells per niche (obs + pred)")
     ap.add_argument("--min-pert", type=int, default=2, help="Min sgP tumor cells per niche (observed)")
     ap.add_argument("--fig-dir", type=Path, default=ROOT / "figures" / "cnn_enrichment")
     ap.add_argument("--figures-only", action="store_true", help="Skip CSV writes; use cached enrich/corr if present")
     args = ap.parse_args()
 
-    leiden_kw = {
-        "resolution": args.leiden_resolution,
-        "spatial_weight": args.spatial_weight,
-        "n_pcs": cmu.DEFAULT_LEIDEN_KW["n_pcs"],
-        "min_cells": cmu.DEFAULT_LEIDEN_KW["min_cells"],
-    }
+    leiden_kw: dict = {}
+    if args.leiden_resolution is not None:
+        leiden_kw["resolution"] = args.leiden_resolution
+    if args.spatial_weight is not None:
+        leiden_kw["spatial_weight"] = args.spatial_weight
+    if args.n_pcs is not None:
+        leiden_kw["n_pcs"] = args.n_pcs
+
+    per_slice_leiden = None
+    if not args.no_per_slice_leiden and args.per_slice_leiden.exists():
+        per_slice_leiden = cmu.load_per_slice_leiden_config(args.per_slice_leiden)
+        print(f"Using per-slice Leiden config: {args.per_slice_leiden} ({len(per_slice_leiden)} slices)")
 
     out_dir = ROOT / "results" / "cnn_enrichment"
     fig_dir = args.fig_dir
@@ -416,6 +436,7 @@ def main() -> None:
             sl, perts, args.data_root, baseline, bd, pd_dir, args.tag,
             global_baseline=gb, fallback_pred_dir=args.seed_pred_dir,
             leiden_kw=leiden_kw, min_ntc=args.min_ntc, min_pert=args.min_pert,
+            per_slice_leiden=per_slice_leiden,
         )
         export_spatial_tumor(pool, sl, out_dir, args.tag, genes=cmu.PAPER_LUNG_GENES)
         plot_spatial_overview(pool, sl, fig_dir, args.tag)
@@ -449,8 +470,9 @@ def main() -> None:
     summary = {
         "tag": args.tag,
         "per_cell_betas": per_cell,
-        "leiden_resolution": args.leiden_resolution,
-        "spatial_weight": args.spatial_weight,
+        "leiden_defaults": cmu.DEFAULT_LEIDEN_KW,
+        "per_slice_leiden": per_slice_leiden,
+        "leiden_override": leiden_kw or None,
         "min_ntc": args.min_ntc,
         "min_pert": args.min_pert,
         "n_enrichment_tests": int(len(corr_df)),
