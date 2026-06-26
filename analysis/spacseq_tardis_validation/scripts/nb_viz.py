@@ -635,6 +635,86 @@ def plot_microniche_control_comparison(
     return fig, list(axes)
 
 
+def plot_enrichment_control_bar_jitter(
+    corr_by_method: dict[str, pd.DataFrame],
+    *,
+    methods: list[str] | None = None,
+    method_labels: dict[str, str] | None = None,
+    tag: str = "cnn_v2",
+    figsize: tuple[float, float] = (5.5, 4.5),
+    bar_color: str = "#1d4ed8",
+    jitter_color: str = "#111827",
+) -> tuple[plt.Figure, plt.Axes]:
+    """Median bar plot with per slice×perturbation jitter points for enrichment controls."""
+    labels = method_labels or {
+        "cnn": "SpaceTravLR\n(CNN β-microniches)",
+        "random_niche": "Random labels",
+        "banksy": "BANKSY",
+        "expr_leiden": "Expression Leiden",
+    }
+    palette = {
+        "cnn": "#2563eb",
+        "random_niche": "#9ca3af",
+        "banksy": "#059669",
+        "expr_leiden": "#d97706",
+    }
+    order = methods or ["cnn", "banksy", "random_niche"]
+    rows = []
+    for method in order:
+        df = corr_by_method.get(method)
+        if df is None or df.empty:
+            continue
+        sub = df.dropna(subset=["pearson_r"]).copy()
+        sub["method_key"] = method
+        sub["method"] = labels.get(method, method)
+        rows.append(sub)
+    if not rows:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No control comparison data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        return fig, ax
+
+    combined = pd.concat(rows, ignore_index=True)
+    display_order = [labels.get(m, m) for m in order if m in combined["method_key"].unique()]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.arange(len(display_order))
+    medians = []
+    for m in display_order:
+        medians.append(float(combined.loc[combined.method == m, "pearson_r"].median()))
+    colors = [palette.get(k, bar_color) for k in order if labels.get(k, k) in display_order]
+    ax.bar(x, medians, width=0.62, color=colors, alpha=0.88, edgecolor="white", linewidth=0.8, zorder=1)
+
+    rng = np.random.default_rng(42)
+    for i, m in enumerate(display_order):
+        vals = combined.loc[combined.method == m, "pearson_r"].to_numpy()
+        jitter = rng.uniform(-0.14, 0.14, size=len(vals))
+        ax.scatter(
+            np.full(len(vals), i) + jitter, vals,
+            s=28, c=jitter_color, alpha=0.55, edgecolors="white", linewidths=0.3, zorder=3,
+        )
+
+    ax.axhline(0, color="k", lw=0.7, alpha=0.45, zorder=0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(display_order)
+    ax.set_ylabel("Pearson r (observed vs predicted niche enrichment)")
+    n_tests = int(len(combined))
+    med_cnn = combined.loc[combined.method_key == "cnn", "pearson_r"].median() if "cnn" in combined.method_key.values else float("nan")
+    ax.set_title(
+        f"Niche enrichment concordance by clustering method ({tag})\n"
+        f"n={n_tests // len(display_order)} slice×perturbation tests per method; "
+        f"SpaceTravLR median r={med_cnn:+.2f}",
+        fontweight="bold",
+        fontsize=10,
+    )
+    ymax = max(float(combined["pearson_r"].max()), max(medians), 0.05)
+    ymin = min(float(combined["pearson_r"].min()), min(medians), -0.05)
+    pad = 0.12 * (ymax - ymin + 1e-6)
+    ax.set_ylim(ymin - pad, ymax + pad)
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_microniche_control_heatmap(
     corr_by_method: dict[str, pd.DataFrame],
     *,

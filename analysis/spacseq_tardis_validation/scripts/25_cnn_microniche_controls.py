@@ -87,16 +87,23 @@ def run_control_variant(
     pd_dir: Path,
     global_baseline: sc.AnnData | None,
     leiden_kw: dict,
+    per_slice_leiden: dict[str, dict] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     prep = prep.copy()
     pool = pool.copy()
 
     if variant == "cnn":
         niche_key = "cnn_leiden"
-        prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw, niche_key=niche_key)
+        prep, pool = assign_pool_niches(
+            prep, pool, beta_matrix, slice_id,
+            leiden_kw=leiden_kw, niche_key=niche_key, per_slice_leiden=per_slice_leiden,
+        )
     elif variant == "random_niche":
         niche_key = "random_leiden"
-        prep, pool = assign_pool_niches(prep, pool, beta_matrix, slice_id, leiden_kw=leiden_kw, niche_key="cnn_leiden")
+        prep, pool = assign_pool_niches(
+            prep, pool, beta_matrix, slice_id,
+            leiden_kw=leiden_kw, niche_key="cnn_leiden", per_slice_leiden=per_slice_leiden,
+        )
         tumor_mask = pool.obs["cell_type"].astype(str) == "tumor"
         shuffled = cmu.shuffle_microniche_labels(pool.obs.loc[tumor_mask, "cnn_leiden"], seed=args.random_seed)
         pool.obs.loc[tumor_mask, niche_key] = shuffled.values
@@ -186,6 +193,14 @@ def plot_controls_figures(
     sh.save_figure_png_svg(fig, fig_dir / "fig26_microniche_control_comparison.png")
     plt.close(fig)
 
+    fig, _ = nb_viz.plot_enrichment_control_bar_jitter(
+        corr_dfs,
+        methods=["cnn", "banksy", "random_niche"],
+        tag=tag,
+    )
+    sh.save_figure_png_svg(fig, fig_dir / f"fig29_enrichment_control_bar_{tag}.png", dpi=300)
+    plt.close(fig)
+
     fig, _ = nb_viz.plot_microniche_control_heatmap(corr_dfs)
     sh.save_figure_png_svg(fig, fig_dir / "fig27_microniche_control_heatmap.png", dpi=180)
     plt.close(fig)
@@ -226,8 +241,15 @@ def main() -> None:
     ap.add_argument("--slices", nargs="+", default=SUBQ_SLICES + [LUNG_SLICE])
     ap.add_argument("--seed-betadata-dir", type=Path, default=ROOT / "runs/baseline_pooled_seed")
     ap.add_argument("--seed-pred-dir", type=Path, default=ROOT / "results/predictions_tuned")
-    ap.add_argument("--leiden-resolution", type=float, default=cmu.DEFAULT_LEIDEN_KW["resolution"])
-    ap.add_argument("--spatial-weight", type=float, default=cmu.DEFAULT_LEIDEN_KW["spatial_weight"])
+    ap.add_argument("--leiden-resolution", type=float, default=None)
+    ap.add_argument("--spatial-weight", type=float, default=None)
+    ap.add_argument(
+        "--per-slice-leiden",
+        type=Path,
+        default=None,
+        help="JSON with per-slice Leiden params (default: tag-specific path if exists)",
+    )
+    ap.add_argument("--no-per-slice-leiden", action="store_true")
     ap.add_argument("--min-ntc", type=int, default=2)
     ap.add_argument("--min-pert", type=int, default=2)
     ap.add_argument("--random-seed", type=int, default=42)
@@ -239,12 +261,17 @@ def main() -> None:
     ap.add_argument("--figures-only", action="store_true", help="Plot from cached controls CSVs without recomputing")
     args = ap.parse_args()
 
-    leiden_kw = {
-        "resolution": args.leiden_resolution,
-        "spatial_weight": args.spatial_weight,
-        "n_pcs": cmu.DEFAULT_LEIDEN_KW["n_pcs"],
-        "min_cells": cmu.DEFAULT_LEIDEN_KW["min_cells"],
-    }
+    leiden_kw: dict = {}
+    if args.leiden_resolution is not None:
+        leiden_kw["resolution"] = args.leiden_resolution
+    if args.spatial_weight is not None:
+        leiden_kw["spatial_weight"] = args.spatial_weight
+
+    per_slice_leiden = None
+    leiden_path = args.per_slice_leiden or cmu.leiden_config_path_for_tag(args.tag)
+    if not args.no_per_slice_leiden and leiden_path.exists():
+        per_slice_leiden = cmu.load_per_slice_leiden_config(leiden_path)
+        print(f"Using per-slice Leiden config: {leiden_path} ({len(per_slice_leiden)} slices)")
 
     out_dir = ROOT / "results" / "cnn_enrichment"
     fig_dir = args.fig_dir
@@ -287,7 +314,7 @@ def main() -> None:
             print(f"Running {variant} on {sl}...")
             enrich, corr = run_control_variant(
                 sl, variant, prep, pool, beta_matrix, score_genes, perts,
-                args, bd, pd_dir, gb, leiden_kw,
+                args, bd, pd_dir, gb, leiden_kw, per_slice_leiden=per_slice_leiden,
             )
             if not enrich.empty:
                 enrich_by_method[variant].append(enrich)
@@ -305,8 +332,9 @@ def main() -> None:
     summary = {
         "tag": args.tag,
         "random_seed": args.random_seed,
-        "leiden_resolution": args.leiden_resolution,
-        "spatial_weight": args.spatial_weight,
+        "leiden_defaults": cmu.DEFAULT_LEIDEN_KW,
+        "per_slice_leiden": per_slice_leiden,
+        "leiden_override": leiden_kw or None,
         "banksy_lambda": args.banksy_lambda,
         "banksy_neighbours": args.banksy_neighbours,
         "variants": args.variants,

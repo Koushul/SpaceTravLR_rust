@@ -1,44 +1,79 @@
 {
   "tag": "cnn_v2",
   "random_seed": 42,
-  "leiden_resolution": 0.7,
-  "spatial_weight": 0.45,
+  "leiden_defaults": {
+    "n_pcs": 18,
+    "n_neighbors": 12,
+    "resolution": 0.75,
+    "spatial_weight": 0.55,
+    "min_cells": 20
+  },
+  "per_slice_leiden": {
+    "subQ-1": {
+      "n_pcs": 18,
+      "n_neighbors": 12,
+      "resolution": 0.75,
+      "spatial_weight": 0.55,
+      "min_cells": 20
+    },
+    "subQ-2": {
+      "n_pcs": 10,
+      "n_neighbors": 12,
+      "resolution": 0.55,
+      "spatial_weight": 0.35,
+      "min_cells": 20
+    },
+    "subQ-3": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.55,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    },
+    "subQ-4": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.75,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    },
+    "Lung_Metastasis_M001": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.65,
+      "spatial_weight": 0.45,
+      "min_cells": 20
+    }
+  },
+  "leiden_override": null,
   "banksy_lambda": 0.2,
   "banksy_neighbours": 15,
   "variants": [
     "cnn",
     "random_niche",
-    "expr_leiden",
     "banksy"
   ],
   "by_method": [
     {
       "method": "cnn",
       "n_tests": 26,
-      "median_pearson_r": 0.44856298128949673,
-      "mean_pearson_r": 0.30529830349617976,
-      "frac_positive_r": 0.7692307692307693
+      "median_pearson_r": 0.7232128575732697,
+      "mean_pearson_r": 0.5861995640539732,
+      "frac_positive_r": 0.8846153846153846
     },
     {
       "method": "random_niche",
       "n_tests": 26,
-      "median_pearson_r": -0.15058455741496368,
-      "mean_pearson_r": -0.09127144352404375,
-      "frac_positive_r": 0.38461538461538464
-    },
-    {
-      "method": "expr_leiden",
-      "n_tests": 26,
-      "median_pearson_r": 0.1543635714448125,
-      "mean_pearson_r": 0.14073008973189902,
-      "frac_positive_r": 0.6153846153846154
+      "median_pearson_r": 0.31909351375571066,
+      "mean_pearson_r": 0.15156301041648507,
+      "frac_positive_r": 0.6538461538461539
     },
     {
       "method": "banksy",
       "n_tests": 26,
-      "median_pearson_r": -0.060899152040273755,
-      "mean_pearson_r": -0.07029430929209633,
-      "frac_positive_r": 0.23076923076923078
+      "median_pearson_r": 0.19091012476032485,
+      "mean_pearson_r": 0.06412458100480081,
+      "frac_positive_r": 0.4230769230769231
     }
   ]
 }
