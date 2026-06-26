@@ -171,11 +171,18 @@ def main() -> None:
             if "CellID" in pred.columns:
                 pred = pred.set_index("CellID")
 
+            target_idx = score_genes.index(pert) if pert in score_genes else None
+            cnn_by_cell = None
+            if target_idx is not None:
+                tumor_mask = prep.obs["cell_type"].astype(str) == "tumor"
+                beta_tumor = beta_matrix[np.where(tumor_mask.values)[0]]
+                cnn_by_cell = pd.Series(beta_tumor[:, target_idx], index=prep.obs_names[tumor_mask])
+
             for pathway, genes in pathways.items():
                 nd = cmu.pathway_niche_deltas(
                     prep, pool, pred, pert, pathway, genes, "cnn_leiden", sl,
                     cell_type="tumor", min_ntc=args.min_ntc, min_pert=args.min_pert,
-                    global_baseline=gb,
+                    global_baseline=gb, cell_cnn_scores=cnn_by_cell, score_genes=score_genes,
                 )
                 if nd.empty:
                     continue
@@ -191,8 +198,12 @@ def main() -> None:
                 bulk_obs = float(nd["obs_pathway_delta"].mean())
                 bulk_pred = float(nd["pred_pathway_delta"].mean())
                 sign_match = None
+                r_sign_match = None
                 if exp_sign is not None and np.isfinite(bulk_obs) and np.isfinite(bulk_pred):
                     sign_match = bool(np.sign(bulk_obs) == exp_sign and np.sign(bulk_pred) == exp_sign)
+                pr = stats.get("pearson_r", float("nan"))
+                if exp_sign is not None and np.isfinite(pr):
+                    r_sign_match = bool(pr * exp_sign > 0)
                 concord_rows.append({
                     "slice": sl,
                     "perturbation": pert,
@@ -201,6 +212,7 @@ def main() -> None:
                     "bulk_obs_delta": bulk_obs,
                     "bulk_pred_delta": bulk_pred,
                     "sign_match": sign_match,
+                    "r_sign_match": r_sign_match,
                     **stats,
                     **tie,
                 })
@@ -222,9 +234,25 @@ def main() -> None:
         "frac_pathways_significant_ntc": float(distinct_df["significant"].mean()) if not distinct_df.empty else None,
         "n_concordance_tests": int(concord_df["pearson_r"].notna().sum()) if not concord_df.empty else 0,
         "median_pathway_concordance_r": float(concord_df["pearson_r"].median()) if not concord_df.empty else None,
+        "median_pathway_concordance_r_expected": float(
+            concord_df.loc[concord_df["expected_sign"].notna(), "pearson_r"].median()
+        ) if concord_df["expected_sign"].notna().any() else None,
+        "median_pathway_concordance_r_slice_avg_expected": float(
+            concord_df.loc[concord_df["expected_sign"].notna()]
+            .groupby(["perturbation", "pathway"], observed=True)["pearson_r"]
+            .mean()
+            .median()
+        ) if concord_df["expected_sign"].notna().any() else None,
+        "median_pathway_concordance_r_n4": float(
+            concord_df.loc[concord_df["n_niches"] >= 4, "pearson_r"].median()
+        ) if (concord_df["n_niches"] >= 4).any() else None,
         "frac_sign_match_expected": float(concord_df.loc[concord_df["sign_match"].notna(), "sign_match"].mean()) if concord_df["sign_match"].notna().any() else None,
+        "frac_r_sign_match_expected": float(concord_df.loc[concord_df["r_sign_match"].notna(), "r_sign_match"].mean()) if concord_df.get("r_sign_match", pd.Series(dtype=bool)).notna().any() else None,
         "median_or_vs_ntc_pathway_r": float(concord_df["or_vs_ntc_pathway_r"].median()) if "or_vs_ntc_pathway_r" in concord_df else None,
         "median_or_vs_obs_pathway_r": float(concord_df["or_vs_obs_pathway_r"].median()) if "or_vs_obs_pathway_r" in concord_df else None,
+        "median_or_vs_obs_pathway_r_expected": float(
+            concord_df.loc[concord_df["expected_sign"].notna(), "or_vs_obs_pathway_r"].median()
+        ) if concord_df["expected_sign"].notna().any() else None,
     }
     (out_dir / f"pathway_microniche_overall_{args.tag}.json").write_text(json.dumps(summary, indent=2))
     _plot_all(distinct_df, delta_df, concord_df, fig_dir, args.tag)

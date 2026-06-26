@@ -1240,7 +1240,7 @@ def plot_pathway_microniche_heatmap(
     *,
     tag: str = "cnn_v2",
     expected_only: bool = True,
-    min_niches: int = 3,
+    min_niches: int = 4,
     average_slices: bool = False,
     figsize: tuple[float, float] | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:

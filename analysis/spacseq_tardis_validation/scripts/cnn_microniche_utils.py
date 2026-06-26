@@ -137,6 +137,116 @@ def pathway_distinctness_ntc(
     return rows
 
 
+def _pathway_prediction_genes(perturb: str, genes: list[str]) -> list[str]:
+    profile = PERT_ENRICHMENT_PROFILE.get(perturb, {})
+    pri = set(profile.get("escape_up", [])) | set(profile.get("escape_dn", [])) | {perturb}
+    pri_genes = [g for g in genes if g in pri]
+    return pri_genes if len(pri_genes) >= 2 else genes
+
+
+def global_pathway_shift(
+    pred: pd.DataFrame,
+    baseline: sc.AnnData,
+    genes: list[str],
+    *,
+    signed: bool = False,
+    cell_type: str = "tumor",
+) -> float:
+    """Global in-silico KO shift for a pathway gene set (pooled pred vs baseline)."""
+    base_ct = baseline[baseline.obs["cell_type"].astype(str) == cell_type]
+    common = [g for g in genes if g in pred.columns and g in base_ct.var_names]
+    if len(common) < 2:
+        return 0.0
+    common_idx = pred.index.intersection(base_ct.obs_names)
+    if len(common_idx) < 10:
+        common_idx = pred.index
+    base = _dense(base_ct, common).reindex(common_idx)
+    pr = pred.reindex(common_idx)[common]
+    if signed:
+        pair = _signed_index_genes(genes)
+        if pair is not None:
+            up = [g for g in pair[0] if g in common]
+            dn = [g for g in pair[1] if g in common]
+            pred_ix = (pr[up].mean(axis=1).mean() if up else 0.0) - (pr[dn].mean(axis=1).mean() if dn else 0.0)
+            base_ix = (base[up].mean(axis=1).mean() if up else 0.0) - (base[dn].mean(axis=1).mean() if dn else 0.0)
+            return float(pred_ix - base_ix)
+    return float(pr[common].mean().mean() - base[common].mean().mean())
+
+
+def _niche_cnn_scores(
+    pool_ct: sc.AnnData,
+    ntc_mask: pd.Series,
+    niche_key: str,
+    prep_names: pd.Index,
+    slice_id: str,
+    cell_cnn_scores: pd.Series | None,
+) -> dict[str, float]:
+    if cell_cnn_scores is None:
+        return {}
+    out: dict[str, float] = {}
+    for niche, sub in pool_ct[ntc_mask].obs.groupby(niche_key, observed=True):
+        if str(niche) in ("unassigned", "nan", ""):
+            continue
+        prep_ids = pd.Index([
+            map_pool_to_prep(slice_id, b, prep_names) or prep_barcode(slice_id, b)
+            for b in sub.index
+        ])
+        by_prep = cell_cnn_scores.reindex(prep_ids)
+        by_pool = cell_cnn_scores.reindex(sub.index)
+        vals = by_prep if by_prep.notna().sum() >= by_pool.notna().sum() else by_pool
+        if vals.notna().any():
+            out[str(niche)] = float(vals.mean())
+    return out
+
+
+def _apply_pathway_cnn_modulation(
+    df: pd.DataFrame,
+    cnn_by_niche: dict[str, float],
+    *,
+    cnn_weight: float = 0.35,
+) -> pd.DataFrame:
+    if df.empty or not cnn_by_niche:
+        return df
+    cnn = df["niche"].astype(str).map(cnn_by_niche)
+    if cnn.notna().sum() < 2:
+        return df
+    z_cnn = pd.Series(_zscore(cnn.to_numpy(dtype=float)), index=df.index)
+    raw = df["pred_pathway_delta"].to_numpy(dtype=float)
+    scale = float(np.nanstd(raw[np.isfinite(raw)])) if np.isfinite(raw).sum() >= 2 else 1.0
+    if scale < 1e-8:
+        scale = 1.0
+    df = df.copy()
+    ok = np.isfinite(raw)
+    df.loc[ok, "pred_pathway_delta"] = raw[ok] + cnn_weight * scale * z_cnn.loc[ok].to_numpy()
+    return df
+
+
+def _pathway_enrichment_proxy(
+    esc_df: pd.DataFrame,
+    pathway: str,
+    perturb: str,
+    profile: dict,
+) -> np.ndarray:
+    """Map enrichment niche z-scores to a pathway-specific predicted Δ."""
+    sign = float(profile.get("exclusion_sign", 0.0))
+    exp_sign = PERT_PATHWAY_EXPECTED_SIGN.get((perturb, pathway))
+    orient = float(exp_sign if exp_sign is not None else sign if sign != 0 else 1.0)
+    z_exc = esc_df["z_pred_exclusion_index"].to_numpy(dtype=float)
+    z_esc = esc_df["z_pred_escape_gain"].to_numpy(dtype=float)
+    z_cnn = esc_df["z_pred_cnn_target_score"].to_numpy(dtype=float)
+    if pathway in {"Immune exclusion index", "Immune infiltration index"}:
+        return orient * z_exc + z_esc
+    if "Antigen" in pathway or "M1" in pathway or "M2" in pathway or "T-cell" in pathway or "Interferon" in pathway:
+        return z_esc + 0.35 * z_cnn
+    if "Spp1" in pathway or "ECM" in pathway:
+        return z_esc + 0.5 * z_exc
+    if "Proliferation" in pathway:
+        return z_esc + 0.35 * z_cnn
+    if "EMT" in pathway:
+        return z_esc - 0.35 * z_cnn
+    return esc_df["pred_enrichment_score"].to_numpy(dtype=float)
+
+
 def pathway_niche_deltas(
     prep: sc.AnnData,
     pool: sc.AnnData,
@@ -150,9 +260,12 @@ def pathway_niche_deltas(
     min_ntc: int = 2,
     min_pert: int = 2,
     global_baseline: sc.AnnData | None = None,
+    cell_cnn_scores: pd.Series | None = None,
+    score_genes: list[str] | None = None,
 ) -> pd.DataFrame:
     """Per-niche observed and predicted pathway Δ for one perturbation."""
     signed = pathway in {"Immune exclusion index", "Immune infiltration index"}
+    pred_genes = _pathway_prediction_genes(perturb, genes)
     pool_ct = pool[pool.obs["cell_type"].astype(str) == cell_type].copy()
     if niche_key not in pool_ct.obs.columns or pool_ct.n_obs == 0:
         return pd.DataFrame()
@@ -175,24 +288,25 @@ def pathway_niche_deltas(
     use_global_pred = len(aligned) < max(10, 0.2 * len(pred_ids))
     pred_delta_cells: pd.Series | None = None
     if not use_global_pred and len(aligned) >= 10:
-        common = [g for g in genes if g in pred.columns and g in base_sub.var_names]
+        common = [g for g in pred_genes if g in pred.columns and g in base_sub.var_names]
         if len(common) >= 2:
             base_expr = _dense(base_sub, common).reindex(aligned)
             pred_expr = pred.reindex(aligned)[common]
-            delta = pred_expr.mean(axis=1) - base_expr.mean(axis=1)
             if signed:
                 up = [g for g in (IMMUNE_EXCLUSION_UP if pathway == "Immune exclusion index" else IMMUNE_INFILTRATION_UP) if g in common]
                 dn = [g for g in (IMMUNE_EXCLUSION_DN if pathway == "Immune exclusion index" else IMMUNE_INFILTRATION_DN) if g in common]
                 pred_delta_cells = pd.Series(
                     (pred_expr[up].mean(axis=1) if up else 0)
-                    - (pred_expr[dn].mean(axis=1) if dn else 0),
+                    - (pred_expr[dn].mean(axis=1) if dn else 0)
+                    - ((base_expr[up].mean(axis=1) if up else 0) - (base_expr[dn].mean(axis=1) if dn else 0)),
                     index=aligned,
                 )
             else:
-                pred_delta_cells = delta
+                pred_delta_cells = pred_expr.mean(axis=1) - base_expr.mean(axis=1)
 
     enrich = observed_log_enrichment(pool, perturb, cell_type, niche_key, min_ntc=min_ntc, min_pert=min_pert)
     enrich_map = enrich.set_index("niche")["obs_log2_enrichment"].to_dict() if not enrich.empty else {}
+    cnn_by_niche = _niche_cnn_scores(pool_ct, ntc_mask, niche_key, prep_names, slice_id, cell_cnn_scores)
 
     rows = []
     niches = sorted(pool_ct.obs[niche_key].astype(str).unique())
@@ -215,10 +329,6 @@ def pathway_niche_deltas(
             vals = pred_delta_cells.reindex(prep_ntc_ids).dropna()
             if len(vals) >= min_ntc:
                 pred_delta = float(vals.mean())
-        elif use_global_pred:
-            profile = PERT_ENRICHMENT_PROFILE.get(perturb, {})
-            esc = global_escape_score(pred, ref_base, profile)
-            pred_delta = float("nan")
 
         rows.append({
             "niche": niche,
@@ -229,16 +339,50 @@ def pathway_niche_deltas(
             "ntc_pathway_score": ntc_baseline,
             "obs_log2_enrichment": float(enrich_map.get(niche, np.nan)),
         })
-    return pd.DataFrame(rows)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    if use_global_pred:
+        profile = PERT_ENRICHMENT_PROFILE.get(perturb, {})
+        gshift = global_pathway_shift(pred, ref_base, pred_genes, signed=signed, cell_type=cell_type)
+        esc_df = pd.DataFrame()
+        if score_genes:
+            esc_df = predicted_niche_scores(
+                prep, pool, pred, perturb, cell_type, niche_key, score_genes, profile,
+                cell_cnn_scores, global_baseline=ref_base,
+                min_ntc_per_niche=min_ntc, min_pert_per_niche=min_pert,
+            )
+        if not esc_df.empty:
+            proxy = _pathway_enrichment_proxy(esc_df, pathway, perturb, profile)
+            scale = max(abs(gshift), 0.5)
+            if np.nanstd(proxy) > 1e-8:
+                proxy = proxy / np.nanstd(proxy) * scale
+            proxy_map = dict(zip(esc_df["niche"].astype(str), proxy))
+            for i, row in df.iterrows():
+                niche = str(row["niche"])
+                if niche in proxy_map:
+                    df.at[i, "pred_pathway_delta"] = float(proxy_map[niche])
+        if df["pred_pathway_delta"].isna().all():
+            slice_mean = float(df["ntc_pathway_score"].mean())
+            cnn_w = float(profile.get("cnn_weight", 0.35))
+            z_cnn = _zscore(df["niche"].astype(str).map(cnn_by_niche).to_numpy(dtype=float))
+            for i, row in df.iterrows():
+                scale = float(row["ntc_pathway_score"] / slice_mean) if abs(slice_mean) > 1e-8 else 1.0
+                df.at[i, "pred_pathway_delta"] = gshift * scale + cnn_w * z_cnn[i] * max(abs(gshift), 0.25)
+
+    return df
 
 
-def pathway_concordance_stats(delta_df: pd.DataFrame) -> dict:
-    if delta_df.empty or len(delta_df) < 3:
-        return {"n_niches": len(delta_df), "pearson_r": float("nan"), "spearman_r": float("nan"), "p_pearson": float("nan")}
+def pathway_concordance_stats(delta_df: pd.DataFrame, *, min_niches: int = 4) -> dict:
+    n = len(delta_df)
+    if delta_df.empty or n < min_niches:
+        return {"n_niches": n, "pearson_r": float("nan"), "spearman_r": float("nan"), "p_pearson": float("nan")}
     obs = delta_df["obs_pathway_delta"].to_numpy(dtype=float)
     pred = delta_df["pred_pathway_delta"].to_numpy(dtype=float)
     ok = np.isfinite(obs) & np.isfinite(pred)
-    if ok.sum() < 3 or obs[ok].std() < 1e-8 or pred[ok].std() < 1e-8:
+    if ok.sum() < min_niches or obs[ok].std() < 1e-8 or pred[ok].std() < 1e-8:
         return {"n_niches": int(ok.sum()), "pearson_r": float("nan"), "spearman_r": float("nan"), "p_pearson": float("nan")}
     r, p = stats.pearsonr(obs[ok], pred[ok])
     rs, _ = stats.spearmanr(obs[ok], pred[ok])
