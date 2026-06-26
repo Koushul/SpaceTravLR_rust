@@ -45,6 +45,18 @@ HEADLINE_CASES = [
     ("Lung_Metastasis_M001", "Icam1"),
 ]
 
+SLICE_ORDER = ["subQ-1", "subQ-2", "subQ-3", "subQ-4", "Lung_Metastasis_M001"]
+PERT_ORDER = ["Il4ra", "Cd83", "Cd74", "Bcam", "Cks1b", "Ptk6", "Icam1"]
+
+
+def all_cases_from_corr(corr_df: pd.DataFrame) -> list[tuple[str, str]]:
+    sl_rank = {s: i for i, s in enumerate(SLICE_ORDER)}
+    pert_rank = {p: i for i, p in enumerate(PERT_ORDER)}
+    rows = corr_df[["slice", "perturbation"]].drop_duplicates()
+    pairs = [(str(r.slice), str(r.perturbation)) for r in rows.itertuples(index=False)]
+    pairs.sort(key=lambda t: (sl_rank.get(t[0], 99), pert_rank.get(t[1], 99), t[0], t[1]))
+    return pairs
+
 
 def niche_palette(labels: list[str]) -> dict[str, tuple]:
     cmap = plt.colormaps.get_cmap("tab20")
@@ -60,11 +72,15 @@ def load_tumor_embedding_adata(
     perturb: str,
     *,
     k_neighbors: int = 50,
-) -> sc.AnnData:
+    base_adata=None,
+) -> "sc.AnnData":
     import scanpy as sc
 
-    pq = results_dir / f"spatial_tumor_{slice_id}_{tag}.parquet"
-    adata = sh.tumor_adata_from_parquet(pq, slice_id)
+    if base_adata is None:
+        pq = results_dir / f"spatial_tumor_{slice_id}_{tag}.parquet"
+        adata = sh.tumor_adata_from_parquet(pq, slice_id)
+    else:
+        adata = base_adata.copy()
     if enrich_sub.empty:
         return adata
     scored = enrich_sub[
@@ -111,6 +127,7 @@ def plot_triplet_row(
     *,
     mc38_dir: Path,
     show_local_sgp: bool = True,
+    tumor_he=None,
 ) -> None:
     if adata.n_obs == 0:
         for ax in axes:
@@ -119,10 +136,14 @@ def plot_triplet_row(
 
     vmin, vmax = enrichment_limits(adata, ("pred_enrichment_score", "obs_log2_enrichment"))
     palette = niche_palette(adata.obs["microniche"].astype(str).tolist())
-    use_he = sh.histology_ready(mc38_dir, slice_id)
-    tumor = adata
-    if use_he:
-        tumor = sh.attach_histology(tumor.copy(), slice_id, mc38_dir, skip_download=True)
+    use_he = tumor_he is not None or sh.histology_ready(mc38_dir, slice_id)
+    tumor = tumor_he.copy() if tumor_he is not None else adata
+    if use_he and tumor_he is None:
+        tumor = sh.attach_histology(adata.copy(), slice_id, mc38_dir, skip_download=True)
+    elif tumor_he is not None:
+        for col in ("pred_enrichment_score", "obs_log2_enrichment", "local_sgp_frac", "microniche"):
+            if col in adata.obs.columns:
+                tumor.obs[col] = adata.obs[col].values
 
     col_keys = ["microniche", "pred_enrichment_score", "obs_log2_enrichment"]
     col_titles = [
@@ -198,8 +219,18 @@ def plot_triplet_row(
         ax_sc.axvline(0, color="k", lw=0.4, alpha=0.35)
         ax_sc.set_xlabel("Predicted enrichment")
         ax_sc.set_ylabel("Observed log₂ OR")
-        ax_sc.set_title(f"sg{perturb} | {slice_id}\nr = {pearson_r:+.2f}", fontweight="bold", fontsize=9)
+        ax_sc.set_title(f"sg{perturb} | {slice_id}\nr = {pearson_r:+.2f}", fontweight="bold", fontsize=8)
         ax_sc.grid(True, alpha=0.25)
+        ax_sc.tick_params(labelsize=7)
+
+
+def _slice_base_cache(results_dir: Path, tag: str) -> dict[str, object]:
+    cache: dict[str, object] = {}
+    for sl in SLICE_ORDER:
+        pq = results_dir / f"spatial_tumor_{sl}_{tag}.parquet"
+        if pq.exists():
+            cache[sl] = sh.tumor_adata_from_parquet(pq, sl)
+    return cache
 
 
 def build_figure(
@@ -211,15 +242,17 @@ def build_figure(
     *,
     cases: list[tuple[str, str]] | None = None,
     show_local_sgp: bool = True,
+    row_height: float = 3.5,
 ) -> plt.Figure:
     sh.apply_publication_style()
     cases = cases or HEADLINE_CASES
     ncols = 5 if show_local_sgp else 4
+    nrows = len(cases)
     fig, axes = plt.subplots(
-        len(cases), ncols,
-        figsize=(3.15 * ncols, 3.5 * len(cases)),
+        nrows, ncols,
+        figsize=(3.0 * ncols, row_height * nrows),
         squeeze=False,
-        gridspec_kw={"wspace": 0.3, "hspace": 0.35},
+        gridspec_kw={"wspace": 0.28, "hspace": 0.38},
     )
 
     header = [
@@ -231,33 +264,55 @@ def build_figure(
         header.append("Local sgP density (kNN)")
     header.append("Niche concordance")
 
+    slice_cache = _slice_base_cache(results_dir, tag)
+    he_cache: dict[str, object] = {}
+
     for row, (sl, pert) in enumerate(cases):
         enrich_sub = enrich_df[(enrich_df["slice"] == sl) & (enrich_df["perturbation"] == pert)].copy()
         sub_c = corr_df[(corr_df["slice"] == sl) & (corr_df["perturbation"] == pert)]
         r = float(sub_c["pearson_r"].iloc[0]) if not sub_c.empty else float("nan")
 
+        base = slice_cache.get(sl)
+        if base is None:
+            print(f"Skipping {sl}/{pert}: no spatial parquet")
+            for ax in axes[row]:
+                ax.axis("off")
+            continue
+
         try:
-            adata = load_tumor_embedding_adata(results_dir, sl, tag, enrich_sub, pert)
+            adata = load_tumor_embedding_adata(
+                results_dir, sl, tag, enrich_sub, pert, base_adata=base,
+            )
         except FileNotFoundError as e:
             print(f"Skipping {sl}/{pert}: {e}")
             for ax in axes[row]:
                 ax.axis("off")
             continue
 
+        if sl not in he_cache and sh.histology_ready(mc38_dir, sl):
+            he_cache[sl] = sh.attach_histology(base.copy(), sl, mc38_dir, skip_download=True)
+
         plot_triplet_row(
             adata, sl, pert, enrich_sub, r, list(axes[row]),
             mc38_dir=mc38_dir, show_local_sgp=show_local_sgp,
+            tumor_he=he_cache.get(sl),
+        )
+        axes[row, 0].text(
+            -0.08, 0.5, f"{sl}\nsg{pert}", transform=axes[row, 0].transAxes,
+            ha="right", va="center", fontsize=8, fontweight="bold",
         )
 
     for j, title in enumerate(header[:ncols]):
         axes[0, j].text(
-            0.5, 1.1, title, transform=axes[0, j].transAxes,
+            0.5, 1.08, title, transform=axes[0, j].transAxes,
             ha="center", va="bottom", fontsize=10, fontweight="bold",
         )
 
+    med_r = float(corr_df["pearson_r"].median()) if not corr_df.empty else float("nan")
     fig.suptitle(
-        "Spatial embedding: SpaceTravLR predicted vs observed niche enrichment",
-        fontsize=13, fontweight="bold", y=1.02,
+        f"Spatial embedding: SpaceTravLR predicted vs observed niche enrichment "
+        f"(n={nrows} tests, median r={med_r:+.2f})",
+        fontsize=13, fontweight="bold", y=1.005,
     )
     return fig
 
@@ -269,20 +324,34 @@ def main() -> None:
     ap.add_argument("--fig-dir", type=Path, default=ROOT / "figures" / "cnn_microniche_v2_improved")
     ap.add_argument("--mc38-dir", type=Path, default=(ROOT.parent / "mc38_visiumhd").resolve())
     ap.add_argument("--no-local-sgp", action="store_true")
+    ap.add_argument("--headline-only", action="store_true", help="Only plot 3 headline slice/pert pairs")
+    ap.add_argument("--row-height", type=float, default=None, help="Inches per row (auto if omitted)")
     args = ap.parse_args()
 
     enrich_df = pd.read_csv(args.results_dir / f"niche_enrichment_{args.tag}.csv")
     corr_df = pd.read_csv(args.results_dir / f"enrichment_corr_{args.tag}.csv")
 
+    if args.headline_only:
+        cases = HEADLINE_CASES
+        row_height = args.row_height or 3.5
+        out_stem = f"fig30_spatial_embedding_enrichment_{args.tag}_headline"
+    else:
+        cases = all_cases_from_corr(corr_df)
+        row_height = args.row_height or (2.35 if len(cases) > 6 else 3.5)
+        out_stem = f"fig30_spatial_embedding_enrichment_{args.tag}"
+
     args.fig_dir.mkdir(parents=True, exist_ok=True)
     fig = build_figure(
         enrich_df, corr_df, args.results_dir, args.mc38_dir, args.tag,
+        cases=cases,
         show_local_sgp=not args.no_local_sgp,
+        row_height=row_height,
     )
-    out = args.fig_dir / f"fig30_spatial_embedding_enrichment_{args.tag}"
-    sh.save_figure_png_svg(fig, out.with_suffix(".png"), dpi=300, transparent_png=True)
+    out = args.fig_dir / out_stem
+    dpi = 200 if len(cases) > 6 else 300
+    sh.save_figure_png_svg(fig, out.with_suffix(".png"), dpi=dpi, transparent_png=True)
     plt.close(fig)
-    print(f"Wrote {out}.svg")
+    print(f"Wrote {out}.svg ({len(cases)} slice × perturbation panels)")
 
 
 if __name__ == "__main__":
