@@ -91,6 +91,8 @@ def run_control_variant(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     prep = prep.copy()
     pool = pool.copy()
+    sgp_shuffle_seed: int | None = None
+    pred_permute_seed: int | None = None
 
     if variant == "cnn":
         niche_key = "cnn_leiden"
@@ -111,6 +113,34 @@ def run_control_variant(
         prep.obs.loc[prep_tumor, niche_key] = cmu.shuffle_microniche_labels(
             prep.obs.loc[prep_tumor, "cnn_leiden"], seed=args.random_seed,
         ).values
+    elif variant == "random_uniform":
+        niche_key = "random_uniform"
+        prep, pool = assign_pool_niches(
+            prep, pool, beta_matrix, slice_id,
+            leiden_kw=leiden_kw, niche_key="cnn_leiden", per_slice_leiden=per_slice_leiden,
+        )
+        tumor_mask = pool.obs["cell_type"].astype(str) == "tumor"
+        pool.obs.loc[tumor_mask, niche_key] = cmu.random_uniform_niche_labels(
+            pool.obs.loc[tumor_mask, "cnn_leiden"], seed=args.random_seed,
+        ).values
+        prep_tumor = prep.obs["cell_type"].astype(str) == "tumor"
+        prep.obs.loc[prep_tumor, niche_key] = cmu.random_uniform_niche_labels(
+            prep.obs.loc[prep_tumor, "cnn_leiden"], seed=args.random_seed,
+        ).values
+    elif variant == "random_sgp":
+        niche_key = "cnn_leiden"
+        prep, pool = assign_pool_niches(
+            prep, pool, beta_matrix, slice_id,
+            leiden_kw=leiden_kw, niche_key=niche_key, per_slice_leiden=per_slice_leiden,
+        )
+        sgp_shuffle_seed = args.random_seed
+    elif variant == "random_pred":
+        niche_key = "cnn_leiden"
+        prep, pool = assign_pool_niches(
+            prep, pool, beta_matrix, slice_id,
+            leiden_kw=leiden_kw, niche_key=niche_key, per_slice_leiden=per_slice_leiden,
+        )
+        pred_permute_seed = args.random_seed
     elif variant == "expr_leiden":
         niche_key = "expr_leiden"
         labels = cmu.assign_slice_expression_clusters(prep, slice_id, "tumor", **leiden_kw)
@@ -133,6 +163,9 @@ def run_control_variant(
     tag = {
         "cnn": args.tag,
         "random_niche": "random_niche",
+        "random_uniform": "random_uniform",
+        "random_sgp": "random_sgp",
+        "random_pred": "random_pred",
         "expr_leiden": "expr_leiden",
         "banksy": "banksy",
     }[variant]
@@ -154,6 +187,8 @@ def run_control_variant(
         pool=pool,
         score_genes=score_genes,
         beta_matrix=beta_matrix,
+        sgp_shuffle_seed=sgp_shuffle_seed,
+        pred_permute_seed=pred_permute_seed,
     )
     if not corr.empty:
         corr = corr.copy()
@@ -195,7 +230,7 @@ def plot_controls_figures(
 
     fig, _ = nb_viz.plot_enrichment_control_bar_jitter(
         corr_dfs,
-        methods=["cnn", "banksy", "random_niche"],
+        methods=["cnn", "banksy", "random_pred", "random_uniform"],
         tag=tag,
     )
     sh.save_figure_png_svg(fig, fig_dir / f"fig29_enrichment_control_bar_{tag}.png", dpi=300)
@@ -211,11 +246,14 @@ def plot_controls_figures(
 
     title_map = {
         "cnn": f"CNN β-microniches ({tag})",
-        "random_niche": "Random label control",
+        "random_niche": "Shuffle niche labels (legacy)",
+        "random_uniform": "Uniform random niches",
+        "random_sgp": "Shuffle sgP labels",
+        "random_pred": "Shuffle predictions",
         "expr_leiden": "Expression Leiden control",
         "banksy": "BANKSY spatial clusters",
     }
-    for variant in ("cnn", "random_niche", "expr_leiden", "banksy"):
+    for variant in ("cnn", "random_niche", "random_uniform", "random_sgp", "random_pred", "expr_leiden", "banksy"):
         if variant not in enrich_dfs or enrich_dfs[variant].empty:
             continue
         scatter_tag = tag if variant == "cnn" else variant
@@ -256,7 +294,7 @@ def main() -> None:
     ap.add_argument("--banksy-lambda", type=float, default=0.2, help="BANKSY neighborhood weight λ")
     ap.add_argument("--banksy-neighbours", type=int, default=15, help="BANKSY spatial neighbors k_geom")
     ap.add_argument("--banksy-tmp-dir", type=Path, default=ROOT / "results" / "cnn_enrichment" / "banksy_tmp")
-    ap.add_argument("--variants", nargs="+", default=["cnn", "random_niche", "expr_leiden", "banksy"])
+    ap.add_argument("--variants", nargs="+", default=["cnn", "banksy", "random_sgp", "random_uniform"])
     ap.add_argument("--fig-dir", type=Path, default=ROOT / "figures" / "cnn_enrichment")
     ap.add_argument("--figures-only", action="store_true", help="Plot from cached controls CSVs without recomputing")
     args = ap.parse_args()

@@ -641,24 +641,30 @@ def plot_enrichment_control_bar_jitter(
     methods: list[str] | None = None,
     method_labels: dict[str, str] | None = None,
     tag: str = "cnn_v2",
-    figsize: tuple[float, float] = (5.5, 4.5),
+    figsize: tuple[float, float] = (7.5, 4.5),
     bar_color: str = "#1d4ed8",
     jitter_color: str = "#111827",
 ) -> tuple[plt.Figure, plt.Axes]:
     """Median bar plot with per slice×perturbation jitter points for enrichment controls."""
     labels = method_labels or {
         "cnn": "SpaceTravLR\n(CNN β-microniches)",
-        "random_niche": "Random labels",
+        "random_niche": "Shuffle niche labels",
+        "random_uniform": "Uniform random niches",
+        "random_sgp": "Shuffle sgP labels",
+        "random_pred": "Shuffle predictions",
         "banksy": "BANKSY",
         "expr_leiden": "Expression Leiden",
     }
     palette = {
         "cnn": "#2563eb",
-        "random_niche": "#9ca3af",
+        "random_niche": "#c4b5fd",
+        "random_uniform": "#9ca3af",
+        "random_sgp": "#6b7280",
+        "random_pred": "#d1d5db",
         "banksy": "#059669",
         "expr_leiden": "#d97706",
     }
-    order = methods or ["cnn", "banksy", "random_niche"]
+    order = methods or ["cnn", "banksy", "random_sgp", "random_uniform"]
     rows = []
     for method in order:
         df = corr_by_method.get(method)

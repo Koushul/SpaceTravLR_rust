@@ -298,7 +298,7 @@ def leiden_microniches(
 
 
 def shuffle_microniche_labels(labels: pd.Series, seed: int = 42) -> pd.Series:
-    """Permute niche labels among cells (negative control; destroys spatial coherence)."""
+    """Permute niche labels among cells (preserves niche sizes; weak null)."""
     rng = np.random.default_rng(seed)
     out = labels.copy().astype(str)
     mask = out.notna() & ~out.isin(["unassigned", "nan", ""])
@@ -308,6 +308,57 @@ def shuffle_microniche_labels(labels: pd.Series, seed: int = 42) -> pd.Series:
     rng.shuffle(shuffled)
     out.loc[mask] = shuffled
     return out
+
+
+def random_uniform_niche_labels(labels: pd.Series, seed: int = 42) -> pd.Series:
+    """Assign cells to K niches i.i.d. uniformly (breaks size structure)."""
+    rng = np.random.default_rng(seed)
+    out = labels.copy().astype(str)
+    mask = out.notna() & ~out.isin(["unassigned", "nan", ""])
+    if int(mask.sum()) < 2:
+        return out
+    uniq = sorted(set(out.loc[mask].astype(str)))
+    k = len(uniq)
+    if k < 2:
+        return out
+    out.loc[mask] = [uniq[i] for i in rng.integers(0, k, size=int(mask.sum()))]
+    return out
+
+
+def shuffle_sgp_assignment(
+    pool: sc.AnnData,
+    perturb: str,
+    cell_type: str = "tumor",
+    seed: int = 42,
+) -> sc.AnnData:
+    """Permute sgP vs NTC labels among tumor cells (niches fixed; destroys spatial sgP signal)."""
+    ad = pool.copy()
+    ct = ad.obs["cell_type"].astype(str) == cell_type
+    tg = ad.obs["target_gene"].astype(str)
+    mask = ct & tg.isin(["non-targeting", perturb])
+    if int(mask.sum()) < 2:
+        return ad
+    labels = tg.loc[mask].to_numpy().copy()
+    rng = np.random.default_rng(seed)
+    rng.shuffle(labels)
+    ad.obs.loc[mask, "target_gene"] = labels
+    return ad
+
+
+def permute_predicted_enrichment(merged: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+    """Shuffle predicted niche scores across niches (observed fixed; predictor-only null)."""
+    m = merged.copy()
+    if len(m) < 3 or "pred_enrichment_score" not in m.columns:
+        return m
+    rng = np.random.default_rng(seed)
+    m["pred_enrichment_score"] = rng.permutation(m["pred_enrichment_score"].to_numpy(dtype=float))
+    if "pred_exclusion_x_escape" in m.columns:
+        m["pred_exclusion_x_escape"] = rng.permutation(m["pred_exclusion_x_escape"].to_numpy(dtype=float))
+    return m
+
+
+def _perturb_seed(base_seed: int, slice_id: str, perturb: str) -> int:
+    return int(base_seed) + sum(ord(c) for c in f"{slice_id}|{perturb}") % 100_003
 
 
 def _expression_clustering_matrix(ad: sc.AnnData, n_top_genes: int = 1500) -> sc.AnnData:

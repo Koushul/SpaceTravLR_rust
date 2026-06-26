@@ -50,8 +50,10 @@
   "banksy_neighbours": 15,
   "variants": [
     "cnn",
-    "random_niche",
-    "banksy"
+    "banksy",
+    "random_sgp",
+    "random_uniform",
+    "random_pred"
   ],
   "by_method": [
     {
@@ -62,18 +64,32 @@
       "frac_positive_r": 0.8846153846153846
     },
     {
-      "method": "random_niche",
+      "method": "banksy",
       "n_tests": 26,
-      "median_pearson_r": 0.31909351375571066,
-      "mean_pearson_r": 0.15156301041648507,
+      "median_pearson_r": 0.024456659295147825,
+      "mean_pearson_r": -0.007468081470555443,
+      "frac_positive_r": 0.34615384615384615
+    },
+    {
+      "method": "random_sgp",
+      "n_tests": 26,
+      "median_pearson_r": 0.213139568500648,
+      "mean_pearson_r": 0.0932761970257979,
       "frac_positive_r": 0.6538461538461539
     },
     {
-      "method": "banksy",
+      "method": "random_uniform",
       "n_tests": 26,
-      "median_pearson_r": 0.19091012476032485,
-      "mean_pearson_r": 0.06412458100480081,
+      "median_pearson_r": -0.28948911665034216,
+      "mean_pearson_r": -0.13134406655477296,
       "frac_positive_r": 0.4230769230769231
+    },
+    {
+      "method": "random_pred",
+      "n_tests": 26,
+      "median_pearson_r": -0.23890735940454036,
+      "mean_pearson_r": -0.15177138151697422,
+      "frac_positive_r": 0.34615384615384615
     }
   ]
 }

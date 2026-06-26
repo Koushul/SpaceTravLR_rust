@@ -118,6 +118,8 @@ def run_slice_enrichment(
     score_genes: list[str] | None = None,
     beta_matrix: np.ndarray | None = None,
     per_slice_leiden: dict[str, dict] | None = None,
+    sgp_shuffle_seed: int | None = None,
+    pred_permute_seed: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, sc.AnnData, sc.AnnData]:
     if pool is None:
         pool = load_pool(slice_id, data_root)
@@ -162,7 +164,14 @@ def run_slice_enrichment(
             tumor_mask = prep.obs["cell_type"].astype(str) == "tumor"
             beta_tumor = beta_matrix[np.where(tumor_mask.values)[0]]
             cnn_by_cell = pd.Series(beta_tumor[:, target_idx], index=prep.obs_names[tumor_mask])
-        obs_df = cmu.observed_log_enrichment(pool, pert, "tumor", niche_key, min_ntc=min_ntc, min_pert=min_pert)
+        pool_pert = pool
+        if sgp_shuffle_seed is not None:
+            pool_pert = cmu.shuffle_sgp_assignment(
+                pool, pert, "tumor", seed=cmu._perturb_seed(sgp_shuffle_seed, slice_id, pert),
+            )
+        obs_df = cmu.observed_log_enrichment(
+            pool_pert, pert, "tumor", niche_key, min_ntc=min_ntc, min_pert=min_pert,
+        )
         pred_df = cmu.predicted_niche_scores(
             prep, pool, pred, pert, "tumor", niche_key, score_genes, profile, cnn_by_cell,
             global_baseline=global_baseline,
@@ -170,6 +179,10 @@ def run_slice_enrichment(
             min_pert_per_niche=min_pert,
         )
         merged = cmu.merge_obs_pred_enrichment(obs_df, pred_df)
+        if pred_permute_seed is not None and not merged.empty:
+            merged = cmu.permute_predicted_enrichment(
+                merged, seed=cmu._perturb_seed(pred_permute_seed, slice_id, pert),
+            )
         corr = cmu.enrichment_correlation(merged)
         corr.update({"slice": slice_id, "perturbation": pert, "n_pert_cells": n_pert, "tag": tag})
         all_corr.append(corr)
