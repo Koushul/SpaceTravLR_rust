@@ -67,8 +67,12 @@ def _plot_all(
     sh.save_figure_png_svg(fig, fig_dir / f"fig32_pathway_obs_pred_concordance_{tag}.png", dpi=300)
     plt.close(fig)
 
-    fig, _ = nb_viz.plot_pathway_microniche_heatmap(concord_df, tag=tag)
+    fig, _ = nb_viz.plot_pathway_microniche_heatmap(concord_df, tag=tag, average_slices=True)
     sh.save_figure_png_svg(fig, fig_dir / f"fig33_pathway_microniche_heatmap_{tag}.png", dpi=300)
+    plt.close(fig)
+
+    fig, _ = nb_viz.plot_pathway_microniche_heatmap(concord_df, tag=tag, average_slices=False)
+    sh.save_figure_png_svg(fig, fig_dir / f"fig33_pathway_microniche_heatmap_by_slice_{tag}.png", dpi=300)
     plt.close(fig)
 
     fig, _ = nb_viz.plot_pathway_enrichment_tie(delta_df, concord_df, tag=tag)

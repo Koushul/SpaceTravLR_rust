@@ -1241,6 +1241,7 @@ def plot_pathway_microniche_heatmap(
     tag: str = "cnn_v2",
     expected_only: bool = True,
     min_niches: int = 3,
+    average_slices: bool = False,
     figsize: tuple[float, float] | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
     import seaborn as sns
@@ -1262,23 +1263,43 @@ def plot_pathway_microniche_heatmap(
         ax.axis("off")
         return fig, ax
 
-    pivot = df.pivot_table(
-        index="pathway", columns=["slice", "perturbation"], values="pearson_r", aggfunc="first",
-    )
+    if average_slices:
+        agg = (
+            df.groupby(["pathway", "perturbation"], observed=True)
+            .agg(pearson_r=("pearson_r", "mean"), n_slices=("slice", "nunique"))
+            .reset_index()
+        )
+        pivot = agg.pivot_table(index="pathway", columns="perturbation", values="pearson_r", aggfunc="first")
+        n_slices = agg.pivot_table(index="pathway", columns="perturbation", values="n_slices", aggfunc="first")
+    else:
+        pivot = df.pivot_table(
+            index="pathway", columns=["slice", "perturbation"], values="pearson_r", aggfunc="first",
+        )
+        n_slices = None
+
     if pivot.empty:
         fig, ax = plt.subplots(figsize=(6, 3))
         ax.text(0.5, 0.5, "No pivot data", ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
         return fig, ax
 
-    fig_h = max(6, 0.28 * len(pivot))
-    fig_w = max(8, 0.45 * pivot.shape[1] + 3)
+    fig_h = max(5, 0.32 * len(pivot))
+    fig_w = max(6, 0.55 * pivot.shape[1] + 2.5) if average_slices else max(8, 0.45 * pivot.shape[1] + 3)
     fig, ax = plt.subplots(figsize=figsize or (fig_w, fig_h))
     sns.heatmap(
         pivot, cmap="RdBu_r", center=0, vmin=-1, vmax=1, ax=ax,
+        annot=average_slices, fmt=".2f", annot_kws={"fontsize": 8},
         cbar_kws={"label": "Pearson r (obs vs pred pathway Δ across niches)"},
     )
-    ax.set_title(f"Pathway–microniche concordance heatmap ({tag})", fontweight="bold")
+    if average_slices and n_slices is not None:
+        title_extra = f"mean across {int(df['slice'].nunique())} slices"
+    else:
+        title_extra = "per slice"
+    ax.set_title(
+        f"Pathway–microniche concordance ({tag}; {title_extra})",
+        fontweight="bold",
+    )
+    ax.set_xlabel("Perturbation")
     fig.tight_layout()
     return fig, ax
 
