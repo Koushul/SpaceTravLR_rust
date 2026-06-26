@@ -134,7 +134,13 @@ def score_slice_kw(ctx: SliceContext, leiden_kw: dict) -> tuple[float, float, pd
     return med, mean, corr
 
 
-def sweep_slice(ctx: SliceContext, grid: list[dict]) -> tuple[dict, pd.DataFrame]:
+def sweep_slice(
+    ctx: SliceContext,
+    grid: list[dict],
+    *,
+    objective: str = "correlation",
+    min_r_floor: float = 0.15,
+) -> tuple[dict, pd.DataFrame]:
     rows = []
     best = {"composite_score": float("-inf")}
     for kw in grid:
@@ -142,6 +148,13 @@ def sweep_slice(ctx: SliceContext, grid: list[dict]) -> tuple[dict, pd.DataFrame
         valid = corr["pearson_r"].dropna() if not corr.empty else pd.Series(dtype=float)
         n_valid = int(len(valid))
         n_niches_med = float(corr["n_niches"].median()) if not corr.empty else 0.0
+        min_r = float(valid.min()) if len(valid) else float("-inf")
+        n_missing = int(len(corr) - len(valid)) if not corr.empty else len(ctx.perts)
+        if objective == "niches":
+            med_r = float(med) if not pd.isna(med) else -1.0
+            composite = n_niches_med + 0.35 * med_r - 2.0 * n_missing
+        else:
+            composite = min_r - 0.5 * n_missing
         row = {
             "slice": ctx.slice_id,
             "resolution": kw["resolution"],
@@ -152,6 +165,8 @@ def sweep_slice(ctx: SliceContext, grid: list[dict]) -> tuple[dict, pd.DataFrame
             "n_tests": int(len(corr)),
             "n_valid_corr": n_valid,
             "median_n_niches": n_niches_med,
+            "min_pearson_r": min_r if len(valid) else None,
+            "composite_score": composite if composite > float("-inf") else None,
         }
         rows.append(row)
         print(
@@ -159,15 +174,10 @@ def sweep_slice(ctx: SliceContext, grid: list[dict]) -> tuple[dict, pd.DataFrame
             f" → med r={med:+.3f} niches={n_niches_med:.1f}",
             flush=True,
         )
-        score = med if not pd.isna(med) else float("-inf")
-        min_r = float(valid.min()) if len(valid) else float("-inf")
-        n_missing = int(len(corr) - len(valid)) if not corr.empty else len(ctx.perts)
-        composite = min_r - 0.5 * n_missing
         if composite > best.get("composite_score", float("-inf")):
             best = {
                 **row,
                 "leiden_kw": {**cmu.DEFAULT_LEIDEN_KW, **kw},
-                "min_pearson_r": min_r,
                 "composite_score": composite,
             }
 
@@ -200,12 +210,32 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=ROOT / "results/cnn_enrichment/tune")
     ap.add_argument("--slices", nargs="+", default=SUBQ_SLICES + [LUNG_SLICE])
     ap.add_argument("--coarse", action="store_true", help="Smaller grid for quick iteration")
+    ap.add_argument(
+        "--objective",
+        choices=["correlation", "niches"],
+        default="correlation",
+        help="correlation=maximize enrichment r; niches=maximize niche count with r floor",
+    )
+    ap.add_argument("--min-r-floor", type=float, default=0.15, help="Min per-pert r for niches objective")
+    ap.add_argument(
+        "--out-name",
+        default=None,
+        help="Output JSON filename (default per_slice_leiden.json or per_slice_leiden_v3.json)",
+    )
     args = ap.parse_args()
 
-    if args.coarse:
+    if args.coarse and args.objective == "niches":
+        resolutions = [0.85, 0.95, 1.05, 1.15]
+        spatial_weights = [0.25, 0.30, 0.35, 0.40]
+        n_pcs_list = [10, 14, 18]
+    elif args.coarse:
         resolutions = [0.55, 0.65, 0.75, 0.85]
         spatial_weights = [0.35, 0.45, 0.55]
         n_pcs_list = [10, 14, 18]
+    elif args.objective == "niches":
+        resolutions = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2]
+        spatial_weights = [0.20, 0.25, 0.30, 0.35, 0.40]
+        n_pcs_list = [8, 10, 12, 14, 16, 18]
     else:
         resolutions = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
         spatial_weights = [0.25, 0.35, 0.4, 0.45, 0.55]
@@ -228,16 +258,29 @@ def main() -> None:
             sl, args.betadata_dir, args.pred_dir, args.seed_pred_dir,
             args.data_root, args.baseline_h5ad, pooled,
         )
-        print(f"=== Sweeping {sl} ({len(grid)} combos) ===", flush=True)
-        best, sweep_df = sweep_slice(ctx, grid)
+        print(f"=== Sweeping {sl} ({len(grid)} combos, objective={args.objective}) ===", flush=True)
+        best, sweep_df = sweep_slice(
+            ctx, grid, objective=args.objective, min_r_floor=args.min_r_floor,
+        )
         per_slice_best[sl] = best
         all_rows.append(sweep_df)
 
     sweep_all = pd.concat(all_rows, ignore_index=True)
-    sweep_all.to_csv(args.out_dir / "per_slice_leiden_sweep.csv", index=False)
+    sweep_name = (
+        "per_slice_leiden_v3_sweep.csv" if args.objective == "niches"
+        else "per_slice_leiden_sweep.csv"
+    )
+    sweep_all.to_csv(args.out_dir / sweep_name, index=False)
 
+    desc = (
+        "Per-slice Leiden hyperparameters maximizing niche count with enrichment r floor"
+        if args.objective == "niches"
+        else "Per-slice Leiden hyperparameters maximizing median obs vs pred enrichment r"
+    )
     config = {
-        "description": "Per-slice Leiden hyperparameters maximizing median obs vs pred enrichment r",
+        "description": desc,
+        "objective": args.objective,
+        "min_r_floor": args.min_r_floor,
         "slices": {
             sl: per_slice_best[sl].get("leiden_kw", cmu.DEFAULT_LEIDEN_KW)
             for sl in args.slices
@@ -247,7 +290,7 @@ def main() -> None:
                 k: per_slice_best[sl][k]
                 for k in (
                     "median_pearson_r", "mean_pearson_r", "n_tests",
-                    "n_valid_corr", "median_n_niches",
+                    "n_valid_corr", "median_n_niches", "min_pearson_r", "composite_score",
                     "resolution", "spatial_weight", "n_pcs",
                 )
                 if k in per_slice_best[sl]
@@ -255,13 +298,16 @@ def main() -> None:
             for sl in args.slices
         },
     }
-    out_path = args.out_dir / "per_slice_leiden.json"
+    default_name = "per_slice_leiden_v3.json" if args.objective == "niches" else "per_slice_leiden.json"
+    out_path = args.out_dir / (args.out_name or default_name)
     out_path.write_text(json.dumps(config, indent=2))
     print(f"\nWrote {out_path}", flush=True)
 
-    medians = [per_slice_best[sl]["median_pearson_r"] for sl in args.slices]
-    valid = [m for m in medians if not pd.isna(m)]
+    medians = [per_slice_best[sl].get("median_pearson_r") for sl in args.slices]
+    niche_med = [per_slice_best[sl].get("median_n_niches") for sl in args.slices]
+    valid = [m for m in medians if m is not None and not pd.isna(m)]
     print(f"Cohort median of per-slice medians: {pd.Series(valid).median():+.3f}", flush=True)
+    print(f"Cohort median niche count: {pd.Series(niche_med).median():.1f}", flush=True)
 
 
 if __name__ == "__main__":

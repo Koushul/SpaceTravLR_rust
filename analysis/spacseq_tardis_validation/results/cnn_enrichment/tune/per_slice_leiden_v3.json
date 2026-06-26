@@ -1,0 +1,48 @@
+{
+  "description": "CNN v3 per-slice Leiden: finer microniches (6-12 niches) with balanced enrichment correlation",
+  "objective": "niches_balanced",
+  "slices": {
+    "subQ-1": {
+      "n_pcs": 10,
+      "n_neighbors": 12,
+      "resolution": 0.85,
+      "spatial_weight": 0.35,
+      "min_cells": 20
+    },
+    "subQ-2": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.95,
+      "spatial_weight": 0.30,
+      "min_cells": 20
+    },
+    "subQ-3": {
+      "n_pcs": 10,
+      "n_neighbors": 12,
+      "resolution": 1.05,
+      "spatial_weight": 0.40,
+      "min_cells": 20
+    },
+    "subQ-4": {
+      "n_pcs": 18,
+      "n_neighbors": 12,
+      "resolution": 1.05,
+      "spatial_weight": 0.40,
+      "min_cells": 20
+    },
+    "Lung_Metastasis_M001": {
+      "n_pcs": 14,
+      "n_neighbors": 12,
+      "resolution": 0.95,
+      "spatial_weight": 0.25,
+      "min_cells": 20
+    }
+  },
+  "summary": {
+    "subQ-1": {"median_n_niches": 8.0, "median_pearson_r": 0.132},
+    "subQ-2": {"median_n_niches": 9.0, "median_pearson_r": 0.413},
+    "subQ-3": {"median_n_niches": 9.0, "median_pearson_r": 0.282},
+    "subQ-4": {"median_n_niches": 11.5, "median_pearson_r": 0.377},
+    "Lung_Metastasis_M001": {"median_n_niches": 6.0, "median_pearson_r": -0.568}
+  }
+}

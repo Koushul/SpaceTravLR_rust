@@ -381,8 +381,8 @@ def main() -> None:
     ap.add_argument(
         "--per-slice-leiden",
         type=Path,
-        default=cmu.PER_SLICE_LEIDEN_PATH,
-        help="JSON with per-slice Leiden params (used when file exists)",
+        default=None,
+        help="JSON with per-slice Leiden params (default: tag-specific path if exists)",
     )
     ap.add_argument("--no-per-slice-leiden", action="store_true")
     ap.add_argument("--min-ntc", type=int, default=2, help="Min NTC tumor cells per niche (obs + pred)")
@@ -400,9 +400,10 @@ def main() -> None:
         leiden_kw["n_pcs"] = args.n_pcs
 
     per_slice_leiden = None
-    if not args.no_per_slice_leiden and args.per_slice_leiden.exists():
-        per_slice_leiden = cmu.load_per_slice_leiden_config(args.per_slice_leiden)
-        print(f"Using per-slice Leiden config: {args.per_slice_leiden} ({len(per_slice_leiden)} slices)")
+    leiden_path = args.per_slice_leiden or cmu.leiden_config_path_for_tag(args.tag)
+    if not args.no_per_slice_leiden and leiden_path.exists():
+        per_slice_leiden = cmu.load_per_slice_leiden_config(leiden_path)
+        print(f"Using per-slice Leiden config: {leiden_path} ({len(per_slice_leiden)} slices)")
 
     out_dir = ROOT / "results" / "cnn_enrichment"
     fig_dir = args.fig_dir

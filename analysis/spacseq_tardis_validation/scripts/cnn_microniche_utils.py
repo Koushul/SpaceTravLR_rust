@@ -222,6 +222,16 @@ DEFAULT_LEIDEN_KW = {
 }
 
 PER_SLICE_LEIDEN_PATH = Path(__file__).resolve().parent.parent / "results/cnn_enrichment/tune/per_slice_leiden.json"
+PER_SLICE_LEIDEN_V3_PATH = Path(__file__).resolve().parent.parent / "results/cnn_enrichment/tune/per_slice_leiden_v3.json"
+
+TAG_LEIDEN_PATHS = {
+    "cnn_v2": PER_SLICE_LEIDEN_PATH,
+    "cnn_v3": PER_SLICE_LEIDEN_V3_PATH,
+}
+
+
+def leiden_config_path_for_tag(tag: str) -> Path:
+    return TAG_LEIDEN_PATHS.get(tag, PER_SLICE_LEIDEN_PATH)
 
 
 def load_per_slice_leiden_config(path: Path | None = None) -> dict[str, dict]:
