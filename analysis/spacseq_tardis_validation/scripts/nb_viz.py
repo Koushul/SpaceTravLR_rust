@@ -1167,21 +1167,48 @@ def plot_pathway_distinctness_bars(
     return fig, ax
 
 
+def _pathway_concordance_summary(concord_df: pd.DataFrame, *, min_niches: int = 4) -> dict:
+    df = concord_df.dropna(subset=["pearson_r"]).copy()
+    if min_niches > 0:
+        df = df[df["n_niches"] >= min_niches]
+    exp = df[df["expected_sign"].notna()] if "expected_sign" in df.columns else df.iloc[0:0]
+    out = {
+        "median_r": float(df["pearson_r"].median()) if not df.empty else float("nan"),
+        "n_tests": int(len(df)),
+    }
+    if not exp.empty:
+        out["median_r_expected"] = float(exp["pearson_r"].median())
+        slice_avg = exp.groupby(["perturbation", "pathway"], observed=True)["pearson_r"].mean()
+        out["median_r_slice_avg_expected"] = float(slice_avg.median())
+        if "r_sign_match" in exp.columns and exp["r_sign_match"].notna().any():
+            out["frac_r_sign_match"] = float(exp["r_sign_match"].mean())
+    if "or_vs_obs_pathway_r" in df.columns and df["or_vs_obs_pathway_r"].notna().any():
+        out["median_or_vs_obs"] = float(df["or_vs_obs_pathway_r"].median())
+    return out
+
+
 def plot_pathway_obs_pred_concordance(
     concord_df: pd.DataFrame,
     delta_df: pd.DataFrame | None = None,
     *,
     tag: str = "cnn_v2",
     expected_only: bool = False,
+    min_niches: int = 4,
     figsize: tuple[float, float] = (7, 6),
 ) -> tuple[plt.Figure, plt.Axes]:
     """Scatter of niche-level observed vs predicted pathway Δ."""
     fig, ax = plt.subplots(figsize=figsize)
+    summary = _pathway_concordance_summary(concord_df, min_niches=min_niches)
     if delta_df is not None and not delta_df.empty:
         show = delta_df.dropna(subset=["obs_pathway_delta", "pred_pathway_delta"]).copy()
         if expected_only and "expected_sign" in concord_df.columns:
             keys = concord_df.dropna(subset=["expected_sign"])[["slice", "perturbation", "pathway"]]
             show = show.merge(keys, on=["slice", "perturbation", "pathway"], how="inner")
+        if min_niches > 0 and not concord_df.empty:
+            valid = concord_df.loc[
+                concord_df["n_niches"] >= min_niches, ["slice", "perturbation", "pathway"]
+            ]
+            show = show.merge(valid, on=["slice", "perturbation", "pathway"], how="inner")
         if show.empty:
             ax.text(0.5, 0.5, "No niche-level pathway deltas", ha="center", va="center", transform=ax.transAxes)
             ax.axis("off")
@@ -1192,12 +1219,17 @@ def plot_pathway_obs_pred_concordance(
         )
         lim = max(float(np.nanmax(np.abs(show[["obs_pathway_delta", "pred_pathway_delta"]].values))), 0.05)
         ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.7, alpha=0.5)
-        med_r = float(concord_df["pearson_r"].median()) if concord_df["pearson_r"].notna().any() else float("nan")
+        med_r = summary.get("median_r_slice_avg_expected", summary["median_r"])
+        sign_txt = ""
+        if "frac_r_sign_match" in summary:
+            sign_txt = f"; {summary['frac_r_sign_match']:.0%} expected r-sign-match"
         ax.set_xlabel("SpaceTravLR predicted pathway Δ per niche")
         ax.set_ylabel("Observed SPAC-seq pathway Δ per niche (sgP − NTC)")
+        filt = "expected pairs; " if expected_only else ""
         ax.set_title(
             f"Niche-level pathway concordance ({tag})\n"
-            f"{len(show)} niche×pathway points; median test r={med_r:+.2f}",
+            f"{filt}≥{min_niches} niches; {len(show)} points; "
+            f"median slice-avg r={med_r:+.2f}{sign_txt}",
             fontweight="bold",
         )
         fig.tight_layout()
@@ -1295,8 +1327,14 @@ def plot_pathway_microniche_heatmap(
         title_extra = f"mean across {int(df['slice'].nunique())} slices"
     else:
         title_extra = "per slice"
+    summary = _pathway_concordance_summary(concord_df, min_niches=min_niches)
+    med_slice = summary.get("median_r_slice_avg_expected", summary["median_r"])
+    sign_txt = ""
+    if "frac_r_sign_match" in summary:
+        sign_txt = f"; {summary['frac_r_sign_match']:.0%} r-sign-match"
     ax.set_title(
-        f"Pathway–microniche concordance ({tag}; {title_extra})",
+        f"Pathway–microniche concordance ({tag}; {title_extra})\n"
+        f"expected pairs, ≥{min_niches} niches; median slice-avg r={med_slice:+.2f}{sign_txt}",
         fontweight="bold",
     )
     ax.set_xlabel("Perturbation")
@@ -1319,8 +1357,9 @@ def plot_pathway_enrichment_tie(
         return fig, np.array([[ax]])
 
     ranked = (
-        concord_df.dropna(subset=["or_vs_ntc_pathway_r"])
-        .assign(abs_r=lambda d: d["or_vs_ntc_pathway_r"].abs())
+        concord_df.dropna(subset=["or_vs_obs_pathway_r"])
+        .loc[lambda d: d["n_niches"] >= 4]
+        .assign(abs_r=lambda d: d["or_vs_obs_pathway_r"].abs())
         .sort_values("abs_r", ascending=False)
         .head(top_n)
     )
@@ -1339,22 +1378,23 @@ def plot_pathway_enrichment_tie(
             ax.axis("off")
             continue
         ax.scatter(
-            sub["ntc_pathway_score"], sub["obs_log2_enrichment"],
+            sub["obs_pathway_delta"], sub["obs_log2_enrichment"],
             s=40, c="#1d4ed8", alpha=0.8, edgecolors="white", linewidths=0.3,
         )
         ax.axhline(0, color="k", lw=0.4, alpha=0.4)
-        r = row.get("or_vs_ntc_pathway_r", float("nan"))
+        ax.axvline(0, color="k", lw=0.4, alpha=0.4)
+        r = row.get("or_vs_obs_pathway_r", float("nan"))
         ax.set_title(
             f"{row.slice} sg{row.perturbation}\n{str(row.pathway)[:24]}  r={r:+.2f}",
             fontsize=8,
         )
-        ax.set_xlabel("NTC pathway score", fontsize=7)
+        ax.set_xlabel("Obs pathway Δ", fontsize=7)
         ax.set_ylabel("Obs log₂ OR", fontsize=7)
 
     for ax in axes.ravel()[n:]:
         ax.axis("off")
     fig.suptitle(
-        f"Pathway–microniche tie: sgP enrichment vs baseline pathway ({tag})",
+        f"Pathway–enrichment tie: obs pathway Δ vs sgP log₂ OR ({tag})",
         fontweight="bold", y=1.02,
     )
     fig.tight_layout()
@@ -1375,7 +1415,14 @@ def plot_pathway_niche_facets(
         ax.axis("off")
         return fig, np.array([[ax]])
 
-    ranked = concord_df.dropna(subset=["pearson_r"]).sort_values("pearson_r", ascending=False).head(top_n)
+    pool = concord_df.dropna(subset=["pearson_r"]).copy()
+    pool = pool[pool["n_niches"] >= 4]
+    if "expected_sign" in pool.columns:
+        exp = pool[pool["expected_sign"].notna()].sort_values("pearson_r", ascending=False)
+        other = pool[pool["expected_sign"].isna()].sort_values("pearson_r", ascending=False)
+        ranked = pd.concat([exp.head(top_n), other.head(max(0, top_n - len(exp)))], ignore_index=True).head(top_n)
+    else:
+        ranked = pool.sort_values("pearson_r", ascending=False).head(top_n)
     ncol = min(3, top_n)
     nrow = int(np.ceil(top_n / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(3.5 * ncol, 3.2 * nrow), squeeze=False)
