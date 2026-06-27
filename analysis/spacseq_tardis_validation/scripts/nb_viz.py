@@ -1327,7 +1327,7 @@ def plot_pathway_microniche_heatmap(
         title_extra = f"mean across {int(df['slice'].nunique())} slices"
     else:
         title_extra = "per slice"
-    summary = _pathway_concordance_summary(concord_df, min_niches=min_niches)
+    summary = _pathway_concordance_summary(df, min_niches=0)
     med_slice = summary.get("median_r_slice_avg_expected", summary["median_r"])
     sign_txt = ""
     if "frac_r_sign_match" in summary:

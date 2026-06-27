@@ -489,6 +489,39 @@ def pathway_concordance_stats(delta_df: pd.DataFrame, *, min_niches: int = 4) ->
     return {"n_niches": int(ok.sum()), "pearson_r": float(r), "spearman_r": float(rs), "p_pearson": float(p)}
 
 
+def pathway_concordance_table(delta_df: pd.DataFrame, *, min_niches: int = 4) -> pd.DataFrame:
+    """Rebuild slice×perturbation×pathway concordance rows from niche-level deltas."""
+    if delta_df.empty:
+        return pd.DataFrame()
+    rows: list[dict] = []
+    for (sl, pert, pathway), g in delta_df.groupby(["slice", "perturbation", "pathway"], observed=True):
+        stats = pathway_concordance_stats(g, min_niches=min_niches)
+        tie = pathway_enrichment_tie_stats(g)
+        exp_sign = PERT_PATHWAY_EXPECTED_SIGN.get((pert, pathway))
+        bulk_obs = float(g["obs_pathway_delta"].mean())
+        bulk_pred = float(g["pred_pathway_delta"].mean())
+        pr = stats.get("pearson_r", float("nan"))
+        sign_match = None
+        r_sign_match = None
+        if exp_sign is not None and np.isfinite(bulk_obs) and np.isfinite(bulk_pred):
+            sign_match = bool(np.sign(bulk_obs) == exp_sign and np.sign(bulk_pred) == exp_sign)
+        if exp_sign is not None and np.isfinite(pr):
+            r_sign_match = bool(pr * exp_sign > 0)
+        rows.append({
+            "slice": sl,
+            "perturbation": pert,
+            "pathway": pathway,
+            "expected_sign": exp_sign,
+            "bulk_obs_delta": bulk_obs,
+            "bulk_pred_delta": bulk_pred,
+            "sign_match": sign_match,
+            "r_sign_match": r_sign_match,
+            **stats,
+            **tie,
+        })
+    return pd.DataFrame(rows)
+
+
 def pathway_enrichment_tie_stats(delta_df: pd.DataFrame) -> dict:
     """Correlate niche sgP enrichment with NTC pathway score and obs pathway Δ."""
     out: dict = {}

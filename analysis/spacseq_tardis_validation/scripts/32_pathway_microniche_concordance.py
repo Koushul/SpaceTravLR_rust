@@ -75,6 +75,13 @@ def _plot_all(
     sh.save_figure_png_svg(fig, fig_dir / f"fig33_pathway_microniche_heatmap_by_slice_{tag}.png", dpi=300)
     plt.close(fig)
 
+    concord_n3 = cmu.pathway_concordance_table(delta_df, min_niches=3)
+    fig, _ = nb_viz.plot_pathway_microniche_heatmap(
+        concord_n3, tag=tag, average_slices=True, min_niches=3,
+    )
+    sh.save_figure_png_svg(fig, fig_dir / f"fig36_pathway_microniche_heatmap_min3_{tag}.png", dpi=300)
+    plt.close(fig)
+
     fig, _ = nb_viz.plot_pathway_enrichment_tie(delta_df, concord_df, tag=tag)
     sh.save_figure_png_svg(fig, fig_dir / f"fig34_pathway_enrichment_tie_{tag}.png", dpi=300)
     plt.close(fig)
