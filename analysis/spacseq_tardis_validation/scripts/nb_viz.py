@@ -635,17 +635,39 @@ def plot_microniche_control_comparison(
     return fig, list(axes)
 
 
+def _bootstrap_median_ci(
+    values: np.ndarray,
+    *,
+    n_boot: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    x = np.asarray(values, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) == 0:
+        return float("nan"), float("nan"), float("nan")
+    med = float(np.median(x))
+    if len(x) < 2:
+        return med, med, med
+    rng = np.random.default_rng(seed)
+    boots = np.array([
+        float(np.median(rng.choice(x, size=len(x), replace=True)))
+        for _ in range(n_boot)
+    ])
+    lo, hi = np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return med, float(lo), float(hi)
+
+
 def plot_enrichment_control_bar_jitter(
     corr_by_method: dict[str, pd.DataFrame],
     *,
     methods: list[str] | None = None,
     method_labels: dict[str, str] | None = None,
     tag: str = "cnn_v2",
-    figsize: tuple[float, float] = (7.5, 4.5),
-    bar_color: str = "#1d4ed8",
-    jitter_color: str = "#111827",
+    figsize: tuple[float, float] = (8.0, 5.0),
+    jitter_color: str = "#1f2937",
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Median bar plot with per slice×perturbation jitter points for enrichment controls."""
+    """Box plot with bootstrap median CI error bars and per-test jitter."""
     labels = method_labels or {
         "cnn": "SpaceTravLR\n(CNN β-microniches)",
         "random_niche": "Shuffle niche labels",
@@ -664,7 +686,7 @@ def plot_enrichment_control_bar_jitter(
         "banksy": "#059669",
         "expr_leiden": "#d97706",
     }
-    order = methods or ["cnn", "banksy", "random_sgp", "random_uniform"]
+    order = methods or ["cnn", "banksy", "random_pred", "random_uniform"]
     rows = []
     for method in order:
         df = corr_by_method.get(method)
@@ -682,41 +704,84 @@ def plot_enrichment_control_bar_jitter(
 
     combined = pd.concat(rows, ignore_index=True)
     display_order = [labels.get(m, m) for m in order if m in combined["method_key"].unique()]
+    method_keys = [m for m in order if m in combined["method_key"].unique()]
 
     fig, ax = plt.subplots(figsize=figsize)
     x = np.arange(len(display_order))
-    medians = []
-    for m in display_order:
-        medians.append(float(combined.loc[combined.method == m, "pearson_r"].median()))
-    colors = [palette.get(k, bar_color) for k in order if labels.get(k, k) in display_order]
-    ax.bar(x, medians, width=0.62, color=colors, alpha=0.88, edgecolor="white", linewidth=0.8, zorder=1)
+    box_data = [combined.loc[combined.method == m, "pearson_r"].to_numpy(dtype=float) for m in display_order]
+
+    bp = ax.boxplot(
+        box_data,
+        positions=x,
+        widths=0.48,
+        patch_artist=True,
+        showfliers=False,
+        whis=1.5,
+        medianprops={"color": "white", "linewidth": 2.2, "solid_capstyle": "round"},
+        whiskerprops={"linewidth": 1.2, "color": "#374151"},
+        capprops={"linewidth": 1.2, "color": "#374151"},
+        boxprops={"linewidth": 1.2, "edgecolor": "white"},
+    )
+    for patch, key in zip(bp["boxes"], method_keys):
+        color = palette.get(key, "#93c5fd")
+        patch.set_facecolor(color)
+        patch.set_alpha(0.82)
+        patch.set_edgecolor("white")
 
     rng = np.random.default_rng(42)
     for i, m in enumerate(display_order):
-        vals = combined.loc[combined.method == m, "pearson_r"].to_numpy()
-        jitter = rng.uniform(-0.14, 0.14, size=len(vals))
+        vals = combined.loc[combined.method == m, "pearson_r"].to_numpy(dtype=float)
+        jitter = rng.uniform(-0.11, 0.11, size=len(vals))
         ax.scatter(
-            np.full(len(vals), i) + jitter, vals,
-            s=28, c=jitter_color, alpha=0.55, edgecolors="white", linewidths=0.3, zorder=3,
+            np.full(len(vals), i) + jitter,
+            vals,
+            s=34,
+            c=jitter_color,
+            alpha=0.5,
+            edgecolors="white",
+            linewidths=0.45,
+            zorder=4,
         )
 
-    ax.axhline(0, color="k", lw=0.7, alpha=0.45, zorder=0)
+    for i, (m, vals) in enumerate(zip(display_order, box_data)):
+        med, lo, hi = _bootstrap_median_ci(vals, seed=42 + i)
+        if not np.isfinite(med):
+            continue
+        yerr = np.array([[med - lo], [hi - med]])
+        ax.errorbar(
+            i, med, yerr=yerr, fmt="D", color="#111827", markersize=5.5,
+            markerfacecolor="white", markeredgecolor="#111827", markeredgewidth=1.1,
+            ecolor="#111827", elinewidth=1.4, capsize=4, capthick=1.4, zorder=5,
+        )
+
     ax.set_xticks(x)
     ax.set_xticklabels(display_order)
     ax.set_ylabel("Pearson r (observed vs predicted niche enrichment)")
-    n_tests = int(len(combined))
+    n_per = int(len(box_data[0])) if box_data else 0
     med_cnn = combined.loc[combined.method_key == "cnn", "pearson_r"].median() if "cnn" in combined.method_key.values else float("nan")
     ax.set_title(
         f"Niche enrichment concordance by clustering method ({tag})\n"
-        f"n={n_tests // len(display_order)} slice×perturbation tests per method; "
+        f"box = IQR; diamonds = median ± 95% bootstrap CI; n={n_per} slice×perturbation tests per method; "
         f"SpaceTravLR median r={med_cnn:+.2f}",
         fontweight="bold",
         fontsize=10,
     )
-    ymax = max(float(combined["pearson_r"].max()), max(medians), 0.05)
-    ymin = min(float(combined["pearson_r"].min()), min(medians), -0.05)
-    pad = 0.12 * (ymax - ymin + 1e-6)
+
+    ymax = max(float(combined["pearson_r"].max()), 0.05)
+    ymin = min(float(combined["pearson_r"].min()), -0.05)
+    pad = 0.14 * (ymax - ymin + 1e-6)
     ax.set_ylim(ymin - pad, ymax + pad)
+
+    for i, vals in enumerate(box_data):
+        ax.text(
+            i, ymin - pad * 0.92, f"n={len(vals)}",
+            ha="center", va="top", fontsize=8, color="#4b5563",
+        )
+
+    ax.axhline(0, color="#6b7280", lw=0.8, alpha=0.55, zorder=0)
+    ax.yaxis.grid(True, linestyle=":", alpha=0.45, color="#9ca3af")
+    ax.set_axisbelow(True)
+    sns.despine(ax=ax, top=True, right=True)
     fig.tight_layout()
     return fig, ax
 
