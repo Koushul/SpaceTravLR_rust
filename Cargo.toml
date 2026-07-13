@@ -113,6 +113,10 @@ path = "src/bin/umap_lab.rs"
 required-features = ["umap-lab"]
 
 [[bin]]
+name = "structure_ligands"
+path = "src/bin/structure_ligands.rs"
+
+[[bin]]
 name = "cnn_train_bench"
 path = "src/bin/cnn_train_bench.rs"
 

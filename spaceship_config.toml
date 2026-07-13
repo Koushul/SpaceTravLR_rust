@@ -45,6 +45,16 @@ contact_distance = 30
 # Linear scale on Gaussian weights in received-ligand aggregation
 weighted_ligand_scale_factor = 1.0
 
+# ── Non-spatial tissue-structure ligands (scRNA-seq) ──────────────────────────
+# Learn neighborhood composition from a matched spatial tissue, then infer
+# received ligands for non-spatial query cells. Forces seed-only (no CNN).
+[structure]
+enabled = false
+# reference_path = "tissue_structure_ref.json"
+# reference_adata = "/path/to/matched_spatial.h5ad"
+# reference_cluster_annot = "cell_type"
+# hard_radius = 200.0
+
 [grn]
 # Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
 # network_data_dir = "/path/to/your/data"

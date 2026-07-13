@@ -154,6 +154,8 @@ pub struct SpaceshipConfig {
     #[serde(default)]
     pub spatial: SpatialConfig,
     #[serde(default)]
+    pub structure: StructureConfig,
+    #[serde(default)]
     pub grn: GrnConfig,
     #[serde(default)]
     pub cnn: CnnConfig,
@@ -167,6 +169,27 @@ pub struct SpaceshipConfig {
     pub perturbation: PerturbationConfig,
     #[serde(default)]
     pub model_export: ModelExportConfig,
+}
+
+/// Non-spatial tissue-structure reference for received-ligand inference.
+///
+/// When `enabled` (or a `reference_path` is set), training uses sparse group lasso only
+/// (no CNN) and replaces Gaussian spatial received ligands with type-conditional
+/// expectations learned from a matched spatial tissue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StructureConfig {
+    /// Enable structure-based received ligands (implies seed-only / no CNN).
+    pub enabled: bool,
+    /// Path to a JSON [`crate::structure::TissueStructureRef`] built from a spatial reference.
+    pub reference_path: Option<String>,
+    /// Optional spatial `.h5ad` used to build the reference at training start (written to `reference_path`
+    /// when set, otherwise to `{output_dir}/tissue_structure_ref.json`).
+    pub reference_adata: Option<String>,
+    /// obs column for cell types in the reference AnnData (default: `[data].cluster_annot`).
+    pub reference_cluster_annot: Option<String>,
+    /// Hard neighbor-count radius; default = `[spatial].radius`.
+    pub hard_radius: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -586,6 +609,18 @@ impl Default for DataConfig {
             perturb_obs_subset_file: None,
             spatial_species: default_data_spatial_species(),
             spatial_median_nn_target_um: None,
+        }
+    }
+}
+
+impl Default for StructureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reference_path: None,
+            reference_adata: None,
+            reference_cluster_annot: None,
+            hard_radius: None,
         }
     }
 }
@@ -1289,7 +1324,21 @@ impl SpaceshipConfig {
     }
 
     pub fn resolved_cnn_mode(&self) -> CnnTrainingMode {
+        if self.structure_mode_enabled() {
+            return CnnTrainingMode::Seed;
+        }
         self.training.mode.unwrap_or(CnnTrainingMode::Seed)
+    }
+
+    /// Structure-based non-spatial ligands: explicit flag or any reference path/adata.
+    pub fn structure_mode_enabled(&self) -> bool {
+        self.structure.enabled
+            || self.structure.reference_path.as_ref().is_some_and(|p| !p.trim().is_empty())
+            || self
+                .structure
+                .reference_adata
+                .as_ref()
+                .is_some_and(|p| !p.trim().is_empty())
     }
 
     pub fn full_cnn(&self) -> bool {

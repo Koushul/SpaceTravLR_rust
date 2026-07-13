@@ -15,6 +15,8 @@ For supported platforms, PATH setup, self-updates, and troubleshooting, see **[i
 
 **Documentation:** [koushul.github.io/SpaceTravLR_rust](https://koushul.github.io/SpaceTravLR_rust/) (GitHub Pages, live). Read the Docs target: [spacetravlr-rust.readthedocs.io](https://spacetravlr-rust.readthedocs.io/en/latest/) — requires a [one-time import](docs/install.md#documentation-site) on readthedocs.org ([`.readthedocs.yaml`](.readthedocs.yaml)). Local: `pip install -r docs/requirements.txt && mkdocs serve`.
 
+**Non-spatial / scRNA-seq:** learn tissue neighborhood structure from a matched spatial reference and infer received ligands without coordinates (sparse group lasso only, no CNN). See [`docs/structure_ligands.md`](docs/structure_ligands.md).
+
 ![SpaceTravLR training dashboard UI](data/demo.gif)
 
 ## Tech stack

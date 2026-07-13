@@ -186,6 +186,7 @@ pub use rust_preprocess::{
 #[cfg(feature = "self-update")]
 pub mod self_update;
 pub mod spatial_estimator;
+pub mod structure;
 pub mod verify_bundle;
 #[cfg(feature = "tui")]
 pub mod training_demo;
@@ -210,10 +211,11 @@ pub use betadata::{
 };
 pub use config::{
     CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, PreprocessConfig,
-    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
-    default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
-    mix_execution_random_seed, normalize_ui_path, resolve_malt_label_transfer_py_path,
-    resolve_spaceship_config_toml_path, resolve_training_target_genes,
+    RUN_REPRO_TOML_FILENAME, SpaceshipConfig, StructureConfig, canonical_adata_stem,
+    canonical_training_prep_stem, default_output_dir_for_adata_path, expand_user_path,
+    filter_training_var_names, mix_execution_random_seed, normalize_ui_path,
+    resolve_malt_label_transfer_py_path, resolve_spaceship_config_toml_path,
+    resolve_training_target_genes,
 };
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
@@ -225,7 +227,15 @@ pub use h5ad_peek::print_h5ad_peek;
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
     GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator, gene_performance_feather_path,
-    materialize_canonical_training_adata, read_h5ad_expression_dense_f64, read_h5ad_obs_column_str,
-    read_h5ad_var_names,
+    load_spatial_coords_f64, materialize_canonical_training_adata, read_h5ad_expression_dense_f64,
+    read_h5ad_obs_column_str, read_h5ad_var_names,
+};
+pub use structure::{
+    CellStructureWeights, StructureBuildArgs, TissueStructureRef, abundance_baseline_weight_mass,
+    build_tissue_structure_ref, column_pearson, compute_cell_structure_weights,
+    infer_neighbor_composition, infer_received_ligands_from_structure,
+    infer_received_with_weight_matrix, infer_weight_mass_expression_matched, matrix_error_metrics,
+    mean_composition_cosine, received_from_weight_mass, received_ligands_type_mean_oracle,
+    restrict_structure_to_types, type_mean_expression,
 };
 pub use training_hud::RunConfigSummary;

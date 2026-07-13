@@ -411,7 +411,7 @@ fn normalize_obsm_xy_two_cols(arr: Array2<f64>, n_obs: usize) -> Option<Array2<f
     Some(a)
 }
 
-pub(crate) fn load_spatial_coords_f64<AnB: Backend>(
+pub fn load_spatial_coords_f64<AnB: Backend>(
     adata: &AnnData<AnB>,
 ) -> anyhow::Result<Array2<f64>> {
     const KEYS: [&str; 3] = ["spatial", "X_spatial", "spatial_loc"];
@@ -588,6 +588,18 @@ fn cell_type_label_counts_from_obs(obs_df: &DataFrame) -> Vec<(String, usize)> {
     let mut v: Vec<(String, usize)> = map.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
     v
+}
+
+fn obs_column_as_strings(obs_df: &DataFrame, key: &str) -> anyhow::Result<Vec<String>> {
+    let col = obs_df
+        .column(key)
+        .map_err(|_| anyhow::anyhow!("obs column {:?} missing", key))?;
+    let series = col.as_materialized_series();
+    let mut out = Vec::with_capacity(series.len());
+    for i in 0..series.len() {
+        out.push(obs_series_row_str(series, i)?);
+    }
+    Ok(out)
 }
 
 fn build_cluster_to_cell_type_map(
@@ -2237,6 +2249,10 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub group_reg_vec: Option<Vec<f64>>,
     pub ligand_grid_factor: Option<f64>,
     pub weighted_ligand_scale_factor: f64,
+    /// When set, replace spatial Gaussian received ligands with tissue-structure inference.
+    pub structure_ref: Option<std::sync::Arc<crate::structure::TissueStructureRef>>,
+    /// Per-obs cell-type labels (same length as n_obs / subset) for structure inference.
+    pub structure_cell_types: Option<Vec<String>>,
     /// When set, only these obs rows are read from the backing AnnData (read-only; no disk writes).
     pub obs_row_subset: Option<Arc<[usize]>>,
     pub modulator_scales: Option<Array1<f64>>,
@@ -2444,6 +2460,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             group_reg_vec: None,
             ligand_grid_factor,
             weighted_ligand_scale_factor,
+            structure_ref: None,
+            structure_cell_types: None,
             obs_row_subset,
             modulator_scales: None,
             gene_excluded_tf_modulators_ablation,
@@ -2653,6 +2671,112 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 cluster_annot,
                 clusters.as_ref(),
             )?);
+
+            let structure_mode = spaceship_config.structure_mode_enabled();
+            let structure_cell_types: Option<Arc<Vec<String>>> = if structure_mode {
+                Some(Arc::new(obs_column_as_strings(&obs_df, cluster_annot)?))
+            } else {
+                None
+            };
+            let structure_ref: Option<Arc<crate::structure::TissueStructureRef>> = if structure_mode
+            {
+                let t_st = pipeline_step_begin(&hud, "load/build tissue structure reference");
+                let hard_r = spaceship_config
+                    .structure
+                    .hard_radius
+                    .unwrap_or(radius);
+                let built = if let Some(path) = spaceship_config
+                    .structure
+                    .reference_path
+                    .as_ref()
+                    .map(|p| crate::config::expand_user_path(p))
+                    .filter(|p| !p.trim().is_empty() && Path::new(p).is_file())
+                {
+                    log_line(&hud, format!("structure ref: load {}", path));
+                    crate::structure::TissueStructureRef::load_json(&path)?
+                } else if let Some(ref_adata) = spaceship_config
+                    .structure
+                    .reference_adata
+                    .as_ref()
+                    .map(|p| crate::config::expand_user_path(p))
+                    .filter(|p| !p.trim().is_empty())
+                {
+                    let ref_annot = spaceship_config
+                        .structure
+                        .reference_cluster_annot
+                        .clone()
+                        .unwrap_or_else(|| cluster_annot.to_string());
+                    log_line(
+                        &hud,
+                        format!("structure ref: build from {} (obs.{})", ref_adata, ref_annot),
+                    );
+                    let ref_xy = {
+                        let a = AnnData::<H5>::open(H5::open(&ref_adata)?)?;
+                        load_spatial_coords_f64(&a)?
+                    };
+                    let ref_types = read_h5ad_obs_column_str(Path::new(&ref_adata), &ref_annot)?;
+                    let st = crate::structure::build_tissue_structure_ref(
+                        crate::structure::StructureBuildArgs {
+                            xy: &ref_xy,
+                            cell_types: &ref_types,
+                            radius,
+                            scale_factor: spaceship_config.spatial.weighted_ligand_scale_factor,
+                            hard_radius: Some(hard_r),
+                        },
+                    )?;
+                    let out_path = spaceship_config
+                        .structure
+                        .reference_path
+                        .as_ref()
+                        .map(|p| crate::config::expand_user_path(p))
+                        .filter(|p| !p.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            format!("{training_dir}/tissue_structure_ref.json")
+                        });
+                    st.save_json(&out_path)?;
+                    log_line(&hud, format!("structure ref: wrote {}", out_path));
+                    st
+                } else {
+                    // Self-structure from the training AnnData (coords required once to build ref).
+                    log_line(
+                        &hud,
+                        "structure ref: build from training AnnData spatial coords".to_string(),
+                    );
+                    let ref_xy = load_spatial_coords_f64(setup_adata.as_ref())?;
+                    let ref_xy = if let Some(rows) = obs_row_subset.as_ref() {
+                        ref_xy.select(ndarray::Axis(0), rows)
+                    } else {
+                        ref_xy
+                    };
+                    let labels = structure_cell_types
+                        .as_ref()
+                        .expect("structure_cell_types set in structure mode");
+                    let st = crate::structure::build_tissue_structure_ref(
+                        crate::structure::StructureBuildArgs {
+                            xy: &ref_xy,
+                            cell_types: labels.as_slice(),
+                            radius,
+                            scale_factor: spaceship_config.spatial.weighted_ligand_scale_factor,
+                            hard_radius: Some(hard_r),
+                        },
+                    )?;
+                    let out_path = format!("{training_dir}/tissue_structure_ref.json");
+                    st.save_json(&out_path)?;
+                    log_line(&hud, format!("structure ref: wrote {}", out_path));
+                    st
+                };
+                pipeline_step_end(&hud, "load/build tissue structure reference", t_st);
+                log_line(
+                    &hud,
+                    format!(
+                        "structure mode: {} types, seed-only (no CNN)",
+                        built.cell_types.len()
+                    ),
+                );
+                Some(Arc::new(built))
+            } else {
+                None
+            };
             pipeline_step_end(&hud, "build cluster labels & cell-type map", t_cl);
             if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
                 log_line(
@@ -2799,12 +2923,23 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             };
 
             let t_xy = pipeline_step_begin(&hud, "load spatial coordinates (obsm)");
-            let xy_full = load_spatial_coords_f64(setup_adata.as_ref())?;
-            let xy: Arc<Array2<f64>> = Arc::new(if let Some(rows) = obs_row_subset.as_ref() {
-                xy_full.select(ndarray::Axis(0), rows)
+            let xy: Arc<Array2<f64>> = if structure_mode && structure_ref.is_some() {
+                // CNN is skipped in structure mode; dummy coords keep spatial caches shape-valid.
+                let n = obs_names.len();
+                log_line(
+                    &hud,
+                    "structure mode: skipping spatial Gaussian ligands (using tissue structure ref)"
+                        .to_string(),
+                );
+                Arc::new(Array2::<f64>::zeros((n, 2)))
             } else {
-                xy_full
-            });
+                let xy_full = load_spatial_coords_f64(setup_adata.as_ref())?;
+                Arc::new(if let Some(rows) = obs_row_subset.as_ref() {
+                    xy_full.select(ndarray::Axis(0), rows)
+                } else {
+                    xy_full
+                })
+            };
             pipeline_step_end(&hud, "load spatial coordinates (obsm)", t_xy);
 
             if write_minimal_repro_h5ad && obs_row_subset.is_some() {
@@ -2996,7 +3131,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let extra_lr_arc_w = extra_lr_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
-                let cnn_mode_w = cnn_training_mode;
+                let cnn_mode_w = if structure_mode {
+                    CnnTrainingMode::Seed
+                } else {
+                    cnn_training_mode
+                };
+                let structure_ref_w = structure_ref.clone();
+                let structure_cell_types_w = structure_cell_types.clone();
                 let model_export_w = model_export.clone();
                 let mean_r2_accum_w = mean_r2_accum.clone();
                 let verbose_w = verbose;
@@ -3158,7 +3299,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 extra_lr_arc_w.as_slice(),
                                 extra_mod_arc_w.as_slice(),
                             )
-                            .map(Box::new)
+                            .map(|mut est| {
+                                est.structure_ref = structure_ref_w.clone();
+                                est.structure_cell_types =
+                                    structure_cell_types_w.as_ref().map(|v| v.as_ref().clone());
+                                Box::new(est)
+                            })
                             {
                                 Ok(est) => est,
                                 Err(e) => {
@@ -3962,36 +4108,54 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             }
         }
 
-        // Compute spatially-weighted received ligands via Gaussian kernel
+        // Compute received ligands: spatial Gaussian, or tissue-structure transfer.
         let mut received_map: HashMap<String, Array1<f64>> = HashMap::new();
         if !unique_lig_genes.is_empty() {
-            let n = xy.nrows();
+            let n = expr_matrix.nrows();
             let mut lig_expr = Array2::<f64>::zeros((n, unique_lig_genes.len()));
             for (k, lig) in unique_lig_genes.iter().enumerate() {
                 let idx = gene_to_idx[lig];
                 lig_expr.column_mut(k).assign(&expr_matrix.column(idx));
             }
-            let grid_factor = self.ligand_grid_factor.or({
-                if n > LARGE_DATASET_GRID_AUTO_CELLS {
-                    Some(DEFAULT_LIGAND_GRID_FACTOR)
-                } else {
-                    None
+            let received = if let (Some(st), Some(labels)) =
+                (self.structure_ref.as_ref(), self.structure_cell_types.as_ref())
+            {
+                if labels.len() != n {
+                    anyhow::bail!(
+                        "structure_cell_types length {} != n_obs {}",
+                        labels.len(),
+                        n
+                    );
                 }
-            });
-            let received = match grid_factor {
-                Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid(
-                    xy,
+                let means = crate::structure::type_mean_expression(
                     &lig_expr,
-                    self.radius,
-                    self.weighted_ligand_scale_factor,
-                    gf,
-                ),
-                _ => calculate_weighted_ligands(
-                    xy,
-                    &lig_expr,
-                    self.radius,
-                    self.weighted_ligand_scale_factor,
-                ),
+                    labels,
+                    &st.cell_types,
+                )?;
+                crate::structure::infer_received_ligands_from_structure(st, labels, &means)?
+            } else {
+                let grid_factor = self.ligand_grid_factor.or({
+                    if n > LARGE_DATASET_GRID_AUTO_CELLS {
+                        Some(DEFAULT_LIGAND_GRID_FACTOR)
+                    } else {
+                        None
+                    }
+                });
+                match grid_factor {
+                    Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid(
+                        xy,
+                        &lig_expr,
+                        self.radius,
+                        self.weighted_ligand_scale_factor,
+                        gf,
+                    ),
+                    _ => calculate_weighted_ligands(
+                        xy,
+                        &lig_expr,
+                        self.radius,
+                        self.weighted_ligand_scale_factor,
+                    ),
+                }
             };
             for (k, lig) in unique_lig_genes.iter().enumerate() {
                 received_map.insert(lig.clone(), received.column(k).to_owned());
