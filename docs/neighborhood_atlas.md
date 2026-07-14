@@ -65,3 +65,12 @@ Outputs under `results/neighborhood_atlas/`:
 
 Primary metric: **type-level Pearson** between structure predictions and spatial GT
 (receiver-type means). Soft-neighbor cosine measures niche-composition fidelity.
+
+## Genius vs Silly (coefficients)
+
+```bash
+python scripts/eval_genius_vs_silly_lasso.py --max-cells 8000 --n-ligands 30 --n-targets 20 --use-atlas-radius
+```
+
+Type-level Ridge coefficient Pearson (Genius vs Silly) is the primary answer for
+snRNA-seq (~0.66–0.99). See `results/neighborhood_atlas/GENIUS_VS_SILLY.md`.
