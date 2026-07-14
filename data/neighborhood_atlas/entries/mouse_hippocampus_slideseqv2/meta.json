@@ -1,0 +1,114 @@
+{
+  "dataset_id": "mouse_hippocampus_slideseqv2",
+  "source_path": "/ix1/ylee/kor11/tools/spatial-signatures/data/anndata/slideseqv2.h5ad",
+  "technology": "SlideSeqV2",
+  "organ": "hippocampus",
+  "species": "mouse",
+  "obs_column": "cluster",
+  "mapping": {
+    "CA1_CA2_CA3_Subiculum": "Neuron_CA",
+    "DentatePyramids": "Neuron_Dentate",
+    "Interneurons": "Neuron_Interneuron",
+    "Subiculum_Entorhinal_cl2": "Neuron_Entorhinal",
+    "Subiculum_Entorhinal_cl3": "Neuron_Entorhinal",
+    "Neurogenesis": "Neuron_Neurogenesis",
+    "Astrocytes": "Astrocyte",
+    "Oligodendrocytes": "Oligodendrocyte",
+    "Polydendrocytes": "OPC",
+    "Endothelial_Stalk": "Endothelial",
+    "Endothelial_Tip": "Endothelial",
+    "Microglia": "Microglia",
+    "Mural": "Stromal",
+    "Ependymal": "Ependymal"
+  },
+  "mapping_usage_counts": {
+    "DentatePyramids": {
+      "Neuron_Dentate": 1897
+    },
+    "CA1_CA2_CA3_Subiculum": {
+      "Neuron_CA": 2202
+    },
+    "Ependymal": {
+      "Ependymal": 233
+    },
+    "Subiculum_Entorhinal_cl3": {
+      "Neuron_Entorhinal": 586
+    },
+    "Endothelial_Tip": {
+      "Endothelial": 371
+    },
+    "Oligodendrocytes": {
+      "Oligodendrocyte": 1034
+    },
+    "Interneurons": {
+      "Neuron_Interneuron": 1054
+    },
+    "Astrocytes": {
+      "Astrocyte": 1879
+    },
+    "Neurogenesis": {
+      "Neuron_Neurogenesis": 269
+    },
+    "Subiculum_Entorhinal_cl2": {
+      "Neuron_Entorhinal": 815
+    },
+    "Endothelial_Stalk": {
+      "Endothelial": 578
+    },
+    "Microglia": {
+      "Microglia": 372
+    },
+    "Polydendrocytes": {
+      "OPC": 416
+    },
+    "Mural": {
+      "Stromal": 294
+    }
+  },
+  "notes": "Classic hippocampus Slide-seqV2 (RCTD-style cluster labels).",
+  "n_source_cells": 41786,
+  "n_ref_cells": 12000,
+  "subsampled": true,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 555.6025646502329,
+  "radius_k_nn": 12.0,
+  "median_nn": 46.300213720852746,
+  "cell_types": [
+    "Astrocyte",
+    "Endothelial",
+    "Ependymal",
+    "Microglia",
+    "Neuron_CA",
+    "Neuron_Dentate",
+    "Neuron_Entorhinal",
+    "Neuron_Interneuron",
+    "Neuron_Neurogenesis",
+    "OPC",
+    "Oligodendrocyte",
+    "Stromal"
+  ],
+  "lineages": [
+    "Endothelial",
+    "Ependymal",
+    "Glia",
+    "Myeloid",
+    "Neuron",
+    "Stromal"
+  ],
+  "ref_type_counts": {
+    "Astrocyte": 1879,
+    "Endothelial": 949,
+    "Ependymal": 233,
+    "Microglia": 372,
+    "Neuron_CA": 2202,
+    "Neuron_Dentate": 1897,
+    "Neuron_Entorhinal": 1401,
+    "Neuron_Interneuron": 1054,
+    "Neuron_Neurogenesis": 269,
+    "OPC": 416,
+    "Oligodendrocyte": 1034,
+    "Stromal": 294
+  },
+  "elapsed_sec": 22.4
+}

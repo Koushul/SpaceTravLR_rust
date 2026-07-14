@@ -1,0 +1,8 @@
+a,b,cosine,n_shared,shared
+mouse_ln_slideseqv2,human_tonsil_slidetags,0.970224315024357,5,"B_naive,CD4_T,CD8_T,DC,Tfh"
+human_tonsil_slidetags,human_tonsil_slidetags_fine,0.9969082499981312,11,"B_GC,B_memory,B_naive,CD4_T,CD8_T,DC,FDC,Myeloid,NK,Plasma,Tfh"
+human_tonsil_slidetags,human_melanoma_slidetags,0.4316002251219034,4,"CD4_T,CD8_T,Myeloid,Plasma"
+mouse_brain_slideseqv2,mouse_hippocampus_slideseqv2,0.9713531545362787,2,"Endothelial,Oligodendrocyte"
+mouse_brain_slideseqv2,mouse_brain_slideseqv2_regions,0.6715550886870357,4,"Choroid_Plexus,Endothelial,Neuron,Oligodendrocyte"
+mouse_hippocampus_slideseqv2,mouse_brain_slideseqv2_regions,0.6727838174055378,6,"Astrocyte,Endothelial,Microglia,Neuron_CA,Neuron_Dentate,Oligodendrocyte"
+mouse_kidney_visiumhd,human_melanoma_slidetags,1.0,1,Myeloid

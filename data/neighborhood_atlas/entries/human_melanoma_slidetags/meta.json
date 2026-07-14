@@ -1,0 +1,79 @@
+{
+  "dataset_id": "human_melanoma_slidetags",
+  "source_path": "/ix1/ylee/kor11/tools/SpaceTravLR/data/Slidetags_human_melanoma.h5ad",
+  "technology": "SlideTags",
+  "organ": "tumor_melanoma",
+  "species": "human",
+  "obs_column": "cell_type",
+  "mapping": {
+    "CD8+ T": "CD8_T",
+    "CD4+ T": "CD4_T",
+    "Treg": "Treg",
+    "Plasma/B": "Plasma",
+    "Mono-mac": "Myeloid",
+    "Tumor 1": "Tumor",
+    "Tumor 2": "Tumor",
+    "Other": "Other"
+  },
+  "mapping_usage_counts": {
+    "CD8+ T": {
+      "CD8_T": 2119
+    },
+    "Tumor 1": {
+      "Tumor": 812
+    },
+    "Treg": {
+      "Treg": 123
+    },
+    "CD4+ T": {
+      "CD4_T": 198
+    },
+    "Mono-mac": {
+      "Myeloid": 692
+    },
+    "Plasma/B": {
+      "Plasma": 654
+    },
+    "Other": {
+      "Other": 119
+    },
+    "Tumor 2": {
+      "Tumor": 87
+    }
+  },
+  "notes": "",
+  "n_source_cells": 4804,
+  "n_ref_cells": 4804,
+  "subsampled": false,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 195.41541491434694,
+  "radius_k_nn": 12.0,
+  "median_nn": 16.28461790952891,
+  "cell_types": [
+    "CD4_T",
+    "CD8_T",
+    "Myeloid",
+    "Other",
+    "Plasma",
+    "Treg",
+    "Tumor"
+  ],
+  "lineages": [
+    "Myeloid",
+    "Other",
+    "Plasma",
+    "T",
+    "Tumor"
+  ],
+  "ref_type_counts": {
+    "CD4_T": 198,
+    "CD8_T": 2119,
+    "Myeloid": 692,
+    "Other": 119,
+    "Plasma": 654,
+    "Treg": 123,
+    "Tumor": 899
+  },
+  "elapsed_sec": 2.8
+}

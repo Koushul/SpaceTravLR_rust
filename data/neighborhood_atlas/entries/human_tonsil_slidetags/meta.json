@@ -1,0 +1,109 @@
+{
+  "dataset_id": "human_tonsil_slidetags",
+  "source_path": "/ix1/ylee/kor11/tools/SpaceTravLR/data/Slidetags_human_tonsil.h5ad",
+  "technology": "SlideTags",
+  "organ": "tonsil",
+  "species": "human",
+  "obs_column": "cell_type",
+  "mapping": {
+    "B_germinal_center": "B_GC",
+    "B_naive": "B_naive",
+    "B_memory": "B_memory",
+    "T_CD4": "CD4_T",
+    "T_follicular_helper": "Tfh",
+    "plasma": "Plasma",
+    "FDC": "FDC",
+    "T_CD8": "CD8_T",
+    "NK": "NK",
+    "mDC": "DC",
+    "pDC": "DC",
+    "myeloid": "Myeloid",
+    "T_double_neg": "CD4_T"
+  },
+  "mapping_usage_counts": {
+    "T_CD4": {
+      "CD4_T": 779
+    },
+    "plasma": {
+      "Plasma": 262
+    },
+    "B_germinal_center": {
+      "B_GC": 1848
+    },
+    "B_naive": {
+      "B_naive": 1067
+    },
+    "B_memory": {
+      "B_memory": 516
+    },
+    "mDC": {
+      "DC": 137
+    },
+    "T_follicular_helper": {
+      "Tfh": 294
+    },
+    "NK": {
+      "NK": 170
+    },
+    "FDC": {
+      "FDC": 255
+    },
+    "T_CD8": {
+      "CD8_T": 238
+    },
+    "pDC": {
+      "DC": 64
+    },
+    "myeloid": {
+      "Myeloid": 102
+    },
+    "T_double_neg": {
+      "CD4_T": 46
+    }
+  },
+  "notes": "",
+  "n_source_cells": 5778,
+  "n_ref_cells": 5778,
+  "subsampled": false,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 213.62723064982163,
+  "radius_k_nn": 12.0,
+  "median_nn": 17.80226922081847,
+  "cell_types": [
+    "B_GC",
+    "B_memory",
+    "B_naive",
+    "CD4_T",
+    "CD8_T",
+    "DC",
+    "FDC",
+    "Myeloid",
+    "NK",
+    "Plasma",
+    "Tfh"
+  ],
+  "lineages": [
+    "B",
+    "DC",
+    "Myeloid",
+    "NK",
+    "Plasma",
+    "Stromal",
+    "T"
+  ],
+  "ref_type_counts": {
+    "B_GC": 1848,
+    "B_memory": 516,
+    "B_naive": 1067,
+    "CD4_T": 825,
+    "CD8_T": 238,
+    "DC": 201,
+    "FDC": 255,
+    "Myeloid": 102,
+    "NK": 170,
+    "Plasma": 262,
+    "Tfh": 294
+  },
+  "elapsed_sec": 4.9
+}

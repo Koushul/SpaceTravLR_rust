@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "description": "Shared cell-type ontology for neighborhood-grammar atlas entries. Every harmonized label used in structure.npz must appear here.",
+  "labels": {
+    "B": {
+      "lineage": "B",
+      "organ_agnostic": true
+    },
+    "B_naive": {
+      "lineage": "B",
+      "organ_agnostic": true
+    },
+    "B_memory": {
+      "lineage": "B",
+      "organ_agnostic": true
+    },
+    "B_GC": {
+      "lineage": "B",
+      "organ_agnostic": true
+    },
+    "Plasma": {
+      "lineage": "Plasma",
+      "organ_agnostic": true
+    },
+    "CD4_T": {
+      "lineage": "T",
+      "organ_agnostic": true
+    },
+    "CD8_T": {
+      "lineage": "T",
+      "organ_agnostic": true
+    },
+    "Tfh": {
+      "lineage": "T",
+      "organ_agnostic": true
+    },
+    "Treg": {
+      "lineage": "T",
+      "organ_agnostic": true
+    },
+    "T": {
+      "lineage": "T",
+      "organ_agnostic": true
+    },
+    "NK": {
+      "lineage": "NK",
+      "organ_agnostic": true
+    },
+    "DC": {
+      "lineage": "DC",
+      "organ_agnostic": true
+    },
+    "Myeloid": {
+      "lineage": "Myeloid",
+      "organ_agnostic": true
+    },
+    "Macrophage": {
+      "lineage": "Myeloid",
+      "organ_agnostic": true
+    },
+    "Microglia": {
+      "lineage": "Myeloid",
+      "organ_agnostic": true
+    },
+    "Granulocyte": {
+      "lineage": "Granulocyte",
+      "organ_agnostic": true
+    },
+    "FDC": {
+      "lineage": "Stromal",
+      "organ_agnostic": true
+    },
+    "Endothelial": {
+      "lineage": "Endothelial",
+      "organ_agnostic": true
+    },
+    "Stromal": {
+      "lineage": "Stromal",
+      "organ_agnostic": true
+    },
+    "Epithelial": {
+      "lineage": "Epithelial",
+      "organ_agnostic": true
+    },
+    "Neuron": {
+      "lineage": "Neuron",
+      "organ_agnostic": true
+    },
+    "Neuron_CA": {
+      "lineage": "Neuron",
+      "organ_agnostic": false
+    },
+    "Neuron_Dentate": {
+      "lineage": "Neuron",
+      "organ_agnostic": false
+    },
+    "Neuron_Interneuron": {
+      "lineage": "Neuron",
+      "organ_agnostic": false
+    },
+    "Neuron_Entorhinal": {
+      "lineage": "Neuron",
+      "organ_agnostic": false
+    },
+    "Neuron_Neurogenesis": {
+      "lineage": "Neuron",
+      "organ_agnostic": false
+    },
+    "Astrocyte": {
+      "lineage": "Glia",
+      "organ_agnostic": true
+    },
+    "Oligodendrocyte": {
+      "lineage": "Glia",
+      "organ_agnostic": true
+    },
+    "OPC": {
+      "lineage": "Glia",
+      "organ_agnostic": true
+    },
+    "Ependymal": {
+      "lineage": "Ependymal",
+      "organ_agnostic": true
+    },
+    "Choroid_Plexus": {
+      "lineage": "Ependymal",
+      "organ_agnostic": true
+    },
+    "Tumor": {
+      "lineage": "Tumor",
+      "organ_agnostic": true
+    },
+    "Other": {
+      "lineage": "Other",
+      "organ_agnostic": true
+    }
+  },
+  "lineages": [
+    "B",
+    "DC",
+    "Endothelial",
+    "Ependymal",
+    "Epithelial",
+    "Glia",
+    "Granulocyte",
+    "Myeloid",
+    "NK",
+    "Neuron",
+    "Other",
+    "Plasma",
+    "Stromal",
+    "T",
+    "Tumor"
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "dataset_id": "mouse_kidney_visiumhd",
+  "source_path": "/ix1/ylee/kor11/djishnu_kor11/training_data_2025/mouse_kidney_visiumHD.h5ad",
+  "technology": "VisiumHD",
+  "organ": "kidney",
+  "species": "mouse",
+  "obs_column": "cell_type",
+  "mapping": {
+    "Epithelial": "Epithelial",
+    "Mesenchymal_Stromal": "Stromal",
+    "Endothelial": "Endothelial",
+    "Myeloid": "Myeloid",
+    "T": "T",
+    "NK": "NK",
+    "B": "B"
+  },
+  "mapping_usage_counts": {
+    "Epithelial": {
+      "Epithelial": 5437
+    },
+    "Mesenchymal_Stromal": {
+      "Stromal": 1723
+    },
+    "Myeloid": {
+      "Myeloid": 537
+    },
+    "Endothelial": {
+      "Endothelial": 1369
+    },
+    "T": {
+      "T": 381
+    },
+    "NK": {
+      "NK": 327
+    },
+    "B": {
+      "B": 226
+    }
+  },
+  "notes": "",
+  "n_source_cells": 10000,
+  "n_ref_cells": 10000,
+  "subsampled": false,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 269.28311535955083,
+  "radius_k_nn": 12.0,
+  "median_nn": 22.4402596132959,
+  "cell_types": [
+    "B",
+    "Endothelial",
+    "Epithelial",
+    "Myeloid",
+    "NK",
+    "Stromal",
+    "T"
+  ],
+  "lineages": [
+    "B",
+    "Endothelial",
+    "Epithelial",
+    "Myeloid",
+    "NK",
+    "Stromal",
+    "T"
+  ],
+  "ref_type_counts": {
+    "B": 226,
+    "Endothelial": 1369,
+    "Epithelial": 5437,
+    "Myeloid": 537,
+    "NK": 327,
+    "Stromal": 1723,
+    "T": 381
+  },
+  "elapsed_sec": 14.4
+}

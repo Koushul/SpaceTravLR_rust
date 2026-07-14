@@ -1,0 +1,117 @@
+{
+  "dataset_id": "mouse_brain_slideseqv2_regions",
+  "source_path": "/ix1/ylee/kor11/djishnu_kor11/lasso_runs/oxidized/brain_train/slideseqv2_brain.h5ad",
+  "technology": "SlideSeqV2",
+  "organ": "brain",
+  "species": "mouse",
+  "obs_column": "cell_type",
+  "mapping": {
+    "Oligodendrocyte": "Oligodendrocyte",
+    "Astrocyte": "Astrocyte",
+    "Microglia": "Microglia",
+    "Endothelial": "Endothelial",
+    "Vascular": "Endothelial",
+    "Choroid Plexus": "Choroid_Plexus",
+    "Neuron": "Neuron",
+    "Allocortex": "Neuron",
+    "CA1/2/3": "Neuron_CA",
+    "Dentate gyrus": "Neuron_Dentate",
+    "Neocortex": "Neuron",
+    "Hippocampal region": "Neuron",
+    "Thalamus LD": "Neuron",
+    "Thalamus LP": "Neuron",
+    "Hypothalamus": "Neuron",
+    "Striatum": "Neuron",
+    "Fiber tracts": "Oligodendrocyte"
+  },
+  "mapping_usage_counts": {
+    "Oligodendrocyte": {
+      "Oligodendrocyte": 1504
+    },
+    "Allocortex": {
+      "Neuron": 6307
+    },
+    "CA1/2/3": {
+      "Neuron_CA": 392
+    },
+    "Hypothalamus": {
+      "Neuron": 75
+    },
+    "Neocortex": {
+      "Neuron": 346
+    },
+    "Hippocampal region": {
+      "Neuron": 177
+    },
+    "Vascular": {
+      "Endothelial": 87
+    },
+    "Endothelial": {
+      "Endothelial": 88
+    },
+    "Dentate gyrus": {
+      "Neuron_Dentate": 40
+    },
+    "Neuron": {
+      "Neuron": 294
+    },
+    "Thalamus LD": {
+      "Neuron": 1299
+    },
+    "Thalamus LP": {
+      "Neuron": 94
+    },
+    "Microglia": {
+      "Microglia": 213
+    },
+    "Choroid Plexus": {
+      "Choroid_Plexus": 58
+    },
+    "Fiber tracts": {
+      "Oligodendrocyte": 26
+    },
+    "Striatum": {
+      "Neuron": 42
+    },
+    "Astrocyte": {
+      "Astrocyte": 958
+    }
+  },
+  "notes": "Regional + glial labels; cortical/thalamic/striatal regions \u2192 Neuron; fiber tracts \u2192 Oligodendrocyte.",
+  "n_source_cells": 44541,
+  "n_ref_cells": 12000,
+  "subsampled": true,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 534.094344931174,
+  "radius_k_nn": 12.0,
+  "median_nn": 44.507862077597835,
+  "cell_types": [
+    "Astrocyte",
+    "Choroid_Plexus",
+    "Endothelial",
+    "Microglia",
+    "Neuron",
+    "Neuron_CA",
+    "Neuron_Dentate",
+    "Oligodendrocyte"
+  ],
+  "lineages": [
+    "Endothelial",
+    "Ependymal",
+    "Glia",
+    "Myeloid",
+    "Neuron"
+  ],
+  "ref_type_counts": {
+    "Astrocyte": 958,
+    "Choroid_Plexus": 58,
+    "Endothelial": 175,
+    "Microglia": 213,
+    "Neuron": 8634,
+    "Neuron_CA": 392,
+    "Neuron_Dentate": 40,
+    "Oligodendrocyte": 1530
+  },
+  "elapsed_sec": 17.62
+}

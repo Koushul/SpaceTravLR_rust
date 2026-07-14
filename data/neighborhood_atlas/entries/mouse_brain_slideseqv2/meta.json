@@ -1,0 +1,56 @@
+{
+  "dataset_id": "mouse_brain_slideseqv2",
+  "source_path": "/ix1/ylee/kor11/djishnu_kor11/training_data_2025/slideseq_brain_processed_v2.h5ad",
+  "technology": "SlideSeqV2",
+  "organ": "brain",
+  "species": "mouse",
+  "obs_column": "cell_type",
+  "mapping": {
+    "Neuron": "Neuron",
+    "Endothelial": "Endothelial",
+    "Oligodendrocyte": "Oligodendrocyte",
+    "Choroid_Plexus": "Choroid_Plexus"
+  },
+  "mapping_usage_counts": {
+    "Neuron": {
+      "Neuron": 4567
+    },
+    "Choroid_Plexus": {
+      "Choroid_Plexus": 1059
+    },
+    "Oligodendrocyte": {
+      "Oligodendrocyte": 3157
+    },
+    "Endothelial": {
+      "Endothelial": 3217
+    }
+  },
+  "notes": "",
+  "n_source_cells": 27359,
+  "n_ref_cells": 12000,
+  "subsampled": true,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 528.7031681387957,
+  "radius_k_nn": 12.0,
+  "median_nn": 44.058597344899646,
+  "cell_types": [
+    "Choroid_Plexus",
+    "Endothelial",
+    "Neuron",
+    "Oligodendrocyte"
+  ],
+  "lineages": [
+    "Endothelial",
+    "Ependymal",
+    "Glia",
+    "Neuron"
+  ],
+  "ref_type_counts": {
+    "Choroid_Plexus": 1059,
+    "Endothelial": 3217,
+    "Neuron": 4567,
+    "Oligodendrocyte": 3157
+  },
+  "elapsed_sec": 23.33
+}

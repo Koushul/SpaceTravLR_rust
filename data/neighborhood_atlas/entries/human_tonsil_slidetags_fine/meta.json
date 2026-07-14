@@ -1,0 +1,136 @@
+{
+  "dataset_id": "human_tonsil_slidetags_fine",
+  "source_path": "/ix1/ylee/kor11/tools/structures/data/h5ad/SlideTags_human_tonsil.h5ad",
+  "technology": "SlideTags",
+  "organ": "tonsil",
+  "species": "human",
+  "obs_column": "cell_type_2",
+  "mapping": {
+    "B_naive": "B_naive",
+    "B_memory": "B_memory",
+    "GC Light Zone": "B_GC",
+    "GC Dark Zone": "B_GC",
+    "GC Intermediate Zone": "B_GC",
+    "plasma": "Plasma",
+    "Naive CD4 T": "CD4_T",
+    "Th1": "CD4_T",
+    "Th2": "CD4_T",
+    "T memory": "CD4_T",
+    "T_follicular_helper": "Tfh",
+    "T_CD8": "CD8_T",
+    "Treg": "Treg",
+    "mDC": "DC",
+    "NKT": "NK",
+    "FDC": "FDC",
+    "myeloid": "Myeloid",
+    "pDC": "DC",
+    "T_double_neg": "CD4_T",
+    "NK": "NK"
+  },
+  "mapping_usage_counts": {
+    "Th1": {
+      "CD4_T": 88
+    },
+    "plasma": {
+      "Plasma": 283
+    },
+    "GC Light Zone": {
+      "B_GC": 735
+    },
+    "B_naive": {
+      "B_naive": 1088
+    },
+    "B_memory": {
+      "B_memory": 522
+    },
+    "GC Intermediate Zone": {
+      "B_GC": 467
+    },
+    "mDC": {
+      "DC": 137
+    },
+    "T_follicular_helper": {
+      "Tfh": 300
+    },
+    "GC Dark Zone": {
+      "B_GC": 558
+    },
+    "NKT": {
+      "NK": 170
+    },
+    "FDC": {
+      "FDC": 288
+    },
+    "Naive CD4 T": {
+      "CD4_T": 177
+    },
+    "T memory": {
+      "CD4_T": 264
+    },
+    "T_CD8": {
+      "CD8_T": 244
+    },
+    "Treg": {
+      "Treg": 198
+    },
+    "pDC": {
+      "DC": 64
+    },
+    "Th2": {
+      "CD4_T": 47
+    },
+    "myeloid": {
+      "Myeloid": 102
+    },
+    "T_double_neg": {
+      "CD4_T": 46
+    }
+  },
+  "notes": "Same SlideTags tonsil sample with finer T/GC subtypes.",
+  "n_source_cells": 5778,
+  "n_ref_cells": 5778,
+  "subsampled": false,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 281.1955826154899,
+  "radius_k_nn": 12.0,
+  "median_nn": 23.432965217957495,
+  "cell_types": [
+    "B_GC",
+    "B_memory",
+    "B_naive",
+    "CD4_T",
+    "CD8_T",
+    "DC",
+    "FDC",
+    "Myeloid",
+    "NK",
+    "Plasma",
+    "Tfh",
+    "Treg"
+  ],
+  "lineages": [
+    "B",
+    "DC",
+    "Myeloid",
+    "NK",
+    "Plasma",
+    "Stromal",
+    "T"
+  ],
+  "ref_type_counts": {
+    "B_GC": 1760,
+    "B_memory": 522,
+    "B_naive": 1088,
+    "CD4_T": 622,
+    "CD8_T": 244,
+    "DC": 201,
+    "FDC": 288,
+    "Myeloid": 102,
+    "NK": 170,
+    "Plasma": 283,
+    "Tfh": 300,
+    "Treg": 198
+  },
+  "elapsed_sec": 5.15
+}

@@ -1,0 +1,71 @@
+{
+  "dataset_id": "mouse_ln_slideseqv2",
+  "source_path": "/ix1/ylee/kor11/tools/SpaceTravLR/data/SlideSeqV2_mouse_lymphnode.h5ad",
+  "technology": "SlideSeqV2",
+  "organ": "lymph_node",
+  "species": "mouse",
+  "obs_column": "cell_type",
+  "mapping": {
+    "B": "B_naive",
+    "Resting T": "CD4_T",
+    "Tfh": "Tfh",
+    "CD8+ T": "CD8_T",
+    "Treg": "Treg",
+    "Th2": "CD4_T",
+    "DC": "DC"
+  },
+  "mapping_usage_counts": {
+    "CD8+ T": {
+      "CD8_T": 1087
+    },
+    "B": {
+      "B_naive": 6390
+    },
+    "Resting T": {
+      "CD4_T": 1987
+    },
+    "Tfh": {
+      "Tfh": 1131
+    },
+    "Treg": {
+      "Treg": 956
+    },
+    "DC": {
+      "DC": 119
+    },
+    "Th2": {
+      "CD4_T": 330
+    }
+  },
+  "notes": "Stickels/Cable-style LN Slide-seqV2; follicular B mapped to B_naive.",
+  "n_source_cells": 22227,
+  "n_ref_cells": 12000,
+  "subsampled": true,
+  "max_cells": 12000,
+  "seed": 0,
+  "radius": 402.3900531212855,
+  "radius_k_nn": 12.0,
+  "median_nn": 33.53250442677379,
+  "cell_types": [
+    "B_naive",
+    "CD4_T",
+    "CD8_T",
+    "DC",
+    "Tfh",
+    "Treg"
+  ],
+  "lineages": [
+    "B",
+    "DC",
+    "T"
+  ],
+  "ref_type_counts": {
+    "B_naive": 6390,
+    "CD4_T": 2317,
+    "CD8_T": 1087,
+    "DC": 119,
+    "Tfh": 1131,
+    "Treg": 956
+  },
+  "elapsed_sec": 14.64
+}

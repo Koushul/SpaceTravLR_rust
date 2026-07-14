@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "technologies": [
+    "SlideSeqV2",
+    "SlideTags",
+    "VisiumHD"
+  ],
+  "organs": [
+    "brain",
+    "hippocampus",
+    "kidney",
+    "lymph_node",
+    "tonsil",
+    "tumor_melanoma"
+  ],
+  "n_entries": 8,
+  "entries": [
+    {
+      "dataset_id": "mouse_ln_slideseqv2",
+      "technology": "SlideSeqV2",
+      "organ": "lymph_node",
+      "species": "mouse",
+      "n_ref_cells": 12000,
+      "n_source_cells": 22227,
+      "radius": 402.3900531212855,
+      "cell_types": [
+        "B_naive",
+        "CD4_T",
+        "CD8_T",
+        "DC",
+        "Tfh",
+        "Treg"
+      ],
+      "path": "entries/mouse_ln_slideseqv2"
+    },
+    {
+      "dataset_id": "human_tonsil_slidetags",
+      "technology": "SlideTags",
+      "organ": "tonsil",
+      "species": "human",
+      "n_ref_cells": 5778,
+      "n_source_cells": 5778,
+      "radius": 213.62723064982163,
+      "cell_types": [
+        "B_GC",
+        "B_memory",
+        "B_naive",
+        "CD4_T",
+        "CD8_T",
+        "DC",
+        "FDC",
+        "Myeloid",
+        "NK",
+        "Plasma",
+        "Tfh"
+      ],
+      "path": "entries/human_tonsil_slidetags"
+    },
+    {
+      "dataset_id": "human_tonsil_slidetags_fine",
+      "technology": "SlideTags",
+      "organ": "tonsil",
+      "species": "human",
+      "n_ref_cells": 5778,
+      "n_source_cells": 5778,
+      "radius": 281.1955826154899,
+      "cell_types": [
+        "B_GC",
+        "B_memory",
+        "B_naive",
+        "CD4_T",
+        "CD8_T",
+        "DC",
+        "FDC",
+        "Myeloid",
+        "NK",
+        "Plasma",
+        "Tfh",
+        "Treg"
+      ],
+      "path": "entries/human_tonsil_slidetags_fine"
+    },
+    {
+      "dataset_id": "human_melanoma_slidetags",
+      "technology": "SlideTags",
+      "organ": "tumor_melanoma",
+      "species": "human",
+      "n_ref_cells": 4804,
+      "n_source_cells": 4804,
+      "radius": 195.41541491434694,
+      "cell_types": [
+        "CD4_T",
+        "CD8_T",
+        "Myeloid",
+        "Other",
+        "Plasma",
+        "Treg",
+        "Tumor"
+      ],
+      "path": "entries/human_melanoma_slidetags"
+    },
+    {
+      "dataset_id": "mouse_kidney_visiumhd",
+      "technology": "VisiumHD",
+      "organ": "kidney",
+      "species": "mouse",
+      "n_ref_cells": 10000,
+      "n_source_cells": 10000,
+      "radius": 269.28311535955083,
+      "cell_types": [
+        "B",
+        "Endothelial",
+        "Epithelial",
+        "Myeloid",
+        "NK",
+        "Stromal",
+        "T"
+      ],
+      "path": "entries/mouse_kidney_visiumhd"
+    },
+    {
+      "dataset_id": "mouse_brain_slideseqv2",
+      "technology": "SlideSeqV2",
+      "organ": "brain",
+      "species": "mouse",
+      "n_ref_cells": 12000,
+      "n_source_cells": 27359,
+      "radius": 528.7031681387957,
+      "cell_types": [
+        "Choroid_Plexus",
+        "Endothelial",
+        "Neuron",
+        "Oligodendrocyte"
+      ],
+      "path": "entries/mouse_brain_slideseqv2"
+    },
+    {
+      "dataset_id": "mouse_hippocampus_slideseqv2",
+      "technology": "SlideSeqV2",
+      "organ": "hippocampus",
+      "species": "mouse",
+      "n_ref_cells": 12000,
+      "n_source_cells": 41786,
+      "radius": 555.6025646502329,
+      "cell_types": [
+        "Astrocyte",
+        "Endothelial",
+        "Ependymal",
+        "Microglia",
+        "Neuron_CA",
+        "Neuron_Dentate",
+        "Neuron_Entorhinal",
+        "Neuron_Interneuron",
+        "Neuron_Neurogenesis",
+        "OPC",
+        "Oligodendrocyte",
+        "Stromal"
+      ],
+      "path": "entries/mouse_hippocampus_slideseqv2"
+    },
+    {
+      "dataset_id": "mouse_brain_slideseqv2_regions",
+      "technology": "SlideSeqV2",
+      "organ": "brain",
+      "species": "mouse",
+      "n_ref_cells": 12000,
+      "n_source_cells": 44541,
+      "radius": 534.094344931174,
+      "cell_types": [
+        "Astrocyte",
+        "Choroid_Plexus",
+        "Endothelial",
+        "Microglia",
+        "Neuron",
+        "Neuron_CA",
+        "Neuron_Dentate",
+        "Oligodendrocyte"
+      ],
+      "path": "entries/mouse_brain_slideseqv2_regions"
+    }
+  ]
+}
