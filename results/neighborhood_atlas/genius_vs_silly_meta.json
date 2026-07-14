@@ -1,0 +1,11 @@
+{
+  "max_cells": 8000,
+  "n_ligands": 30,
+  "n_targets": 20,
+  "alpha": null,
+  "min_genius_r2": 0.02,
+  "min_nonzero": 2,
+  "use_atlas_radius": true,
+  "seed": 0,
+  "note": "Pooled-cell Lasso; within-type Silly is constant under type-pooled S_hat"
+}
