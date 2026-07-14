@@ -48,3 +48,20 @@ stratified-subsampled (documented in each `meta.json`).
 
 Label consistency is enforced at build time: every raw label must map into
 `ontology.json` (no silent drops).
+
+## Ground truth vs structure
+
+Compare spatial Gaussian received ligands to `Ŝ`-inferred predictions:
+
+```bash
+python scripts/eval_gt_vs_structure.py --max-cells 12000 --n-ligands 40 --use-atlas-radius
+```
+
+Outputs under `results/neighborhood_atlas/`:
+
+- `gt_vs_structure_summary.csv` — per-dataset difference metrics
+- `gt_vs_structure_detail.csv` — all methods (structure, atlas, oracle, abundance)
+- `GT_VS_STRUCTURE.md` — readable table
+
+Primary metric: **type-level Pearson** between structure predictions and spatial GT
+(receiver-type means). Soft-neighbor cosine measures niche-composition fidelity.
