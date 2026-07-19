@@ -1,0 +1,63 @@
+{
+  "dataset": "Koushul/spacetravlr",
+  "cohort": "xenium_skin_mixed",
+  "description": "SpaceTravLR condition-level beta matrices for mouse skin Xenium (mixed samples 12-16). Perturbation outputs are excluded.",
+  "source_root": "/ix/djishnu/shared/djishnu_kor11/rust_trainings/xenium_skin_mixed/conditions",
+  "training_adata": "/ix/djishnu/shared/djishnu_kor11/training_data_revision/xenium_skin_mixed.h5ad",
+  "hub_path_prefix": "xenium_skin_mixed",
+  "samples": [
+    {
+      "sample_id": "sample12",
+      "hub_path": "xenium_skin_mixed/sample12",
+      "approx_size_gb": 59,
+      "betadata_files": 2809,
+      "has_perturbations_local": true,
+      "upload_perturbations": false
+    },
+    {
+      "sample_id": "sample13",
+      "hub_path": "xenium_skin_mixed/sample13",
+      "approx_size_gb": 103,
+      "betadata_files": 2807,
+      "has_perturbations_local": false,
+      "upload_perturbations": false
+    },
+    {
+      "sample_id": "sample14",
+      "hub_path": "xenium_skin_mixed/sample14",
+      "approx_size_gb": 66,
+      "betadata_files": 2810,
+      "has_perturbations_local": true,
+      "upload_perturbations": false
+    },
+    {
+      "sample_id": "sample15",
+      "hub_path": "xenium_skin_mixed/sample15",
+      "approx_size_gb": 100,
+      "betadata_files": 2801,
+      "has_perturbations_local": false,
+      "upload_perturbations": false
+    },
+    {
+      "sample_id": "sample16",
+      "hub_path": "xenium_skin_mixed/sample16",
+      "approx_size_gb": 89,
+      "betadata_files": 2801,
+      "has_perturbations_local": false,
+      "upload_perturbations": false
+    }
+  ],
+  "excluded_paths": [
+    "**/perturbations/**"
+  ],
+  "included_artifacts_per_sample": [
+    "*_betadata.feather",
+    "*.h5ad",
+    "*.csv",
+    "condition_label.txt",
+    "spacetravlr_run_repro.toml",
+    "spacetravlr_run_summary.html",
+    "log/**",
+    "*.orphan"
+  ]
+}
