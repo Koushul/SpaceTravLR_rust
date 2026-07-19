@@ -27,7 +27,7 @@ require_hf_auth() {
     return 0
   fi
 
-  if [[ -f "${HOME}/.git-credentials" ]]; then
+  if [[ -f "${HOME}/.git-credentials" && -z "${HF_TOKEN:-}" ]]; then
     local token
     token="$(python3 - <<'PY'
 import re
@@ -108,6 +108,8 @@ main() {
   }
 
   require_hf_auth
+
+  export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 
   case "${target}" in
     metadata)
