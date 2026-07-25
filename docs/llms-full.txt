@@ -1,0 +1,756 @@
+# SpaceTravLR — complete reference for LLM agents
+
+> SpaceTravLR (Spatially perturbing Transcription factors, Ligands and Receptors) infers spatially resolved gene regulatory and ligand–receptor networks from spatial transcriptomics data, then simulates in-silico genetic perturbations and propagates their effects through the tissue neighborhood. It predicts how knocking out or overexpressing a gene in one cell changes that cell *and* its spatial neighbors. It ships as a standalone Rust CLI with no Python environment, conda, or CUDA driver setup required.
+
+This file is self-contained. Reading it should be enough to answer questions about SpaceTravLR and to drive it end to end from a shell. Version described: `spacetravlr` 3.3.1.
+
+Canonical documentation: https://spacetravlr-rust.readthedocs.io/en/latest/
+Repository: https://github.com/Koushul/SpaceTravLR_rust
+Original Python implementation (superseded): https://github.com/jishnu-lab/SpaceTravLR
+
+---
+
+## 1. What SpaceTravLR does
+
+SpaceTravLR addresses a gap in spatial biology: spatial omics is largely descriptive, and existing in-silico perturbation methods (foundation models, GRN models) are single-cell and spatially blind. SpaceTravLR moves from descriptive mapping to causal modeling by learning, directly from an observational spatial transcriptomics slide:
+
+1. **Intracellular regulation** — transcription factor to target gene edges.
+2. **Intercellular signaling** — distance-weighted ligand fields from neighboring sender cells feeding into ligand–receptor (`LIG$REC`) and ligand–TF (`TF#LIG`) terms on each receiver cell.
+3. **Spatial modulation** — a convolutional vision model that produces location-specific multipliers on those coefficients, so the same cell type can have different regulatory wiring in different parts of the tissue.
+
+From this it supports four main task families:
+
+- **Inferring functional cell–cell communication.** Rank ligand–receptor interactions by their actual causal impact on a gene signature in a specific niche, rather than by co-expression.
+- **In-silico perturbation.** Single or combinatorial knockout / overexpression, with effects propagated through the regulatory and signaling networks to both the perturbed cell and its neighbors.
+- **Functional microniche discovery.** Cluster cells by learned regulatory activity (not transcriptional similarity) to partition tissue into functional microniches, then identify their defining genes and interactions.
+- **Transfer learning.** Apply a model trained on one sample, tissue, or platform to a new unseen sample, including across resolutions (for example a Slide-tags-trained model applied to Visium spots).
+
+### What makes it different
+
+The distinguishing capability is **cell-extrinsic prediction**. Given a perturbation confined to one cell population, SpaceTravLR predicts the transcriptomic response of spatially adjacent, unperturbed populations. CellOracle, CellPLM, Tahoe-x1, SpaceFlow, scGPT, and similar methods cannot do this. If a user asks "what happens to macrophages if I knock out Mif in epithelial cells," SpaceTravLR is the tool; most alternatives are not.
+
+Secondary differentiators: it models spatially *varying* coefficients rather than one global network; it is interpretable by construction (coefficients map to named TF / L–R / L–TF edges, no post-hoc attribution needed); it requires no perturbation data for training, only wild-type observational spatial transcriptomics; and it scales to millions of cells (validated on 717,576 cells × 18,028 genes without downsampling).
+
+### Known limitations
+
+- **Out-of-distribution overexpression breaks down.** Simulated overexpression beyond roughly twice the highest observed expression for that gene yields aberrant fold changes and loses distance dependency. Keep `--desired-expr` near the observed data distribution.
+- **Gene panel coverage matters.** Targeted panels (for example a 350-gene Xenium panel) can produce false-positive ligand–receptor prioritizations that disappear on whole-transcriptome platforms. Prefer broad panels for interaction ranking.
+- **Transfer requires shared cell types.** Cross-tissue and cross-platform generalization works when the same cell types are present, even if spatial organization differs; it does not work for entirely disjoint cell-type compositions.
+- **Low-expression transcripts** limit robust evaluation of neighbor-level differential expression.
+- Predictions are conditioned on the training sample's signaling networks. This makes it sensitive to subtle condition-specific rewiring, but means a model trained on one condition should not be assumed to describe another.
+
+---
+
+## 2. Installation
+
+### One-line install (recommended)
+
+```bash
+curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
+```
+
+Safer two-step form (avoids piping a remote script straight into a shell):
+
+```bash
+curl -fsSL -o install.sh https://tinyurl.com/spacetravlr/scripts/install.sh
+sh install.sh
+```
+
+The installer places `spacetravlr`, `spacetravlr-perturb`, and `spatial_viewer` in `$HOME/.local/bin` (override with `SPACETRAVLR_INSTALL_DIR`), appends that directory to `PATH` in `~/.bashrc`, and downloads a `data/` directory next to the binaries containing `spaceship_config.toml`, `human_network.parquet`, `mouse_network.parquet`, and `malt_label_transfer.py`. Run `source ~/.bashrc` or open a new shell afterwards.
+
+### Prebuilt platform matrix
+
+| Platform | Target triple | Status |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | Supported (glibc 2.31 and 2.28 variants auto-selected via `ldd`) |
+| macOS Apple Silicon | `aarch64-apple-darwin` | Supported |
+| Linux arm64 | — | Build from source |
+| macOS Intel | — | Build from source |
+
+### From source
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # or: module load cargo
+git clone https://github.com/Koushul/SpaceTravLR_rust.git
+cd SpaceTravLR_rust
+cargo install --path . --locked
+```
+
+This installs into `~/.cargo/bin`, which must be on `PATH`.
+
+### Update and verify
+
+```bash
+spacetravlr --update                    # self-update to latest release
+spacetravlr --update --update-version v0.2.0
+spacetravlr --verify                    # smoke test: downloads a tonsil .h5ad, runs Rust prep,
+                                        # trains 2 genes, checks the WebGPU backend
+```
+
+`--verify` is the right first command to confirm an install and to discover whether GPU compute is available on the machine.
+
+### Building optional components
+
+```bash
+cargo build --release                                        # default binaries
+cargo build --release --features "spatial-viewer,umap-lab"   # plus the web UIs
+cargo build --release -p celloracle                          # standalone spacetravlr-celloracle
+```
+
+Build features: `tui` (default, Ratatui dashboards), `self-update` (default, enables `--update`), `rctd` (default, enables RCTD deconvolution flags), `view-image` (default, enables `--view`), `rctd-wgpu` (GPU RCTD), `spatial-viewer`, `umap-lab`, `dev-main`.
+
+---
+
+## 3. Input requirements
+
+A single spatial AnnData `.h5ad` file:
+
+| Slot | Requirement |
+|---|---|
+| `.X` | Gene expression counts. Raw counts are acceptable — SpaceTravLR detects whether normalization and filtering are needed and applies them automatically. |
+| `.obsm['spatial']` | 2D cell or spot coordinates. Units should be microns; SpaceTravLR can rescale (see `--spatial-species`, `--spatial-microns-target-um`). |
+| `.obs['cell_type']` | Cluster or cell-type labels. Strongly preferred. If absent, Leiden clustering runs first. The column name is configurable via `[data].cluster_annot` or `--cluster-key`. |
+| `.layers['imputed_count']` | Optional but the default expression layer. Auto-generated by the built-in MAGIC imputation when missing. |
+
+Supported and validated platforms include Slide-tags, Slide-seq V2, Stereo-seq, Visium and Visium HD, Xenium (including Prime 5K), MERFISH, XYZeqV2, and Atera whole-transcriptome. The model has been applied across 16+ datasets spanning both human and mouse.
+
+To skip automatic preparation entirely, pass `--skip-auto-adata-prep`.
+
+### Inspecting a file before committing to a run
+
+```bash
+spacetravlr --peek data.h5ad                    # fast metadata summary, no full load
+spacetravlr --peek data.h5ad --obs cell_type    # ranked value counts for one obs column
+spacetravlr --infer-species --h5ad data.h5ad    # human vs mouse detection
+spacetravlr --plot-h5ad --h5ad data.h5ad        # spatial scatter rendered in the terminal
+spacetravlr --plot-umap data.h5ad --obs cell_type
+```
+
+`--peek` also works on 10x `.h5` files. `--peak` is accepted as an alias.
+
+---
+
+## 4. End-to-end workflow
+
+```bash
+# 0. install and confirm the machine works
+curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh
+spacetravlr --verify
+
+# 1. look at the data
+spacetravlr --peek /data/tonsil.h5ad --obs cell_type
+
+# 2. (optional) transfer cell type labels if .obs has none
+spacetravlr --map-labels --reference /data/ref.h5ad --query /data/tonsil.h5ad \
+  --map-labels-outdir /data/malt_out
+
+# 3. train — writes betadata feathers and spacetravlr_run_repro.toml
+spacetravlr --h5ad /data/tonsil.h5ad --output-dir /runs/tonsil
+
+# 4. (optional) add more machines to the same run
+spacetravlr --join-output-dir /runs/tonsil --plain --parallel 16
+
+# 5. in-silico knockout, propagated through the tissue
+spacetravlr-perturb \
+  --run-toml /runs/tonsil/spacetravlr_run_repro.toml \
+  --gene FOXO1 --desired-expr 0 --n-propagation 4 \
+  --out /runs/tonsil/FOXO1_ko.feather --verbose
+
+# 6. aggregate learned interactions across cell types
+spacetravlr collect-interactions --run-toml /runs/tonsil/spacetravlr_run_repro.toml
+```
+
+`spacetravlr_run_repro.toml` is the hinge of the whole system. It records the effective configuration after CLI overrides, and it is the input that `--join-output-dir`, `spacetravlr-perturb`, and `spatial_viewer` all consume. When a user asks "how do I perturb / view / resume," the answer almost always involves pointing a tool at this file.
+
+### Running on SLURM
+
+Start a leader run to create the repro TOML, then submit workers that join it. Workers claim genes through `{gene}.lock` files on shared storage, so no scheduler coordination is needed.
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=SpaceTravLR
+#SBATCH --mem=300G
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --cluster=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --time=1-00:00:00
+
+spacetravlr --join-output-dir /runs/tonsil --plain
+```
+
+Do not pass conflicting hyperparameter flags (notably a different `--genes` or `--max-genes`) on join hosts — they must match what the repro TOML stores. Stale locks are reclaimed after `[execution].stale_lock_secs`.
+
+---
+
+## 5. Binaries
+
+| Binary | Purpose |
+|---|---|
+| `spacetravlr` | Main CLI: training, preprocessing, inspection, label transfer, deconvolution, run summaries, interaction aggregation. |
+| `spacetravlr-perturb` | In-silico perturbation: interactive TUI, single-gene batch export, multi-gene batch TOML, and genome-scale KO screens. |
+| `spatial_viewer` | Deck.gl web viewer plus an HTTP API for interactive exploration and perturbation (requires the `spatial-viewer` feature). |
+| `umap_lab` | UMAP / Leiden / MAGIC exploration web server (requires the `umap-lab` feature). |
+| `spacetravlr-celloracle` | Standalone CellOracle-style TF GRN inference using SpaceTravLR priors. |
+| `cnn_train_bench`, `spacetravlr-dev` | Internal benchmark and dev scratch binaries; no CLI. |
+
+---
+
+## 6. `spacetravlr` — main CLI
+
+`spacetravlr [OPTIONS] [COMMAND]`. With no subcommand and no utility flag, it trains. Launching bare (`spacetravlr`) opens an interactive TUI that prompts for an `.h5ad`.
+
+Add `--plain` for line-oriented logs instead of the full-screen dashboard — **always use `--plain` when running non-interactively, from a script, or from an agent**, otherwise the Ratatui dashboard will fight with the captured terminal.
+
+### Subcommands
+
+**`spacetravlr run-summary`** — generate `spacetravlr_run_summary.html` (AnnData summary, config, optional manifest) without training.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--h5ad PATH` | `[data].adata_path` | Input AnnData |
+| `--output-dir PATH` | dated dir | Training output directory |
+| `-c, --config PATH` | — | Config overlay |
+| `--cluster-key STR` | `[data].cluster_annot` | obs column for cluster count |
+| `--layer STR` | — | Documented in the report only |
+| `--run-id STR` | — | Override run id |
+| `--manifest PATH` | — | Optional JSON manifest from training |
+| `--betadata-pattern STR` | `*_betadata.feather` | Glob for counting betadata files |
+
+**`spacetravlr collect-interactions`** — scan `*_betadata.feather` under a run and aggregate β per modulator × target × cell type.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--run-toml PATH` | required | `spacetravlr_run_repro.toml` from a finished run |
+| `--annot STR` | `cell_type` | obs column for cell-type grouping |
+| `--cluster-col STR` | — | Additional per-cluster aggregation |
+| `--aggregate STR` | `mean` | `mean` \| `min` \| `max` \| `sum` \| `positive` \| `negative` |
+| `--out PATH` | `<output_dir>/plucked_feathers.feather` | Output feather |
+
+**`spacetravlr gui`** — build the UMAP lab web UI, start the API and static server, print the URL. Flags: `--bind` (`127.0.0.1`), `--port` (`8765`), `--skip-npm`, `--static-dir` (`web/umap_lab/dist`).
+
+### Input flags
+
+| Flag | Meaning |
+|---|---|
+| `-c, --config PATH` | `spaceship_config.toml` overlay; merged over defaults, then overridden by CLI flags |
+| `--h5ad PATH` | Spatial AnnData input |
+| `--peek PATH` (alias `--peak`) | HDF5 metadata summary without a full load |
+| `--obs STR` | With `--peek`, print value counts; with `--plot-umap`, choose the color column |
+| `--skip-auto-adata-prep` | Skip automatic Scanpy-equivalent preprocessing and imputation |
+| `--tf-prior PATH` | Precomputed TF priors feather |
+
+### Gene list and GRN flags
+
+| Flag | Meaning |
+|---|---|
+| `--genes A,B,C` | Comma-separated list of target genes to train |
+| `--max-genes N` | Cap the gene count after the `--genes` filter |
+| `--max-ligands N` (alias `--max-lr`) | Keep only the top-N ligands by mean expression |
+| `--extra-modulators A,B` | Additional raw-expression Lasso predictors |
+| `--extra-lr LIG$REC,...` | Additional ligand–receptor pairs beyond the database screen |
+| `--train-modulators tf,lr,tfl` | Ablation shorthand replacing the three `use_*` config flags |
+
+### Training flags
+
+| Flag | Values | Meaning |
+|---|---|---|
+| `--training-mode` | `full` \| `seed` | `seed` = cluster-level Lasso coefficients only (fast). `full` = Lasso then per-cell CNN refinement (spatially varying coefficients). |
+| `--epochs N` | | CNN epochs per cluster |
+| `--parallel N` | | Genes trained concurrently |
+| `--random-seed N` | | Global RNG seed |
+| `--l1-reg F` | | Lasso element-wise L1 penalty |
+| `--group-reg F` | | Lasso group penalty across modulator families |
+| `--lr F` | | CNN Adam learning rate |
+| `--cnn-output-activation` | `identity` \| `sigmoid` \| `tanh` \| `sigmoid-x2` | Bounds on the CNN spatial multiplier |
+| `--mean-beta-lasso-prior-weight F` | | Auxiliary loss pulling CNN β toward Lasso anchors |
+| `--n-iter N` | | FISTA maximum iterations |
+| `--tol F` | | FISTA convergence tolerance |
+| `--weighted-ligand-scale-factor F` | | Scale on received-ligand weights |
+| `--spatial_dim N` | | Edge length of the per-cell CNN spatial grid |
+
+### Output flags
+
+| Flag | Meaning |
+|---|---|
+| `--output-dir PATH` | Where feathers and the repro TOML are written |
+| `--condition STR` | Split training by an obs column into `output_dir/conditions/<value>/` |
+| `--join-output-dir PATH` | Join an existing run on another host |
+| `--clean-output-dir` | Delete the output directory first |
+| `--write-minimal-repro-h5ad` | Write a slim `.h5ad` for offline replay |
+| `--save-cnn-weights` | Save per-gene CNN weights as `.npz` |
+| `--write-cnn-train-data-npz` | Export CNN training tensors for the Python reference trainer |
+
+### Interface flags
+
+`--plain` (line logs), `-v, --verbose` (per-cluster Lasso and CNN R²), `--demo` (fake dashboard only).
+
+### Preprocessing and utility flags
+
+| Flag | Meaning |
+|---|---|
+| `--rust-process-h5ad` | Full native pipeline (QC → normalize → HVG → PCA → KNN → UMAP → Leiden / MAGIC) → `<stem>_rust_processed.h5ad` |
+| `--rust-n-top-hvg N` | Highly variable genes, default `2000` |
+| `--rust-n-neighbors N` | KNN neighbors, default `15` |
+| `--umap`, `--leiden`, `--rust-magic` | Individual pipeline stages; in-memory unless `-o/--output` is given |
+| `--process-h5ad` | Scanpy + magic-impute path → `<stem>_processed.h5ad` |
+| `--impute` | MAGIC imputation only → `<stem>_imputed.h5ad` |
+| `--magic-batch-obs STR` | Batch axis column for MAGIC |
+| `--process-output-dir PATH` | Where derived `.h5ad` files go |
+| `-o, --output PATH` | Write the preprocessed `.h5ad` |
+| `--skip-spatial-microns` | Skip spatial-to-micron rescaling |
+| `--spatial-species human\|mouse` | Species used for micron scaling |
+| `--spatial-microns-target-um F` | Override the median k-NN micron target |
+| `--make-cells-csv` with `--run-toml PATH` | Write `cells.csv` (one column per cluster label) for `spacetravlr-perturb --cells-csv` |
+| `--view PATH`, `--view-width`, `--view-height` | Render a `.png` / `.jpg` / `.svg` in the terminal |
+| `--verify` | Install smoke test |
+| `--update`, `--update-version TAG` | Self-update |
+
+### CellOracle TF prior inference
+
+`--celloracle [PATH]` runs TF prior inference; supporting flags: `--celloracle-output PATH`, `--celloracle-output-dir PATH`, `--celloracle-layer STR` (default `imputed_count`), `--celloracle-skip-preprocess`, `--celloracle-per-cluster`, `--celloracle-obs-key STR` (default `cell_type`), `--celloracle-species STR`, `--celloracle-network-data-dir PATH`, `--celloracle-p-max F`, `--celloracle-threads N`.
+
+### Label transfer (MALT)
+
+Marker-Aware Label Transfer moves cell-type labels from a reference to a query `.h5ad`. Requires `uv` on `PATH`; the first run may download PyTorch.
+
+```bash
+spacetravlr --map-labels --reference ref.h5ad --query query.h5ad --map-labels-outdir ./malt_out
+```
+
+Supporting flags: `-g/--map-labels-groupby STR` (repeatable), `--map-labels-output-query STR` (default `query_labeled.h5ad`), `--map-labels-extra-markers STR`, `--map-labels-expression-mode auto|counts|lognorm`, `--map-labels-counts-layer STR`, `--map-labels-prefer-raw-counts`, `--map-labels-no-leiden`, `--map-labels-reference-gene-list PATH`, `--map-labels-spatial`, `--map-labels-reference-betadata-dir PATH`, `--map-labels-query-betadata-dir PATH`, `--map-labels-benchmark-truth STR`, `--map-labels-spatial-genes-per-type N` (default `6`).
+
+### RCTD deconvolution (feature `rctd`)
+
+```bash
+spacetravlr --rctd --h5ad spatial.h5ad --ref-adata reference.h5ad --rctd-output ./out/deconv
+```
+
+Supporting flags: `--rctd-mode full|doublet|multi` (default `full`), `--cell-type-col STR` (default `cell_type`), `--ref-rows-are-types`, `--ref-cell-min N` (25), `--ref-min-umi N` (100), `--ref-max-cells-per-type N` (10000), `--rctd-batch-size N` (4096), `--sigma N` (100), `--rctd-k-val N` (1000), `--q-matrices PATH` (`~/.cache/rctd/q_matrices.npz`), `--gpu` (requires `rctd-wgpu`), plus file overrides `--rctd-obs-subset-file`, `--rctd-genes-file`, `--rctd-spatial-numi-tsv`, `--rctd-sigma-file`, `--rctd-q-tsv`, `--rctd-x-vals-tsv`, `--rctd-skip-profile-normalize`.
+
+---
+
+## 7. `spacetravlr-perturb` — in-silico perturbation
+
+`spacetravlr-perturb [OPTIONS] [CONFIG] [COMMAND]`. With no `--out`/`--export`, it opens an interactive TUI. With `--out`, it runs a single-gene batch export. With `--batch-toml`, it runs many perturbations.
+
+Perturbation reads the training outputs and writes simulated expression; it does not modify the training tree.
+
+### Core flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--run-toml PATH` | — | `spacetravlr_run_repro.toml` from a finished training run. Effectively required. |
+| `--config PATH` (alias `--perturb-toml`, or positional) | — | Perturbation TOML; may set `run_toml` and overlay config sections |
+| `--export PATH` (alias `--out`) | — | Single-gene feather export (also selects batch mode) |
+| `--gene SYMBOL` | — | Gene to perturb |
+| `--desired-expr F` | `0.0` | Target expression. `0` = knockout. Higher = overexpression. |
+| `--n-propagation N` | from TOML (4) | Rounds of signal propagation through the GRN and ligand field |
+| `--beta-scale-factor F` | from TOML (100.0) | Global multiplier on β before propagation |
+| `--cells-csv PATH` | — | Restrict the perturbation to a region or population of interest |
+| `--cells-csv-column STR` | — | Which CSV column selects cells; required with `--cells-csv` in batch mode |
+| `--batch-toml PATH` | — | Multi-gene batch specification |
+| `--batch-parallelism N` | TOML or `clamp(cores,1,8)` | Concurrent perturbation threads |
+| `--verbose` | off | Timing breakdown on stderr |
+
+### Examples
+
+```bash
+# whole-slide knockout
+spacetravlr-perturb --run-toml /runs/tonsil/spacetravlr_run_repro.toml \
+  --gene SOX2 --desired-expr 0 --n-propagation 4 \
+  --out /tmp/SOX2_ko.feather --verbose
+
+# knockout restricted to one cell population (cell-type-specific perturbation)
+spacetravlr --make-cells-csv --run-toml /runs/tonsil/spacetravlr_run_repro.toml
+spacetravlr-perturb --run-toml /runs/tonsil/spacetravlr_run_repro.toml \
+  --gene MIF --desired-expr 0 \
+  --cells-csv /runs/tonsil/cells.csv --cells-csv-column Epithelial \
+  --out /tmp/MIF_ko_epithelial.feather
+
+# many genes at once
+spacetravlr-perturb --run-toml /runs/tonsil/spacetravlr_run_repro.toml \
+  --batch-toml /runs/tonsil/batch_perturb.toml --verbose
+
+# interactive exploration
+spacetravlr-perturb --run-toml /runs/tonsil/spacetravlr_run_repro.toml
+```
+
+The `--cells-csv` / `--cells-csv-column` pair is how you express "knock this out **only in cell type X**." Use `spacetravlr --make-cells-csv` to generate a CSV with one boolean column per cluster label. This is the mechanism behind cell-extrinsic analyses: perturb in one population, then examine the predicted expression of neighboring populations in the output.
+
+### Screening subcommand
+
+```bash
+spacetravlr-perturb screen --config /path/ko_screen.toml --verbose
+```
+
+`screen` knocks out every TF, ligand, receptor, and extra GRN gene named by a perturbation TOML. Flags: `-c/--config` (required), `--run-toml`, `--n-propagation`, `--beta-scale-factor`, `--batch-parallelism`, `--verbose`. For genome-scale screens there is also a helper: `python3 scripts/spacetravlr_whole_genome_ko_batch.py --run-toml <repro.toml>`.
+
+### Batch TOML schema
+
+```toml
+run_toml = "/runs/tonsil/spacetravlr_run_repro.toml"
+
+genes = ["BCL6", "PRDM1", "IL21"]
+desired_expr = [0.0, 0.0, 0.0]     # scalar or per-gene vector
+n_propagation = 4                   # scalar or per-gene vector
+beta_scale_factor = 100.0           # scalar or per-gene vector
+out_dir = "/runs/tonsil/perturbations"
+parallelism = 4
+
+cells_csv = "/runs/tonsil/cells.csv"
+cells_csv_column = "CD8_T"          # or cells_csv_columns = [...] per gene
+cells_obs_file = "/runs/tonsil/roi_obs.txt"
+
+radius = 300.0                      # override spatial radius
+contact_distance = 30.0
+ligand_grid_factor = 0.5            # approximate received ligands; faster, ~few % error
+```
+
+Also accepted: `gene` and `out` for the single-gene form. Default output name when using `out_dir` is `{gene}_perturb_expr.feather`.
+
+### Combinatorial perturbations
+
+Perturbing two or more genes simultaneously is supported and is one of the validated capabilities (for example `Bcl6` overexpression combined with `Il21` knockout, or a `Prdm1` + `Nr4a3` double knockout). Express this by listing multiple genes with their target expressions in the perturbation config so they are applied in the same propagation, rather than by running separate single-gene jobs and adding the results.
+
+---
+
+## 8. `spaceship_config.toml`
+
+SpaceTravLR reads `spaceship_config.toml` from the repo build, from the installed `data/` directory next to the binary, from `SPACETRAVLR_DATA_DIR`, or from `--config`. CLI flags override config values. The merged, executed configuration is written to the output directory as `spacetravlr_run_repro.toml`.
+
+### `[data]` — inputs
+
+| Key | Template | Meaning |
+|---|---|---|
+| `adata_path` | — | Path to the `.h5ad`; usually set via `--h5ad` |
+| `layer` | `imputed_count` | Expression matrix for means, Lasso targets, ligand ranking |
+| `cluster_annot` | `cell_type` | obs column with cluster labels |
+| `condition` | — | Split training per unique obs value |
+| `perturb_obs_subset_file` | — | One `obs_name` per line to scope perturbation |
+| `spatial_species` | — | `human` or `mouse` for micron scaling |
+| `spatial_median_nn_target_um` | — | Override the median k-NN micron target |
+
+### `[spatial]` — distances and grids
+
+| Key | Template | Meaning |
+|---|---|---|
+| `radius` | `300` | Gaussian σ for secreted ligand reception. Larger = wider paracrine neighborhoods and smoother ligand fields. |
+| `spatial_dim` | `48` | Side length of the per-cell spatial map fed to the CNN. Keep ≥ 8 for the pooling stack. Larger = finer spatial context, more memory. |
+| `contact_distance` | `30` | Hard cutoff for juxtacrine / contact signaling |
+| `weighted_ligand_scale_factor` | `1.0` | Linear multiplier on Gaussian received-ligand weights |
+
+Coordinate units must match `obsm['spatial']` (microns after prep).
+
+### `[grn]` — modulators and priors
+
+| Key | Template | Meaning |
+|---|---|---|
+| `network_data_dir` | — | Folder with `human_network.parquet` / `mouse_network.parquet`; overrides `SPACETRAVLR_DATA_DIR` |
+| `tf_priors_feather` | — | Precomputed TF→target links (`source`, `target`, `cell_type`); skips auto CellOracle inference |
+| `tf_ligand_cutoff` | `0.1` | Minimum NicheNet-style score for a ligand-mediated TF edge |
+| `celloracle_p_max` | `0.05` | Max p-value for auto-inferred ridge edges |
+| `max_lr` / `max_ligands` | `200` | Keep only L–R pairs whose ligand is in the top N by mean expression |
+| `use_tf_modulators` | `true` | Include TF terms |
+| `use_lr_modulators` | `true` | Include `LIG$REC` terms |
+| `use_tfl_modulators` | `true` | Include `TF#LIG` terms |
+| `train_modulators` | — | Shorthand such as `"tf,lr,tfl"`; at least one family must remain |
+| `extra_modulators` / `extra_modulators_file` | — | Extra raw-expression predictors (a fourth Lasso group) |
+| `extra_lr` / `extra_lr_file` | — | Hypothesis-driven L–R pairs, for example `CXCL13$CXCR5` |
+
+### `[lasso]` — cluster-wise sparse group lasso
+
+| Key | Template | Meaning |
+|---|---|---|
+| `l1_reg` | `1e-4` | Element-wise L1; higher = sparser |
+| `group_reg` | `1e-5` | Group L2 across modulator families; higher = whole families dropped together |
+| `n_iter` | `500` | Max FISTA iterations |
+| `tol` | `1e-4` | Relative convergence tolerance |
+| `scale_modulators` | `true` | Column-wise division by std, no mean centering |
+| `unscale_betas_on_export` | `false` | Set `true` for coefficients in expression units |
+| `parallel_lasso_clusters` | `false` | Rayon parallelism over clusters within a gene |
+| `gram_override` | `true` | `true` = Gram-matrix FISTA; omit for automatic selection when n > p |
+
+### `[training]` — mode and quality gate
+
+| Key | Template | Meaning |
+|---|---|---|
+| `mode` | `full` | `seed` = cluster-level Lasso only; `full` = Lasso plus per-cell CNN |
+| `epochs` | `100` | CNN epochs per cluster |
+| `learning_rate` | `4e-4` | CNN Adam step size |
+| `score_threshold` | `0.1` | Minimum in-sample R² for a cluster to be kept; failures export as orphans |
+| `genes` | — | Subset of `var` to train; persisted for join hosts |
+| `max_genes` | — | Cap after the `genes` filter |
+
+### `[cnn]` — spatial refinement (only used in `full` mode)
+
+| Key | Template | Meaning |
+|---|---|---|
+| `adam_beta_1` / `adam_beta_2` / `adam_epsilon` | `0.9` / `0.999` / `1e-5` | Adam settings |
+| `weight_decay` | — | L2 on CNN weights |
+| `grad_clip_norm` | `3.0` (code default) | Gradient norm clip; `null` disables |
+| `spatial_feature_radius` | `300.0` | Gaussian radius for CNN input feature maps; may differ from `[spatial].radius` |
+| `output_activation` | `sigmoidx2` | `identity`, `sigmoid`, `tanh`, or `sigmoidx2` (bounds multipliers to 0–2) |
+| `cnn_minibatch_size` | `256` | Cells per optimizer step; `0` = full batch |
+| `cnn_inference_batch_size` | `512` | Chunk size for export and post-train R² |
+| `cnn_max_batches_per_epoch` | — | Cap optimizer steps per epoch |
+| `cnn_max_cells_per_epoch` | `1000` | Random subsample per epoch; drives the training-time estimate. `null` = full sweeps. |
+| `min_cells_for_cnn` | `0` | Skip the CNN below this cluster size |
+| `mean_beta_lasso_prior_weight` | `0.005` (code default) | Pull batch-mean β toward Lasso anchors |
+| `lr_schedule` / `cosine_lr_min_ratio` / `lr_warmup_epochs` | cosine / `0.01` / `0` | Learning-rate schedule |
+| `cnn_early_stop_patience` / `cnn_early_stop_min_epochs` | `8` / `12` | Early stopping |
+| `lasso_pred_align_weight` | `0.05` | Extra loss matching CNN predictions to Lasso predictions |
+| `lasso_pred_align_linear_decay` | `true` | Ramp the alignment weight down over epochs |
+| `drop_cnn_if_insample_worse_than_lasso` | `true` | Fall back to Lasso when the CNN loses |
+| `cnn_vs_lasso_arbitration_margin` | `0.2` | CNN kept if `cnn_r2 + margin ≥ lasso_r2` |
+
+### `[execution]` — parallelism and outputs
+
+| Key | Template | Meaning |
+|---|---|---|
+| `random_seed` | `42` | Base seed, mixed per target gene |
+| `n_parallel` | `5` | Genes trained concurrently |
+| `output_dir` | — | Empty means `{adata_stem}_{date}` in the current directory |
+| `write_minimal_repro_h5ad` | `false` | Slim `.h5ad` for offline replay |
+| `stale_lock_secs` | `3600` | Multi-host: reclaim gene locks older than this. `0` = never. |
+
+### `[perturbation]` — defaults for splash simulations
+
+| Key | Template | Meaning |
+|---|---|---|
+| `beta_scale_factor` | `100.0` | Global β multiplier before propagation |
+| `beta_cap` | — | Clamp β to `[-cap, cap]` after scaling |
+| `n_propagation` | `4` | Propagation rounds |
+| `ligand_grid_factor` | — | Grid spacing as a fraction of `radius` for approximate received ligands; `0.5` is much faster with a few percent error |
+| `cells_csv` / `cells_csv_column` | — | Default region of interest |
+| `perturbed_gene_min_bound` | `0.0` when omitted | Lower clip on simulated expression each step |
+| `perturbed_gene_max_bound` | — | Upper clip; useful to cap out-of-distribution overexpression |
+
+### `[model_export]`
+
+`save_cnn_weights` (`false`), `write_cnn_train_data_npz` (`false`), `compressed_npz` (`true`), `output_subdir` (`CNN_weights`).
+
+### `[preprocess]`
+
+`min_genes` 100, `min_cells` 3, `normalize_target_sum` 10000, `n_top_hvg` 2000, `n_pca_components` 50, `pca_random_seed` 42, `n_neighbors` 15, `min_dist` 0.5, `spread` 0.5, `umap_learning_rate` 1.0, `n_epochs` (auto), `ef_construction` 30, `leiden_resolution` 1.0, `leiden_max_iter` 100, `magic_t` 3.
+
+---
+
+## 9. Output files
+
+### Run directory layout
+
+```
+output_dir/
+├── spacetravlr_run_repro.toml    # effective config; the pointer for all downstream tools
+├── spacetravlr_run_summary.html  # HTML training summary
+├── GENE_betadata.feather         # per-gene coefficients
+├── GENE.lock                     # transient: gene currently training on some host
+├── GENE.orphan                   # gene skipped (no modulators / failed quality gate)
+├── GENE.tf_ablated               # TF channel ablated or all-zero TF support
+├── log/GENE.log                  # per-gene training metrics
+└── CNN_weights/GENE_cnn_weights.npz   # only when save_cnn_weights = true
+```
+
+With `[data].condition` set, each group trains under `output_dir/conditions/<sanitized_value>/` while the repro TOML stays at the parent level.
+
+### `{gene}_betadata.feather`
+
+Arrow IPC with LZ4 compression. The primary training product: learned coefficients for predicting the target gene from its modulators.
+
+| Column | Meaning |
+|---|---|
+| `Cluster` or `CellID` | Row key. In `seed` mode, one row per cluster label. In `full` mode, one row per cell (`obs_names`). |
+| `beta0` | Intercept |
+| `beta_<name>` | Coefficient for modulator `<name>` |
+
+Modulator naming convention: a plain gene symbol is a transcription factor; `LIG$REC` is a ligand–receptor pair; `TF#LIG` is a ligand-mediated TF term (NicheNet-style).
+
+### `collect-interactions` output
+
+`plucked_feathers.feather` by default, with columns `interaction`, `target_gene`, `beta`, `interaction_type` (`tf` | `ligand-receptor` | `ligand-tf`), and `cell_type`.
+
+### Perturbation output
+
+A feather with `CellID` plus one column per gene, holding simulated post-perturbation expression. Compare against the baseline expression from the source `.h5ad` to get fold changes.
+
+### Reading results in Python
+
+```python
+import pandas as pd, scanpy as sc, numpy as np
+
+# aggregated interactions across cell types
+inter = pd.read_feather("/runs/tonsil/plucked_feathers.feather")
+top_lr = (inter[inter.interaction_type == "ligand-receptor"]
+            .sort_values("beta", ascending=False)
+            .head(25))
+
+# per-gene spatial coefficients
+beta = pd.read_feather("/runs/tonsil/AICDA_betadata.feather").set_index("CellID")
+
+# perturbation effect
+adata = sc.read_h5ad("/data/tonsil.h5ad")
+pert  = pd.read_feather("/runs/tonsil/FOXO1_ko.feather").set_index("CellID")
+base  = pd.DataFrame(adata[pert.index].layers["imputed_count"].toarray(),
+                     index=pert.index, columns=adata.var_names)
+log2fc = np.log2((pert[base.columns] + 1e-9) / (base + 1e-9))
+
+# cell-extrinsic effect: restrict to neighbors of the perturbed population
+neighbors = adata.obs_names[adata.obs.cell_type == "Macrophage"]
+log2fc.loc[log2fc.index.intersection(neighbors)].mean().sort_values()
+```
+
+### `log/{gene}.log`
+
+Tab-separated, format `spacetravlr_training_log v1`. Contains global settings (`seed_only`, `per_cell_cnn_export`, CNN epochs, learning rate, Lasso iterations and tolerance) and per-cluster metrics (`lasso_r2`, FISTA iterations, convergence, CNN epoch MSE trace, in-sample `cnn_r2`). Parsed by `run-summary` and summarizable with `scripts/cnn_vs_lasso_metrics.py`.
+
+---
+
+## 10. Web interfaces
+
+### `spatial_viewer`
+
+```bash
+cd web/spatial_viewer && npm install && npm run build:all && cd ../..
+cargo run --release --features spatial-viewer --bin spatial_viewer -- \
+  --h5ad /data/tonsil.h5ad \
+  --run-toml /runs/tonsil/spacetravlr_run_repro.toml \
+  --static-dir web/spatial_viewer/dist \
+  --allow-cors --bind 127.0.0.1 --port 8080
+```
+
+Flags: `--h5ad`, `--layer` (`imputed_count`), `--cluster-annot` (`cell_type`), `--bind` (`127.0.0.1`), `--port` (`8080`), `--static-dir` (`web/spatial_viewer/dist`), `--network-dir`, `--run-toml` (enables perturbation and betadata panels), `--perturb-overlay`, `--allow-cors`, `--perturb-cache-dir`, and foyer cache sizing flags `--foyer-grn-memory-mb` (256), `--foyer-grn-disk-mb` (512), `--foyer-grid-memory-mb` (64), `--foyer-grid-disk-mb` (128).
+
+HTTP API under `/api`:
+
+`GET /api/meta`, `GET|POST /api/viewer_state`, `POST /api/session/configure`, `POST /api/cancel`, `GET /api/spatial`, `GET /api/umap`, `GET /api/clusters`, `GET /api/cell_type/codes`, `GET /api/genes`, `GET /api/genes/full`, `GET /api/gene/expression`, `POST /api/spatial/received_ligand`, `GET /api/betadata/genes`, `GET /api/betadata/columns`, `GET /api/betadata/values`, `POST /api/betadata/top`, `POST /api/betadata/collect_interactions`, `POST /api/betadata/pair_lr`, `POST /api/network/cell-context`, `POST /api/perturb/preview`, `POST /api/perturb/batch`, `POST /api/perturb/export_feather`, `POST /api/perturb/splash_network`, `GET /api/perturb/splash_progress`, `POST /api/perturb/umap-field`, `POST /api/umap/signature_field`, `POST /api/perturb/summary`, `POST /api/perturb/reference_similarity`, `POST /api/perturb/neighbor_sanity`, `POST /api/cluster/mean_expression`, `POST /api/meta/label_clusters`.
+
+An MCP server is available for agent control (`npm run mcp:serve` from `web/spatial_viewer`), exposing tools including `show_spatial_viewer`, `spatial_viewer_capture_render`, `spatial_viewer_run_perturb`, `spatial_viewer_collect_interactions`, `spatial_viewer_perturb_summary`, `spatial_viewer_get_meta`, `spatial_viewer_wait_ready`, and `spatial_viewer_cancel_jobs`.
+
+### `umap_lab`
+
+```bash
+spacetravlr gui                                  # builds the UI and starts the server
+# or manually:
+cd web/umap_lab && npm ci && npm run build && cd ../..
+cargo run --release --features umap-lab --bin umap_lab -- --port 8765 --static-dir web/umap_lab/dist
+```
+
+Flags: `--bind` (`127.0.0.1`), `--port` (`8765`), `--static-dir`, `--api-only` (false), `--allow-cors` (true).
+
+HTTP API under `/api`: `GET /api/status`, `POST /api/load`, `POST /api/umap`, `POST /api/leiden`, `POST /api/leiden/subcluster`, `POST /api/leiden/reset`, `POST /api/gene`, `POST /api/magic_leiden`, `GET /api/signature_sets`, `POST /api/signature`, `POST /api/color_by`, `POST /api/malt`, `POST /api/malt_optimized`, `POST /api/load_csv`, `POST /api/export_csv`.
+
+---
+
+## 11. Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `SPACETRAVLR_DATA_DIR` | Search path for GRN parquet files and the config template |
+| `SPACETRAVLR_ROOT` | Repo root used for config discovery |
+| `SPACETRAVLR_FORCE_CPU` / `SPACETRAVLR_DISABLE_WGPU` | Force the CPU (NdArray) backend instead of WebGPU |
+| `SPACETRAVLR_QUIET_COMPUTE` | Suppress the compute-backend log line |
+| `SPACETRAVLR_FORCE_KEEP_GENES` | Comma-separated genes preserved through HVG selection |
+| `SPACETRAVLR_INSTALL_DIR` | Installer target directory (default `$HOME/.local/bin`) |
+| `SPACETRAVLR_GITHUB_REPO` / `SPACETRAVLR_GH_API` | Release source overrides for install and self-update |
+| `SPACETRAVLR_LINUX_VARIANT` | `standard` \| `compat` \| `compat28` glibc variant selection |
+| `SPACETRAVLR_UV_BLAS_THREADS` / `SPACETRAVLR_PRESERVE_BLAS_THREADS` / `SPACETRAVLR_UV_ALLOW_CACHE` | Control BLAS threading and caching for `uv`-launched Python children |
+| `SPACETRAVLR_VERIFY_H5AD`, `SPACETRAVLR_VERIFY_H5AD_URL`, `SPACETRAVLR_VERIFY_LOG`, `SPACETRAVLR_VERIFY_MAX_LR`, `SPACETRAVLR_VERIFY_ALLOW_CPU` | `--verify` behavior |
+| `SPACETRAVLR_FOYER_GRN_MEMORY_MB`, `SPACETRAVLR_FOYER_GRN_DISK_MB`, `SPACETRAVLR_FOYER_GRID_MEMORY_MB`, `SPACETRAVLR_FOYER_GRID_DISK_MB` | Spatial viewer cache tiers |
+| `SPATIAL_VIEWER_ALLOW_CORS` | Enable CORS without the flag (`1` or `true`) |
+| `SPATIAL_VIEWER_API_BASE` | Base URL used by the MCP server |
+| `SPACETRAVLR_DUMP_CNN_PARITY`, `SPACETRAVLR_DUMP_CNN_TRAIN_DATA` | Debug dumps |
+| `UV_BIN` | Path to the `uv` executable (default `uv`) |
+| `RUST_LOG` | Logging for `spatial_viewer` and `umap_lab` (default `spatial_viewer=info,tower_http=info`) |
+| `HDF5_USE_FILE_LOCKING` | Set to `FALSE` automatically if unset |
+
+---
+
+## 12. How the model works
+
+**Step 1 — Received ligand fields.** For each cell and each ligand, aggregate expression from neighboring sender cells weighted by a Gaussian kernel with σ = `[spatial].radius`. Juxtacrine terms use a hard `contact_distance` cutoff instead.
+
+**Step 2 — Sparse group lasso.** For each target gene and each cluster, fit a sparse group lasso (solved by FISTA) predicting expression from three modulator groups — TF terms, `LIG$REC` products of receptor expression and received ligand, and `TF#LIG` ligand-mediated TF terms — plus optional extras. This produces global, cell-type-specific baseline coefficients β_SGL and acts as a quality gate via `score_threshold`.
+
+**Step 3 — Spatial proximity grids and vision encoder.** Each cell's neighborhood is rendered as a per-cell-type spatial proximity grid (a k × m × n tensor over cell-type channels). A three-layer CNN with batch normalization, parametric ReLU, and spatial pyramid pooling encodes it. A Vision Transformer backbone is also implemented; both learn very similar gene–gene relationships and achieve comparable accuracy, and the CNN is the default because it has far fewer parameters, overfits less on sparse data, and trains more cheaply.
+
+**Step 4 — Spatially varying coefficients.** An MLP maps the encoded representation to location-specific multipliers, and effective coefficients are the elementwise product β_j = β_SGL ⊙ f_spatial(D_j). Expression is read out linearly, ŷ_i = β_i,0 + Σ β_i,j x_i,j. Training is end-to-end with Adam on mean squared error. This factorization deliberately separates global cell-type biology from spatial modulation, which is what makes the coefficients interpretable.
+
+**Step 5 — Perturbation propagation.** Set the perturbed gene to its desired level and build a delta tensor. At each iteration, evaluate partial derivatives of predicted expression with respect to modulators from the current coefficients and expression state (∂H/∂x_TF = β_TF; ∂H/∂x_R = β_LR · received ligand; ∂H/∂x_L = β_LR · receptor expression, with ligand–TF contributions summed on the same modulator). Propagate through the chain rule, recompute received-ligand fields through the Gaussian kernel whenever ligand expression changes, and reconcile ligand deltas so direct and diffused changes are not double counted. Repeat for T steps (default 4). This recomputation of the spatial ligand field at every hop is what produces cell-extrinsic predictions.
+
+**Step 6 — Interpretation.** Hop-specific contributions are isolated by differencing cumulative gradients, averaged across cells into a directed weighted graph (edges below 1e-4 pruned), and traced backward greedily from a downstream target to the perturbation source to recover parallel mechanistic pathways. Transition probabilities between cell states are computed from the correlation of the simulated shift with pairwise expression differences, softmaxed over k-nearest neighbors, and calibrated by subtracting a null transition matrix computed under zero perturbation. Projecting these onto an embedding gives Velocyto-style vector fields, and cosine similarity against a reference gradient (pseudotime, gene-set activity) yields differentiation alignment scores.
+
+**Microniches.** Modulator activity per cell is the mean coefficient across highly variable genes, giving an N × M activity matrix. A k-NN graph over that matrix plus Leiden clustering yields discrete, non-overlapping functional microniches. On NicheCompass benchmarking metrics this outperforms BANKSY, COVET/ENVI, and NicheCompass itself.
+
+**Transfer across resolutions.** For matched modality, trained CNNs directly predict coefficients on the new sample. To go from higher-resolution data (Slide-tags, XYZeqV2) to 55 µm Visium spots, neighborhoods of five single-nuclei cells are aligned to each spot, Cell2location provides per-spot cell-type scores, each spot is matched by Pearson correlation to the most similar training centroid, and cells receive that neighborhood's mean coefficients.
+
+---
+
+## 13. Validated results (what the method has been shown to do)
+
+These are useful for calibrating claims about what SpaceTravLR can be trusted to predict.
+
+- **Human tonsil (Slide-tags).** Recovered cell-type-specific responses across 18 subclusters. Cell-type-restricted `Cxcl13` overexpression in follicular dendritic cells selectively altered neighboring `Cxcr5`-expressing cells; the same held for `Il21` in Tfh cells and `Il18` in myeloid cells. A Tfh-restricted `Bcl6` knockout shifted nearby cells as a function of their `Il21r` expression. Combinatorial `Il21` / `Bcl6` / `Prdm1` perturbations reproduced known synergistic and antagonistic relationships, outperforming Tahoe-x1, CellPLM, SpaceFlow, and CellOracle.
+- **Spatial dependence.** `Il21` overexpression in naive CD4 T cells produced `Stat3` and `Cxcr5` changes that depended non-linearly on the local germinal-center B cell count, saturating around 40 GC B cells — a functional microniche effect that CellPLM failed to resolve despite using spatial information.
+- **Germinal center architecture.** `Foxo1` knockout was predicted to drive dark-zone GC B cells toward a light-zone identity while light-zone cells retained theirs, with correctly signed changes in `Bcl6`, `Batf`, and `Cxcr4` — matching murine experimental findings, and not captured by CellOracle.
+- **Cross-platform transfer.** A tonsil Slide-tags model applied to an unseen Visium lymph node correctly predicted dark-zone shrinkage under `Foxo1` knockout.
+- **Mouse kidney (XYZeqV2, true single-cell spatial).** `Mif` knockout restricted to epithelial cells was predicted to convert hypertonic macrophages toward a regular macrophage state via `Mif`–`Cd74` signaling. The effect was correctly absent in a kidney dataset lacking hypertonic macrophages, and zero-shot transfer to an independent kidney sample reproduced the prediction. NicheCompass did not detect the mediating network.
+- **Neighbor-level validation against Spatial Perturb-seq.** In mouse hippocampus, predicted differentially expressed genes in CA1/2/3 cells *neighboring* cells that received `Clu`, `Flcn`, `Fasn`, `Rraga`, `Srf`, and `Stk39` knockouts showed high concordance with the experimental ground truth. Similar agreement held in MERFISH liver against Perturb-Multimodal for `Bccip`, `Lgr4`, `Tbcb`, and `Gpn1`.
+- **Development.** Trained on wild-type Slide-seq V2 mouse embryo, in-silico `Tbx6` knockout at E9.5 reproduced the ectopic neural tube phenotype and outperformed alternatives across the top 1000 differentially expressed genes; `Sox2` overexpression reproduced the reciprocal progenitor-like shift.
+- **Melanoma screen with experimental validation.** Systematically perturbing all expressed TFs, ligands, and receptors in CD8 T cells recovered known checkpoint targets (`Pdcd1`, `Ctla4`) and nominated `Patz1` as a novel target. CRISPR knockout of `Patz1` in pMEL cells followed by adoptive transfer confirmed reduced exhaustion and heightened activation (linear SVM discriminator, 91.7% cross-validation accuracy, p = 0.025).
+- **Allergic asthma with experimental validation.** In-silico `Ccr4` deletion predicted that antigen-specific Th2 cells would become transcriptionally more similar to cells at the T–B border and B cell follicles; CRISPR `Ccr4` knockout in 1DER cells confirmed Th2 enrichment in B cell follicles and depletion from T cell zones.
+- **Scale.** Processed the full Atera whole-transcriptome cervical cancer dataset (717,576 segmented cells × 18,028 genes) without downsampling, and generalized to an independent FFPE breast cancer section (170,057 cells).
+- **Feature attribution.** Exact Shapley decomposition over the four feature families attributed predictions to ligand–receptor signaling (39.4%), TF activity (36.8%), learned spatial context (22.3%), and ligand–TF edges (1.4%), confirming that spatial neighborhood structure contributes substantively rather than decoratively.
+
+---
+
+## 14. Task recipes
+
+**"Which ligand–receptor interactions drive gene X in cell type Y?"**
+Train, run `collect-interactions`, filter `plucked_feathers.feather` to `target_gene == X`, `cell_type == Y`, `interaction_type == "ligand-receptor"`, and sort by `beta`. For a gene *set* rather than a single gene, sum coefficients across the set weighted by receptor expression on the cells of interest.
+
+**"What happens to neighbors if I knock out gene G in cell type A?"**
+Generate `cells.csv` with `spacetravlr --make-cells-csv`, run `spacetravlr-perturb` with `--cells-csv` and `--cells-csv-column A`, then compare simulated versus baseline expression restricted to cells of type B within the spatial neighborhood of the perturbed cells (a k-d tree query within roughly 200 µm is the convention used in the paper).
+
+**"Find functional microniches."**
+Train in `full` mode, then cluster the per-cell modulator activity matrix derived from the betadata feathers (mean β across highly variable genes) with a k-NN graph and Leiden. Tune Leiden resolution to maximize silhouette score.
+
+**"Screen every TF, ligand, and receptor."**
+`spacetravlr-perturb screen --config ko_screen.toml`, or `scripts/spacetravlr_whole_genome_ko_batch.py` for genome scale. Score each perturbation by projecting its simulated shift vector onto a functional axis (pseudotime gradient, exhaustion signature, tumorigenicity score) via cosine similarity.
+
+**"Compare two conditions."**
+Either train once with `[data].condition` / `--condition` set to the obs column separating them, which produces per-condition subdirectories under a shared repro TOML, or train separate models and compare ranked interactions.
+
+**"Apply an existing model to a new sample."**
+Point `spacetravlr-perturb` at the original run's `spacetravlr_run_repro.toml` while supplying the new AnnData. This works when the samples share cell types; expect degraded results otherwise.
+
+---
+
+## 15. Troubleshooting and guidance
+
+| Symptom | Cause and fix |
+|---|---|
+| Dashboard garbles scripted output | Add `--plain`. Always use it for non-interactive and agent-driven runs. |
+| `{gene}.orphan` files appear | The gene had no usable modulators or failed the `score_threshold` quality gate. Lower `[training].score_threshold`, raise `max_lr`, or check that `[data].layer` exists and is not all zeros. |
+| Join host errors or inconsistent results | Join hosts must not override hyperparameters stored in the repro TOML — drop `--genes`, `--max-genes`, and training flags and pass only `--join-output-dir`, `--parallel`, and `--plain`. |
+| Locks left behind after a crash | Set `[execution].stale_lock_secs` (3600 is a reasonable value on NFS) so workers reclaim them. |
+| GPU unavailable or wgpu misbehaving | `SPACETRAVLR_FORCE_CPU=1` or `SPACETRAVLR_DISABLE_WGPU=1`. Confirm with `spacetravlr --verify`. |
+| GRN parquet files not found | Set `SPACETRAVLR_DATA_DIR` or `[grn].network_data_dir` to the directory holding `human_network.parquet` / `mouse_network.parquet`. |
+| Out of memory during training | Lower `[execution].n_parallel`, lower `[cnn].cnn_max_cells_per_epoch` and `cnn_minibatch_size`, or reduce `[spatial].spatial_dim`. |
+| Perturbation is slow on large slides | Set `[perturbation].ligand_grid_factor` to about `0.5` for approximate received-ligand computation, and raise `--batch-parallelism`. |
+| Overexpression gives implausible fold changes | The value is out of distribution. Reduce `--desired-expr` toward the observed range and set `[perturbation].perturbed_gene_max_bound`. |
+| Suspicious L–R hits on a targeted panel | Panel coverage artifact. Validate on a whole-transcriptome platform before trusting the ranking. |
+| Docs build locally | `pip install -r docs/requirements.txt && mkdocs serve` |
+
+Runtime scales with cell count, gene count, cluster count, and epochs, and benefits substantially from a GPU. The documentation site hosts an empirically calibrated training-time estimator (fit across A100, L40S, and RTX 6000 runs) on its overview page. `[cnn].cnn_max_cells_per_epoch` is the main knob for trading accuracy against wall time — higher values mean later epochs see fewer cells, concentrating effort on tissue regions with larger residual error.
+
+---
+
+## 16. Citation and contact
+
+Ramjattun K\*, Wang A\*, Giri S#, Baessler A#, Imianowski CJ#, Chen Y, Takehara KK, Lee H, Cui J, Liu YC, Chen C-S, MacDonald WA, Siwek JC, Lord ND, Kaplan DH, Heeg M, Workman CJ, Vignali DAA, Poholek AC^, Lee Y^, Das J^. *Characterizing spatial functional microniches with SpaceTravLR.* (\* co-first authors; # co-second authors; ^ corresponding authors.)
+
+Corresponding authors: Jishnu Das (jishnu@pitt.edu), Youjin Lee (youjin.lee@pitt.edu), Amanda Poholek (poholeka@pitt.edu). Center for Systems Immunology and Department of Immunology, University of Pittsburgh School of Medicine.
+
+Lab: https://jishnulab.org

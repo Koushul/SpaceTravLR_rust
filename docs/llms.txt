@@ -1,0 +1,49 @@
+# SpaceTravLR
+
+> SpaceTravLR (Spatially perturbing Transcription factors, Ligands and Receptors) is an interpretable machine-learning framework that infers spatially resolved gene regulatory and ligand–receptor networks from spatial transcriptomics, then simulates single or combinatorial in-silico perturbations (knockout / overexpression) and propagates their effects through the tissue neighborhood — predicting changes in both the perturbed cell and its unperturbed neighbors. It is distributed as a self-contained, cross-platform Rust CLI (`spacetravlr`, `spacetravlr-perturb`, `spatial_viewer`) with no conda or CUDA setup required.
+
+Key facts an agent should know before answering questions or running commands:
+
+- Input is a single Visium-style spatial AnnData `.h5ad` with expression in `.X`, 2D coordinates in `.obsm['spatial']`, and preferably cluster labels in `.obs['cell_type']`. If no cell-type column exists, SpaceTravLR runs Leiden clustering first. Raw counts are fine — preprocessing is auto-detected.
+- The canonical happy path is: `spacetravlr --h5ad DATA.h5ad --output-dir RUN/` (training) → `RUN/spacetravlr_run_repro.toml` (the pointer file every downstream tool consumes) → `spacetravlr-perturb --run-toml RUN/spacetravlr_run_repro.toml --gene GENE --desired-expr 0 --out OUT.feather` (in-silico perturbation).
+- Training writes one `{GENE}_betadata.feather` per target gene, containing per-cell coefficients for each modulator. Modulator naming is positional: a bare symbol is a transcription factor, `LIG$REC` is a ligand–receptor pair, `TF#LIG` is a ligand-mediated TF term.
+- Additional hosts join an in-progress run with `spacetravlr --join-output-dir RUN/ --plain`; genes are claimed via `{gene}.lock` files, so this works over shared storage and SLURM without a scheduler.
+- SpaceTravLR is unique among in-silico perturbation methods in predicting **cell-extrinsic** effects — how perturbing gene X in cell type A changes the transcriptome of neighboring cell type B. Do not assume tools like CellOracle, CellPLM, or scGPT can answer that class of question.
+- Accuracy degrades for extreme out-of-distribution overexpression. Keep simulated expression within roughly the observed range (do not exceed ~2× the maximum observed value for that gene).
+- Read `llms-full.txt` below for the complete self-contained reference (every binary, flag, config key, environment variable, output artifact, and HTTP route). One fetch of that file is enough to operate SpaceTravLR end to end.
+
+## Complete reference
+
+- [llms-full.txt](https://spacetravlr-rust.readthedocs.io/en/latest/llms-full.txt): Single-file exhaustive reference — capabilities, all CLI binaries and flags, `spaceship_config.toml` schema, environment variables, output file formats, viewer HTTP API, troubleshooting, and the science behind the model. Start here.
+
+## Docs
+
+- [Overview](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/index.md): Landing page with the four-command quickstart (install, run, join, collect-interactions) and a GPU training-time estimator.
+- [Installation](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/install.md): One-line installer, prebuilt platform matrix, building from source with cargo, self-update, and the `--verify` hardware smoke test.
+- [Usage](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/usage.md): Primary CLI guide — input requirements, interactive and batch training, multi-host `--join-output-dir`, `.h5ad` inspection with `--peek`, terminal UMAP plots, Rust preprocessing, label transfer, and β aggregation.
+- [Parameters](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/params.md): Every `spaceship_config.toml` key across `[data]`, `[spatial]`, `[grn]`, `[lasso]`, `[training]`, `[cnn]`, `[execution]`, `[perturbation]`, and `[model_export]`, with guidance on what happens when you turn each one up or down.
+- [How it works](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/math.md): The math and Rust implementation — Gaussian received-ligand fields, sparse group lasso via FISTA, CNN-derived spatially varying coefficients, and chain-rule perturbation propagation.
+- [Output files](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/output.md): Catalog of every artifact — run directory layout, `{gene}_betadata.feather` schema, `spacetravlr_run_repro.toml`, per-gene logs, lock/orphan markers, CNN weight exports, and perturbation feathers.
+
+## Tutorials
+
+- [Bring your own data](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/tutorials/run-on-your-own-data.md): Complete BYOD walkthrough from install and verify through `.h5ad` preparation, leader/worker cluster training, and post-training interaction collection.
+
+## Agent skills
+
+- [spacetravlr-cli skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/spacetravlr-cli/SKILL.md): Agent-oriented operating guide for `spacetravlr` and `spacetravlr-perturb`, including config TOMLs, gene subsets, condition splits, multi-host join, and compute-backend selection.
+- [spatial-viewer-mcp skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/spatial-viewer-mcp/SKILL.md): Driving the Deck.gl spatial viewer from an agent via MCP — opening the viewer, capturing renders, running perturbations from chat, and querying interactions.
+- [single-cell-rna-qc skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/single-cell-rna-qc/SKILL.md): scVerse-style MAD-based quality control for `.h5ad` / `.h5` inputs before spatial analysis.
+
+## Source
+
+- [Repository](https://github.com/Koushul/SpaceTravLR_rust): Rust implementation (current, recommended). Package version 3.3.1.
+- [Config template](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/spaceship_config.toml): Annotated `spaceship_config.toml` with every section and inline comments.
+- [Installer script](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/scripts/install.sh): What `curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh` actually runs.
+- [Original Python implementation](https://github.com/jishnu-lab/SpaceTravLR): Reference research code that the Rust port supersedes.
+
+## Optional
+
+- [Examples index](https://spacetravlr-rust.readthedocs.io/en/latest/): Twenty per-dataset example pages spanning Atera, Xenium, Visium HD, XYZeqV2, Slide-tags, Stereo-seq, Slide-seq V2, and MERFISH. Most are placeholders at present — prefer the Usage and BYOD pages for working commands.
+- [Read the Docs site](https://spacetravlr-rust.readthedocs.io/en/latest/): Rendered documentation.
+- [GitHub Pages mirror](https://koushul.github.io/SpaceTravLR_rust/): Same content, deployed from `main`.
