@@ -1,0 +1,16 @@
+signal_id,signal_name,receptor,receptor_complex,pathway,signaling_class,default_radius_um,weight,species,evidence
+Lps,Lipopolysaccharide (LPS / lipid A),Tlr4,Ly96;Cd14,TLR,Vesicle,40,1.0,both,Gram-negative outer membrane; TLR4-MD2-CD14
+Lta,Lipoteichoic acid,Tlr2,Tlr6,TLR,Contact,25,1.0,both,Gram-positive cell wall; TLR2/6
+Lipoprotein,Bacterial lipoprotein,Tlr2,Tlr1,TLR,Contact,25,1.0,both,Triacylated lipoproteins; TLR2/1
+Flagellin,Flagellin,Tlr5,,TLR,Secreted,50,1.0,both,Motile bacteria flagellar filament
+Cpg_dna,Unmethylated CpG DNA,Tlr9,,TLR,Vesicle,30,1.0,both,Endosomal bacterial DNA sensing
+Mdp,Muramyl dipeptide,Nod2,,NLR,Contact,20,1.0,both,Peptidoglycan fragment; cytosolic NOD2
+Ie_dap,iE-DAP,Nod1,,NLR,Contact,20,1.0,both,Peptidoglycan fragment; cytosolic NOD1
+Scfa_acetate,Acetate,Ffar2,,GPCR_SCFA,Secreted,100,1.0,both,Fermentation product; FFAR2/GPR43
+Scfa_propionate,Propionate,Ffar2,,GPCR_SCFA,Secreted,100,1.0,both,Fermentation product; FFAR2
+Scfa_propionate,Propionate,Ffar3,,GPCR_SCFA,Secreted,100,1.0,both,Fermentation product; FFAR3/GPR41
+Scfa_butyrate,Butyrate,Ffar3,,GPCR_SCFA,Secreted,100,1.0,both,Fermentation product; FFAR3
+Scfa_butyrate,Butyrate,Hcar2,,GPCR_SCFA,Secreted,100,1.0,both,Butyrate; HCAR2/GPR109A
+Fmlp,Formyl peptide,Fpr1,,FPR,Secreted,40,1.0,both,Bacterial N-formyl peptides
+Fmlp,Formyl peptide,Fpr2,,FPR,Secreted,40,1.0,both,Bacterial N-formyl peptides; FPR2
+Ps_dmsp,Microbial PAMP proxy (pan),Cd14,,TLR,Vesicle,40,0.5,both,Soft prior when taxonomy uncertain; CD14 LPS transfer

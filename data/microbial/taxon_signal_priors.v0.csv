@@ -1,0 +1,51 @@
+taxon_level,taxon,signal_id,emission_weight,notes
+gram,Gram_negative,Lps,1.0,Outer membrane LPS
+gram,Gram_negative,Ie_dap,0.8,Peptidoglycan iE-DAP enriched in many Gram-neg
+gram,Gram_negative,Cpg_dna,0.5,Bacterial DNA proxy
+gram,Gram_positive,Lta,1.0,LTA / lipoteichoic acid
+gram,Gram_positive,Lipoprotein,0.8,Lipoproteins
+gram,Gram_positive,Mdp,0.8,Peptidoglycan MDP
+gram,Gram_positive,Cpg_dna,0.5,Bacterial DNA proxy
+phylum,Bacillota,Lta,0.7,Firmicutes / Bacillota often Gram-positive wall
+phylum,Bacillota,Mdp,0.7,
+phylum,Bacillota,Scfa_butyrate,0.9,Many Firmicutes ferment to butyrate
+phylum,Bacillota,Scfa_propionate,0.5,
+phylum,Bacillota,Scfa_acetate,0.6,
+phylum,Bacteroidota,Lps,0.9,Gram-negative
+phylum,Bacteroidota,Scfa_propionate,0.8,Bacteroides-linked propionate
+phylum,Bacteroidota,Scfa_acetate,0.7,
+phylum,Pseudomonadota,Lps,1.0,Proteobacteria
+phylum,Pseudomonadota,Flagellin,0.8,Many motile Proteobacteria
+phylum,Actinomycetota,Lta,0.4,Variable; weak LTA prior
+phylum,Actinomycetota,Cpg_dna,0.5,
+genus,Clostridium,Scfa_butyrate,1.0,Classic butyrate producer prior
+genus,Clostridium,Lta,0.6,
+genus,Clostridium,Mdp,0.6,
+genus,Lactobacillus,Lta,0.9,
+genus,Lactobacillus,Mdp,0.7,
+genus,Lactobacillus,Scfa_acetate,0.4,Weak acetate prior; lactate receptors not in v0
+genus,Turicibacter,Lta,0.7,
+genus,Turicibacter,Mdp,0.6,
+genus,Duncaniella,Lps,0.9,Muribaculaceae-related Gram-neg prior
+genus,Duncaniella,Scfa_propionate,0.5,
+genus,Muribaculum,Lps,0.9,
+genus,Muribaculum,Scfa_propionate,0.6,
+genus,Faecalibaculum,Lta,0.7,
+genus,Faecalibaculum,Scfa_butyrate,0.6,
+genus,Bacteroides,Lps,1.0,
+genus,Bacteroides,Scfa_propionate,0.9,
+genus,Bacteroides,Scfa_acetate,0.7,
+genus,Prevotella,Lps,0.9,
+genus,Parabacteroides,Lps,0.9,
+genus,Fusobacterium,Lps,1.0,Oral/gut Gram-neg; tumour-associated in other cancers
+genus,Fusobacterium,Flagellin,0.3,
+genus,Escherichia,Lps,1.0,
+genus,Escherichia,Flagellin,0.9,
+genus,Escherichia,Fmlp,0.6,
+genus,Enterococcus,Lta,0.9,
+genus,Staphylococcus,Lta,1.0,
+genus,Staphylococcus,Lipoprotein,0.8,
+genus,Bacillus,Lta,0.7,
+genus,Bacillus,Flagellin,0.5,
+genus,Akkermansia,Lps,0.5,Gram-neg atypical; weak LPS prior
+genus,Akkermansia,Scfa_propionate,0.4,

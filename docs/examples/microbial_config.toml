@@ -1,0 +1,13 @@
+# Example microbial section for spaceship_config.toml (M0 — not wired yet)
+#
+# Copy into a run config when M2+ lands. See docs/microbial.md.
+
+[microbial]
+enabled = false
+sender_mode = "colony" # bin | colony | soft_field
+interactions = "data/microbial/bact_host_interactions.v0.csv"
+taxon_priors = "data/microbial/taxon_signal_priors.v0.csv"
+# sender_table = "/path/to/bact_senders.parquet"
+normalization = "none" # none | n_senders | density
+scale_factor = 1.0
+# radius_um_override = 50.0  # if set, overrides per-signal default_radius_um
