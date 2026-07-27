@@ -611,6 +611,75 @@ pub fn calc_neg_loglik_row_sums(
     if n == 0 {
         return Vec::new();
     }
+    let d0 = calc_q_d0_matrix(y, lam, q_mat, sq_mat, x_vals, k_val);
+    let d0s = d0.as_slice().unwrap();
+    (0..n)
+        .map(|i| -d0s[i * g..(i + 1) * g].iter().sum::<f64>())
+        .collect()
+}
+
+/// Flat `calc_q` d0 values (length = y.len()), matching Burn `calc_q_all` d0.
+pub fn calc_q_d0_flat(
+    y: &[f64],
+    lam: &[f64],
+    q_mat: &Array2<f64>,
+    sq_mat: &Array2<f64>,
+    x_vals: &Array1<f64>,
+    k_val: i64,
+) -> Vec<f64> {
+    assert_eq!(y.len(), lam.len());
+    let n = y.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let nk = q_mat.nrows();
+    let nx = q_mat.ncols();
+    let k_eff = if k_val < 0 { nk as i64 - 3 } else { k_val };
+    let q_flat: Vec<f64> = q_mat.as_standard_layout().iter().copied().collect();
+    let sq_flat: Vec<f64> = sq_mat.as_standard_layout().iter().copied().collect();
+    let x_vals_vec: Vec<f64> = x_vals.iter().copied().collect();
+    let x_max = x_vals_vec[nx - 1];
+    let yc: Vec<f64> = y
+        .iter()
+        .map(|&v| v.clamp(0.0, k_eff as f64))
+        .collect();
+    let mut d0 = vec![0.0f64; n];
+    let mut d1 = vec![0.0f64; n];
+    let mut d2 = vec![0.0f64; n];
+    let chunk = 4096.max(1);
+    d0.par_chunks_mut(chunk)
+        .zip(d1.par_chunks_mut(chunk))
+        .zip(d2.par_chunks_mut(chunk))
+        .zip(yc.par_chunks(chunk))
+        .zip(lam.par_chunks(chunk))
+        .for_each(|((((d0c, d1c), d2c), y_row), l_row)| {
+            calc_q_chunk(
+                y_row,
+                l_row,
+                d0c,
+                d1c,
+                d2c,
+                &q_flat,
+                &sq_flat,
+                &x_vals_vec,
+                nk,
+                nx,
+                x_max,
+            );
+        });
+    d0
+}
+
+fn calc_q_d0_matrix(
+    y: &Array2<f64>,
+    lam: &Array2<f64>,
+    q_mat: &Array2<f64>,
+    sq_mat: &Array2<f64>,
+    x_vals: &Array1<f64>,
+    k_val: i64,
+) -> Array2<f64> {
+    let n = y.nrows();
+    let g = y.ncols();
     let nk = q_mat.nrows();
     let nx = q_mat.ncols();
     let k_eff = if k_val < 0 { nk as i64 - 3 } else { k_val };
@@ -650,9 +719,55 @@ pub fn calc_neg_loglik_row_sums(
                 );
             });
     }
+    d0
+}
 
-    let d0s = d0.as_slice().unwrap();
-    (0..n)
-        .map(|i| -d0s[i * g..(i + 1) * g].iter().sum::<f64>())
-        .collect()
+/// Bulk-mode IRWLS for a single observation (`S` is genes × types, already scaled by nUMI).
+pub fn solve_irwls_single_bulk_native(s: &Array2<f64>, y: &Array1<f64>, numi: f64) -> Array1<f64> {
+    let g = s.nrows();
+    let k = s.ncols();
+    assert_eq!(y.len(), g);
+    let mut w = Array1::from_elem(k, 1.0 / k as f64);
+    let thr = (1e-4f64).max(numi * 1e-7);
+    let mut change = 1.0f64;
+    for _ in 0..100 {
+        if change <= 0.001 {
+            break;
+        }
+        let solution: Array1<f64> = w.mapv(|x| x.max(0.0));
+        let mut pred = s.dot(&solution);
+        for p in pred.iter_mut() {
+            *p = p.abs().max(thr);
+        }
+        let mut grad = Array1::<f64>::zeros(k);
+        let mut hess = vec![0.0f64; k * k];
+        for gg in 0..g {
+            let p = pred[gg];
+            let yv = y[gg] + 1e-10;
+            let d1 = (p.ln() - yv.ln()) / p * -2.0;
+            let d2 = (1.0 - p.ln() + yv.ln()) / (p * p) * -2.0;
+            for t in 0..k {
+                grad[t] -= d1 * s[[gg, t]];
+                for u in 0..k {
+                    hess[t * k + u] += s[[gg, t]] * (-d2) * s[[gg, u]];
+                }
+            }
+        }
+        let mut dw = vec![0.0f64; k];
+        psd_normalize_qp(
+            &hess,
+            grad.as_slice().unwrap(),
+            solution.as_slice().unwrap(),
+            &mut dw,
+            k,
+            1e-3,
+        );
+        change = 0.0;
+        for t in 0..k {
+            let nw = solution[t] + dw[t] * 0.3;
+            change += (nw - w[t]).abs();
+            w[t] = nw;
+        }
+    }
+    w
 }

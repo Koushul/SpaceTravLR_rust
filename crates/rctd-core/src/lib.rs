@@ -1,4 +1,8 @@
-//! RCTD core: Poisson–Lognormal likelihood + IRWLS (Burn tensors; CPU `NdArray<f64>` or optional GPU `Wgpu<f32>`).
+//! RCTD core: Poisson–Lognormal likelihood + IRWLS.
+//!
+//! Hot paths (`full` / `doublet` / `multi` / `choose_sigma` / `fit_bulk`) use the native
+//! ndarray+rayon solver. The Burn tensor IRWLS stack remains for experiments, but each
+//! iteration round-trips host↔device for PSD / box-QP / simplex, so it is not the default.
 #![recursion_limit = "256"]
 
 pub mod backend;
@@ -21,8 +25,8 @@ pub mod types;
 #[cfg(feature = "wgpu")]
 pub use backend::init_wgpu;
 pub use backend::{
-    default_device, fe, scalar_to_f64, slice_elems_to_f64, sync_device, FloatElem, RctdBackend,
-    RctdDevice,
+    default_device, fe, scalar_to_f64, slice_elems_to_f64, sync_device, tensor1_from_f64,
+    tensor2_from_f64, FloatElem, RctdBackend, RctdDevice,
 };
 pub use calc_q::{calc_log_likelihood_batch, calc_q_all, device_cpu};
 pub use doublet::run_doublet_mode;

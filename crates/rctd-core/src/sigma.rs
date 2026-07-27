@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 
-use burn::tensor::{Tensor, TensorData};
 use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-use crate::backend::{
-    f64_slice_to_elems, scalar_to_f64, tensor1_from_f64, tensor2_from_f64, RctdBackend, RctdDevice,
+use crate::backend::RctdDevice;
+use crate::irwls_native::{
+    calc_q_d0_flat, solve_irwls_native, NativeSharedPrepared,
 };
-use crate::calc_q::calc_q_all;
-use crate::irwls::solve_irwls_batch_shared;
 use crate::likelihood_tables::compute_spline_coefficients;
 
 pub static SIGMA_ALL: &[i32] = &[
@@ -20,14 +18,6 @@ pub static SIGMA_ALL: &[i32] = &[
     132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 166, 168,
     170, 172, 174, 176, 178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198, 200,
 ];
-
-fn t1(a: &Array1<f64>, dev: &RctdDevice) -> Tensor<RctdBackend, 1> {
-    tensor1_from_f64(a, dev)
-}
-
-fn t2(a: &Array2<f64>, dev: &RctdDevice) -> Tensor<RctdBackend, 2> {
-    tensor2_from_f64(a, dev)
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn choose_sigma(
@@ -43,10 +33,8 @@ pub fn choose_sigma(
     n_epoch: usize,
     k_val: i64,
     seed: u64,
-    device: &RctdDevice,
+    _device: &RctdDevice,
 ) -> i32 {
-    #[cfg(feature = "wgpu")]
-    crate::backend::init_wgpu(device);
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let valid_idx: Vec<usize> = spatial_numi
         .iter()
@@ -75,26 +63,22 @@ pub fn choose_sigma(
     });
     let fit_numi: Array1<f64> = fit_idx.iter().map(|&i| spatial_numi[i]).collect();
 
-    let x_t = t1(x_vals, device);
     let mut sigma = sigma_init;
     for _epoch in 0..n_epoch {
         let sigma_use = nearest_sigma_key(sigma, q_matrices);
         let q_cur = q_matrices.get(&sigma_use.to_string()).expect("q mat");
         let sq_cur = sq_map.get(&sigma_use.to_string()).expect("sq mat");
 
-        let (mut weights, _) = solve_irwls_batch_shared(
-            norm_profiles,
-            &fit_counts,
-            &fit_numi,
-            q_cur,
-            sq_cur,
-            x_vals,
+        let prep = NativeSharedPrepared::new(norm_profiles, q_cur, sq_cur, x_vals);
+        let (mut weights, _) = solve_irwls_native(
+            &prep,
+            fit_counts.view(),
+            fit_numi.view(),
             50,
             0.001,
             0.3,
             false,
             false,
-            device,
         );
         weights.mapv_inplace(|w| w.max(0.0));
 
@@ -121,35 +105,19 @@ pub fn choose_sigma(
 
         let y_flat: Vec<f64> = fit_counts.iter().cloned().collect();
         let y_len = y_flat.len();
-        let y_t = Tensor::from_data(
-            TensorData::new(f64_slice_to_elems(&y_flat), [y_len]),
-            device,
-        );
 
         let mut best_sigma = sigma;
         let mut best_score = f64::INFINITY;
         for &s in &valid_cands {
             let q_s = q_matrices.get(&s.to_string()).unwrap();
             let sq_s = sq_map.get(&s.to_string()).unwrap();
-            let q_t = t2(q_s, device);
-            let sq_tt = t2(sq_s, device);
             let mut min_over_fac = f64::INFINITY;
             for fac_num in 8_i32..=12 {
                 let fac = fac_num as f64 / 10.0;
                 let lam_flat: Vec<f64> = prediction.iter().map(|p| (p * fac).max(1e-4)).collect();
-                let lam_t = Tensor::from_data(
-                    TensorData::new(f64_slice_to_elems(&lam_flat), [y_len]),
-                    device,
-                );
-                let (d0, _, _) = calc_q_all(
-                    y_t.clone(),
-                    lam_t,
-                    q_t.clone(),
-                    sq_tt.clone(),
-                    x_t.clone(),
-                    k_val,
-                );
-                let score = -scalar_to_f64(d0.sum().into_scalar());
+                let d0 = calc_q_d0_flat(&y_flat, &lam_flat, q_s, sq_s, x_vals, k_val);
+                debug_assert_eq!(d0.len(), y_len);
+                let score = -d0.iter().sum::<f64>();
                 min_over_fac = min_over_fac.min(score);
             }
             if min_over_fac < best_score {

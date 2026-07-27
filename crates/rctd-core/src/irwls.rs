@@ -1,3 +1,9 @@
+//! Burn-tensor IRWLS (experimental). Prefer [`crate::irwls_native`] for production.
+//!
+//! This path pays a host round-trip every iteration: `psd_batch`, `solve_box_qp_batch`,
+//! and `project_simplex_batch` all `into_data` → CPU f64 → `from_data`. That dominates
+//! cost on NdArray and defeats WGPU for typical pixel batches.
+
 use burn::tensor::{Int, Tensor};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
