@@ -64,6 +64,25 @@ use_tfl_modulators = true
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
 
+[cellchat]
+# Hybrid CellChat → SpaceTravLR LR terms (off by default).
+enabled = false
+# db_path = "data/cellchat_mouse.csv"
+# lr_mode: weighted_spatial | hill_spatial | spatial_product
+lr_mode = "weighted_spatial"
+kh = 0.5
+hill_coef = 1.0
+min_cells = 10
+population_size_weight = false
+# n_perm = 100  # label-shuffle p-values (0 = skip)
+n_perm = 0
+p_threshold = 0.05
+min_prob = 0.0
+replace_lr_pairs = true
+max_interactions = 200
+# signaling_types = ["Secreted Signaling"]
+random_seed = 42
+
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)
 adam_beta_1 = 0.9

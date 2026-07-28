@@ -172,6 +172,35 @@ enum Commands {
     CollectInteractions(CollectInteractionsCli),
     /// UMAP lab: build the web UI, start the API + static server, print the URL.
     Gui(GuiCli),
+    /// Compute CellChat-style communication probabilities and write a CSV (hybrid LR preview).
+    #[command(name = "cellchat")]
+    CellChat(CellChatCli),
+}
+
+#[derive(Parser, Debug, Clone)]
+struct CellChatCli {
+    #[arg(long, value_name = "PATH", help = "AnnData .h5ad")]
+    h5ad: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "spaceship_config.toml overlay (must enable [cellchat] or pass flags)"
+    )]
+    config: Option<PathBuf>,
+    #[arg(long, help = "obs column for groups (default: data.cluster_annot / cell_type)")]
+    cluster_key: Option<String>,
+    #[arg(long, help = "expression layer (default: data.layer)")]
+    layer: Option<String>,
+    #[arg(long, help = "human|mouse (default: infer from var_names)")]
+    species: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "output CSV (default: ./cellchat_commun_prob.csv)"
+    )]
+    out: Option<PathBuf>,
+    #[arg(long, help = "force-enable CellChat even if [cellchat].enabled = false")]
+    enable: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -1579,6 +1608,114 @@ fn print_plain_preamble(
     );
 }
 
+fn run_cellchat_cli(cli: &Cli, cc: &CellChatCli) -> anyhow::Result<()> {
+    use anndata::{AnnDataOp, Backend};
+    use spacetravlr::spatial_estimator::{
+        clusters_array1_from_obs_column, prepare_cellchat_lr_plan,
+    };
+
+    let mut cfg = SpaceshipConfig::try_load_merged(
+        cc.config
+            .as_ref()
+            .or(cli.config.as_ref())
+            .map(|p| p.as_path()),
+    )?;
+    if cc.enable {
+        cfg.cellchat.enabled = true;
+    }
+    if !cfg.cellchat.enabled {
+        anyhow::bail!(
+            "CellChat is disabled. Pass --enable or set [cellchat].enabled = true in the config."
+        );
+    }
+
+    let adata_path = cc.h5ad.clone();
+    let layer = cc
+        .layer
+        .clone()
+        .unwrap_or_else(|| cfg.data.layer.clone());
+    let cluster_key = cc
+        .cluster_key
+        .clone()
+        .unwrap_or_else(|| cfg.data.cluster_annot.clone());
+    let out_dir = cc
+        .out
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let out_name = cc
+        .out
+        .as_ref()
+        .and_then(|p| p.file_name().map(|s| s.to_os_string()))
+        .unwrap_or_else(|| std::ffi::OsString::from("cellchat_commun_prob.csv"));
+
+    let adata = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(&adata_path)?)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let var_names = adata.var_names().into_vec();
+    let species = cc
+        .species
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let s = cfg.data.spatial_species.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .or_else(|| spacetravlr::network::infer_species(&var_names).map(|s| s.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("could not infer species; pass --species human|mouse"))?;
+
+    let obs = adata.read_obs()?;
+    let clusters = clusters_array1_from_obs_column(&obs, &cluster_key)?;
+    let labels =
+        spacetravlr::spatial_estimator::read_h5ad_obs_column_str(&adata_path, &cluster_key)?;
+    let num_clusters = clusters.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+    let mut name_of: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    for (i, lab) in labels.iter().enumerate() {
+        name_of.entry(clusters[i]).or_insert_with(|| lab.clone());
+    }
+    let group_names: Vec<String> = (0..num_clusters)
+        .map(|c| name_of.get(&c).cloned().unwrap_or_else(|| c.to_string()))
+        .collect();
+
+    let cfg_parent = cc
+        .config
+        .as_ref()
+        .or(cli.config.as_ref())
+        .and_then(|p| p.parent());
+
+    let plan = prepare_cellchat_lr_plan(
+        &adata,
+        &layer,
+        &clusters,
+        num_clusters,
+        &group_names,
+        None,
+        &species,
+        &cfg.cellchat,
+        cfg_parent,
+        Some(&out_dir),
+    )?;
+
+    let default_csv = out_dir.join("cellchat_commun_prob.csv");
+    let desired = out_dir.join(&out_name);
+    if desired != default_csv && default_csv.is_file() {
+        std::fs::rename(&default_csv, &desired)?;
+    }
+    eprintln!(
+        "CellChat: {} interactions (mode={:?}) → {}",
+        plan.interactions.len(),
+        plan.mode,
+        desired.display()
+    );
+    adata.close()?;
+    Ok(())
+}
+
 fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
     let cfg = SpaceshipConfig::try_load_merged(
         rs.config
@@ -2742,6 +2879,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::RunSummary(rs)) => return run_run_summary(&cli, rs),
         Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
         Some(Commands::Gui(g)) => return run_spacetravlr_gui(g),
+        Some(Commands::CellChat(cc)) => return run_cellchat_cli(&cli, cc),
         None => {}
     }
 

@@ -61,6 +61,29 @@ Each target gene is predicted from modulator groups: **TFs**, **ligand–recepto
 
 ---
 
+## `[cellchat]` — hybrid CellChat probabilities → LR terms
+
+Off by default. When `enabled = true`, SpaceTravLR computes CellChat-style communication probabilities (trimean + Hill), filters interactions, and builds spatial LR design columns for Lasso. See [CellChat hybrid](cellchat.md).
+
+| Parameter | Template | What it does | Turn up | Turn down |
+|-----------|----------|--------------|---------|-----------|
+| `enabled` | `false` | Master switch for the hybrid path. | `true` to replace/weight LR with CellChat. | Leave off for stock Gaussian \(L\times R\). |
+| `db_path` |  | Path to `cellchat_{species}.csv`. | Custom curated DB. | Auto-resolve from `data/` / `SPACETRAVLR_DATA_DIR`. |
+| `lr_mode` | `weighted_spatial` | How \(P\) enters per-cell LR features. | `hill_spatial` for saturating local Hill; `spatial_product` for classic product on CellChat pairs. | — |
+| `kh` | `0.5` | Half-saturation in the Hill term. | Harder to saturate. | Easier saturation. |
+| `hill_coef` | `1.0` | Hill coefficient \(n\). | Steeper switch. | Near-linear mass action. |
+| `min_cells` | `10` | Drop groups smaller than this. | More groups kept. | Stricter group filter. |
+| `population_size_weight` | `false` | Multiply \(P\) by sender×receiver fractions. | Emphasize abundant populations. | Expression-only \(P\). |
+| `n_perm` | `0` | Label-shuffle permutations for p-values (`0` = skip). | e.g. `100` for CellChat-style significance. | Keep `0` for speed. |
+| `p_threshold` | `0.05` | Keep interactions with min p ≤ this (needs `n_perm > 0`). | More pairs. | Stricter significance. |
+| `min_prob` | `0.0` | Drop interactions whose max \(P\) is below this. | Stronger-only edges. | Keep weak links. |
+| `replace_lr_pairs` | `true` | Replace GRN `lr` edges with CellChat-selected complexes. | Force CellChat pair set. | `false` to keep GRN pairs but still use hybrid features when modes apply. |
+| `max_interactions` | `200` | Cap after ranking by max \(P\). | Broader LR block. | Faster, sparser. |
+| `signaling_types` |  | Restrict to classes (e.g. `Secreted Signaling`). | Focus paracrine. | Empty = all classes. |
+| `random_seed` | `42` | Permutation RNG seed. | — | — |
+
+---
+
 ## `[lasso]` — cluster-wise group Lasso
 
 Lasso runs **per target gene × cluster** (or per cell in export semantics) before any CNN step in full mode. It sets **anchors** and a **quality gate** via `score_threshold`.

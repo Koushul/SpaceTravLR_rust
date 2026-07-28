@@ -339,6 +339,116 @@ pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<St
     Ok(out)
 }
 
+/// Build a [`crate::cellchat::CellChatLrPlan`] from an open AnnData + cluster labels.
+pub fn prepare_cellchat_lr_plan<AnB: Backend>(
+    adata: &AnnData<AnB>,
+    layer: &str,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    group_names: &[String],
+    obs_row_subset: Option<&[usize]>,
+    species: &str,
+    cfg: &crate::cellchat::CellChatConfig,
+    config_file_parent: Option<&Path>,
+    output_dir: Option<&Path>,
+) -> anyhow::Result<Arc<crate::cellchat::CellChatLrPlan>> {
+    let db_path = crate::cellchat::resolve_cellchat_db_path(
+        species,
+        cfg.db_path.as_deref(),
+        config_file_parent,
+    )?;
+    let db = crate::cellchat::load_cellchat_db(&db_path)?;
+    let var_names = adata.var_names().into_vec();
+    let var_set: HashSet<String> = var_names.iter().cloned().collect();
+    let interactions = crate::cellchat::filter_interactions_for_adata(
+        &db,
+        &var_set,
+        &cfg.signaling_types,
+    );
+    if interactions.is_empty() {
+        anyhow::bail!(
+            "CellChat: no interactions after filtering DB {} against AnnData genes / signaling_types",
+            db_path.display()
+        );
+    }
+
+    let mut gene_set: HashSet<String> = HashSet::new();
+    for inter in &interactions {
+        for g in inter
+            .ligand_subunits
+            .iter()
+            .chain(inter.receptor_subunits.iter())
+        {
+            gene_set.insert(g.clone());
+        }
+    }
+    let mut gene_names: Vec<String> = gene_set.into_iter().collect();
+    gene_names.sort();
+    let mut gene_indices = Vec::with_capacity(gene_names.len());
+    for g in &gene_names {
+        let idx = adata
+            .var_names()
+            .get_index(g)
+            .ok_or_else(|| anyhow::anyhow!("CellChat gene {g} missing from var_names"))?;
+        gene_indices.push(idx);
+    }
+
+    let row_sel = match obs_row_subset {
+        Some(rows) => SelectInfoElem::Index(rows.to_vec()),
+        None => SelectInfoElem::full(),
+    };
+    let slice = [row_sel, SelectInfoElem::Index(gene_indices)];
+    let expr = read_expression_matrix_dense_f64(adata, layer, &slice)?;
+
+    let n = match obs_row_subset {
+        Some(rows) => rows.len(),
+        None => adata.n_obs(),
+    };
+    if clusters.len() != n {
+        anyhow::bail!(
+            "CellChat: clusters len {} != n_obs {}",
+            clusters.len(),
+            n
+        );
+    }
+    if group_names.len() != num_clusters {
+        anyhow::bail!(
+            "CellChat: group_names len {} != num_clusters {}",
+            group_names.len(),
+            num_clusters
+        );
+    }
+    let group_ids: Vec<usize> = clusters.iter().copied().collect();
+
+    let result = crate::cellchat::compute_commun_prob(
+        &expr,
+        &gene_names,
+        &group_ids,
+        group_names,
+        &interactions,
+        cfg,
+    )?;
+    let selected = crate::cellchat::select_interactions(&result, cfg);
+    if selected.is_empty() {
+        anyhow::bail!(
+            "CellChat: no interactions passed filters (min_prob={}, p_threshold={}, max_interactions={:?})",
+            cfg.min_prob,
+            cfg.p_threshold,
+            cfg.max_interactions
+        );
+    }
+
+    if let Some(dir) = output_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let csv_path = dir.join("cellchat_commun_prob.csv");
+        crate::cellchat::write_prob_csv(&csv_path, &result, Some(&selected))?;
+    }
+
+    let plan = crate::cellchat::CellChatLrPlan::from_selected(result, &selected, cfg)
+        .with_cell_groups(group_ids);
+    Ok(Arc::new(plan))
+}
+
 /// When the sliced `X`/layer is canonical CSR in AnnData, returns it without densifying (useful for
 /// future column-wise pipelines). Dense or CSC layouts return [`None`] — use [`read_expression_matrix_dense_f64`].
 #[allow(dead_code)]
@@ -493,7 +603,7 @@ fn validate_training_inputs<AnB: Backend>(
 }
 
 /// Per-cell cluster indices for `cluster_annot`: numeric, categorical codes, or stable indices from strings.
-fn clusters_array1_from_obs_column(
+pub fn clusters_array1_from_obs_column(
     obs_df: &DataFrame,
     cluster_annot: &str,
 ) -> anyhow::Result<Array1<usize>> {
@@ -2244,6 +2354,8 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// no LR/TFL/extra columns — written as `.tf_ablated`, not `.orphan`. When TF modulators are
     /// on, missing or all-zero TF support uses `.orphan` like any other orphan.
     pub gene_excluded_tf_modulators_ablation: bool,
+    /// Hybrid CellChat plan: replaces/weights LR columns in [`Self::build_x_modulators_and_target_y`].
+    pub cellchat_plan: Option<Arc<crate::cellchat::CellChatLrPlan>>,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -2447,7 +2559,75 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             obs_row_subset,
             modulator_scales: None,
             gene_excluded_tf_modulators_ablation,
+            cellchat_plan: None,
         })
+    }
+
+    /// Attach a CellChat hybrid plan: optionally replace LR pairs and enable hybrid LR features.
+    pub fn apply_cellchat_plan(
+        &mut self,
+        plan: Arc<crate::cellchat::CellChatLrPlan>,
+    ) -> anyhow::Result<()> {
+        if plan.replace_lr_pairs {
+            let var_set: HashSet<String> = self.adata.var_names().into_vec().into_iter().collect();
+            let mut ligands = Vec::new();
+            let mut receptors = Vec::new();
+            let mut lr_pairs = Vec::new();
+            let mut seen = HashSet::new();
+            for inter in &plan.interactions {
+                let lig = inter.ligand_subunits.join("_");
+                let rec = inter.receptor_subunits.join("_");
+                if lig == self.target_gene || rec == self.target_gene {
+                    continue;
+                }
+                for g in inter
+                    .ligand_subunits
+                    .iter()
+                    .chain(inter.receptor_subunits.iter())
+                {
+                    if !var_set.contains(g) {
+                        anyhow::bail!(
+                            "CellChat interaction {} references gene {} missing from AnnData",
+                            inter.pair_name,
+                            g
+                        );
+                    }
+                }
+                let pair = inter.pair_name.clone();
+                if seen.insert(pair.clone()) {
+                    ligands.push(lig);
+                    receptors.push(rec);
+                    lr_pairs.push(pair);
+                }
+            }
+            self.ligands = ligands;
+            self.receptors = receptors;
+            self.lr_pairs = lr_pairs;
+            // Drop TFL that referenced old LR ligands unless still present.
+            let lig_set: HashSet<&str> = self.ligands.iter().map(|s| s.as_str()).collect();
+            let mut keep_l = Vec::new();
+            let mut keep_r = Vec::new();
+            let mut keep_p = Vec::new();
+            for i in 0..self.tfl_pairs.len() {
+                if lig_set.contains(self.tfl_ligands[i].as_str()) {
+                    keep_l.push(self.tfl_ligands[i].clone());
+                    keep_r.push(self.tfl_regulators[i].clone());
+                    keep_p.push(self.tfl_pairs[i].clone());
+                }
+            }
+            self.tfl_ligands = keep_l;
+            self.tfl_regulators = keep_r;
+            self.tfl_pairs = keep_p;
+            self.modulators_genes = {
+                let mut m = self.regulators.clone();
+                m.extend(self.lr_pairs.iter().cloned());
+                m.extend(self.tfl_pairs.iter().cloned());
+                m.extend(self.extra_modulators.iter().cloned());
+                m
+            };
+        }
+        self.cellchat_plan = Some(plan);
+        Ok(())
     }
 
     pub fn new(
@@ -2899,6 +3079,45 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let extra_mod_arc = Arc::new(resolved_ex_mod);
             let extra_lr_arc = Arc::new(resolved_ex_lr);
 
+            let cellchat_plan_arc: Option<Arc<crate::cellchat::CellChatLrPlan>> =
+                if spaceship_config.cellchat.enabled {
+                    let t_cc = pipeline_step_begin(&hud, "CellChat communication probabilities");
+                    let group_names: Vec<String> = (0..num_clusters)
+                        .map(|c| {
+                            cluster_to_cell_type
+                                .get(&c)
+                                .cloned()
+                                .or_else(|| cluster_betadata_row_keys.get(&c).cloned())
+                                .unwrap_or_else(|| c.to_string())
+                        })
+                        .collect();
+                    let plan = prepare_cellchat_lr_plan(
+                        setup_adata.as_ref(),
+                        layer,
+                        clusters.as_ref(),
+                        num_clusters,
+                        &group_names,
+                        obs_row_subset.as_deref(),
+                        species,
+                        &spaceship_config.cellchat,
+                        cfg_parent,
+                        Some(Path::new(training_dir)),
+                    )?;
+                    pipeline_step_end(&hud, "CellChat communication probabilities", t_cc);
+                    log_line(
+                        &hud,
+                        format!(
+                            "CellChat: {} interactions (mode={:?}, replace_lr={})",
+                            plan.interactions.len(),
+                            plan.mode,
+                            plan.replace_lr_pairs
+                        ),
+                    );
+                    Some(plan)
+                } else {
+                    None
+                };
+
             let layer_for_workers = layer.to_string();
             let cnn_for_workers = cnn.clone();
             let ligand_grid_factor = spaceship_config.perturbation.ligand_grid_factor;
@@ -2994,6 +3213,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let gene_mean_arc = gene_mean_arc.clone();
                 let extra_mod_arc_w = extra_mod_arc.clone();
                 let extra_lr_arc_w = extra_lr_arc.clone();
+                let cellchat_plan_w = cellchat_plan_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
@@ -3183,6 +3403,32 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     continue;
                                 }
                             };
+
+                            if let Some(ref plan) = cellchat_plan_w {
+                                if plan.replace_lr_pairs {
+                                    if let Err(e) = estimator.apply_cellchat_plan(plan.clone()) {
+                                        log_line(
+                                            &hud,
+                                            format!("fail cellchat {}: {}", gene, e),
+                                        );
+                                        if let Some(ref h) = hud {
+                                            if let Ok(mut g) = h.lock() {
+                                                g.genes_failed += 1;
+                                                g.remove_gene(&gene);
+                                            }
+                                        }
+                                        if let Some(ref p) = pb {
+                                            p.inc(1);
+                                        }
+                                        if let Some(ref h) = hud {
+                                            if let Ok(mut g) = h.lock() {
+                                                g.genes_rounds += 1;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
 
                             let n_mods = estimator.modulators_genes.len();
                             if let Some(ref h) = hud {
@@ -3916,12 +4162,6 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         for g in &self.regulators {
             all_unique_genes.insert(g.clone());
         }
-        for g in &self.ligands {
-            all_unique_genes.insert(g.clone());
-        }
-        for g in &self.receptors {
-            all_unique_genes.insert(g.clone());
-        }
         for g in &self.tfl_ligands {
             all_unique_genes.insert(g.clone());
         }
@@ -3930,6 +4170,24 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         }
         for g in &self.extra_modulators {
             all_unique_genes.insert(g.clone());
+        }
+        if let Some(plan) = self.cellchat_plan.as_ref() {
+            for inter in &plan.interactions {
+                for g in inter
+                    .ligand_subunits
+                    .iter()
+                    .chain(inter.receptor_subunits.iter())
+                {
+                    all_unique_genes.insert(g.clone());
+                }
+            }
+        } else {
+            for g in &self.ligands {
+                all_unique_genes.insert(g.clone());
+            }
+            for g in &self.receptors {
+                all_unique_genes.insert(g.clone());
+            }
         }
 
         let unique_genes_vec: Vec<String> = all_unique_genes.into_iter().collect::<Vec<_>>();
@@ -3943,12 +4201,14 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         // Collect unique ligand genes from LR and TFL pairs for received-ligand computation
         let mut unique_lig_genes: Vec<String> = Vec::new();
         let mut lig_seen: HashSet<String> = HashSet::new();
-        for pair in &self.lr_pairs {
-            let parts: Vec<&str> = pair.split('$').collect();
-            if parts.len() == 2 {
-                let lig = parts[0].to_string();
-                if lig_seen.insert(lig.clone()) {
-                    unique_lig_genes.push(lig);
+        if self.cellchat_plan.is_none() {
+            for pair in &self.lr_pairs {
+                let parts: Vec<&str> = pair.split('$').collect();
+                if parts.len() == 2 {
+                    let lig = parts[0].to_string();
+                    if lig_seen.insert(lig.clone()) {
+                        unique_lig_genes.push(lig);
+                    }
                 }
             }
         }
@@ -4014,14 +4274,37 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         }
 
         let offset_lr = self.regulators.len();
-        for (i, pair) in self.lr_pairs.iter().enumerate() {
-            let parts: Vec<&str> = pair.split('$').collect::<Vec<_>>();
-            if parts.len() == 2 {
-                let lig_name = parts[0].to_string();
-                let r_idx = gene_to_idx[&parts[1].to_string()];
-                let mut interaction = received_map[&lig_name].clone();
-                interaction *= &expr_matrix.column(r_idx);
-                x_modulators.column_mut(offset_lr + i).assign(&interaction);
+        if let Some(plan) = self.cellchat_plan.as_ref() {
+            let lr_mat = crate::cellchat::build_hybrid_lr_matrix(
+                plan,
+                xy,
+                &expr_matrix,
+                &gene_to_idx,
+                self.radius,
+                self.weighted_ligand_scale_factor,
+            )?;
+            if lr_mat.ncols() != self.lr_pairs.len() {
+                anyhow::bail!(
+                    "CellChat LR matrix cols ({}) != lr_pairs ({})",
+                    lr_mat.ncols(),
+                    self.lr_pairs.len()
+                );
+            }
+            for i in 0..self.lr_pairs.len() {
+                x_modulators
+                    .column_mut(offset_lr + i)
+                    .assign(&lr_mat.column(i));
+            }
+        } else {
+            for (i, pair) in self.lr_pairs.iter().enumerate() {
+                let parts: Vec<&str> = pair.split('$').collect::<Vec<_>>();
+                if parts.len() == 2 {
+                    let lig_name = parts[0].to_string();
+                    let r_idx = gene_to_idx[&parts[1].to_string()];
+                    let mut interaction = received_map[&lig_name].clone();
+                    interaction *= &expr_matrix.column(r_idx);
+                    x_modulators.column_mut(offset_lr + i).assign(&interaction);
+                }
             }
         }
 

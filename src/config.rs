@@ -8,6 +8,7 @@ pub const SPACESHIP_MERGE_SECTIONS: &[&str] = &[
     "preprocess",
     "spatial",
     "grn",
+    "cellchat",
     "cnn",
     "lasso",
     "training",
@@ -155,6 +156,9 @@ pub struct SpaceshipConfig {
     pub spatial: SpatialConfig,
     #[serde(default)]
     pub grn: GrnConfig,
+    /// Hybrid CellChat communication probabilities → LR design matrix for Lasso.
+    #[serde(default)]
+    pub cellchat: crate::cellchat::CellChatConfig,
     #[serde(default)]
     pub cnn: CnnConfig,
     #[serde(default)]

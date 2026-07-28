@@ -1,0 +1,982 @@
+//! CellChat-style communication probabilities for hybrid SpaceTravLR LR terms.
+//!
+//! Implements the Jin et al. (Nat Commun 2021) mass-action / Hill communication
+//! probability on cell-type aggregates (trimean expression, geometric-mean
+//! multi-subunit complexes), then builds **per-cell** LR design columns for
+//! Lasso. Group-level \(P_{i\to j}^k\) alone is constant within a cluster and
+//! would be absorbed by the intercept; the hybrid therefore uses \(P\) to
+//! weight **type-stratified spatially received ligand** × local receptor
+//! (or a spatial Hill transform).
+
+use crate::config::expand_user_path;
+use crate::ligand::calculate_weighted_ligands;
+use crate::network::SPACETRAVLR_DATA_DIR_ENV;
+use anyhow::{Context, Result, bail};
+use ndarray::{Array1, Array2, Array3, Axis};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+/// How hybrid LR columns are built from CellChat probabilities + spatial expression.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CellChatLrMode {
+    /// \(X_{c,k}=\sum_s P_{s\to\mathrm{type}(c)}^k\cdot\widetilde{L}_{c\leftarrow s}^{(k)}\cdot R_c^{(k)}\)
+    #[default]
+    WeightedSpatial,
+    /// \(X_{c,k}=(\widetilde{L}_c R_c)/(K_h+\widetilde{L}_c R_c)\) for CellChat-selected pairs.
+    HillSpatial,
+    /// Current SpaceTravLR product \(\widetilde{L}_c\cdot R_c\), but pair set / filter from CellChat.
+    SpatialProduct,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CellChatConfig {
+    /// Master switch. When false, training ignores this section.
+    pub enabled: bool,
+    /// Optional path to `cellchat_{species}.csv` (`ligand,receptor,pathway,signaling`).
+    pub db_path: Option<String>,
+    pub lr_mode: CellChatLrMode,
+    /// Half-saturation \(K_h\) in the Hill / mass-action term (CellChat default 0.5).
+    pub kh: f64,
+    /// Hill coefficient \(n\) (CellChat default 1).
+    pub hill_coef: f64,
+    /// Drop groups with fewer than this many cells (CellChat `min.cells`).
+    pub min_cells: usize,
+    /// Weight probabilities by sender/receiver population fractions.
+    pub population_size_weight: bool,
+    /// Label-permutation nulls for p-values; `0` skips the test.
+    pub n_perm: usize,
+    /// Keep interactions with permutation p ≤ this (ignored when `n_perm == 0`).
+    pub p_threshold: f64,
+    /// Drop interactions whose max \(P\) (any sender→receiver) is below this.
+    pub min_prob: f64,
+    /// When true, replace GRN `edge_type=lr` pairs with CellChat-selected interactions.
+    pub replace_lr_pairs: bool,
+    /// Cap retained interactions after filtering (by max \(P\), descending).
+    pub max_interactions: Option<usize>,
+    /// Restrict to these signaling classes (e.g. `Secreted Signaling`). Empty = all.
+    #[serde(default)]
+    pub signaling_types: Vec<String>,
+    /// RNG seed for permutations.
+    pub random_seed: u64,
+}
+
+impl Default for CellChatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            db_path: None,
+            lr_mode: CellChatLrMode::WeightedSpatial,
+            kh: 0.5,
+            hill_coef: 1.0,
+            min_cells: 10,
+            population_size_weight: false,
+            n_perm: 0,
+            p_threshold: 0.05,
+            min_prob: 0.0,
+            replace_lr_pairs: true,
+            max_interactions: Some(200),
+            signaling_types: Vec::new(),
+            random_seed: 42,
+        }
+    }
+}
+
+/// One CellChatDB interaction (multi-subunit complexes kept intact).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CellChatInteraction {
+    pub ligand_subunits: Vec<String>,
+    pub receptor_subunits: Vec<String>,
+    pub pathway: String,
+    pub signaling: String,
+    /// Column name for SpaceTravLR: `Lig$Rec` (subunits joined with `_` when multi).
+    pub pair_name: String,
+}
+
+impl CellChatInteraction {
+    pub fn from_row(ligand: &str, receptor: &str, pathway: &str, signaling: &str) -> Self {
+        let ligand_subunits = split_complex(ligand);
+        let receptor_subunits = split_complex(receptor);
+        let pair_name = format!(
+            "{}${}",
+            ligand_subunits.join("_"),
+            receptor_subunits.join("_")
+        );
+        Self {
+            ligand_subunits,
+            receptor_subunits,
+            pathway: pathway.to_string(),
+            signaling: signaling.to_string(),
+            pair_name,
+        }
+    }
+}
+
+fn split_complex(s: &str) -> Vec<String> {
+    s.split('_')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
+
+/// Tukey's trimean \((Q_1 + 2 Q_2 + Q_3)/4\).
+pub fn tri_mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let q1 = percentile_sorted(&v, 0.25);
+    let q2 = percentile_sorted(&v, 0.50);
+    let q3 = percentile_sorted(&v, 0.75);
+    (q1 + 2.0 * q2 + q3) / 4.0
+}
+
+fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let idx = p * (n - 1) as f64;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let w = idx - lo as f64;
+        sorted[lo] * (1.0 - w) + sorted[hi] * w
+    }
+}
+
+/// Geometric mean of non-negative values; zeros propagate (CellChat complex rule).
+pub fn geometric_mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    if values.iter().any(|&x| x <= 0.0 || !x.is_finite()) {
+        return 0.0;
+    }
+    let n = values.len() as f64;
+    let log_sum: f64 = values.iter().map(|x| x.ln()).sum();
+    (log_sum / n).exp()
+}
+
+/// Hill / mass-action communication probability base term.
+pub fn hill_commun_prob(ligand: f64, receptor: f64, kh: f64, hill_coef: f64) -> f64 {
+    let lr = ligand * receptor;
+    if !lr.is_finite() || lr <= 0.0 {
+        return 0.0;
+    }
+    let kh = kh.max(1e-12);
+    let n = hill_coef.max(1e-12);
+    let num = lr.powf(n);
+    let den = kh.powf(n) + num;
+    if den <= 0.0 || !den.is_finite() {
+        return 0.0;
+    }
+    num / den
+}
+
+/// Load CellChatDB CSV (`ligand,receptor,pathway,signaling`).
+pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
+    let f = File::open(path).with_context(|| format!("open CellChatDB {}", path.display()))?;
+    let reader = BufReader::new(f);
+    let mut lines = reader.lines();
+    let header = lines
+        .next()
+        .transpose()?
+        .ok_or_else(|| anyhow::anyhow!("empty CellChatDB {}", path.display()))?;
+    let cols: Vec<String> = header
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
+    let idx = |name: &str| -> Result<usize> {
+        cols.iter()
+            .position(|c| c == name)
+            .ok_or_else(|| anyhow::anyhow!("CellChatDB missing column {name:?} in {}", path.display()))
+    };
+    let i_lig = idx("ligand")?;
+    let i_rec = idx("receptor")?;
+    let i_path = idx("pathway")?;
+    let i_sig = idx("signaling")?;
+
+    let mut out = Vec::new();
+    for (lineno, line) in lines.enumerate() {
+        let line = line.with_context(|| format!("read line {} of {}", lineno + 2, path.display()))?;
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = t.split(',').map(str::trim).collect();
+        if parts.len() <= i_sig.max(i_path).max(i_rec).max(i_lig) {
+            continue;
+        }
+        let inter = CellChatInteraction::from_row(
+            parts[i_lig],
+            parts[i_rec],
+            parts[i_path],
+            parts[i_sig],
+        );
+        if inter.ligand_subunits.is_empty() || inter.receptor_subunits.is_empty() {
+            continue;
+        }
+        out.push(inter);
+    }
+    Ok(out)
+}
+
+/// Resolve `cellchat_{species}.csv` from config path, env, or `data/` search.
+pub fn resolve_cellchat_db_path(
+    species: &str,
+    config_db_path: Option<&str>,
+    config_file_parent: Option<&Path>,
+) -> Result<PathBuf> {
+    let mut tried = Vec::new();
+    if let Some(raw) = config_db_path.map(str::trim).filter(|s| !s.is_empty()) {
+        let exp = expand_user_path(raw);
+        let pb = PathBuf::from(&exp);
+        let cand = if pb.is_absolute() {
+            pb
+        } else if let Some(parent) = config_file_parent {
+            parent.join(pb)
+        } else {
+            pb
+        };
+        tried.push(cand.display().to_string());
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+
+    let filename = format!("cellchat_{species}.csv");
+    if let Ok(dir) = std::env::var(SPACETRAVLR_DATA_DIR_ENV) {
+        let cand = PathBuf::from(expand_user_path(dir.trim())).join(&filename);
+        tried.push(cand.display().to_string());
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for rel in ["data", "../data"] {
+                let cand = parent.join(rel).join(&filename);
+                tried.push(cand.display().to_string());
+                if cand.is_file() {
+                    return Ok(cand);
+                }
+            }
+        }
+    }
+
+    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for _ in 0..8 {
+        let cand = dir.join("data").join(&filename);
+        tried.push(cand.display().to_string());
+        if cand.is_file() {
+            return Ok(cand);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    bail!(
+        "Could not find CellChatDB {filename:?}. Set [cellchat].db_path or {SPACETRAVLR_DATA_DIR_ENV}. Tried:\n  {}",
+        tried.join("\n  ")
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct CellChatProbResult {
+    pub group_names: Vec<String>,
+    pub interactions: Vec<CellChatInteraction>,
+    /// Shape `(n_interactions, n_groups, n_groups)` — `[k][sender][receiver]`.
+    pub prob: Array3<f64>,
+    /// Same shape; `None` when permutations were skipped.
+    pub pvalues: Option<Array3<f64>>,
+    pub group_counts: Vec<usize>,
+}
+
+impl CellChatProbResult {
+    pub fn n_groups(&self) -> usize {
+        self.group_names.len()
+    }
+
+    pub fn max_prob_for_interaction(&self, k: usize) -> f64 {
+        self.prob
+            .index_axis(Axis(0), k)
+            .iter()
+            .copied()
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Incoming strength to receiver group `j` for interaction `k`: \(\sum_i P_{i\to j}^k\).
+    pub fn incoming_strength(&self, k: usize, receiver: usize) -> f64 {
+        let n = self.n_groups();
+        (0..n).map(|i| self.prob[[k, i, receiver]]).sum()
+    }
+}
+
+/// Filter DB interactions to genes present in `var_names` and optional signaling classes.
+pub fn filter_interactions_for_adata(
+    db: &[CellChatInteraction],
+    var_names: &HashSet<String>,
+    signaling_types: &[String],
+) -> Vec<CellChatInteraction> {
+    let sig_filter: HashSet<String> = signaling_types
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    db.iter()
+        .filter(|inter| {
+            if !sig_filter.is_empty()
+                && !sig_filter.contains(&inter.signaling.to_ascii_lowercase())
+            {
+                return false;
+            }
+            inter
+                .ligand_subunits
+                .iter()
+                .chain(inter.receptor_subunits.iter())
+                .all(|g| var_names.contains(g))
+        })
+        .cloned()
+        .collect()
+}
+
+fn group_trimean_expression(
+    expr: &Array2<f64>,
+    group_ids: &[usize],
+    n_groups: usize,
+    min_cells: usize,
+) -> (Array2<f64>, Vec<usize>) {
+    let n_genes = expr.ncols();
+    let mut counts = vec![0usize; n_groups];
+    for &g in group_ids {
+        if g < n_groups {
+            counts[g] += 1;
+        }
+    }
+    let mut out = Array2::<f64>::zeros((n_groups, n_genes));
+    for g in 0..n_groups {
+        if counts[g] < min_cells {
+            continue;
+        }
+        for gene in 0..n_genes {
+            let mut vals = Vec::with_capacity(counts[g]);
+            for (i, &gi) in group_ids.iter().enumerate() {
+                if gi == g {
+                    vals.push(expr[[i, gene]]);
+                }
+            }
+            out[[g, gene]] = tri_mean(&vals);
+        }
+    }
+    (out, counts)
+}
+
+fn complex_level(
+    group_expr: &Array2<f64>,
+    group: usize,
+    subunits: &[String],
+    gene_to_col: &HashMap<&str, usize>,
+) -> f64 {
+    let mut vals = Vec::with_capacity(subunits.len());
+    for s in subunits {
+        let Some(&col) = gene_to_col.get(s.as_str()) else {
+            return 0.0;
+        };
+        vals.push(group_expr[[group, col]]);
+    }
+    geometric_mean(&vals)
+}
+
+fn fill_prob_tensor(
+    group_expr: &Array2<f64>,
+    counts: &[usize],
+    interactions: &[CellChatInteraction],
+    gene_to_col: &HashMap<&str, usize>,
+    kh: f64,
+    hill_coef: f64,
+    population_size_weight: bool,
+) -> Array3<f64> {
+    let n_g = counts.len();
+    let n_k = interactions.len();
+    let n_cells: usize = counts.iter().sum();
+    let mut prob = Array3::<f64>::zeros((n_k, n_g, n_g));
+    if n_cells == 0 {
+        return prob;
+    }
+    for (k, inter) in interactions.iter().enumerate() {
+        for i in 0..n_g {
+            if counts[i] == 0 {
+                continue;
+            }
+            let lig = complex_level(group_expr, i, &inter.ligand_subunits, gene_to_col);
+            if lig <= 0.0 {
+                continue;
+            }
+            for j in 0..n_g {
+                if counts[j] == 0 {
+                    continue;
+                }
+                let rec = complex_level(group_expr, j, &inter.receptor_subunits, gene_to_col);
+                let mut p = hill_commun_prob(lig, rec, kh, hill_coef);
+                if population_size_weight {
+                    let wi = counts[i] as f64 / n_cells as f64;
+                    let wj = counts[j] as f64 / n_cells as f64;
+                    p *= wi * wj;
+                }
+                prob[[k, i, j]] = p;
+            }
+        }
+    }
+    prob
+}
+
+/// Compute CellChat communication probabilities (and optional permutation p-values).
+pub fn compute_commun_prob(
+    expr: &Array2<f64>,
+    gene_names: &[String],
+    group_ids: &[usize],
+    group_names: &[String],
+    interactions: &[CellChatInteraction],
+    cfg: &CellChatConfig,
+) -> Result<CellChatProbResult> {
+    if expr.nrows() != group_ids.len() {
+        bail!(
+            "CellChat expr rows ({}) != group_ids ({})",
+            expr.nrows(),
+            group_ids.len()
+        );
+    }
+    if expr.ncols() != gene_names.len() {
+        bail!(
+            "CellChat expr cols ({}) != gene_names ({})",
+            expr.ncols(),
+            gene_names.len()
+        );
+    }
+    let n_groups = group_names.len();
+    let gene_to_col: HashMap<&str, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i))
+        .collect();
+
+    let (group_expr, counts) =
+        group_trimean_expression(expr, group_ids, n_groups, cfg.min_cells);
+    let prob = fill_prob_tensor(
+        &group_expr,
+        &counts,
+        interactions,
+        &gene_to_col,
+        cfg.kh,
+        cfg.hill_coef,
+        cfg.population_size_weight,
+    );
+
+    let pvalues = if cfg.n_perm > 0 && !interactions.is_empty() {
+        let mut rng = StdRng::seed_from_u64(cfg.random_seed);
+        let mut exceed = Array3::<f64>::zeros(prob.raw_dim());
+        let mut shuffled = group_ids.to_vec();
+        for _ in 0..cfg.n_perm {
+            for i in (1..shuffled.len()).rev() {
+                let j = rng.gen_range(0..=i);
+                shuffled.swap(i, j);
+            }
+            let (ge, ct) =
+                group_trimean_expression(expr, &shuffled, n_groups, cfg.min_cells);
+            let null = fill_prob_tensor(
+                &ge,
+                &ct,
+                interactions,
+                &gene_to_col,
+                cfg.kh,
+                cfg.hill_coef,
+                cfg.population_size_weight,
+            );
+            ndarray::Zip::from(&mut exceed)
+                .and(&null)
+                .and(&prob)
+                .for_each(|e, &n, &o| {
+                    if n >= o {
+                        *e += 1.0;
+                    }
+                });
+        }
+        let n_perm = cfg.n_perm as f64;
+        Some(exceed.mapv(|e| (e + 1.0) / (n_perm + 1.0)))
+    } else {
+        None
+    };
+
+    Ok(CellChatProbResult {
+        group_names: group_names.to_vec(),
+        interactions: interactions.to_vec(),
+        prob,
+        pvalues,
+        group_counts: counts,
+    })
+}
+
+/// Keep significant / strong interactions; optionally cap by max \(P\).
+pub fn select_interactions(
+    result: &CellChatProbResult,
+    cfg: &CellChatConfig,
+) -> Vec<usize> {
+    let mut keep: Vec<(usize, f64)> = Vec::new();
+    for k in 0..result.interactions.len() {
+        let max_p = result.max_prob_for_interaction(k);
+        if max_p < cfg.min_prob {
+            continue;
+        }
+        if let Some(ref pvals) = result.pvalues {
+            let min_pval = pvals
+                .index_axis(Axis(0), k)
+                .iter()
+                .copied()
+                .fold(1.0_f64, f64::min);
+            if min_pval > cfg.p_threshold {
+                continue;
+            }
+        }
+        keep.push((k, max_p));
+    }
+    keep.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some(cap) = cfg.max_interactions {
+        keep.truncate(cap);
+    }
+    keep.into_iter().map(|(k, _)| k).collect()
+}
+
+/// Shared plan consumed by per-gene Lasso workers when `[cellchat].enabled`.
+#[derive(Debug, Clone)]
+pub struct CellChatLrPlan {
+    pub mode: CellChatLrMode,
+    pub kh: f64,
+    pub hill_coef: f64,
+    pub replace_lr_pairs: bool,
+    /// Selected interactions (already filtered).
+    pub interactions: Vec<CellChatInteraction>,
+    /// Group label per cell (aligned to training obs rows / xy).
+    pub cell_group: Vec<usize>,
+    pub group_names: Vec<String>,
+    /// `(n_interactions, n_groups, n_groups)` for selected interactions only.
+    pub prob: Array3<f64>,
+    pub pair_names: Vec<String>,
+}
+
+impl CellChatLrPlan {
+    pub fn from_selected(result: CellChatProbResult, selected: &[usize], cfg: &CellChatConfig) -> Self {
+        let n_g = result.n_groups();
+        let mut interactions = Vec::with_capacity(selected.len());
+        let mut pair_names = Vec::with_capacity(selected.len());
+        let mut prob = Array3::<f64>::zeros((selected.len(), n_g, n_g));
+        for (new_k, &old_k) in selected.iter().enumerate() {
+            interactions.push(result.interactions[old_k].clone());
+            pair_names.push(result.interactions[old_k].pair_name.clone());
+            for i in 0..n_g {
+                for j in 0..n_g {
+                    prob[[new_k, i, j]] = result.prob[[old_k, i, j]];
+                }
+            }
+        }
+        Self {
+            mode: cfg.lr_mode,
+            kh: cfg.kh,
+            hill_coef: cfg.hill_coef,
+            replace_lr_pairs: cfg.replace_lr_pairs,
+            interactions,
+            cell_group: Vec::new(),
+            group_names: result.group_names,
+            prob,
+            pair_names,
+        }
+    }
+
+    pub fn with_cell_groups(mut self, cell_group: Vec<usize>) -> Self {
+        self.cell_group = cell_group;
+        self
+    }
+
+    pub fn lr_pairs_as_extra(&self) -> Vec<(String, String)> {
+        self.interactions
+            .iter()
+            .map(|inter| {
+                (
+                    inter.ligand_subunits.join("_"),
+                    inter.receptor_subunits.join("_"),
+                )
+            })
+            .collect()
+    }
+}
+
+fn geom_mean_columns(mat: &Array2<f64>, cols: &[usize]) -> Array1<f64> {
+    let n = mat.nrows();
+    let mut out = Array1::<f64>::zeros(n);
+    if cols.is_empty() {
+        return out;
+    }
+    for i in 0..n {
+        let vals: Vec<f64> = cols.iter().map(|&c| mat[[i, c]]).collect();
+        out[i] = geometric_mean(&vals);
+    }
+    out
+}
+
+fn receptor_complex_expr(
+    expr: &Array2<f64>,
+    gene_to_idx: &HashMap<String, usize>,
+    subunits: &[String],
+) -> Option<Array1<f64>> {
+    let cols: Vec<usize> = subunits
+        .iter()
+        .map(|g| gene_to_idx.get(g).copied())
+        .collect::<Option<Vec<_>>>()?;
+    Some(geom_mean_columns(expr, &cols))
+}
+
+/// Type-stratified received ligand: for each sender group `s`, Gaussian-weighted
+/// mean of ligand expression using only cells of type `s` (other cells zeroed).
+fn type_stratified_received_ligand(
+    xy: &Array2<f64>,
+    ligand_expr: &Array1<f64>,
+    cell_group: &[usize],
+    n_groups: usize,
+    radius: f64,
+    scale_factor: f64,
+) -> Array2<f64> {
+    let n = xy.nrows();
+    let mut out = Array2::<f64>::zeros((n, n_groups));
+    if n == 0 {
+        return out;
+    }
+    // Parallel over sender groups: zero-mask then reuse exact kernel.
+    let cols: Vec<Array1<f64>> = (0..n_groups)
+        .into_par_iter()
+        .map(|s| {
+            let mut lig = Array2::<f64>::zeros((n, 1));
+            for i in 0..n {
+                if cell_group.get(i).copied().unwrap_or(usize::MAX) == s {
+                    lig[[i, 0]] = ligand_expr[i];
+                }
+            }
+            let recv = calculate_weighted_ligands(xy, &lig, radius, scale_factor);
+            recv.column(0).to_owned()
+        })
+        .collect();
+    for (s, col) in cols.into_iter().enumerate() {
+        out.column_mut(s).assign(&col);
+    }
+    out
+}
+
+fn received_ligand_field(
+    xy: &Array2<f64>,
+    ligand_expr: &Array1<f64>,
+    radius: f64,
+    scale_factor: f64,
+) -> Array1<f64> {
+    let n = xy.nrows();
+    let mut lig = Array2::<f64>::zeros((n, 1));
+    lig.column_mut(0).assign(ligand_expr);
+    let recv = calculate_weighted_ligands(xy, &lig, radius, scale_factor);
+    recv.column(0).to_owned()
+}
+
+/// Build per-cell LR design columns for the plan's selected interactions.
+///
+/// `expr` must contain all ligand/receptor subunit genes (columns indexed by `gene_to_idx`).
+/// Returns `(n_cells × n_interactions)`.
+pub fn build_hybrid_lr_matrix(
+    plan: &CellChatLrPlan,
+    xy: &Array2<f64>,
+    expr: &Array2<f64>,
+    gene_to_idx: &HashMap<String, usize>,
+    radius: f64,
+    scale_factor: f64,
+) -> Result<Array2<f64>> {
+    let n = xy.nrows();
+    let n_k = plan.interactions.len();
+    let n_g = plan.group_names.len();
+    if plan.cell_group.len() != n {
+        bail!(
+            "CellChat plan cell_group len {} != n_cells {}",
+            plan.cell_group.len(),
+            n
+        );
+    }
+    let mut out = Array2::<f64>::zeros((n, n_k));
+    if n_k == 0 {
+        return Ok(out);
+    }
+
+    // Cache ligand gene → cell expression and type-stratified received fields.
+    let mut subunit_expr_cache: HashMap<String, Array1<f64>> = HashMap::new();
+    let get_gene = |name: &str,
+                        cache: &mut HashMap<String, Array1<f64>>|
+     -> Result<Array1<f64>> {
+        if let Some(v) = cache.get(name) {
+            return Ok(v.clone());
+        }
+        let idx = gene_to_idx
+            .get(name)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("CellChat gene {name} missing from expr map"))?;
+        let col = expr.column(idx).to_owned();
+        cache.insert(name.to_string(), col.clone());
+        Ok(col)
+    };
+
+    for (k, inter) in plan.interactions.iter().enumerate() {
+        let mut lig_sub_cols = Vec::with_capacity(inter.ligand_subunits.len());
+        for s in &inter.ligand_subunits {
+            lig_sub_cols.push(get_gene(s, &mut subunit_expr_cache)?);
+        }
+        // Per-cell geometric mean of ligand subunits (pre-reception).
+        let mut lig_complex = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let vals: Vec<f64> = lig_sub_cols.iter().map(|c| c[i]).collect();
+            lig_complex[i] = geometric_mean(&vals);
+        }
+
+        let rec = receptor_complex_expr(expr, gene_to_idx, &inter.receptor_subunits)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CellChat receptor complex {:?} missing subunits in expr",
+                    inter.receptor_subunits
+                )
+            })?;
+
+        match plan.mode {
+            CellChatLrMode::WeightedSpatial => {
+                let recv_by_type = type_stratified_received_ligand(
+                    xy,
+                    &lig_complex,
+                    &plan.cell_group,
+                    n_g,
+                    radius,
+                    scale_factor,
+                );
+                for i in 0..n {
+                    let j = plan.cell_group[i];
+                    if j >= n_g {
+                        continue;
+                    }
+                    let mut acc = 0.0;
+                    for s in 0..n_g {
+                        let p = plan.prob[[k, s, j]];
+                        if p > 0.0 {
+                            acc += p * recv_by_type[[i, s]];
+                        }
+                    }
+                    out[[i, k]] = acc * rec[i];
+                }
+            }
+            CellChatLrMode::HillSpatial => {
+                let recv = received_ligand_field(xy, &lig_complex, radius, scale_factor);
+                for i in 0..n {
+                    out[[i, k]] = hill_commun_prob(recv[i], rec[i], plan.kh, plan.hill_coef);
+                }
+            }
+            CellChatLrMode::SpatialProduct => {
+                let recv = received_ligand_field(xy, &lig_complex, radius, scale_factor);
+                for i in 0..n {
+                    out[[i, k]] = recv[i] * rec[i];
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Map cluster integer ids to dense 0..G-1 group indices + names.
+pub fn encode_groups_from_labels(labels: &[String]) -> (Vec<usize>, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut map: HashMap<String, usize> = HashMap::new();
+    let mut ids = Vec::with_capacity(labels.len());
+    for lab in labels {
+        let e = map.entry(lab.clone()).or_insert_with(|| {
+            let id = names.len();
+            names.push(lab.clone());
+            id
+        });
+        ids.push(*e);
+    }
+    (ids, names)
+}
+
+/// Write a long-format CSV of \(P_{i\to j}^k\) (and optional p-values) for inspection.
+pub fn write_prob_csv(path: &Path, result: &CellChatProbResult, selected: Option<&[usize]>) -> Result<()> {
+    use std::io::Write;
+    let mut f = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    writeln!(
+        f,
+        "interaction,ligand,receptor,pathway,signaling,sender,receiver,prob,pvalue"
+    )?;
+    let ks: Vec<usize> = match selected {
+        Some(s) => s.to_vec(),
+        None => (0..result.interactions.len()).collect(),
+    };
+    let n_g = result.n_groups();
+    for k in ks {
+        let inter = &result.interactions[k];
+        for i in 0..n_g {
+            for j in 0..n_g {
+                let p = result.prob[[k, i, j]];
+                if p <= 0.0 {
+                    continue;
+                }
+                let pv = result
+                    .pvalues
+                    .as_ref()
+                    .map(|a| a[[k, i, j]])
+                    .map(|x| format!("{x}"))
+                    .unwrap_or_default();
+                writeln!(
+                    f,
+                    "{},{},{},{},{},{},{},{},{}",
+                    inter.pair_name,
+                    inter.ligand_subunits.join("_"),
+                    inter.receptor_subunits.join("_"),
+                    inter.pathway,
+                    inter.signaling,
+                    result.group_names[i],
+                    result.group_names[j],
+                    p,
+                    pv
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_abs_diff_eq;
+    use ndarray::array;
+
+    #[test]
+    fn tri_mean_known_values() {
+        let v = [1.0, 2.0, 3.0, 4.0, 5.0];
+        // Q1=2, Q2=3, Q3=4 → (2+6+4)/4 = 3
+        assert_abs_diff_eq!(tri_mean(&v), 3.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn geometric_mean_zero_propagates() {
+        assert_eq!(geometric_mean(&[1.0, 0.0, 2.0]), 0.0);
+        assert_abs_diff_eq!(geometric_mean(&[4.0, 1.0]), 2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn hill_saturates() {
+        let p0 = hill_commun_prob(0.0, 1.0, 0.5, 1.0);
+        assert_eq!(p0, 0.0);
+        let p_half = hill_commun_prob(1.0, 0.5, 0.5, 1.0); // LR=0.5 = Kh
+        assert_abs_diff_eq!(p_half, 0.5, epsilon = 1e-10);
+        let p_hi = hill_commun_prob(10.0, 10.0, 0.5, 1.0);
+        assert!(p_hi > 0.99);
+    }
+
+    #[test]
+    fn commun_prob_sender_receiver_asymmetric() {
+        // 2 groups, 2 genes (L, R). Group0 expresses L, group1 expresses R.
+        let gene_names = vec!["L".into(), "R".into()];
+        let expr = array![
+            [2.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 2.0],
+            [0.0, 2.0],
+            [0.0, 2.0],
+        ];
+        let group_ids = vec![0, 0, 0, 1, 1, 1];
+        let group_names = vec!["A".into(), "B".into()];
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let cfg = CellChatConfig {
+            enabled: true,
+            min_cells: 2,
+            n_perm: 0,
+            ..Default::default()
+        };
+        let res = compute_commun_prob(
+            &expr,
+            &gene_names,
+            &group_ids,
+            &group_names,
+            &[inter],
+            &cfg,
+        )
+        .unwrap();
+        // A→B should be strong; B→A ~0; A→A and B→B ~0
+        assert!(res.prob[[0, 0, 1]] > 0.5);
+        assert!(res.prob[[0, 1, 0]] < 1e-9);
+        assert!(res.prob[[0, 0, 0]] < 1e-9);
+        assert!(res.prob[[0, 1, 1]] < 1e-9);
+    }
+
+    #[test]
+    fn hybrid_weighted_uses_sender_specific_ligand() {
+        // Cells: sender A at x=0 with L=1; receivers B at x=1 with R=1.
+        let xy = array![[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 0.0]];
+        let expr = array![
+            [1.0, 0.0], // A
+            [1.0, 0.0], // A
+            [0.0, 1.0], // B
+            [0.0, 1.0], // B
+        ];
+        let mut gene_to_idx = HashMap::new();
+        gene_to_idx.insert("L".into(), 0);
+        gene_to_idx.insert("R".into(), 1);
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let mut prob = Array3::<f64>::zeros((1, 2, 2));
+        prob[[0, 0, 1]] = 1.0; // only A→B
+        let plan = CellChatLrPlan {
+            mode: CellChatLrMode::WeightedSpatial,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            interactions: vec![inter],
+            cell_group: vec![0, 0, 1, 1],
+            group_names: vec!["A".into(), "B".into()],
+            prob,
+            pair_names: vec!["L$R".into()],
+        };
+        let x = build_hybrid_lr_matrix(&plan, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
+        // Receivers (rows 2,3) should get positive signal; senders with R=0 get 0.
+        assert!(x[[2, 0]] > 0.0);
+        assert!(x[[3, 0]] > 0.0);
+        assert_eq!(x[[0, 0]], 0.0);
+        assert_eq!(x[[1, 0]], 0.0);
+    }
+
+    #[test]
+    fn load_mouse_db_if_present() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/cellchat_mouse.csv");
+        if !root.is_file() {
+            return;
+        }
+        let db = load_cellchat_db(&root).unwrap();
+        assert!(db.len() > 1000);
+        let tgfb = db.iter().find(|i| i.pair_name.starts_with("Tgfb1$")).unwrap();
+        assert!(tgfb.receptor_subunits.len() >= 2);
+    }
+}

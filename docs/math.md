@@ -144,6 +144,8 @@ R^2_c = 1 - \frac{\sum_{i\in c}(y_i - \hat{y}_i)^2}{\sum_{i\in c}(y_i - \bar{y}_
 
 To prevent bad coefficients from polluting the network, cell types below a threshold performance are masked; with their coefficients set to zero.
 
+For a CellChat-hybrid LR design matrix (probabilities weight type-stratified spatial ligands before this Lasso step), see [CellChat hybrid](cellchat.md).
+
 ---
 
 ## Step 4 — Convolutional Neural Networks
