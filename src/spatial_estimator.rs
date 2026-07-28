@@ -56,7 +56,9 @@ pub fn gene_performance_feather_path(training_dir: &Path) -> PathBuf {
 }
 
 /// `use_tf_modulators` is on and every fitted TF coefficient column is zero (column indices
-/// `1..=n_tf` in per-cell β; column 0 is intercept).
+/// `1..=n_tf` in per-cell β; column 0 is intercept). Retained for diagnostics; betadata export
+/// orphans only when **no** non-intercept modulator β is non-zero (LR/BR/TFL still count).
+#[allow(dead_code)]
 fn per_cell_all_tf_beta_columns_zero(all_betas: &Array2<f64>, n_tf: usize) -> bool {
     if n_tf == 0 {
         return false;
@@ -71,6 +73,7 @@ fn per_cell_all_tf_beta_columns_zero(all_betas: &Array2<f64>, n_tf: usize) -> bo
 }
 
 /// Same as [`per_cell_all_tf_beta_columns_zero`] for cluster-rows export (`[intercept, β…]` per row).
+#[allow(dead_code)]
 fn cluster_rows_all_tf_coef_columns_zero(rows: &[Vec<f64>], n_tf: usize) -> bool {
     if n_tf == 0 {
         return false;
@@ -2249,6 +2252,8 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// Shared microbial sender table / BR catalog (None when `[microbial].enabled = false`).
     pub microbial: Option<Arc<crate::microbial::MicrobialContext>>,
     pub microbial_dmax_factor: f64,
+    /// Precomputed received microbial fields (`n_cells × n_signals`), shared across genes.
+    pub microbial_received: Option<Arc<Array2<f64>>>,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -2277,6 +2282,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         extra_modulator_candidates: &[String],
         microbial: Option<Arc<crate::microbial::MicrobialContext>>,
         microbial_dmax_factor: f64,
+        microbial_received: Option<Arc<Array2<f64>>>,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
 
@@ -2468,6 +2474,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             gene_excluded_tf_modulators_ablation,
             microbial,
             microbial_dmax_factor,
+            microbial_received,
         })
     }
 
@@ -2515,6 +2522,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             &[],
             None,
             3.0,
+            None,
         )
     }
 }
@@ -2727,6 +2735,43 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     )
                 })?;
                 let t_co = pipeline_step_begin(&hud, "CellOracle GRN inference (auto TF priors)");
+                // Join workers race on the first check; hold an advisory flock and re-check.
+                let co_lock_path = Path::new(training_dir).join("celloracle_tf_priors.flock");
+                let co_lock_file = OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&co_lock_path)
+                    .with_context(|| format!("open flock {}", co_lock_path.display()))?;
+                {
+                    const CO_ATTEMPTS: usize = 7200;
+                    const CO_SLEEP_MS: u64 = 50;
+                    let mut locked = false;
+                    for attempt in 0..CO_ATTEMPTS {
+                        if attempt > 0 {
+                            std::thread::sleep(Duration::from_millis(CO_SLEEP_MS));
+                        }
+                        match co_lock_file.try_lock_exclusive() {
+                            Ok(true) => {
+                                locked = true;
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                return Err(e)
+                                    .with_context(|| format!("lock {}", co_lock_path.display()));
+                            }
+                        }
+                    }
+                    if !locked {
+                        anyhow::bail!(
+                            "timed out after {}s acquiring CellOracle priors flock ({})",
+                            CO_ATTEMPTS as u64 * CO_SLEEP_MS / 1000,
+                            co_lock_path.display()
+                        );
+                    }
+                }
                 if !co_path.is_file() {
                     let gem = read_h5ad_expression_dense_f64(Path::new(adata_path), layer)?;
                     let gem_scaled = crate::celloracle::scale_gem_no_center(&gem);
@@ -2940,6 +2985,17 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                     ),
                 );
             }
+            let microbial_received_arc: Option<Arc<Array2<f64>>> =
+                microbial_arc.as_ref().map(|m| {
+                    let t_br = pipeline_step_begin(&hud, "precompute microbial received fields");
+                    let rec = crate::microbial::precompute_all_signal_received(
+                        m,
+                        xy.as_ref(),
+                        microbial_dmax,
+                    );
+                    pipeline_step_end(&hud, "precompute microbial received fields", t_br);
+                    Arc::new(rec)
+                });
 
             let layer_for_workers = layer.to_string();
             let cnn_for_workers = cnn.clone();
@@ -3038,6 +3094,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let extra_lr_arc_w = extra_lr_arc.clone();
                 let microbial_arc_w = microbial_arc.clone();
                 let microbial_dmax_w = microbial_dmax;
+                let microbial_received_w = microbial_received_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
@@ -3203,6 +3260,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 extra_mod_arc_w.as_slice(),
                                 microbial_arc_w.clone(),
                                 microbial_dmax_w,
+                                microbial_received_w.clone(),
                             )
                             .map(Box::new)
                             {
@@ -3237,8 +3295,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             }
 
-                            let absent_tf_when_required =
-                                use_tf_modulators && estimator.regulators.is_empty();
+                            let has_non_tf_mods = !estimator.lr_pairs.is_empty()
+                                || !estimator.tfl_pairs.is_empty()
+                                || !estimator.extra_modulators.is_empty()
+                                || !estimator.br_pairs.is_empty();
+                            // Require TF regulators only when the gene has no other modulator types
+                            // (LR / TFL / extra / BR). BR-only genes must still train.
+                            let absent_tf_when_required = use_tf_modulators
+                                && estimator.regulators.is_empty()
+                                && !has_non_tf_mods;
 
                             if n_mods == 0 || absent_tf_when_required {
                                 if n_mods == 0
@@ -3471,12 +3536,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         n_betadata_beta_columns =
                                             Some(keep.iter().filter(|&&j| j >= 1).count());
 
-                                        let n_tf = estimator.regulators.len();
                                         let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
-                                        let all_tf_betas_zero =
-                                            per_cell_all_tf_beta_columns_zero(&all_betas, n_tf);
 
-                                        if !has_any_mod_beta || all_tf_betas_zero {
+                                        // Orphan only when every modulator β is zero. Non-zero
+                                        // LR/BR/TFL columns must still export even if all TF βs
+                                        // are zero (previously dropped as `orphan zero_tf_betas`).
+                                        if !has_any_mod_beta {
                                             let _ = fs::File::create(format!(
                                                 "{}/{}.orphan",
                                                 training_dir, gene
@@ -3487,12 +3552,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     g.genes_orphan += 1;
                                                 }
                                             }
-                                            let orphan_msg = if !has_any_mod_beta {
-                                                format!("orphan zero_betas {}", gene)
-                                            } else {
-                                                format!("orphan zero_tf_betas {}", gene)
-                                            };
-                                            log_line(&hud, orphan_msg);
+                                            log_line(&hud, format!("orphan zero_betas {}", gene));
                                         } else {
                                             let n_rows = obs_names.len();
                                             let n_keep = keep.len();
@@ -3603,12 +3663,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         n_betadata_beta_columns =
                                             Some(keep.iter().filter(|&&j| j >= 1).count());
 
-                                        let n_tf = estimator.regulators.len();
                                         let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
-                                        let all_tf_betas_zero =
-                                            cluster_rows_all_tf_coef_columns_zero(&rows, n_tf);
 
-                                        if !has_any_mod_beta || all_tf_betas_zero {
+                                        if !has_any_mod_beta {
                                             let _ = fs::File::create(format!(
                                                 "{}/{}.orphan",
                                                 training_dir, gene
@@ -3619,12 +3676,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     g.genes_orphan += 1;
                                                 }
                                             }
-                                            let orphan_msg = if !has_any_mod_beta {
-                                                format!("orphan zero_betas {}", gene)
-                                            } else {
-                                                format!("orphan zero_tf_betas {}", gene)
-                                            };
-                                            log_line(&hud, orphan_msg);
+                                            log_line(&hud, format!("orphan zero_betas {}", gene));
                                         } else {
                                             let n_rows = rows.len();
                                             let n_keep = keep.len();
@@ -3870,6 +3922,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             pipeline_step_end(&hud, "per-gene training (workers running)", t_workers);
 
             if obs_row_subset.is_none() {
+                log_line(&hud, "gene_performance: merging…".to_string());
+                let t_gp = std::time::Instant::now();
                 match patch_adata_var_mean_lasso_r2_locked(
                     Path::new(training_dir),
                     Path::new(adata_path),
@@ -3883,13 +3937,17 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         };
                         let msg = if join_training {
                             format!(
-                                "gene_performance: merged {} → {} (join flock)",
-                                cols, GENE_PERFORMANCE_FEATHER_NAME
+                                "gene_performance: merged {} → {} (join flock, {:.1}s)",
+                                cols,
+                                GENE_PERFORMANCE_FEATHER_NAME,
+                                t_gp.elapsed().as_secs_f64()
                             )
                         } else {
                             format!(
-                                "gene_performance: wrote {} → {}",
-                                cols, GENE_PERFORMANCE_FEATHER_NAME
+                                "gene_performance: wrote {} → {} ({:.1}s)",
+                                cols,
+                                GENE_PERFORMANCE_FEATHER_NAME,
+                                t_gp.elapsed().as_secs_f64()
                             )
                         };
                         log_line(&hud, msg);
@@ -3918,19 +3976,35 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 }
             }
 
-            match write_run_summary_html(RunSummaryParams {
-                adata_path: Path::new(&worker_adata_path),
-                output_dir: Path::new(training_dir),
-                cfg: spaceship_config,
-                cluster_key: None,
-                layer_override: None,
-                run_id: None,
-                manifest: None,
-                betadata_pattern: "*_betadata.feather",
-                config_source_path: config_source_path.as_deref(),
-            }) {
-                Ok(p) => log_line(&hud, format!("summary: {}", p.display())),
-                Err(e) => log_line(&hud, format!("summary: failed: {}", e)),
+            if join_training {
+                log_line(
+                    &hud,
+                    "summary: skipped on join (leader writes run summary)".to_string(),
+                );
+            } else {
+                log_line(&hud, "summary: writing HTML…".to_string());
+                let t_sum = std::time::Instant::now();
+                match write_run_summary_html(RunSummaryParams {
+                    adata_path: Path::new(&worker_adata_path),
+                    output_dir: Path::new(training_dir),
+                    cfg: spaceship_config,
+                    cluster_key: None,
+                    layer_override: None,
+                    run_id: None,
+                    manifest: None,
+                    betadata_pattern: "*_betadata.feather",
+                    config_source_path: config_source_path.as_deref(),
+                }) {
+                    Ok(p) => log_line(
+                        &hud,
+                        format!(
+                            "summary: {} ({:.1}s)",
+                            p.display(),
+                            t_sum.elapsed().as_secs_f64()
+                        ),
+                    ),
+                    Err(e) => log_line(&hud, format!("summary: failed: {}", e)),
+                }
             }
 
             print_training_outcome_banner(&hud);
@@ -4118,6 +4192,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     xy,
                     &rec_map,
                     self.microbial_dmax_factor,
+                    self.microbial_received.as_deref(),
                 );
                 for (i, _) in pair_structs.iter().enumerate() {
                     if i < br.ncols() {

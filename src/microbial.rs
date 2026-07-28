@@ -330,50 +330,9 @@ pub fn calculate_received_from_senders(
     out
 }
 
-/// Build BR feature matrix (n_cells × n_pairs) = received(S) * receptor_expr.
-pub fn build_br_features(
-    ctx: &MicrobialContext,
-    pairs: &[BrPair],
-    receiver_xy: &Array2<f64>,
-    receptor_expr: &HashMap<String, Array1<f64>>,
-    dmax_factor: f64,
-) -> Array2<f64> {
-    let n = receiver_xy.nrows();
-    if pairs.is_empty() {
-        return Array2::zeros((n, 0));
-    }
-
-    // unique signals needed
-    let mut sig_cols: Vec<usize> = Vec::new();
-    let mut sig_radii: Vec<f64> = Vec::new();
-    let mut local_index: HashMap<String, usize> = HashMap::new();
-    for p in pairs {
-        if let Some(&k) = ctx.signal_index.get(&p.signal_id) {
-            if !local_index.contains_key(&p.signal_id) {
-                local_index.insert(p.signal_id.clone(), sig_cols.len());
-                sig_cols.push(k);
-                sig_radii.push(p.radius_um);
-            }
-        }
-    }
-
-    let n_sig = sig_cols.len();
-    let mut amounts = Array2::<f64>::zeros((ctx.n_senders(), n_sig));
-    for (t, &k) in sig_cols.iter().enumerate() {
-        amounts.column_mut(t).assign(&ctx.amounts.column(k));
-    }
-
-    let received = calculate_received_from_senders(
-        receiver_xy,
-        &ctx.sender_xy,
-        &amounts,
-        &sig_radii,
-        ctx.scale_factor,
-        dmax_factor,
-    );
-
-    // median-normalize positive channels (stabilize scale across signals)
-    let mut received = received;
+/// Median-normalize positive columns of a received-signal matrix (in place).
+fn median_normalize_positive_columns(received: &mut Array2<f64>) {
+    let n_sig = received.ncols();
     for t in 0..n_sig {
         let col = received.column(t);
         let mut pos: Vec<f64> = col.iter().copied().filter(|&v| v > 0.0).collect();
@@ -385,6 +344,96 @@ pub fn build_br_features(
             }
         }
     }
+}
+
+/// Precompute median-normalized received fields for every signal in `ctx` at receiver sites.
+/// Columns align with `ctx.signal_names` / `ctx.signal_index`.
+pub fn precompute_all_signal_received(
+    ctx: &MicrobialContext,
+    receiver_xy: &Array2<f64>,
+    dmax_factor: f64,
+) -> Array2<f64> {
+    let n_sig = ctx.signal_names.len();
+    let mut radii = vec![40.0_f64; n_sig];
+    for p in &ctx.br_pairs {
+        if let Some(&k) = ctx.signal_index.get(&p.signal_id) {
+            radii[k] = p.radius_um;
+        }
+    }
+    let mut received = calculate_received_from_senders(
+        receiver_xy,
+        &ctx.sender_xy,
+        &ctx.amounts,
+        &radii,
+        ctx.scale_factor,
+        dmax_factor,
+    );
+    median_normalize_positive_columns(&mut received);
+    received
+}
+
+/// Build BR feature matrix (n_cells × n_pairs) = received(S) * receptor_expr.
+///
+/// When `cached_received` is `Some`, it must be `n_cells × n_signals` aligned with
+/// [`MicrobialContext::signal_names`] (from [`precompute_all_signal_received`]); the expensive
+/// Gaussian field is skipped.
+pub fn build_br_features(
+    ctx: &MicrobialContext,
+    pairs: &[BrPair],
+    receiver_xy: &Array2<f64>,
+    receptor_expr: &HashMap<String, Array1<f64>>,
+    dmax_factor: f64,
+    cached_received: Option<&Array2<f64>>,
+) -> Array2<f64> {
+    let n = receiver_xy.nrows();
+    if pairs.is_empty() {
+        return Array2::zeros((n, 0));
+    }
+
+    let owned_received;
+    let (local_index, received): (HashMap<String, usize>, &Array2<f64>) =
+        if let Some(full) = cached_received {
+            assert_eq!(full.nrows(), n);
+            assert_eq!(full.ncols(), ctx.signal_names.len());
+            let mut local_index = HashMap::new();
+            for p in pairs {
+                if let Some(&k) = ctx.signal_index.get(&p.signal_id) {
+                    local_index.entry(p.signal_id.clone()).or_insert(k);
+                }
+            }
+            (local_index, full)
+        } else {
+            let mut sig_cols: Vec<usize> = Vec::new();
+            let mut sig_radii: Vec<f64> = Vec::new();
+            let mut local_index: HashMap<String, usize> = HashMap::new();
+            for p in pairs {
+                if let Some(&k) = ctx.signal_index.get(&p.signal_id) {
+                    if !local_index.contains_key(&p.signal_id) {
+                        local_index.insert(p.signal_id.clone(), sig_cols.len());
+                        sig_cols.push(k);
+                        sig_radii.push(p.radius_um);
+                    }
+                }
+            }
+
+            let n_sig = sig_cols.len();
+            let mut amounts = Array2::<f64>::zeros((ctx.n_senders(), n_sig));
+            for (t, &k) in sig_cols.iter().enumerate() {
+                amounts.column_mut(t).assign(&ctx.amounts.column(k));
+            }
+
+            let mut received = calculate_received_from_senders(
+                receiver_xy,
+                &ctx.sender_xy,
+                &amounts,
+                &sig_radii,
+                ctx.scale_factor,
+                dmax_factor,
+            );
+            median_normalize_positive_columns(&mut received);
+            owned_received = received;
+            (local_index, &owned_received)
+        };
 
     let mut out = Array2::<f64>::zeros((n, pairs.len()));
     for (j, p) in pairs.iter().enumerate() {
@@ -431,5 +480,41 @@ mod tests {
         assert!(MicrobialContext::is_bact_pair_name("beta_Lps$Tlr4", &known));
         assert!(!MicrobialContext::is_bact_pair_name("beta_Tgfa$Erbb2", &known));
         assert!(!MicrobialContext::is_bact_pair_name("beta_Stat3", &known));
+    }
+
+    #[test]
+    fn cached_received_matches_uncached_br_features() {
+        let ctx = MicrobialContext {
+            sender_xy: array![[0.0, 0.0]],
+            amounts: array![[10.0]],
+            signal_names: vec!["Lps".into()],
+            signal_index: {
+                let mut m = HashMap::new();
+                m.insert("Lps".into(), 0);
+                m
+            },
+            br_pairs: vec![BrPair {
+                signal_id: "Lps".into(),
+                receptor: "Tlr4".into(),
+                radius_um: 40.0,
+                pair_name: "Lps$Tlr4".into(),
+            }],
+            scale_factor: 1.0,
+            known_signals: HashSet::from(["Lps".into()]),
+        };
+        let receivers = array![[0.0, 0.0], [50.0, 0.0]];
+        let mut rec_map = HashMap::new();
+        rec_map.insert("Tlr4".into(), array![1.0, 2.0]);
+        let pairs = ctx.br_pairs.clone();
+        let uncached = build_br_features(&ctx, &pairs, &receivers, &rec_map, 3.0, None);
+        let cached = precompute_all_signal_received(&ctx, &receivers, 3.0);
+        let with_cache = build_br_features(&ctx, &pairs, &receivers, &rec_map, 3.0, Some(&cached));
+        assert_eq!(uncached.nrows(), with_cache.nrows());
+        assert_eq!(uncached.ncols(), with_cache.ncols());
+        for i in 0..uncached.nrows() {
+            for j in 0..uncached.ncols() {
+                assert!((uncached[[i, j]] - with_cache[[i, j]]).abs() < 1e-9);
+            }
+        }
     }
 }

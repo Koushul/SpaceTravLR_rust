@@ -406,7 +406,7 @@ struct Cli {
         long = "skip-auto-adata-prep",
         action = ArgAction::SetTrue,
         help_heading = "Input",
-        help = "Do not auto-run Scanpy / imputation when AnnData lacks cell_type or layers[\"imputed_count\"]"
+        help = "Do not auto-run Scanpy / imputation when AnnData lacks cell_type or layers[\"imputed_count\"]. Join workers skip auto-prep automatically (use the leader's prepared adata from the repro TOML)."
     )]
     skip_auto_adata_prep: bool,
 
@@ -3071,7 +3071,9 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Join workers must not rewrite shared spacetravlr_prep/*.h5ad (HDF5 race → segfault).
     if !cli.skip_auto_adata_prep
+        && !join_training
         && Path::new(&path)
             .extension()
             .and_then(|e| e.to_str())

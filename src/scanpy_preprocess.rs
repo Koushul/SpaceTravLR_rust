@@ -76,14 +76,17 @@ use crate::rust_preprocess::{
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
+use fs4::fs_std::FileExt;
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const UV_WITH_ANNDATA: &[&str] = &["numpy<2", "anndata>=0.11"];
 const UV_WITH_ATTACH: &[&str] = &["numpy<2", "anndata>=0.11", "scipy"];
@@ -1056,6 +1059,8 @@ pub fn training_processed_h5ad_path(output_dir: &Path, stem: &str) -> PathBuf {
 }
 
 pub const TRAINING_PREP_SUBDIR: &str = "spacetravlr_prep";
+/// Advisory lock beside prep outputs so concurrent hosts do not race-write the same `.h5ad`.
+pub const TRAINING_PREP_FLOCK: &str = "spacetravlr_prep.flock";
 
 pub fn training_prep_subdir(output_dir: &Path) -> PathBuf {
     output_dir.join(TRAINING_PREP_SUBDIR)
@@ -1502,8 +1507,8 @@ pub fn ensure_training_adata_ready(
         TrainingPrepPlan::LayersLeidenAnnotate { out } => Some(out.clone()),
         TrainingPrepPlan::FullPreprocess { out } => Some(out.clone()),
     };
-    if let Some(out) = reuse_out {
-        if prepared_training_output_is_reusable(&p, &out)? {
+    if let Some(out) = reuse_out.as_ref() {
+        if prepared_training_output_is_reusable(&p, out)? {
             eprintln!(
                 "spacetravlr: reusing existing training-prep output {} (>= mtime of {})",
                 out.display(),
@@ -1513,6 +1518,59 @@ pub fn ensure_training_adata_ready(
             return Ok(());
         }
     }
+    if matches!(plan, TrainingPrepPlan::Noop) {
+        *adata_path = expanded;
+        return Ok(());
+    }
+
+    // Concurrent leaders / misconfigured join workers can race-write the same prep h5ad.
+    let prep_dir = training_prep_subdir(output_dir);
+    std::fs::create_dir_all(&prep_dir)?;
+    let lock_path = prep_dir.join(TRAINING_PREP_FLOCK);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open flock {}", lock_path.display()))?;
+    const ATTEMPTS: usize = 7200;
+    const SLEEP_MS: u64 = 50;
+    let mut locked = false;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(SLEEP_MS));
+        }
+        match lock_file.try_lock_exclusive() {
+            Ok(true) => {
+                locked = true;
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("lock {}", lock_path.display()));
+            }
+        }
+    }
+    if !locked {
+        bail!(
+            "timed out after {}s acquiring exclusive flock for training prep ({})",
+            ATTEMPTS as u64 * SLEEP_MS / 1000,
+            lock_path.display()
+        );
+    }
+    // Another process may have finished prep while we waited.
+    if let Some(out) = reuse_out.as_ref() {
+        if prepared_training_output_is_reusable(&p, out)? {
+            eprintln!(
+                "spacetravlr: reusing existing training-prep output {} (after prep flock)",
+                out.display()
+            );
+            *adata_path = expand_user_path(out.to_string_lossy().as_ref());
+            return Ok(());
+        }
+    }
+
     match plan {
         TrainingPrepPlan::Noop => {
             *adata_path = expanded;
