@@ -14,6 +14,7 @@ pub const SPACESHIP_MERGE_SECTIONS: &[&str] = &[
     "execution",
     "perturbation",
     "model_export",
+    "microbial",
 ];
 
 fn merge_toml_table_maps(
@@ -1992,5 +1993,31 @@ n_neighbors = 20
         assert_eq!(back.preprocess.n_top_hvg, 1500);
         assert_eq!(back.preprocess.min_genes, 80);
         assert_eq!(back.preprocess.magic_t, 4);
+    }
+}
+
+#[cfg(test)]
+mod microbial_merge_section_tests {
+    use super::{SpaceshipConfig, merge_spaceship_overlay_into_toml};
+
+    #[test]
+    fn overlay_merges_microbial_enabled() {
+        let mut root: toml::Value = toml::from_str("").unwrap();
+        let ov: toml::Value = toml::from_str(
+            r#"
+[microbial]
+enabled = true
+sender_table = "/tmp/senders.parquet"
+interactions = "/tmp/inter.csv"
+"#,
+        )
+        .unwrap();
+        merge_spaceship_overlay_into_toml(&mut root, &ov);
+        let cfg: SpaceshipConfig = root.try_into().unwrap();
+        assert!(cfg.microbial.enabled);
+        assert_eq!(
+            cfg.microbial.sender_table.as_deref(),
+            Some("/tmp/senders.parquet")
+        );
     }
 }
