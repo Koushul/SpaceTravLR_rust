@@ -89,18 +89,23 @@ impl Default for CellChatConfig {
     }
 }
 
-/// One CellChatDB interaction (multi-subunit complexes kept intact).
+/// One CellChatDB interaction after expansion to independent single-gene units.
+///
+/// CellChatDB stores multi-subunit complexes (e.g. `Tgfbr1_Tgfbr2`). For SpaceTravLR
+/// compatibility we expand each complex row into the cartesian product of ligand ×
+/// receptor subunits, each becoming a standard `Lig$Rec` modulator column.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellChatInteraction {
     pub ligand_subunits: Vec<String>,
     pub receptor_subunits: Vec<String>,
     pub pathway: String,
     pub signaling: String,
-    /// Column name for SpaceTravLR: `Lig$Rec` (subunits joined with `_` when multi).
+    /// SpaceTravLR column name: single-gene `Lig$Rec`.
     pub pair_name: String,
 }
 
 impl CellChatInteraction {
+    /// Parse a raw CellChatDB row (complexes may still be multi-subunit here).
     pub fn from_row(ligand: &str, receptor: &str, pathway: &str, signaling: &str) -> Self {
         let ligand_subunits = split_complex(ligand);
         let receptor_subunits = split_complex(receptor);
@@ -117,6 +122,33 @@ impl CellChatInteraction {
             pair_name,
         }
     }
+
+    /// Single-gene ligand (after [`expand_complexes_to_independent_units`]).
+    pub fn ligand(&self) -> &str {
+        self.ligand_subunits
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// Single-gene receptor (after expansion).
+    pub fn receptor(&self) -> &str {
+        self.receptor_subunits
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    fn singleton(ligand: String, receptor: String, pathway: &str, signaling: &str) -> Self {
+        let pair_name = format!("{ligand}${receptor}");
+        Self {
+            ligand_subunits: vec![ligand],
+            receptor_subunits: vec![receptor],
+            pathway: pathway.to_string(),
+            signaling: signaling.to_string(),
+            pair_name,
+        }
+    }
 }
 
 fn split_complex(s: &str) -> Vec<String> {
@@ -125,6 +157,36 @@ fn split_complex(s: &str) -> Vec<String> {
         .filter(|p| !p.is_empty())
         .map(|p| p.to_string())
         .collect()
+}
+
+/// Expand multi-subunit CellChat complexes into independent `Lig$Rec` units
+/// (cartesian product of ligand × receptor subunits), deduplicated by pair name.
+///
+/// Example: `Tgfb1` × `Tgfbr1_Tgfbr2` → `Tgfb1$Tgfbr1`, `Tgfb1$Tgfbr2`.
+pub fn expand_complexes_to_independent_units(
+    interactions: &[CellChatInteraction],
+) -> Vec<CellChatInteraction> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for inter in interactions {
+        if inter.ligand_subunits.is_empty() || inter.receptor_subunits.is_empty() {
+            continue;
+        }
+        for lig in &inter.ligand_subunits {
+            for rec in &inter.receptor_subunits {
+                let unit = CellChatInteraction::singleton(
+                    lig.clone(),
+                    rec.clone(),
+                    &inter.pathway,
+                    &inter.signaling,
+                );
+                if seen.insert(unit.pair_name.clone()) {
+                    out.push(unit);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Tukey's trimean \((Q_1 + 2 Q_2 + Q_3)/4\).
@@ -233,7 +295,8 @@ pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
         }
         out.push(inter);
     }
-    Ok(out)
+    // SpaceTravLR modulators are single-gene Lig$Rec; expand complexes before use.
+    Ok(expand_complexes_to_independent_units(&out))
 }
 
 /// Resolve `cellchat_{species}.csv` from config path, env, or `data/` search.
@@ -616,12 +679,7 @@ impl CellChatLrPlan {
     pub fn lr_pairs_as_extra(&self) -> Vec<(String, String)> {
         self.interactions
             .iter()
-            .map(|inter| {
-                (
-                    inter.ligand_subunits.join("_"),
-                    inter.receptor_subunits.join("_"),
-                )
-            })
+            .map(|inter| (inter.ligand().to_string(), inter.receptor().to_string()))
             .collect()
     }
 }
@@ -852,8 +910,8 @@ pub fn write_prob_csv(path: &Path, result: &CellChatProbResult, selected: Option
                     f,
                     "{},{},{},{},{},{},{},{},{}",
                     inter.pair_name,
-                    inter.ligand_subunits.join("_"),
-                    inter.receptor_subunits.join("_"),
+                    inter.ligand(),
+                    inter.receptor(),
                     inter.pathway,
                     inter.signaling,
                     result.group_names[i],
@@ -969,14 +1027,55 @@ mod tests {
     }
 
     #[test]
-    fn load_mouse_db_if_present() {
+    fn expand_complex_to_independent_lig_rec_units() {
+        let raw = CellChatInteraction::from_row(
+            "Tgfb1",
+            "Tgfbr1_Tgfbr2",
+            "TGFb",
+            "Secreted Signaling",
+        );
+        assert_eq!(raw.receptor_subunits.len(), 2);
+        let units = expand_complexes_to_independent_units(&[raw]);
+        assert_eq!(units.len(), 2);
+        let names: HashSet<_> = units.iter().map(|u| u.pair_name.as_str()).collect();
+        assert!(names.contains("Tgfb1$Tgfbr1"));
+        assert!(names.contains("Tgfb1$Tgfbr2"));
+        for u in &units {
+            assert_eq!(u.ligand_subunits.len(), 1);
+            assert_eq!(u.receptor_subunits.len(), 1);
+        }
+    }
+
+    #[test]
+    fn expand_dedupes_overlapping_complex_rows() {
+        let a = CellChatInteraction::from_row("A_B", "R1_R2", "P", "Secreted Signaling");
+        let b = CellChatInteraction::from_row("A", "R1", "P", "Secreted Signaling");
+        let units = expand_complexes_to_independent_units(&[a, b]);
+        // A×R1 appears once despite coming from both the complex cartesian product and the singleton.
+        assert_eq!(
+            units.iter().filter(|u| u.pair_name == "A$R1").count(),
+            1
+        );
+        assert!(units.iter().any(|u| u.pair_name == "A$R2"));
+        assert!(units.iter().any(|u| u.pair_name == "B$R1"));
+        assert!(units.iter().any(|u| u.pair_name == "B$R2"));
+    }
+
+    #[test]
+    fn load_mouse_db_expands_complexes() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/cellchat_mouse.csv");
         if !root.is_file() {
             return;
         }
         let db = load_cellchat_db(&root).unwrap();
         assert!(db.len() > 1000);
-        let tgfb = db.iter().find(|i| i.pair_name.starts_with("Tgfb1$")).unwrap();
-        assert!(tgfb.receptor_subunits.len() >= 2);
+        // All units are single-gene Lig$Rec (SpaceTravLR-compatible).
+        for inter in &db {
+            assert_eq!(inter.ligand_subunits.len(), 1, "{}", inter.pair_name);
+            assert_eq!(inter.receptor_subunits.len(), 1, "{}", inter.pair_name);
+            assert!(!inter.pair_name.contains('_'));
+        }
+        assert!(db.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr1"));
+        assert!(db.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr2"));
     }
 }

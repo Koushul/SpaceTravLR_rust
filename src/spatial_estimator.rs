@@ -2575,23 +2575,27 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             let mut lr_pairs = Vec::new();
             let mut seen = HashSet::new();
             for inter in &plan.interactions {
-                let lig = inter.ligand_subunits.join("_");
-                let rec = inter.receptor_subunits.join("_");
+                let lig = inter.ligand().to_string();
+                let rec = inter.receptor().to_string();
+                if lig.is_empty() || rec.is_empty() {
+                    continue;
+                }
                 if lig == self.target_gene || rec == self.target_gene {
                     continue;
                 }
-                for g in inter
-                    .ligand_subunits
-                    .iter()
-                    .chain(inter.receptor_subunits.iter())
-                {
-                    if !var_set.contains(g) {
-                        anyhow::bail!(
-                            "CellChat interaction {} references gene {} missing from AnnData",
-                            inter.pair_name,
-                            g
-                        );
-                    }
+                if !var_set.contains(&lig) {
+                    anyhow::bail!(
+                        "CellChat interaction {} references ligand {} missing from AnnData",
+                        inter.pair_name,
+                        lig
+                    );
+                }
+                if !var_set.contains(&rec) {
+                    anyhow::bail!(
+                        "CellChat interaction {} references receptor {} missing from AnnData",
+                        inter.pair_name,
+                        rec
+                    );
                 }
                 let pair = inter.pair_name.clone();
                 if seen.insert(pair.clone()) {

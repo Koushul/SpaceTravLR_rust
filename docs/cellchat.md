@@ -10,15 +10,15 @@ SpaceTravLR fits **per cluster**. A feature that is constant within a cluster (g
 
 ## Pipeline
 
-1. **CellChatDB** — load `cellchat_{mouse|human}.csv` (complexes kept as multi-subunit).
+1. **CellChatDB** — load `cellchat_{mouse|human}.csv`, then **expand** multi-subunit complexes into independent SpaceTravLR units: cartesian product of ligand × receptor subunits, deduped by `Lig$Rec` (e.g. `Tgfb1` × `Tgfbr1_Tgfbr2` → `Tgfb1$Tgfbr1`, `Tgfb1$Tgfbr2`). Each unit is a single-gene pair, matching GRN `edge_type=lr` naming.
 2. **Expression prep** — per-group **trimean** \((Q_1+2Q_2+Q_3)/4\); drop groups with `< min_cells`.
-3. **Probability** — for ligand complex \(L_i\) and receptor complex \(R_j\) (geometric means of subunits):
+3. **Probability** — for each independent unit \(k\) with ligand gene \(L\) and receptor gene \(R\):
 
 \[
 P_{i\to j}^k \propto \frac{(L_i R_j)^n}{K_h^n + (L_i R_j)^n}
 \]
 
-Optional label-permutation p-values (`n_perm > 0`).
+where \(L_i,R_j\) are group trimeans of those single genes (no complex geometric mean after expansion). Optional label-permutation p-values (`n_perm > 0`).
 
 4. **LR terms** (`[cellchat].lr_mode`):
 
@@ -30,7 +30,7 @@ Optional label-permutation p-values (`n_perm > 0`).
 
 \(\widetilde{L}_{c\leftarrow s}\) is the Gaussian received-ligand field using **only** cells of type \(s\).
 
-5. **Lasso** — same sparse group Lasso / optional CNN path as usual.
+5. **Lasso** — same sparse group Lasso / optional CNN path as usual; LR columns are standard `Lig$Rec` strings.
 
 ## Config
 
@@ -61,5 +61,6 @@ spacetravlr cellchat --h5ad path/to/data.h5ad --enable --species mouse --out pro
 | | CellChat | SpaceTravLR (stock) | Hybrid |
 |--|----------|---------------------|--------|
 | Currency | Probability \(P\) | β on \(L\times R\) | β on \(P\)-weighted spatial \(L\times R\) |
+| Complexes | Multi-subunit geom. mean | Expanded `Lig$Rec` | Expanded like SpaceTravLR |
 | Locality | Mean-field over types | Gaussian neighborhoods | Both |
 | Significance | Label permutation | Rank/Wilcoxon on β (downstream) | CellChat filter → Lasso β |
