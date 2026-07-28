@@ -77,7 +77,7 @@ Off by default. When `enabled = true`, SpaceTravLR computes CellChat-style commu
 | `n_perm` | `0` | Label-shuffle permutations for p-values (`0` = skip). | e.g. `100` for CellChat-style significance. | Keep `0` for speed. |
 | `p_threshold` | `0.05` | Keep interactions with min p ≤ this (needs `n_perm > 0`). | More pairs. | Stricter significance. |
 | `min_prob` | `0.0` | Drop interactions whose max \(P\) is below this. | Stronger-only edges. | Keep weak links. |
-| `replace_lr_pairs` | `true` | Replace GRN `lr` edges with CellChat-selected complexes. | Force CellChat pair set. | `false` to keep GRN pairs but still use hybrid features when modes apply. |
+| `replace_lr_pairs` | `true` | Replace GRN `lr` edges with CellChat-selected `Lig$Rec` units (complexes pre-expanded). | Force CellChat pair set. | `false` to keep GRN pairs (probs still written for inspection). |
 | `max_interactions` | `200` | Cap after ranking by max \(P\). | Broader LR block. | Faster, sparser. |
 | `signaling_types` |  | Restrict to classes (e.g. `Secreted Signaling`). | Focus paracrine. | Empty = all classes. |
 | `random_seed` | `42` | Permutation RNG seed. | — | — |
