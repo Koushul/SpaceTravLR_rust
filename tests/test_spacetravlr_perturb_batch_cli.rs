@@ -7,14 +7,13 @@ fn perturb_bin() -> PathBuf {
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_spacetravlr_perturb") {
         return PathBuf::from(p);
     }
-    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        root = PathBuf::from(dir);
-    } else if cfg!(debug_assertions) {
-        root.push("target/debug");
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let mut root = if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(dir)
     } else {
-        root.push("target/release");
-    }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target")
+    };
+    root.push(profile);
     root.join("spacetravlr-perturb")
 }
 
