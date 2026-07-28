@@ -2229,6 +2229,8 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub tfl_pairs: Vec<String>,
     /// User-requested genes in the fourth Lasso group (raw expression), after filtering vs target/occupied.
     pub extra_modulators: Vec<String>,
+    /// Bacterial secretion × host receptor pairs (`signal$receptor`); Lasso group **4**.
+    pub br_pairs: Vec<String>,
     pub modulators_genes: Vec<String>,
     pub max_ligands: Option<usize>,
     pub regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>>,
@@ -2244,6 +2246,9 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// no LR/TFL/extra columns — written as `.tf_ablated`, not `.orphan`. When TF modulators are
     /// on, missing or all-zero TF support uses `.orphan` like any other orphan.
     pub gene_excluded_tf_modulators_ablation: bool,
+    /// Shared microbial sender table / BR catalog (None when `[microbial].enabled = false`).
+    pub microbial: Option<Arc<crate::microbial::MicrobialContext>>,
+    pub microbial_dmax_factor: f64,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -2270,6 +2275,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         obs_row_subset: Option<Arc<[usize]>>,
         extra_lr_pairs: &[(String, String)],
         extra_modulator_candidates: &[String],
+        microbial: Option<Arc<crate::microbial::MicrobialContext>>,
+        microbial_dmax_factor: f64,
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
 
@@ -2405,10 +2412,21 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             &extra_modulators_accepted,
         )?;
 
+        let br_pairs: Vec<String> = microbial
+            .as_ref()
+            .map(|m| {
+                m.pairs_for_target(&target_gene_str)
+                    .into_iter()
+                    .map(|p| p.pair_name)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut modulators_genes_ordered = regulators.clone();
         modulators_genes_ordered.extend(lr_pairs.iter().cloned());
         modulators_genes_ordered.extend(tfl_pairs.iter().cloned());
         modulators_genes_ordered.extend(extra_modulators_accepted.iter().cloned());
+        modulators_genes_ordered.extend(br_pairs.iter().cloned());
 
         let gene_excluded_tf_modulators_ablation = !use_tf_modulators
             && modulators_genes_ordered.is_empty()
@@ -2436,6 +2454,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             lr_pairs,
             tfl_pairs,
             extra_modulators: extra_modulators_accepted,
+            br_pairs,
             modulators_genes: modulators_genes_ordered,
             max_ligands,
             regulator_masks_by_cluster,
@@ -2447,6 +2466,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             obs_row_subset,
             modulator_scales: None,
             gene_excluded_tf_modulators_ablation,
+            microbial,
+            microbial_dmax_factor,
         })
     }
 
@@ -2492,6 +2513,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             &[],
             &[],
+            None,
+            3.0,
         )
     }
 }
@@ -2899,6 +2922,25 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let extra_mod_arc = Arc::new(resolved_ex_mod);
             let extra_lr_arc = Arc::new(resolved_ex_lr);
 
+            let microbial_cfg = spaceship_config.microbial.to_runtime_config();
+            let microbial_dmax = microbial_cfg.dmax_factor;
+            let microbial_arc = crate::microbial::load_microbial_context(
+                &microbial_cfg,
+                &all_var_names,
+                cfg_parent,
+            )?;
+            if let Some(ref m) = microbial_arc {
+                log_line(
+                    &hud,
+                    format!(
+                        "microbial BR: {} senders, {} pairs, {} signals",
+                        m.n_senders(),
+                        m.br_pairs.len(),
+                        m.signal_names.len()
+                    ),
+                );
+            }
+
             let layer_for_workers = layer.to_string();
             let cnn_for_workers = cnn.clone();
             let ligand_grid_factor = spaceship_config.perturbation.ligand_grid_factor;
@@ -2994,6 +3036,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let gene_mean_arc = gene_mean_arc.clone();
                 let extra_mod_arc_w = extra_mod_arc.clone();
                 let extra_lr_arc_w = extra_lr_arc.clone();
+                let microbial_arc_w = microbial_arc.clone();
+                let microbial_dmax_w = microbial_dmax;
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
@@ -3157,6 +3201,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 obs_subset.clone(),
                                 extra_lr_arc_w.as_slice(),
                                 extra_mod_arc_w.as_slice(),
+                                microbial_arc_w.clone(),
+                                microbial_dmax_w,
                             )
                             .map(Box::new)
                             {
@@ -4005,7 +4051,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         let total_modulators = self.regulators.len()
             + self.lr_pairs.len()
             + self.tfl_pairs.len()
-            + self.extra_modulators.len();
+            + self.extra_modulators.len()
+            + self.br_pairs.len();
         let mut x_modulators = Array2::<f64>::zeros((n_obs, total_modulators));
 
         for (i, gene) in self.regulators.iter().enumerate() {
@@ -4043,6 +4090,43 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             x_modulators
                 .column_mut(offset_extra + i)
                 .assign(&expr_matrix.column(idx));
+        }
+
+        let offset_br = offset_extra + self.extra_modulators.len();
+        if !self.br_pairs.is_empty() {
+            if let Some(ref mctx) = self.microbial {
+                let pair_structs: Vec<_> = mctx
+                    .pairs_for_target(&self.target_gene)
+                    .into_iter()
+                    .filter(|p| self.br_pairs.iter().any(|n| n == &p.pair_name))
+                    .collect();
+                // receptor expression map
+                let mut rec_map: HashMap<String, Array1<f64>> = HashMap::new();
+                for p in &pair_structs {
+                    if rec_map.contains_key(&p.receptor) {
+                        continue;
+                    }
+                    if let Some(&idx) = gene_to_idx.get(&p.receptor) {
+                        rec_map.insert(p.receptor.clone(), expr_matrix.column(idx).to_owned());
+                    } else if let Ok(expr) = self.get_gene_expression(&p.receptor) {
+                        rec_map.insert(p.receptor.clone(), expr);
+                    }
+                }
+                let br = crate::microbial::build_br_features(
+                    mctx,
+                    &pair_structs,
+                    xy,
+                    &rec_map,
+                    self.microbial_dmax_factor,
+                );
+                for (i, _) in pair_structs.iter().enumerate() {
+                    if i < br.ncols() {
+                        x_modulators
+                            .column_mut(offset_br + i)
+                            .assign(&br.column(i));
+                    }
+                }
+            }
         }
 
         Ok((x_modulators, target_expr))
@@ -4085,6 +4169,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             groups.extend(std::iter::repeat_n(1i64, self.lr_pairs.len()));
             groups.extend(std::iter::repeat_n(2i64, self.tfl_pairs.len()));
             groups.extend(std::iter::repeat_n(3i64, self.extra_modulators.len()));
+            groups.extend(std::iter::repeat_n(4i64, self.br_pairs.len()));
 
             let params = GroupLassoParams {
                 l1_reg,

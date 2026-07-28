@@ -246,6 +246,12 @@ struct CollectInteractionsCli {
     aggregate: String,
     #[arg(
         long,
+        default_value = "all",
+        help = "all|host|microbiome — filter interaction types (microbiome = bact-receptor only)"
+    )]
+    mode: String,
+    #[arg(
+        long,
         value_name = "PATH",
         help = "Output .feather path (default: <[execution].output_dir>/plucked_feathers.feather)"
     )]
@@ -1653,6 +1659,28 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn filter_collect_mode_rows<T, F>(rows: Vec<T>, mode: &str, type_of: F) -> anyhow::Result<Vec<T>>
+where
+    F: Fn(&T) -> &str,
+{
+    let m = mode.trim().to_ascii_lowercase();
+    Ok(match m.as_str() {
+        "all" => rows,
+        "microbiome" | "bact" | "br" => rows
+            .into_iter()
+            .filter(|r| type_of(r) == "bact-receptor")
+            .collect(),
+        "host" => rows
+            .into_iter()
+            .filter(|r| {
+                let t = type_of(r);
+                t == "tf" || t == "ligand-receptor" || t == "ligand-tf"
+            })
+            .collect(),
+        other => anyhow::bail!("--mode must be all|host|microbiome (got {other:?})"),
+    })
+}
+
 fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
     let cfg = SpaceshipConfig::from_file(&ci.run_toml)?;
     let annot_col = ci.annot.trim();
@@ -1668,7 +1696,14 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
     let out_path = ci
         .out
         .clone()
-        .unwrap_or_else(|| run_output_dir.join("plucked_feathers.feather"));
+        .unwrap_or_else(|| {
+            let suffix = match ci.mode.trim().to_ascii_lowercase().as_str() {
+                "microbiome" | "bact" | "br" => "plucked_feathers_microbiome.feather",
+                "host" => "plucked_feathers_host.feather",
+                _ => "plucked_feathers.feather",
+            };
+            run_output_dir.join(suffix)
+        });
     let out_s = out_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?;
@@ -1686,11 +1721,13 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
             None,
             Some(cluster_obs.as_slice()),
         )?;
+        let rows = filter_collect_mode_rows(rows, &ci.mode, |r| r.interaction_type.as_str())?;
         write_collected_interactions_full_feather(out_s, &rows)?;
         eprintln!(
-            "Wrote {} rows (per-cluster β, column {:?}) to {}",
+            "Wrote {} rows (per-cluster β, column {:?}, mode={}) to {}",
             rows.len(),
             col,
+            ci.mode,
             out_path.display()
         );
         return Ok(());
@@ -1710,8 +1747,14 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
         mode,
         None,
     )?;
+    let rows = filter_collect_mode_rows(rows, &ci.mode, |r| r.interaction_type.as_str())?;
     write_collected_interactions_feather(out_s, &rows)?;
-    eprintln!("Wrote {} rows to {}", rows.len(), out_path.display());
+    eprintln!(
+        "Wrote {} rows (mode={}) to {}",
+        rows.len(),
+        ci.mode,
+        out_path.display()
+    );
     Ok(())
 }
 

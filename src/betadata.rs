@@ -1507,12 +1507,35 @@ impl BetadataCollectAggregate {
 fn classify_betadata_column_type(col: &str) -> &'static str {
     let body = col.strip_prefix("beta_").unwrap_or(col);
     if body.contains('#') {
-        "ligand-tf"
-    } else if body.contains('$') {
-        "ligand-receptor"
-    } else {
-        "tf"
+        return "ligand-tf";
     }
+    if let Some((sig, _)) = body.split_once('$') {
+        if default_bact_signals().contains(sig) {
+            return "bact-receptor";
+        }
+        return "ligand-receptor";
+    }
+    "tf"
+}
+
+fn default_bact_signals() -> std::collections::HashSet<String> {
+    [
+        "Lps",
+        "Lta",
+        "Lipoprotein",
+        "Flagellin",
+        "Cpg_dna",
+        "Mdp",
+        "Ie_dap",
+        "Scfa_acetate",
+        "Scfa_propionate",
+        "Scfa_butyrate",
+        "Fmlp",
+        "Ps_dmsp",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 fn aggregates_have_signal(agg: &BetaAggregates) -> bool {

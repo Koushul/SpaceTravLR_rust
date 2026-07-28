@@ -167,6 +167,54 @@ pub struct SpaceshipConfig {
     pub perturbation: PerturbationConfig,
     #[serde(default)]
     pub model_export: ModelExportConfig,
+    /// Bacterial secretion → host receptor (BR) modulators. Off by default.
+    #[serde(default)]
+    pub microbial: MicrobialSection,
+}
+
+/// TOML `[microbial]` — see `docs/microbial.md` and `docs/examples/microbial_config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MicrobialSection {
+    pub enabled: bool,
+    pub sender_table: Option<String>,
+    pub interactions: String,
+    pub taxon_priors: Option<String>,
+    pub sender_mode: String,
+    pub normalization: String,
+    pub scale_factor: f64,
+    pub radius_um_override: Option<f64>,
+    /// Truncate Gaussian kernel at this × radius (default 3).
+    pub dmax_factor: f64,
+}
+
+impl Default for MicrobialSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sender_table: None,
+            interactions: "data/microbial/bact_host_interactions.v0.csv".into(),
+            taxon_priors: Some("data/microbial/taxon_signal_priors.v0.csv".into()),
+            sender_mode: "colony".into(),
+            normalization: "none".into(),
+            scale_factor: 1.0,
+            radius_um_override: None,
+            dmax_factor: 3.0,
+        }
+    }
+}
+
+impl MicrobialSection {
+    pub fn to_runtime_config(&self) -> crate::microbial::MicrobialConfig {
+        crate::microbial::MicrobialConfig {
+            enabled: self.enabled,
+            sender_table: self.sender_table.clone(),
+            interactions: self.interactions.clone(),
+            scale_factor: self.scale_factor,
+            radius_um_override: self.radius_um_override,
+            dmax_factor: self.dmax_factor,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

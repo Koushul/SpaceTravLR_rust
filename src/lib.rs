@@ -156,6 +156,7 @@ pub mod grn_extra;
 pub mod h5ad_peek;
 pub mod lasso;
 pub mod ligand;
+pub mod microbial;
 pub mod malt_label_transfer;
 pub mod model;
 mod modulator_scale;
