@@ -1,0 +1,75 @@
+# SpaceTravLR full spatial TF+LR+BR — expanded gene panel, all radii ×2
+
+[data]
+adata_path = "/ix1/ylee/kor11/tools/spacetravlr_microbiome/processed/GSM9456850_tumor_cells_imputed.h5ad"
+layer = "imputed_count"
+cluster_annot = "cell_type"
+spatial_species = "mouse"
+
+[preprocess]
+min_genes = 20
+min_cells = 1
+n_top_hvg = 8000
+
+[spatial]
+radius = 400.0
+spatial_dim = 32
+contact_distance = 60.0
+weighted_ligand_scale_factor = 1.0
+
+[grn]
+network_data_dir = "/ix1/ylee/kor11/tools/SpaceTravLR_rust/data"
+tf_ligand_cutoff = 0.15
+max_ligands = 40
+use_tf_modulators = true
+use_lr_modulators = true
+use_tfl_modulators = false
+train_modulators = "tf,lr"
+
+[lasso]
+l1_reg = 0.01
+group_reg = 0.05
+scale_modulators = true
+n_iter = 2000
+tol = 1e-4
+parallel_lasso_clusters = true
+
+[cnn]
+spatial_feature_radius = 400.0
+ego_center_spatial_maps = true
+multi_channel_spatial_maps = false
+
+[training]
+mode = "full"
+epochs = 8
+learning_rate = 0.01
+score_threshold = 0.0
+genes = [
+  "Lyz1", "Lyz2", "Muc2", "Muc3", "Muc4", "Defa17", "Defa21", "Defa22", "Defa24", "Defa26",
+  "Reg3g", "Reg3b", "Reg3a", "Ang4", "Nos2", "Duox2", "Duoxa2", "Cd74", "Guca2a", "Guca2b",
+  "Tff3", "Pigr", "S100a8", "S100a9", "S100g", "S100a14", "Krt18", "Krt19", "Krt20", "Ace2",
+  "Lct", "Apoa1", "Apoa4", "Fabp1", "Fabp2", "Spink1", "Clca4b", "Itln1", "Pla2g2a", "Pla2g2e",
+  "Cxcl1", "Cxcl2", "Cxcl5", "Ccl25", "Ccl20", "Nfkb1", "Rela", "Relb", "Stat1", "Stat3",
+  "Stat2", "Hif1a", "Il18", "Il1b", "Tnf", "Cxcl9", "Cxcl10", "Cd14", "Tlr2", "Tlr4",
+  "Tlr5", "Tlr9", "Nod1", "Nod2", "Ffar2", "Ffar3", "Fpr1", "Nlrp3", "Casp1", "Jchain",
+  "Igha", "Ighm", "Alpi", "Sis", "Chga", "Chgb", "Lgr5", "Ascl2", "Olfm4", "Axin2",
+  "Myc", "Jun", "Fos", "Mmp7", "Mmp9", "Retnlb", "Retnla", "Defb1", "Camp", "Chil3",
+  "Chil4", "Saa1", "Saa3", "Socs3", "Ido1",
+]
+max_genes = 100
+
+[execution]
+output_dir = "/ix1/ylee/kor11/tools/spacetravlr_microbiome/runs/tumor_br_r2x"
+n_parallel = 2
+stale_lock_secs = 7200
+random_seed = 0
+
+[microbial]
+enabled = true
+sender_mode = "colony"
+sender_table = "/ix1/ylee/kor11/tools/spacetravlr_microbiome/processed/GSM9456850_bact_senders_colony25um_scfa_merged.parquet"
+interactions = "/ix1/ylee/kor11/tools/spacetravlr_microbiome/configs/bact_host_interactions.train_scfa_merged_r2x.csv"
+taxon_priors = "/ix1/ylee/kor11/tools/SpaceTravLR_rust/data/microbial/taxon_signal_priors.v0.csv"
+normalization = "none"
+scale_factor = 1.0
+dmax_factor = 3.0
