@@ -9,13 +9,12 @@
 //! (or a spatial Hill transform).
 
 use crate::config::expand_user_path;
-use crate::ligand::calculate_weighted_ligands;
+use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
 use crate::network::SPACETRAVLR_DATA_DIR_ENV;
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -711,6 +710,7 @@ fn receptor_complex_expr(
 
 /// Type-stratified received ligand: for each sender group `s`, Gaussian-weighted
 /// mean of ligand expression using only cells of type `s` (other cells zeroed).
+/// Uses the grid approximation when `grid_factor` is set (recommended for N ≳ 5k).
 fn type_stratified_received_ligand(
     xy: &Array2<f64>,
     ligand_expr: &Array1<f64>,
@@ -718,28 +718,28 @@ fn type_stratified_received_ligand(
     n_groups: usize,
     radius: f64,
     scale_factor: f64,
+    grid_factor: Option<f64>,
 ) -> Array2<f64> {
     let n = xy.nrows();
     let mut out = Array2::<f64>::zeros((n, n_groups));
     if n == 0 {
         return out;
     }
-    // Parallel over sender groups: zero-mask then reuse exact kernel.
-    let cols: Vec<Array1<f64>> = (0..n_groups)
-        .into_par_iter()
-        .map(|s| {
-            let mut lig = Array2::<f64>::zeros((n, 1));
-            for i in 0..n {
-                if cell_group.get(i).copied().unwrap_or(usize::MAX) == s {
-                    lig[[i, 0]] = ligand_expr[i];
-                }
+    let use_grid = grid_factor.filter(|g| g.is_finite() && *g > 0.0);
+    // Sequential over groups: `calculate_weighted_ligands*` already parallelizes over
+    // receiver cells. Nesting Rayon here under gene-workers corrupted the allocator.
+    for s in 0..n_groups {
+        let mut lig = Array2::<f64>::zeros((n, 1));
+        for i in 0..n {
+            if cell_group.get(i).copied().unwrap_or(usize::MAX) == s {
+                lig[[i, 0]] = ligand_expr[i];
             }
-            let recv = calculate_weighted_ligands(xy, &lig, radius, scale_factor);
-            recv.column(0).to_owned()
-        })
-        .collect();
-    for (s, col) in cols.into_iter().enumerate() {
-        out.column_mut(s).assign(&col);
+        }
+        let recv = match use_grid {
+            Some(gf) => calculate_weighted_ligands_grid(xy, &lig, radius, scale_factor, gf),
+            None => calculate_weighted_ligands(xy, &lig, radius, scale_factor),
+        };
+        out.column_mut(s).assign(&recv.column(0));
     }
     out
 }
@@ -749,11 +749,15 @@ fn received_ligand_field(
     ligand_expr: &Array1<f64>,
     radius: f64,
     scale_factor: f64,
+    grid_factor: Option<f64>,
 ) -> Array1<f64> {
     let n = xy.nrows();
     let mut lig = Array2::<f64>::zeros((n, 1));
     lig.column_mut(0).assign(ligand_expr);
-    let recv = calculate_weighted_ligands(xy, &lig, radius, scale_factor);
+    let recv = match grid_factor.filter(|g| g.is_finite() && *g > 0.0) {
+        Some(gf) => calculate_weighted_ligands_grid(xy, &lig, radius, scale_factor, gf),
+        None => calculate_weighted_ligands(xy, &lig, radius, scale_factor),
+    };
     recv.column(0).to_owned()
 }
 
@@ -761,6 +765,10 @@ fn received_ligand_field(
 ///
 /// `expr` must contain all ligand/receptor subunit genes (columns indexed by `gene_to_idx`).
 /// Returns `(n_cells × n_interactions)`.
+///
+/// When `grid_factor` is `Some(g)` with `g > 0`, received-ligand fields use the grid
+/// approximation (same as SpaceTravLR training for large N). Unique ligand genes are
+/// cached so shared ligands across interactions are not recomputed.
 pub fn build_hybrid_lr_matrix(
     plan: &CellChatLrPlan,
     xy: &Array2<f64>,
@@ -768,6 +776,19 @@ pub fn build_hybrid_lr_matrix(
     gene_to_idx: &HashMap<String, usize>,
     radius: f64,
     scale_factor: f64,
+) -> Result<Array2<f64>> {
+    build_hybrid_lr_matrix_with_grid(plan, xy, expr, gene_to_idx, radius, scale_factor, None)
+}
+
+/// Like [`build_hybrid_lr_matrix`], with optional ligand grid factor.
+pub fn build_hybrid_lr_matrix_with_grid(
+    plan: &CellChatLrPlan,
+    xy: &Array2<f64>,
+    expr: &Array2<f64>,
+    gene_to_idx: &HashMap<String, usize>,
+    radius: f64,
+    scale_factor: f64,
+    grid_factor: Option<f64>,
 ) -> Result<Array2<f64>> {
     let n = xy.nrows();
     let n_k = plan.interactions.len();
@@ -784,7 +805,15 @@ pub fn build_hybrid_lr_matrix(
         return Ok(out);
     }
 
-    // Cache ligand gene → cell expression and type-stratified received fields.
+    // Auto grid for dense slides (matches spatial_estimator LARGE_DATASET threshold spirit).
+    let grid_factor = grid_factor.or_else(|| {
+        if n > 5_000 {
+            Some(0.5)
+        } else {
+            None
+        }
+    });
+
     let mut subunit_expr_cache: HashMap<String, Array1<f64>> = HashMap::new();
     let get_gene = |name: &str,
                         cache: &mut HashMap<String, Array1<f64>>|
@@ -801,18 +830,16 @@ pub fn build_hybrid_lr_matrix(
         Ok(col)
     };
 
-    for (k, inter) in plan.interactions.iter().enumerate() {
-        let mut lig_sub_cols = Vec::with_capacity(inter.ligand_subunits.len());
-        for s in &inter.ligand_subunits {
-            lig_sub_cols.push(get_gene(s, &mut subunit_expr_cache)?);
-        }
-        // Per-cell geometric mean of ligand subunits (pre-reception).
-        let mut lig_complex = Array1::<f64>::zeros(n);
-        for i in 0..n {
-            let vals: Vec<f64> = lig_sub_cols.iter().map(|c| c[i]).collect();
-            lig_complex[i] = geometric_mean(&vals);
-        }
+    // Cache received fields by ligand gene (post-expansion: one subunit).
+    let mut stratified_cache: HashMap<String, Array2<f64>> = HashMap::new();
+    let mut field_cache: HashMap<String, Array1<f64>> = HashMap::new();
 
+    for (k, inter) in plan.interactions.iter().enumerate() {
+        let lig_name = inter.ligand().to_string();
+        if lig_name.is_empty() {
+            continue;
+        }
+        let lig_expr = get_gene(&lig_name, &mut subunit_expr_cache)?;
         let rec = receptor_complex_expr(expr, gene_to_idx, &inter.receptor_subunits)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -823,14 +850,21 @@ pub fn build_hybrid_lr_matrix(
 
         match plan.mode {
             CellChatLrMode::WeightedSpatial => {
-                let recv_by_type = type_stratified_received_ligand(
-                    xy,
-                    &lig_complex,
-                    &plan.cell_group,
-                    n_g,
-                    radius,
-                    scale_factor,
-                );
+                let recv_by_type = if let Some(cached) = stratified_cache.get(&lig_name) {
+                    cached.clone()
+                } else {
+                    let computed = type_stratified_received_ligand(
+                        xy,
+                        &lig_expr,
+                        &plan.cell_group,
+                        n_g,
+                        radius,
+                        scale_factor,
+                        grid_factor,
+                    );
+                    stratified_cache.insert(lig_name.clone(), computed.clone());
+                    computed
+                };
                 for i in 0..n {
                     let j = plan.cell_group[i];
                     if j >= n_g {
@@ -847,13 +881,27 @@ pub fn build_hybrid_lr_matrix(
                 }
             }
             CellChatLrMode::HillSpatial => {
-                let recv = received_ligand_field(xy, &lig_complex, radius, scale_factor);
+                let recv = if let Some(cached) = field_cache.get(&lig_name) {
+                    cached.clone()
+                } else {
+                    let computed =
+                        received_ligand_field(xy, &lig_expr, radius, scale_factor, grid_factor);
+                    field_cache.insert(lig_name.clone(), computed.clone());
+                    computed
+                };
                 for i in 0..n {
                     out[[i, k]] = hill_commun_prob(recv[i], rec[i], plan.kh, plan.hill_coef);
                 }
             }
             CellChatLrMode::SpatialProduct => {
-                let recv = received_ligand_field(xy, &lig_complex, radius, scale_factor);
+                let recv = if let Some(cached) = field_cache.get(&lig_name) {
+                    cached.clone()
+                } else {
+                    let computed =
+                        received_ligand_field(xy, &lig_expr, radius, scale_factor, grid_factor);
+                    field_cache.insert(lig_name.clone(), computed.clone());
+                    computed
+                };
                 for i in 0..n {
                     out[[i, k]] = recv[i] * rec[i];
                 }

@@ -2564,6 +2564,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     }
 
     /// Attach a CellChat hybrid plan: optionally replace LR pairs and enable hybrid LR features.
+    /// Pairs that include `target_gene` as ligand or receptor are dropped from both the
+    /// modulator list and the plan tensor so column counts stay aligned.
     pub fn apply_cellchat_plan(
         &mut self,
         plan: Arc<crate::cellchat::CellChatLrPlan>,
@@ -2573,8 +2575,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             let mut ligands = Vec::new();
             let mut receptors = Vec::new();
             let mut lr_pairs = Vec::new();
+            let mut keep_idx: Vec<usize> = Vec::new();
             let mut seen = HashSet::new();
-            for inter in &plan.interactions {
+            for (k, inter) in plan.interactions.iter().enumerate() {
                 let lig = inter.ligand().to_string();
                 let rec = inter.receptor().to_string();
                 if lig.is_empty() || rec.is_empty() {
@@ -2602,6 +2605,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     ligands.push(lig);
                     receptors.push(rec);
                     lr_pairs.push(pair);
+                    keep_idx.push(k);
                 }
             }
             self.ligands = ligands;
@@ -2629,8 +2633,40 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 m.extend(self.extra_modulators.iter().cloned());
                 m
             };
+
+            if keep_idx.len() != plan.interactions.len() {
+                let n_g = plan.group_names.len();
+                let mut interactions = Vec::with_capacity(keep_idx.len());
+                let mut pair_names = Vec::with_capacity(keep_idx.len());
+                let mut prob =
+                    ndarray::Array3::<f64>::zeros((keep_idx.len(), n_g, n_g));
+                for (new_k, &old_k) in keep_idx.iter().enumerate() {
+                    interactions.push(plan.interactions[old_k].clone());
+                    pair_names.push(plan.pair_names[old_k].clone());
+                    for i in 0..n_g {
+                        for j in 0..n_g {
+                            prob[[new_k, i, j]] = plan.prob[[old_k, i, j]];
+                        }
+                    }
+                }
+                let filtered = crate::cellchat::CellChatLrPlan {
+                    mode: plan.mode,
+                    kh: plan.kh,
+                    hill_coef: plan.hill_coef,
+                    replace_lr_pairs: plan.replace_lr_pairs,
+                    interactions,
+                    cell_group: plan.cell_group.clone(),
+                    group_names: plan.group_names.clone(),
+                    prob,
+                    pair_names,
+                };
+                self.cellchat_plan = Some(Arc::new(filtered));
+            } else {
+                self.cellchat_plan = Some(plan);
+            }
+        } else {
+            self.cellchat_plan = Some(plan);
         }
-        self.cellchat_plan = Some(plan);
         Ok(())
     }
 
@@ -4279,13 +4315,21 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
 
         let offset_lr = self.regulators.len();
         if let Some(plan) = self.cellchat_plan.as_ref() {
-            let lr_mat = crate::cellchat::build_hybrid_lr_matrix(
+            let grid_factor = self.ligand_grid_factor.or({
+                if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
+                    Some(DEFAULT_LIGAND_GRID_FACTOR)
+                } else {
+                    None
+                }
+            });
+            let lr_mat = crate::cellchat::build_hybrid_lr_matrix_with_grid(
                 plan,
                 xy,
                 &expr_matrix,
                 &gene_to_idx,
                 self.radius,
                 self.weighted_ligand_scale_factor,
+                grid_factor,
             )?;
             if lr_mat.ncols() != self.lr_pairs.len() {
                 anyhow::bail!(
