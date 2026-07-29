@@ -6,7 +6,10 @@
 //! and multiplied by local receptor for the Lasso design matrix.
 
 use crate::config::expand_user_path;
-use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
+use crate::ligand::{
+    WeightedLigandReduce, calculate_weighted_ligands, calculate_weighted_ligands_grid,
+    calculate_weighted_ligands_with_cutoff_reduce,
+};
 use crate::network::SPACETRAVLR_DATA_DIR_ENV;
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Axis};
@@ -17,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// How received ligand is aggregated for LR columns.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -28,6 +32,30 @@ pub enum LigandFieldMode {
     #[default]
     #[serde(alias = "spatial_product")]
     Spatial,
+}
+
+/// How LR pairs are chosen before building design columns.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PairSelectionMode {
+    /// Rank/filter by CellChat-style communication probability \(P\) (default).
+    #[default]
+    Prob,
+    /// Keep all DB pairs present in the AnnData (both L and R expressed); rank by
+    /// expression product of group trimeans when applying `max_interactions`.
+    Expressed,
+}
+
+/// Matched normalization of the received-ligand field before \(L\cdot R\).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceivedLigandNorm {
+    /// Legacy: spatial uses `(1/N)Σ w L`; meanfield uses global mean.
+    #[default]
+    GlobalN,
+    /// Spatial uses kernel-mass `Σ w L / Σ w`; meanfield uses global mean (flat kernel-mass).
+    /// Makes meanfield vs spatial a pure geometry contrast.
+    KernelMass,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +71,7 @@ pub struct LigandFieldConfig {
     #[serde(default = "default_one_f64")]
     pub weighted_ligand_scale_factor: f64,
     /// Grid spacing as a fraction of `[spatial].radius` for approximate spatial aggregation.
-    /// Omit for exact pairwise (slower on large N).
+    /// Omit for exact pairwise (slower on large N). Ignored when `received_ligand_norm = kernel_mass`.
     pub ligand_grid_factor: Option<f64>,
     /// Half-saturation \(K_h\) in the Hill / mass-action term (CellChat default 0.5).
     pub kh: f64,
@@ -58,16 +86,28 @@ pub struct LigandFieldConfig {
     /// Keep interactions with permutation p ≤ this (ignored when `n_perm == 0`).
     pub p_threshold: f64,
     /// Drop interactions whose max \(P\) (any sender→receiver) is below this.
+    /// Ignored when `pair_selection = expressed`.
     pub min_prob: f64,
     /// When true, replace GRN `edge_type=lr` pairs with probability-selected interactions.
     pub replace_lr_pairs: bool,
-    /// Cap retained interactions after filtering (by max \(P\), descending).
+    /// Cap retained interactions after filtering (by max \(P\) or expression product).
     pub max_interactions: Option<usize>,
     /// Restrict to these signaling classes (e.g. `Secreted Signaling`). Empty = all.
     #[serde(default)]
     pub signaling_types: Vec<String>,
     /// RNG seed for permutations.
     pub random_seed: u64,
+    /// `prob` (default) ranks by CellChat \(P\); `expressed` keeps all present LR pairs.
+    pub pair_selection: PairSelectionMode,
+    /// Matched received-\(L\) normalization for fair meanfield ↔ spatial A/B.
+    pub received_ligand_norm: ReceivedLigandNorm,
+    /// Write `ligand_field_L_diagnostics.csv` next to commun_prob when an output dir is set.
+    #[serde(default = "default_true")]
+    pub write_ligand_diagnostics: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_one_f64() -> f64 {
@@ -92,6 +132,9 @@ impl Default for LigandFieldConfig {
             max_interactions: Some(200),
             signaling_types: Vec::new(),
             random_seed: 42,
+            pair_selection: PairSelectionMode::Prob,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
+            write_ligand_diagnostics: true,
         }
     }
 }
@@ -617,34 +660,80 @@ pub fn compute_commun_prob(
     })
 }
 
-/// Keep significant / strong interactions; optionally cap by max \(P\).
+/// Keep significant / strong interactions; optionally cap by max \(P\) or expression product.
 pub fn select_interactions(
     result: &CellChatProbResult,
     cfg: &LigandFieldConfig,
 ) -> Vec<usize> {
+    select_interactions_with_expr_scores(result, cfg, None)
+}
+
+/// Like [`select_interactions`], with optional per-interaction expression-product scores
+/// (used when `pair_selection = expressed`).
+pub fn select_interactions_with_expr_scores(
+    result: &CellChatProbResult,
+    cfg: &LigandFieldConfig,
+    expr_product_scores: Option<&[f64]>,
+) -> Vec<usize> {
     let mut keep: Vec<(usize, f64)> = Vec::new();
-    for k in 0..result.interactions.len() {
-        let max_p = result.max_prob_for_interaction(k);
-        if max_p < cfg.min_prob {
-            continue;
-        }
-        if let Some(ref pvals) = result.pvalues {
-            let min_pval = pvals
-                .index_axis(Axis(0), k)
-                .iter()
-                .copied()
-                .fold(1.0_f64, f64::min);
-            if min_pval > cfg.p_threshold {
-                continue;
+    match cfg.pair_selection {
+        PairSelectionMode::Prob => {
+            for k in 0..result.interactions.len() {
+                let max_p = result.max_prob_for_interaction(k);
+                if max_p < cfg.min_prob {
+                    continue;
+                }
+                if let Some(ref pvals) = result.pvalues {
+                    let min_pval = pvals
+                        .index_axis(Axis(0), k)
+                        .iter()
+                        .copied()
+                        .fold(1.0_f64, f64::min);
+                    if min_pval > cfg.p_threshold {
+                        continue;
+                    }
+                }
+                keep.push((k, max_p));
             }
         }
-        keep.push((k, max_p));
+        PairSelectionMode::Expressed => {
+            for k in 0..result.interactions.len() {
+                let score = expr_product_scores
+                    .and_then(|s| s.get(k).copied())
+                    .unwrap_or_else(|| result.max_prob_for_interaction(k));
+                keep.push((k, score));
+            }
+        }
     }
     keep.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     if let Some(cap) = cfg.max_interactions {
         keep.truncate(cap);
     }
     keep.into_iter().map(|(k, _)| k).collect()
+}
+
+/// Per-interaction score = (mean ligand complex expr) × (mean receptor complex expr).
+pub fn interaction_mean_expr_product_scores(
+    expr: &Array2<f64>,
+    gene_names: &[String],
+    interactions: &[CellChatInteraction],
+) -> Vec<f64> {
+    let mut gene_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, g) in gene_names.iter().enumerate() {
+        gene_to_idx.insert(g.clone(), i);
+    }
+    interactions
+        .iter()
+        .map(|inter| {
+            let lig = receptor_complex_expr(expr, &gene_to_idx, &inter.ligand_subunits)
+                .map(|v| v.mean().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            let rec = receptor_complex_expr(expr, &gene_to_idx, &inter.receptor_subunits)
+                .map(|v| v.mean().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            lig * rec
+        })
+        .collect()
 }
 
 /// Shared plan consumed by per-gene Lasso workers for ligand-field LR terms.
@@ -656,6 +745,7 @@ pub struct LigandFieldPlan {
     pub replace_lr_pairs: bool,
     /// Min cells per group when computing mean-field ligand trimeans.
     pub min_cells: usize,
+    pub received_ligand_norm: ReceivedLigandNorm,
     /// Selected interactions (already filtered).
     pub interactions: Vec<CellChatInteraction>,
     /// Group label per cell (aligned to training obs rows / xy).
@@ -664,6 +754,8 @@ pub struct LigandFieldPlan {
     /// `(n_interactions, n_groups, n_groups)` for selected interactions only.
     pub prob: Array3<f64>,
     pub pair_names: Vec<String>,
+    /// Precomputed received-\(L\) fields keyed by ligand gene (shared across workers).
+    pub received_ligand_cache: Option<HashMap<String, Arc<Array1<f64>>>>,
 }
 
 impl LigandFieldPlan {
@@ -701,11 +793,13 @@ impl LigandFieldPlan {
             hill_coef: cfg.hill_coef,
             replace_lr_pairs: cfg.replace_lr_pairs,
             min_cells: cfg.min_cells,
+            received_ligand_norm: cfg.received_ligand_norm,
             interactions,
             cell_group: Vec::new(),
             group_names: result.group_names,
             prob,
             pair_names,
+            received_ligand_cache: None,
         }
     }
 
@@ -719,6 +813,48 @@ impl LigandFieldPlan {
             .iter()
             .map(|inter| (inter.ligand().to_string(), inter.receptor().to_string()))
             .collect()
+    }
+
+    /// Slice the plan to `keep_idx` while preserving the shared ligand cache.
+    pub fn filtered_to_indices(&self, keep_idx: &[usize]) -> Self {
+        let n_g = self.group_names.len();
+        let mut interactions = Vec::with_capacity(keep_idx.len());
+        let mut pair_names = Vec::with_capacity(keep_idx.len());
+        let mut prob = Array3::<f64>::zeros((keep_idx.len(), n_g, n_g));
+        for (new_k, &old_k) in keep_idx.iter().enumerate() {
+            interactions.push(self.interactions[old_k].clone());
+            pair_names.push(self.pair_names[old_k].clone());
+            for i in 0..n_g {
+                for j in 0..n_g {
+                    prob[[new_k, i, j]] = self.prob[[old_k, i, j]];
+                }
+            }
+        }
+        let mut cache = None;
+        if let Some(ref src) = self.received_ligand_cache {
+            let mut m = HashMap::new();
+            for inter in &interactions {
+                let lig = inter.ligand();
+                if let Some(v) = src.get(lig) {
+                    m.insert(lig.to_string(), Arc::clone(v));
+                }
+            }
+            cache = Some(m);
+        }
+        Self {
+            mode: self.mode,
+            kh: self.kh,
+            hill_coef: self.hill_coef,
+            replace_lr_pairs: self.replace_lr_pairs,
+            min_cells: self.min_cells,
+            received_ligand_norm: self.received_ligand_norm,
+            interactions,
+            cell_group: self.cell_group.clone(),
+            group_names: self.group_names.clone(),
+            prob,
+            pair_names,
+            received_ligand_cache: cache,
+        }
     }
 }
 
@@ -753,15 +889,168 @@ fn received_ligand_field(
     radius: f64,
     scale_factor: f64,
     grid_factor: Option<f64>,
+    norm: ReceivedLigandNorm,
 ) -> Array1<f64> {
     let n = xy.nrows();
     let mut lig = Array2::<f64>::zeros((n, 1));
     lig.column_mut(0).assign(ligand_expr);
-    let recv = match grid_factor.filter(|g| g.is_finite() && *g > 0.0) {
-        Some(gf) => calculate_weighted_ligands_grid(xy, &lig, radius, scale_factor, gf),
-        None => calculate_weighted_ligands(xy, &lig, radius, scale_factor),
+    let reduce = match norm {
+        ReceivedLigandNorm::GlobalN => WeightedLigandReduce::GlobalN,
+        ReceivedLigandNorm::KernelMass => WeightedLigandReduce::KernelMass,
+    };
+    let recv = match (norm, grid_factor.filter(|g| g.is_finite() && *g > 0.0)) {
+        // Kernel-mass: exact pairwise with a soft spatial cutoff (3·radius) for tractability.
+        (ReceivedLigandNorm::KernelMass, _) => {
+            let cutoff = if radius.is_finite() && radius > 0.0 {
+                Some(3.0 * radius)
+            } else {
+                None
+            };
+            calculate_weighted_ligands_with_cutoff_reduce(
+                xy, &lig, radius, scale_factor, cutoff, reduce,
+            )
+        }
+        (ReceivedLigandNorm::GlobalN, Some(gf)) => {
+            calculate_weighted_ligands_grid(xy, &lig, radius, scale_factor, gf)
+        }
+        (ReceivedLigandNorm::GlobalN, None) => {
+            calculate_weighted_ligands(xy, &lig, radius, scale_factor)
+        }
     };
     recv.column(0).to_owned()
+}
+
+/// Precompute unique-ligand received fields into `plan.received_ligand_cache`.
+pub fn precompute_received_ligand_cache(
+    plan: &mut LigandFieldPlan,
+    xy: &Array2<f64>,
+    expr: &Array2<f64>,
+    gene_to_idx: &HashMap<String, usize>,
+    radius: f64,
+    scale_factor: f64,
+    grid_factor: Option<f64>,
+) -> Result<()> {
+    let n = xy.nrows();
+    let mut cache: HashMap<String, Arc<Array1<f64>>> = HashMap::new();
+    let mut ligands: Vec<String> = plan
+        .interactions
+        .iter()
+        .map(|i| i.ligand().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    ligands.sort();
+    ligands.dedup();
+
+    let grid_factor = grid_factor.or_else(|| {
+        if n > 5_000 {
+            Some(0.5)
+        } else {
+            None
+        }
+    });
+
+    for lig_name in ligands {
+        let idx = gene_to_idx
+            .get(&lig_name)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("CellChat gene {lig_name} missing from expr map"))?;
+        let lig_expr = expr.column(idx).to_owned();
+        let field = match plan.mode {
+            LigandFieldMode::Spatial => received_ligand_field(
+                xy,
+                &lig_expr,
+                radius,
+                scale_factor,
+                grid_factor,
+                plan.received_ligand_norm,
+            ),
+            LigandFieldMode::Meanfield => {
+                let l_mf = lig_expr.mean().unwrap_or(0.0);
+                Array1::from_elem(n, l_mf)
+            }
+        };
+        cache.insert(lig_name, Arc::new(field));
+    }
+    plan.received_ligand_cache = Some(cache);
+    Ok(())
+}
+
+/// Write per-ligand meanfield vs spatial field diagnostics.
+///
+/// Spatial field uses a **grid approximation** (or legacy global_n exact) for speed —
+/// diagnostics are not the training path. Training still uses `received_ligand_norm`.
+pub fn write_ligand_field_diagnostics_csv(
+    path: &Path,
+    xy: &Array2<f64>,
+    expr: &Array2<f64>,
+    gene_to_idx: &HashMap<String, usize>,
+    ligand_genes: &[String],
+    radius: f64,
+    scale_factor: f64,
+    grid_factor: Option<f64>,
+    _norm: ReceivedLigandNorm,
+) -> Result<()> {
+    use std::io::Write;
+    let mut f = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    writeln!(
+        f,
+        "ligand,L_bar,L_spatial_mean,L_spatial_std,mae_sp_minus_mf,mae_rel,rel_l2_sp_vs_mf,cv_spatial,frac_cells_sp_gt_mf"
+    )?;
+    let n = xy.nrows();
+    // Prefer grid for diagnostics regardless of training norm (exact kernel_mass is O(N²·L)).
+    let grid_factor = Some(grid_factor.filter(|g| g.is_finite() && *g > 0.0).unwrap_or(0.5));
+    for lig in ligand_genes {
+        let Some(&idx) = gene_to_idx.get(lig) else {
+            continue;
+        };
+        let lig_expr = expr.column(idx).to_owned();
+        let l_bar = lig_expr.mean().unwrap_or(0.0);
+        let sp = received_ligand_field(
+            xy,
+            &lig_expr,
+            radius,
+            scale_factor,
+            grid_factor,
+            ReceivedLigandNorm::GlobalN,
+        );
+        let sp_mean = sp.mean().unwrap_or(0.0);
+        let sp_std = {
+            let var = sp.iter().map(|x| (x - sp_mean).powi(2)).sum::<f64>() / n.max(1) as f64;
+            var.sqrt()
+        };
+        let mae = sp
+            .iter()
+            .map(|&x| (x - l_bar).abs())
+            .sum::<f64>()
+            / n.max(1) as f64;
+        let mae_rel = if l_bar.abs() > 1e-12 {
+            mae / l_bar.abs()
+        } else {
+            f64::NAN
+        };
+        let l2_sp = sp.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let l2_diff = sp
+            .iter()
+            .map(|&x| (x - l_bar).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let rel_l2 = if l2_sp > 1e-12 {
+            l2_diff / l2_sp
+        } else {
+            f64::NAN
+        };
+        let cv = if sp_mean.abs() > 1e-12 {
+            sp_std / sp_mean.abs()
+        } else {
+            f64::NAN
+        };
+        let frac_gt = sp.iter().filter(|&&x| x > l_bar).count() as f64 / n.max(1) as f64;
+        writeln!(
+            f,
+            "{lig},{l_bar},{sp_mean},{sp_std},{mae},{mae_rel},{rel_l2},{cv},{frac_gt}"
+        )?;
+    }
+    Ok(())
 }
 
 /// Build per-cell LR design columns for the plan's selected interactions.
@@ -771,7 +1060,8 @@ fn received_ligand_field(
 ///
 /// When `grid_factor` is `Some(g)` with `g > 0`, received-ligand fields use the grid
 /// approximation (same as SpaceTravLR training for large N). Unique ligand genes are
-/// cached so shared ligands across interactions are not recomputed.
+/// cached so shared ligands across interactions are not recomputed. Prefer filling
+/// [`LigandFieldPlan::received_ligand_cache`] once via [`precompute_received_ligand_cache`].
 pub fn build_hybrid_lr_matrix(
     plan: &LigandFieldPlan,
     xy: &Array2<f64>,
@@ -807,7 +1097,6 @@ pub fn build_hybrid_lr_matrix_with_grid(
         return Ok(out);
     }
 
-    // Auto grid for dense slides (matches spatial_estimator LARGE_DATASET threshold spirit).
     let grid_factor = grid_factor.or_else(|| {
         if n > 5_000 {
             Some(0.5)
@@ -832,8 +1121,12 @@ pub fn build_hybrid_lr_matrix_with_grid(
         Ok(col)
     };
 
-    // Cache received fields by ligand gene (post-expansion: one subunit).
     let mut field_cache: HashMap<String, Array1<f64>> = HashMap::new();
+    if let Some(ref shared) = plan.received_ligand_cache {
+        for (k, v) in shared {
+            field_cache.insert(k.clone(), v.as_ref().clone());
+        }
+    }
 
     for (k, inter) in plan.interactions.iter().enumerate() {
         let lig_name = inter.ligand().to_string();
@@ -849,31 +1142,32 @@ pub fn build_hybrid_lr_matrix_with_grid(
                 )
             })?;
 
-        match plan.mode {
-            LigandFieldMode::Spatial => {
-                let recv = if let Some(cached) = field_cache.get(&lig_name) {
-                    cached.clone()
-                } else {
-                    let computed =
-                        received_ligand_field(xy, &lig_expr, radius, scale_factor, grid_factor);
-                    field_cache.insert(lig_name.clone(), computed.clone());
-                    computed
-                };
-                for i in 0..n {
-                    out[[i, k]] = recv[i] * rec[i];
+        let recv = if let Some(cached) = field_cache.get(&lig_name) {
+            cached.clone()
+        } else {
+            let computed = match plan.mode {
+                LigandFieldMode::Spatial => received_ligand_field(
+                    xy,
+                    &lig_expr,
+                    radius,
+                    scale_factor,
+                    grid_factor,
+                    plan.received_ligand_norm,
+                ),
+                LigandFieldMode::Meanfield => {
+                    let l_mf = if !lig_expr.is_empty() {
+                        lig_expr.mean().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    Array1::from_elem(n, l_mf)
                 }
-            }
-            LigandFieldMode::Meanfield => {
-                // Flat-kernel received ligand: global mean of L (no spatial weights).
-                let l_mf = if !lig_expr.is_empty() {
-                    lig_expr.mean().unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                for i in 0..n {
-                    out[[i, k]] = l_mf * rec[i];
-                }
-            }
+            };
+            field_cache.insert(lig_name.clone(), computed.clone());
+            computed
+        };
+        for i in 0..n {
+            out[[i, k]] = recv[i] * rec[i];
         }
     }
     Ok(out)
@@ -1026,11 +1320,13 @@ mod tests {
             hill_coef: 1.0,
             replace_lr_pairs: true,
             min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
             interactions: vec![inter],
             cell_group: vec![0, 0, 1, 1],
             group_names: vec!["A".into(), "B".into()],
             prob: Array3::<f64>::zeros((1, 2, 2)),
             pair_names: vec!["L$R".into()],
+            received_ligand_cache: None,
         };
         let x = build_hybrid_lr_matrix(&plan, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
         assert!(x[[2, 0]] > 0.0);
@@ -1059,11 +1355,13 @@ mod tests {
             hill_coef: 1.0,
             replace_lr_pairs: true,
             min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
             interactions: vec![inter.clone()],
             cell_group: vec![0, 0, 1, 1],
             group_names: vec!["A".into(), "B".into()],
             prob: Array3::<f64>::zeros((1, 2, 2)),
             pair_names: vec!["L$R".into()],
+            received_ligand_cache: None,
         };
         let x_mf =
             build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();

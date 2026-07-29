@@ -335,6 +335,10 @@ pub struct LassoConfig {
     pub scale_modulators: bool,
     #[serde(default = "default_true")]
     pub unscale_betas_on_export: bool,
+    /// Also write `{gene}_betadata_scaled.feather` (coefficients in standardized feature space).
+    /// Useful for comparing spatial vs meanfield when unscaled |β| differ by feature scale.
+    #[serde(default = "default_true")]
+    pub export_scaled_betas: bool,
     /// When **true**, fit in-sample group Lasso **per cluster in parallel** (Rayon, up to a small fixed pool).
     /// Default **false** (sequential per cluster; does not affect gene-level `--parallel` workers).
     #[serde(default = "default_false")]
@@ -779,6 +783,7 @@ impl Default for LassoConfig {
             tol: 1e-4,
             scale_modulators: true,
             unscale_betas_on_export: true,
+            export_scaled_betas: true,
             parallel_lasso_clusters: false,
             gram_override: None,
         }

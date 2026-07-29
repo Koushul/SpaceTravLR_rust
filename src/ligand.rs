@@ -3,6 +3,16 @@ use polars::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+/// How Gaussian received-ligand weights are reduced to a per-cell scalar field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WeightedLigandReduce {
+    /// `(1/N) Σ_j w_{ij} L_j` (legacy SpaceTravLR / Python default).
+    #[default]
+    GlobalN,
+    /// `Σ_j w_{ij} L_j / Σ_j w_{ij}` (degree / kernel-mass normalized; comparable to a global mean).
+    KernelMass,
+}
+
 /// Compute the amount of ligand received by each cell.
 ///
 /// Corresponds to `compute_radius_weights_fast` / `_weighted_mean` in Python: per cell,
@@ -26,6 +36,25 @@ pub fn calculate_weighted_ligands_with_cutoff(
     scale_factor: f64,
     max_neighbor_distance: Option<f64>,
 ) -> Array2<f64> {
+    calculate_weighted_ligands_with_cutoff_reduce(
+        xy,
+        lig_values,
+        radius,
+        scale_factor,
+        max_neighbor_distance,
+        WeightedLigandReduce::GlobalN,
+    )
+}
+
+/// Like [`calculate_weighted_ligands_with_cutoff`] with an explicit weight-reduction mode.
+pub fn calculate_weighted_ligands_with_cutoff_reduce(
+    xy: &Array2<f64>,
+    lig_values: &Array2<f64>,
+    radius: f64,
+    scale_factor: f64,
+    max_neighbor_distance: Option<f64>,
+    reduce: WeightedLigandReduce,
+) -> Array2<f64> {
     let n_cells = xy.nrows();
     let n_ligands = lig_values.ncols();
     let inv_2r2 = -1.0 / (2.0 * radius * radius);
@@ -46,6 +75,7 @@ pub fn calculate_weighted_ligands_with_cutoff(
         .for_each(|(i, mut row)| {
             let xi = xy[[i, 0]];
             let yi = xy[[i, 1]];
+            let mut w_sum = 0.0_f64;
 
             for j in 0..n_cells {
                 let dx = xi - xy[[j, 0]];
@@ -55,14 +85,25 @@ pub fn calculate_weighted_ligands_with_cutoff(
                     continue;
                 }
                 let w = scale_factor * (d2 * inv_2r2).exp();
+                w_sum += w;
 
                 for k in 0..n_ligands {
                     row[k] += w * lig_values[[j, k]];
                 }
             }
 
-            for k in 0..n_ligands {
-                row[k] *= n_inv;
+            match reduce {
+                WeightedLigandReduce::GlobalN => {
+                    for k in 0..n_ligands {
+                        row[k] *= n_inv;
+                    }
+                }
+                WeightedLigandReduce::KernelMass => {
+                    let inv = if w_sum > 1e-15 { 1.0 / w_sum } else { 0.0 };
+                    for k in 0..n_ligands {
+                        row[k] *= inv;
+                    }
+                }
             }
         });
 

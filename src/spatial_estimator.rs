@@ -340,6 +340,10 @@ pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<St
 }
 
 /// Build a [`crate::ligand_field::LigandFieldPlan`] from an open AnnData + cluster labels.
+/// Build a [`crate::ligand_field::LigandFieldPlan`] from an open AnnData + cluster labels.
+///
+/// When `spatial_radius` is `Some`, unique-ligand received fields are precomputed once and
+/// shared across per-gene workers (major speedup for `mode = spatial`).
 pub fn prepare_ligand_field_plan<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
@@ -351,6 +355,7 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     cfg: &crate::ligand_field::LigandFieldConfig,
     config_file_parent: Option<&Path>,
     output_dir: Option<&Path>,
+    spatial_radius: Option<f64>,
 ) -> anyhow::Result<Arc<crate::ligand_field::LigandFieldPlan>> {
     if matches!(
         cfg.mode,
@@ -437,10 +442,25 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
         &interactions,
         cfg,
     )?;
-    let selected = crate::ligand_field::select_interactions(&result, cfg);
+    let expr_scores = match cfg.pair_selection {
+        crate::ligand_field::PairSelectionMode::Expressed => Some(
+            crate::ligand_field::interaction_mean_expr_product_scores(
+                &expr,
+                &gene_names,
+                &result.interactions,
+            ),
+        ),
+        crate::ligand_field::PairSelectionMode::Prob => None,
+    };
+    let selected = crate::ligand_field::select_interactions_with_expr_scores(
+        &result,
+        cfg,
+        expr_scores.as_deref(),
+    );
     if selected.is_empty() {
         anyhow::bail!(
-            "Ligand field: no interactions passed filters (min_prob={}, p_threshold={}, max_interactions={:?})",
+            "Ligand field: no interactions passed filters (pair_selection={:?}, min_prob={}, p_threshold={}, max_interactions={:?})",
+            cfg.pair_selection,
             cfg.min_prob,
             cfg.p_threshold,
             cfg.max_interactions
@@ -453,8 +473,62 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
         crate::ligand_field::write_prob_csv(&csv_path, &result, Some(&selected))?;
     }
 
-    let plan = crate::ligand_field::LigandFieldPlan::from_selected(result, &selected, cfg)
+    let mut plan = crate::ligand_field::LigandFieldPlan::from_selected(result, &selected, cfg)
         .with_cell_groups(group_ids);
+
+    let mut gene_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, g) in gene_names.iter().enumerate() {
+        gene_to_idx.insert(g.clone(), i);
+    }
+
+    if let Some(radius) = spatial_radius.filter(|r| r.is_finite() && *r > 0.0) {
+        let xy = match obs_row_subset {
+            Some(rows) => {
+                let full = load_spatial_coords_f64(adata)?;
+                let mut sub = Array2::<f64>::zeros((rows.len(), 2));
+                for (i, &r) in rows.iter().enumerate() {
+                    sub[[i, 0]] = full[[r, 0]];
+                    sub[[i, 1]] = full[[r, 1]];
+                }
+                sub
+            }
+            None => load_spatial_coords_f64(adata)?,
+        };
+        crate::ligand_field::precompute_received_ligand_cache(
+            &mut plan,
+            &xy,
+            &expr,
+            &gene_to_idx,
+            radius,
+            cfg.weighted_ligand_scale_factor,
+            cfg.ligand_grid_factor,
+        )?;
+        if cfg.write_ligand_diagnostics {
+            if let Some(dir) = output_dir {
+                let mut ligands: Vec<String> = plan
+                    .interactions
+                    .iter()
+                    .map(|i| i.ligand().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                ligands.sort();
+                ligands.dedup();
+                let diag = dir.join("ligand_field_L_diagnostics.csv");
+                let _ = crate::ligand_field::write_ligand_field_diagnostics_csv(
+                    &diag,
+                    &xy,
+                    &expr,
+                    &gene_to_idx,
+                    &ligands,
+                    radius,
+                    cfg.weighted_ligand_scale_factor,
+                    cfg.ligand_grid_factor,
+                    cfg.received_ligand_norm,
+                );
+            }
+        }
+    }
+
     Ok(Arc::new(plan))
 }
 
@@ -2644,33 +2718,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             };
 
             if keep_idx.len() != plan.interactions.len() {
-                let n_g = plan.group_names.len();
-                let mut interactions = Vec::with_capacity(keep_idx.len());
-                let mut pair_names = Vec::with_capacity(keep_idx.len());
-                let mut prob =
-                    ndarray::Array3::<f64>::zeros((keep_idx.len(), n_g, n_g));
-                for (new_k, &old_k) in keep_idx.iter().enumerate() {
-                    interactions.push(plan.interactions[old_k].clone());
-                    pair_names.push(plan.pair_names[old_k].clone());
-                    for i in 0..n_g {
-                        for j in 0..n_g {
-                            prob[[new_k, i, j]] = plan.prob[[old_k, i, j]];
-                        }
-                    }
-                }
-                let filtered = crate::ligand_field::LigandFieldPlan {
-                    mode: plan.mode,
-                    kh: plan.kh,
-                    hill_coef: plan.hill_coef,
-                    replace_lr_pairs: plan.replace_lr_pairs,
-                    min_cells: plan.min_cells,
-                    interactions,
-                    cell_group: plan.cell_group.clone(),
-                    group_names: plan.group_names.clone(),
-                    prob,
-                    pair_names,
-                };
-                self.ligand_field_plan = Some(Arc::new(filtered));
+                self.ligand_field_plan = Some(Arc::new(plan.filtered_to_indices(&keep_idx)));
             } else {
                 self.ligand_field_plan = Some(plan);
             }
@@ -3152,15 +3200,22 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         &spaceship_config.ligand_field,
                         cfg_parent,
                         Some(Path::new(training_dir)),
+                        Some(spaceship_config.spatial.radius),
                     )?;
                     pipeline_step_end(&hud, "Ligand-field pair selection probabilities", t_cc);
                     log_line(
                         &hud,
                         format!(
-                            "Ligand field: {} interactions (mode={:?}, replace_lr={})",
+                            "Ligand field: {} interactions (mode={:?}, pair_selection={:?}, norm={:?}, replace_lr={}, cached_L={})",
                             plan.interactions.len(),
                             plan.mode,
-                            plan.replace_lr_pairs
+                            spaceship_config.ligand_field.pair_selection,
+                            plan.received_ligand_norm,
+                            plan.replace_lr_pairs,
+                            plan.received_ligand_cache
+                                .as_ref()
+                                .map(|m| m.len())
+                                .unwrap_or(0)
                         ),
                     );
                     Some(plan)
@@ -3197,6 +3252,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let stale_lock_secs = spaceship_config.execution.stale_lock_secs;
             let scale_modulators_w = spaceship_config.lasso.scale_modulators;
             let unscale_betas_on_export_w = spaceship_config.lasso.unscale_betas_on_export;
+            let export_scaled_betas_w = spaceship_config.lasso.export_scaled_betas;
             let parallel_lasso_clusters_w = spaceship_config.lasso.parallel_lasso_clusters;
             let gram_override_w = spaceship_config.lasso.gram_override;
             let random_seed_w = spaceship_config.execution.random_seed;
@@ -3801,7 +3857,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             cluster_betadata_row_keys.keys().copied().collect();
                                         cluster_ids.sort();
 
-                                        let rows: Vec<Vec<f64>> = cluster_ids
+                                        let rows_scaled: Vec<Vec<f64>> = cluster_ids
                                             .iter()
                                             .map(|&c_id| {
                                                 let zero_row = || vec![0.0; 1 + n_mods];
@@ -3823,24 +3879,37 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 let mut row = Vec::with_capacity(1 + n_mods);
                                                 row.push(intercept);
                                                 for j in 0..coefs.nrows() {
-                                                    let mut b =
-                                                        finite_or_zero_f64(coefs[[j, 0]]);
-                                                    if unscale_betas_on_export_w {
-                                                        if let Some(ref s) =
-                                                            estimator.modulator_scales
-                                                        {
+                                                    row.push(finite_or_zero_f64(coefs[[j, 0]]));
+                                                }
+                                                while row.len() < 1 + n_mods {
+                                                    row.push(0.0);
+                                                }
+                                                row
+                                            })
+                                            .collect();
+
+                                        let rows: Vec<Vec<f64>> = rows_scaled
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(ri, scaled)| {
+                                                let c_id = cluster_ids[ri];
+                                                if bad_betadata_clusters.contains(&c_id) {
+                                                    return scaled.clone();
+                                                }
+                                                let mut row = scaled.clone();
+                                                if unscale_betas_on_export_w {
+                                                    if let Some(ref s) =
+                                                        estimator.modulator_scales
+                                                    {
+                                                        for j in 0..n_mods {
                                                             if j < s.len() {
                                                                 let sj = s[j];
                                                                 if sj != 1.0 {
-                                                                    b /= sj;
+                                                                    row[1 + j] /= sj;
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                    row.push(b);
-                                                }
-                                                while row.len() < 1 + n_mods {
-                                                    row.push(0.0);
                                                 }
                                                 row
                                             })
@@ -3907,6 +3976,32 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             .is_ok()
                                             {
                                                 wrote = true;
+                                                if export_scaled_betas_w
+                                                    && scale_modulators_w
+                                                    && unscale_betas_on_export_w
+                                                {
+                                                    let mut mat_s =
+                                                        Array2::<f64>::zeros((n_rows, n_keep));
+                                                    for (i, row_vals) in
+                                                        rows_scaled.iter().enumerate()
+                                                    {
+                                                        for (new_j, &j) in keep.iter().enumerate()
+                                                        {
+                                                            mat_s[[i, new_j]] = row_vals[j];
+                                                        }
+                                                    }
+                                                    let scaled_path = format!(
+                                                        "{}/{}_betadata_scaled.feather",
+                                                        training_dir, gene
+                                                    );
+                                                    let _ = write_betadata_feather(
+                                                        &scaled_path,
+                                                        "Cluster",
+                                                        &ids,
+                                                        &data_cols,
+                                                        &mat_s,
+                                                    );
+                                                }
                                             }
                                         }
                                     }

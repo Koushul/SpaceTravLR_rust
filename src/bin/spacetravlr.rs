@@ -1689,6 +1689,7 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
         &cfg.ligand_field,
         cfg_parent,
         Some(&out_dir),
+        Some(cfg.spatial.radius),
     )?;
 
     let default_csv = out_dir.join("ligand_field_commun_prob.csv");

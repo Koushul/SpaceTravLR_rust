@@ -12,57 +12,46 @@ SpaceTravLR fits **per cluster**. A feature that is constant within a cluster (g
 
 1. **Interaction DB** — load `cellchat_{mouse|human}.csv` **as intact complexes**.
 2. **Expression prep** — scale `expr / max(expr)`, group **trimean**, geometric-mean complexes.
-3. **Probability** — \(P_{i\to j}^k = (L_i R_j)^n / (K_h^n + (L_i R_j)^n)\); filter / cap interactions.
-4. **Expand for Lasso** — selected complexes → independent `Lig$Rec` units (children inherit parent \(P\)).
-5. **LR terms** (`[ligand_field].mode`):
+3. **Pair selection** — `pair_selection = "prob"` uses \(P\); `"expressed"` keeps all present LR pairs ranked by mean \(L\times R\).
+4. **Expand for Lasso** — selected complexes → independent `Lig$Rec` units.
+5. **Received ligand** (`mode` + `received_ligand_norm`):
 
-| Mode | Received ligand | Per-cell feature | Requires spatial coords |
-|------|-----------------|------------------|-------------------------|
-| `spatial` (default) | Gaussian neighborhood \(\widetilde{L}_c\) | \(X=\widetilde{L}_c\,R_c\) | Yes (`obsm['spatial']`, or `X_spatial` / `spatial_loc`) |
-| `meanfield` | Global mean \(\bar{L}\) | \(X=\bar{L}\,R_c\) | No (for the ligand field itself) |
+| Mode | Norm | Received ligand | Feature |
+|------|------|-----------------|---------|
+| `spatial` | `global_n` (default) | `(1/N)Σ w_{ij} L_j` | \(X=\widetilde L_c R_c\) |
+| `spatial` | `kernel_mass` | \(Σ w L / Σ w\) | same; fair vs meanfield |
+| `meanfield` | either | global \(\bar L\) | \(X=\bar L R_c\) |
 
-Spatial aggregation uses `[ligand_field].weighted_ligand_scale_factor` and optional `ligand_grid_factor`.
-
-## Not implemented (vs full CellChat)
-
-- Agonist / antagonist / co-receptor cofactor tables
-- Imaging-mode region-distance `P.spatial`
+Unique-ligand fields are **precomputed once** per run and shared across gene workers. Diagnostics CSV: `ligand_field_L_diagnostics.csv`.
 
 ## Config
 
 ```toml
 [ligand_field]
-mode = "spatial"                 # or "meanfield" (alias: lr_mode)
+mode = "spatial"                 # or "meanfield"
+pair_selection = "prob"          # or "expressed"
+received_ligand_norm = "global_n" # or "kernel_mass"
 weighted_ligand_scale_factor = 1.0
-# ligand_grid_factor = 0.2        # approximate field (omit = exact)
-kh = 0.5
-hill_coef = 1.0
-min_cells = 10
-n_perm = 0
-replace_lr_pairs = true
 max_interactions = 200
-# signaling_types = ["Secreted Signaling"]
+write_ligand_diagnostics = true
+signaling_types = ["Secreted Signaling"]
 ```
 
-`max_interactions` caps **complex-level** rows before expansion.
-
-Legacy `[cellchat]` / `enabled` keys are ignored or migrated; prefer `[ligand_field].mode`.
-
-## CLI preview
-
-```bash
-spacetravlr ligand-field --h5ad path/to/data.h5ad --species human --out probs.csv
-```
-
-(`cellchat` remains a CLI alias.) With `mode = "spatial"`, the `.h5ad` must contain usable 2D spatial coordinates.
-
-## Fair A/B
+## Fair A/B (recommended)
 
 ```toml
+pair_selection = "expressed"
+received_ligand_norm = "kernel_mass"
 # arm A
 mode = "meanfield"
 # arm B
 mode = "spatial"
 ```
 
-Hold all other `[ligand_field]` / training settings fixed.
+Hold all other settings fixed. Compare **scaled** betas (`*_betadata_scaled.feather`) when `unscale_betas_on_export = true`.
+
+## Fast meanfield screen
+
+Use `mode = "meanfield"` for a quick screen, then re-run `mode = "spatial"` on selected genes / pairs.
+
+Legacy `[cellchat]` / `enabled` keys are ignored or migrated; prefer `[ligand_field].mode`.

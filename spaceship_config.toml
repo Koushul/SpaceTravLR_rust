@@ -66,9 +66,14 @@ use_tfl_modulators = true
 # Received-ligand aggregation + communication-prob pair selection (when LR modulators are on).
 # mode: spatial (default, Gaussian; needs obsm spatial coords) | meanfield
 mode = "spatial"
+# pair_selection: prob (CellChat P) | expressed (all present LR pairs, ranked by mean L×R)
+pair_selection = "prob"
+# received_ligand_norm: global_n (legacy) | kernel_mass (fair meanfield↔spatial A/B)
+received_ligand_norm = "global_n"
 # Linear scale on Gaussian weights in received-ligand aggregation
 weighted_ligand_scale_factor = 1.0
 # Approximate received ligands via a spatial grid (spacing / radius). Omit for exact.
+# Ignored when received_ligand_norm = "kernel_mass" (exact pairwise).
 # ligand_grid_factor = 0.2
 # db_path = "data/cellchat_mouse.csv"
 kh = 0.5
@@ -81,6 +86,7 @@ p_threshold = 0.05
 min_prob = 0.0
 replace_lr_pairs = true
 max_interactions = 200
+write_ligand_diagnostics = true
 # signaling_types = ["Secreted Signaling"]
 random_seed = 42
 
@@ -144,6 +150,8 @@ scale_modulators = true
 # When scale_modulators is true, divide exported betas by column std (original expression units).
 # Set false to export scaled-space betas (CellOracle-style). Default true.
 unscale_betas_on_export = false
+# Also write {gene}_betadata_scaled.feather when unscale_betas_on_export is true.
+export_scaled_betas = true
 # Parallel in-sample group Lasso across clusters per gene (Rayon; independent of [execution].n_parallel).
 # Default false (sequential). Set true for faster Lasso when many clusters per gene.
 parallel_lasso_clusters = false
