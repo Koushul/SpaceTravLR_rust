@@ -33,13 +33,10 @@ pub enum LigandFieldMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LigandFieldConfig {
-    /// When true, select LR pairs via communication probabilities (interaction DB + Hill).
-    /// When false, LR pairs come from the GRN as usual; `mode` still controls received-L aggregation
-    /// only for the hybrid matrix path when a plan is attached.
-    pub enabled: bool,
     /// Optional path to `cellchat_{species}.csv` (`ligand,receptor,pathway,signaling`).
     pub db_path: Option<String>,
-    /// Received-ligand aggregator: `spatial` | `meanfield`.
+    /// Received-ligand aggregator: `spatial` (default, Gaussian) | `meanfield`.
+    /// `spatial` requires 2D coordinates in `obsm` (`spatial` / `X_spatial` / `spatial_loc`).
     #[serde(alias = "lr_mode")]
     pub mode: LigandFieldMode,
     /// Multiplier on Gaussian kernel weights in spatial received-ligand aggregation.
@@ -80,7 +77,6 @@ fn default_one_f64() -> f64 {
 impl Default for LigandFieldConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             db_path: None,
             mode: LigandFieldMode::Spatial,
             weighted_ligand_scale_factor: 1.0,
@@ -651,7 +647,7 @@ pub fn select_interactions(
     keep.into_iter().map(|(k, _)| k).collect()
 }
 
-/// Shared plan consumed by per-gene Lasso workers when `[ligand_field].enabled`.
+/// Shared plan consumed by per-gene Lasso workers for ligand-field LR terms.
 #[derive(Debug, Clone)]
 pub struct LigandFieldPlan {
     pub mode: LigandFieldMode,
@@ -990,7 +986,6 @@ mod tests {
         let group_names = vec!["A".into(), "B".into()];
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
         let cfg = LigandFieldConfig {
-            enabled: true,
             min_cells: 2,
             n_perm: 0,
             ..Default::default()
@@ -1104,7 +1099,6 @@ mod tests {
             group_counts: vec![3, 3],
         };
         let cfg = LigandFieldConfig {
-            enabled: true,
             mode: LigandFieldMode::Spatial,
             ..Default::default()
         };
@@ -1127,7 +1121,6 @@ mod tests {
         let group_names = vec!["A".into()];
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
         let cfg = LigandFieldConfig {
-            enabled: true,
             min_cells: 1,
             n_perm: 0,
             ..Default::default()

@@ -184,7 +184,7 @@ struct LigandFieldCli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "spaceship_config.toml overlay (must enable [ligand_field] or pass --enable)"
+        help = "spaceship_config.toml overlay for [ligand_field] / data keys"
     )]
     config: Option<PathBuf>,
     #[arg(long, help = "obs column for groups (default: data.cluster_annot / cell_type)")]
@@ -199,8 +199,6 @@ struct LigandFieldCli {
         help = "output CSV (default: ./ligand_field_commun_prob.csv)"
     )]
     out: Option<PathBuf>,
-    #[arg(long, help = "force-enable ligand field even if [ligand_field].enabled = false")]
-    enable: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -1614,20 +1612,12 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
         clusters_array1_from_obs_column, prepare_ligand_field_plan,
     };
 
-    let mut cfg = SpaceshipConfig::try_load_merged(
+    let cfg = SpaceshipConfig::try_load_merged(
         lf.config
             .as_ref()
             .or(cli.config.as_ref())
             .map(|p| p.as_path()),
     )?;
-    if lf.enable {
-        cfg.ligand_field.enabled = true;
-    }
-    if !cfg.ligand_field.enabled {
-        anyhow::bail!(
-            "Ligand field is disabled. Pass --enable or set [ligand_field].enabled = true in the config."
-        );
-    }
 
     let adata_path = lf.h5ad.clone();
     let layer = lf

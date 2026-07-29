@@ -1123,7 +1123,7 @@ lr_mode = "meanfield"
         let t = root.as_table().unwrap();
         assert!(t.get("cellchat").is_none());
         let lf = t.get("ligand_field").unwrap().as_table().unwrap();
-        assert_eq!(lf.get("enabled").unwrap().as_bool(), Some(true));
+        assert!(lf.get("enabled").is_none());
         assert_eq!(lf.get("mode").unwrap().as_str(), Some("meanfield"));
         assert!(lf.get("lr_mode").is_none());
         assert_eq!(
@@ -1154,7 +1154,7 @@ enabled = true
             .as_table()
             .unwrap();
         assert_eq!(lf.get("mode").unwrap().as_str(), Some("spatial"));
-        assert_eq!(lf.get("enabled").unwrap().as_bool(), Some(true));
+        assert!(lf.get("enabled").is_none());
     }
 }
 
@@ -1207,6 +1207,8 @@ pub fn migrate_ligand_field_toml(root: &mut toml::Value) {
         } else {
             lf_t.remove("lr_mode");
         }
+        // `enabled` was removed; mode/params always apply when LR modulators are on.
+        lf_t.remove("enabled");
     }
 }
 

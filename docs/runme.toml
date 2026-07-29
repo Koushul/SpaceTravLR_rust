@@ -41,7 +41,6 @@ spatial_dim      = 64
 contact_distance = 30
 
 [ligand_field]
-enabled = false
 mode = "spatial"
 weighted_ligand_scale_factor = 1.0
 # ligand_grid_factor = 0.2

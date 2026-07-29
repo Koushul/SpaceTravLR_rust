@@ -352,6 +352,15 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     config_file_parent: Option<&Path>,
     output_dir: Option<&Path>,
 ) -> anyhow::Result<Arc<crate::ligand_field::LigandFieldPlan>> {
+    if matches!(
+        cfg.mode,
+        crate::ligand_field::LigandFieldMode::Spatial
+    ) {
+        load_spatial_coords_f64(adata).context(
+            "ligand_field.mode = \"spatial\" (Gaussian received ligand) requires 2D cell coordinates in obsm['spatial'] (also tried X_spatial, spatial_loc)",
+        )?;
+    }
+
     let db_path = crate::ligand_field::resolve_cellchat_db_path(
         species,
         cfg.db_path.as_deref(),
@@ -3121,7 +3130,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let extra_lr_arc = Arc::new(resolved_ex_lr);
 
             let ligand_field_plan_arc: Option<Arc<crate::ligand_field::LigandFieldPlan>> =
-                if spaceship_config.ligand_field.enabled {
+                if spaceship_config.grn.use_lr_modulators {
                     let t_cc = pipeline_step_begin(&hud, "Ligand-field pair selection probabilities");
                     let group_names: Vec<String> = (0..num_clusters)
                         .map(|c| {

@@ -63,9 +63,8 @@ use_tfl_modulators = true
 # extra_lr_file = "path/to/extra_lr.txt"
 
 [ligand_field]
-# Received-ligand aggregation + optional communication-prob pair selection (off by default).
-enabled = false
-# mode: spatial | meanfield (alias: lr_mode)
+# Received-ligand aggregation + communication-prob pair selection (when LR modulators are on).
+# mode: spatial (default, Gaussian; needs obsm spatial coords) | meanfield
 mode = "spatial"
 # Linear scale on Gaussian weights in received-ligand aggregation
 weighted_ligand_scale_factor = 1.0

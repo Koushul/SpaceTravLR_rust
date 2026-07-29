@@ -60,15 +60,14 @@ Each target gene is predicted from modulator groups: **TFs**, **ligand–recepto
 
 ---
 
-## `[ligand_field]` — received ligand + optional communication-prob pair selection
+## `[ligand_field]` — received ligand + communication-prob pair selection
 
-Controls how **received ligands** are aggregated for LR (and TFL) columns, and optionally selects LR pairs via CellChat-style communication probabilities. See [Ligand field](ligand_field.md). Legacy `[cellchat]` is still accepted.
+Used whenever LR modulators are on (`use_lr_modulators` / `train_modulators` includes `lr`). Pick **`mode`** and params; there is no `enabled` flag. Default is Gaussian spatial. See [Ligand field](ligand_field.md).
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
-| `enabled` | `false` | When true, select LR pairs via communication probabilities (interaction DB + Hill). | `true` to replace/weight LR with DB-selected pairs. | Leave off for stock GRN LR pairs (mode/scale still apply when a plan is attached). |
 | `db_path` |  | Path to `cellchat_{species}.csv`. | Custom curated DB. | Auto-resolve from `data/` / `SPACETRAVLR_DATA_DIR`. |
-| `mode` | `spatial` | Received-ligand aggregator (`lr_mode` alias). | `meanfield` = global mean \(L\times R\); `spatial` = Gaussian \(\widetilde{L}R\). | — |
+| `mode` | `spatial` | Received-ligand aggregator (`lr_mode` alias). | `meanfield` = global mean \(L\times R\). | `spatial` = Gaussian \(\widetilde{L}R\) (needs `obsm` spatial coords). |
 | `weighted_ligand_scale_factor` | `1.0` | Linear multiplier on Gaussian weights in received-ligand aggregation. | Stronger effective paracrine input per neighbor. | Weaker paracrine signal (before normalization). |
 | `ligand_grid_factor` |  | Grid spacing as fraction of `[spatial].radius` for approximate received ligands. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |
 | `kh` | `0.5` | Half-saturation in the Hill term. | Harder to saturate. | Easier saturation. |
