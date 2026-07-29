@@ -98,7 +98,7 @@ impl RunConfigSummary {
             spatial_radius: cfg.spatial.radius,
             spatial_dim: cfg.spatial.spatial_dim,
             contact_distance: cfg.spatial.contact_distance,
-            weighted_ligand_scale_factor: cfg.spatial.weighted_ligand_scale_factor,
+            weighted_ligand_scale_factor: cfg.ligand_field.weighted_ligand_scale_factor,
             tf_ligand_cutoff: cfg.grn.tf_ligand_cutoff,
             max_ligands,
             l1_reg: cfg.lasso.l1_reg,

@@ -8,7 +8,8 @@ pub const SPACESHIP_MERGE_SECTIONS: &[&str] = &[
     "preprocess",
     "spatial",
     "grn",
-    "cellchat",
+    "ligand_field",
+    "cellchat", // legacy alias; migrated into ligand_field before deserialize
     "cnn",
     "lasso",
     "training",
@@ -156,9 +157,9 @@ pub struct SpaceshipConfig {
     pub spatial: SpatialConfig,
     #[serde(default)]
     pub grn: GrnConfig,
-    /// Hybrid CellChat communication probabilities → LR design matrix for Lasso.
-    #[serde(default)]
-    pub cellchat: crate::cellchat::CellChatConfig,
+    /// Ligand-field LR terms: meanfield vs spatial received ligand; optional pair selection.
+    #[serde(default, alias = "cellchat")]
+    pub ligand_field: crate::ligand_field::LigandFieldConfig,
     #[serde(default)]
     pub cnn: CnnConfig,
     #[serde(default)]
@@ -272,7 +273,8 @@ pub struct SpatialConfig {
     pub radius: f64,
     pub spatial_dim: usize,
     pub contact_distance: f64,
-    /// Multiplier on Gaussian kernel weights in received-ligand aggregation (`calculate_weighted_ligands`).
+    /// Multiplier on Gaussian kernel weights in received-ligand aggregation.
+    /// Legacy location; prefer `[ligand_field].weighted_ligand_scale_factor` (migrated on load).
     #[serde(default = "default_one_f64")]
     pub weighted_ligand_scale_factor: f64,
 }
@@ -540,9 +542,8 @@ pub struct PerturbationConfig {
     pub beta_cap: Option<f64>,
     pub n_propagation: usize,
     /// Grid spacing as a fraction of the Gaussian radius for approximate
-    /// received-ligand computation.  E.g. 0.5 → spacing = radius/2.
-    /// Smaller = more accurate, larger = faster.  Omit or comment out for
-    /// exact O(N²) computation.
+    /// received-ligand computation. Legacy location; prefer
+    /// `[ligand_field].ligand_grid_factor` (migrated on load).
     pub ligand_grid_factor: Option<f64>,
     /// Default cells CSV path for `spacetravlr-perturb` export / TUI (relative to run TOML directory unless absolute).
     #[serde(default)]
@@ -1102,10 +1103,134 @@ mod canonical_training_prep_stem_tests {
     }
 }
 
+#[cfg(test)]
+mod ligand_field_migrate_tests {
+    use super::migrate_ligand_field_toml;
+
+    #[test]
+    fn renames_cellchat_section_and_lifts_scale() {
+        let mut root: toml::Value = toml::from_str(
+            r#"
+[spatial]
+weighted_ligand_scale_factor = 2.5
+[cellchat]
+enabled = true
+lr_mode = "meanfield"
+"#,
+        )
+        .unwrap();
+        migrate_ligand_field_toml(&mut root);
+        let t = root.as_table().unwrap();
+        assert!(t.get("cellchat").is_none());
+        let lf = t.get("ligand_field").unwrap().as_table().unwrap();
+        assert_eq!(lf.get("enabled").unwrap().as_bool(), Some(true));
+        assert_eq!(lf.get("mode").unwrap().as_str(), Some("meanfield"));
+        assert!(lf.get("lr_mode").is_none());
+        assert_eq!(
+            lf.get("weighted_ligand_scale_factor")
+                .unwrap()
+                .as_float()
+                .unwrap(),
+            2.5
+        );
+    }
+
+    #[test]
+    fn ligand_field_wins_over_cellchat_when_both_present() {
+        let mut root: toml::Value = toml::from_str(
+            r#"
+[ligand_field]
+mode = "spatial"
+[cellchat]
+lr_mode = "meanfield"
+enabled = true
+"#,
+        )
+        .unwrap();
+        migrate_ligand_field_toml(&mut root);
+        let lf = root
+            .get("ligand_field")
+            .unwrap()
+            .as_table()
+            .unwrap();
+        assert_eq!(lf.get("mode").unwrap().as_str(), Some("spatial"));
+        assert_eq!(lf.get("enabled").unwrap().as_bool(), Some(true));
+    }
+}
+
+/// Lift legacy `[cellchat]` / misplaced ligand keys into `[ligand_field]` before deserialize.
+pub fn migrate_ligand_field_toml(root: &mut toml::Value) {
+    let Some(t) = root.as_table_mut() else {
+        return;
+    };
+    if let Some(cc) = t.remove("cellchat") {
+        match t.get_mut("ligand_field") {
+            Some(lf) => {
+                if let (Some(lf_t), Some(cc_t)) = (lf.as_table_mut(), cc.as_table()) {
+                    // Fill keys missing from ligand_field; existing ligand_field values win.
+                    merge_toml_table_underlay_maps(lf_t, cc_t);
+                }
+            }
+            None => {
+                t.insert("ligand_field".to_string(), cc);
+            }
+        }
+    }
+    let mut lift: Vec<(String, toml::Value)> = Vec::new();
+    if let Some(spatial) = t.get("spatial").and_then(|x| x.as_table()) {
+        if let Some(v) = spatial.get("weighted_ligand_scale_factor") {
+            lift.push(("weighted_ligand_scale_factor".into(), v.clone()));
+        }
+    }
+    if let Some(pert) = t.get("perturbation").and_then(|x| x.as_table()) {
+        if let Some(v) = pert.get("ligand_grid_factor") {
+            lift.push(("ligand_grid_factor".into(), v.clone()));
+        }
+    }
+    if !lift.is_empty() {
+        let lf = t
+            .entry("ligand_field")
+            .or_insert(toml::Value::Table(Default::default()));
+        if let Some(lf_t) = lf.as_table_mut() {
+            for (k, v) in lift {
+                // Only fill if ligand_field does not already set the key.
+                lf_t.entry(k).or_insert(v);
+            }
+        }
+    }
+    if let Some(lf_t) = t.get_mut("ligand_field").and_then(|v| v.as_table_mut()) {
+        // Legacy key name from [cellchat].
+        if !lf_t.contains_key("mode") {
+            if let Some(v) = lf_t.remove("lr_mode") {
+                lf_t.insert("mode".to_string(), v);
+            }
+        } else {
+            lf_t.remove("lr_mode");
+        }
+    }
+}
+
 impl SpaceshipConfig {
+    /// Prefer `[ligand_field]` values; copy legacy `[spatial]` / `[perturbation]` ligand knobs once.
+    pub fn consolidate_ligand_field(&mut self) {
+        if (self.ligand_field.weighted_ligand_scale_factor - 1.0).abs() < 1e-15
+            && (self.spatial.weighted_ligand_scale_factor - 1.0).abs() > 1e-15
+        {
+            self.ligand_field.weighted_ligand_scale_factor =
+                self.spatial.weighted_ligand_scale_factor;
+        }
+        if self.ligand_field.ligand_grid_factor.is_none() {
+            self.ligand_field.ligand_grid_factor = self.perturbation.ligand_grid_factor;
+        }
+    }
+
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path.as_ref())?;
-        let mut config: SpaceshipConfig = toml::from_str(&contents)?;
+        let mut root: toml::Value = toml::from_str(&contents)?;
+        migrate_ligand_field_toml(&mut root);
+        let mut config: SpaceshipConfig =
+            <SpaceshipConfig as Deserialize>::deserialize(root).context("deserialize SpaceshipConfig")?;
+        config.consolidate_ligand_field();
         config.grn.apply_train_modulators_shorthand()?;
         Ok(config)
     }
@@ -1124,12 +1249,14 @@ impl SpaceshipConfig {
         if let Some(ov) = overlay_root {
             merge_spaceship_overlay_into_toml(&mut root, ov);
         }
+        migrate_ligand_field_toml(&mut root);
         let mut cfg = <SpaceshipConfig as Deserialize>::deserialize(root).with_context(|| {
             format!(
                 "deserialize merged SpaceshipConfig from {} (after overlay)",
                 path.display()
             )
         })?;
+        cfg.consolidate_ligand_field();
         cfg.grn.apply_train_modulators_shorthand()?;
         Ok(cfg)
     }
@@ -1176,12 +1303,14 @@ impl SpaceshipConfig {
             merge_spaceship_overlay_into_toml(&mut root, &overlay_root);
         }
 
+        migrate_ligand_field_toml(&mut root);
         let mut cfg = <SpaceshipConfig as Deserialize>::deserialize(root).with_context(|| {
             format!(
                 "deserialize SpaceshipConfig from {} (after repro merge)",
                 path.display()
             )
         })?;
+        cfg.consolidate_ligand_field();
         cfg.grn.apply_train_modulators_shorthand()?;
         Ok(cfg)
     }
@@ -1276,8 +1405,12 @@ impl SpaceshipConfig {
         } else if let Some(bp) = base_path {
             eprintln!("Loaded config from {}", bp.display());
         }
-        let mut cfg = <SpaceshipConfig as Deserialize>::deserialize(doc)
-            .context("deserialize SpaceshipConfig after TOML merge")?;
+        let mut cfg = <SpaceshipConfig as Deserialize>::deserialize({
+            migrate_ligand_field_toml(&mut doc);
+            doc
+        })
+        .context("deserialize SpaceshipConfig after TOML merge")?;
+        cfg.consolidate_ligand_field();
         cfg.grn.apply_train_modulators_shorthand()?;
         Ok(cfg)
     }

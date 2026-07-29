@@ -146,7 +146,7 @@ pub mod adata_terminal_scatter;
 pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
-pub mod cellchat;
+pub mod ligand_field;
 pub mod celloracle;
 pub mod condition_split;
 pub mod config;

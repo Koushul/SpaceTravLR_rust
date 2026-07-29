@@ -1,11 +1,9 @@
-//! CellChat-style communication probabilities for hybrid SpaceTravLR LR terms.
+//! Ligand-field LR terms for SpaceTravLR.
 //!
-//! Implements the Jin et al. (Nat Commun 2021) mass-action / Hill communication
-//! probability on cell-type aggregates (trimean expression, geometric-mean
-//! multi-subunit complexes), then builds **per-cell** LR design columns for
-//! Lasso. Group-level \(P_{i\to j}^k\) alone is constant within a cluster and
-//! would be absorbed by the intercept; \(P\) therefore **selects** LR pairs.
-//! Received ligand is either mean-field (global) or spatial (Gaussian field).
+//! Optional CellChat-style communication probabilities (Jin et al., Nat Commun 2021)
+//! select LR pairs from an interaction DB. Received ligand is then aggregated as
+//! either a **mean field** (global mean) or a **spatial field** (Gaussian neighborhood)
+//! and multiplied by local receptor for the Lasso design matrix.
 
 use crate::config::expand_user_path;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -20,15 +18,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-/// How received ligand enters per-cell LR columns (pair set from CellChat).
+/// How received ligand is aggregated for LR columns.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum CellChatLrMode {
-    /// Mean-field / flat-kernel received ligand: \(X_{c,k}=\bar{L}^{(k)}\,R_c^{(k)}\)
-    /// with \(\bar{L}\) the global mean of ligand expression.
+pub enum LigandFieldMode {
+    /// Mean field: \(X_{c,k}=\bar{L}^{(k)}\,R_c^{(k)}\) (global mean ligand).
     Meanfield,
-    /// Spatial-field received ligand: \(X_{c,k}=\widetilde{L}_c^{(k)}\,R_c^{(k)}\)
-    /// with Gaussian neighborhood aggregation (SpaceTravLR default).
+    /// Spatial field: \(X_{c,k}=\widetilde{L}_c^{(k)}\,R_c^{(k)}\) (Gaussian neighborhood).
     #[default]
     #[serde(alias = "spatial_product")]
     Spatial,
@@ -36,12 +32,22 @@ pub enum CellChatLrMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CellChatConfig {
-    /// Master switch. When false, training ignores this section.
+pub struct LigandFieldConfig {
+    /// When true, select LR pairs via communication probabilities (interaction DB + Hill).
+    /// When false, LR pairs come from the GRN as usual; `mode` still controls received-L aggregation
+    /// only for the hybrid matrix path when a plan is attached.
     pub enabled: bool,
     /// Optional path to `cellchat_{species}.csv` (`ligand,receptor,pathway,signaling`).
     pub db_path: Option<String>,
-    pub lr_mode: CellChatLrMode,
+    /// Received-ligand aggregator: `spatial` | `meanfield`.
+    #[serde(alias = "lr_mode")]
+    pub mode: LigandFieldMode,
+    /// Multiplier on Gaussian kernel weights in spatial received-ligand aggregation.
+    #[serde(default = "default_one_f64")]
+    pub weighted_ligand_scale_factor: f64,
+    /// Grid spacing as a fraction of `[spatial].radius` for approximate spatial aggregation.
+    /// Omit for exact pairwise (slower on large N).
+    pub ligand_grid_factor: Option<f64>,
     /// Half-saturation \(K_h\) in the Hill / mass-action term (CellChat default 0.5).
     pub kh: f64,
     /// Hill coefficient \(n\) (CellChat default 1).
@@ -56,7 +62,7 @@ pub struct CellChatConfig {
     pub p_threshold: f64,
     /// Drop interactions whose max \(P\) (any sender→receiver) is below this.
     pub min_prob: f64,
-    /// When true, replace GRN `edge_type=lr` pairs with CellChat-selected interactions.
+    /// When true, replace GRN `edge_type=lr` pairs with probability-selected interactions.
     pub replace_lr_pairs: bool,
     /// Cap retained interactions after filtering (by max \(P\), descending).
     pub max_interactions: Option<usize>,
@@ -67,12 +73,18 @@ pub struct CellChatConfig {
     pub random_seed: u64,
 }
 
-impl Default for CellChatConfig {
+fn default_one_f64() -> f64 {
+    1.0
+}
+
+impl Default for LigandFieldConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             db_path: None,
-            lr_mode: CellChatLrMode::Spatial,
+            mode: LigandFieldMode::Spatial,
+            weighted_ligand_scale_factor: 1.0,
+            ligand_grid_factor: None,
             kh: 0.5,
             hill_coef: 1.0,
             min_cells: 10,
@@ -354,7 +366,7 @@ pub fn resolve_cellchat_db_path(
     }
 
     bail!(
-        "Could not find CellChatDB {filename:?}. Set [cellchat].db_path or {SPACETRAVLR_DATA_DIR_ENV}. Tried:\n  {}",
+        "Could not find CellChatDB {filename:?}. Set [ligand_field].db_path or {SPACETRAVLR_DATA_DIR_ENV}. Tried:\n  {}",
         tried.join("\n  ")
     )
 }
@@ -520,7 +532,7 @@ pub fn compute_commun_prob(
     group_ids: &[usize],
     group_names: &[String],
     interactions: &[CellChatInteraction],
-    cfg: &CellChatConfig,
+    cfg: &LigandFieldConfig,
 ) -> Result<CellChatProbResult> {
     if expr.nrows() != group_ids.len() {
         bail!(
@@ -612,7 +624,7 @@ pub fn compute_commun_prob(
 /// Keep significant / strong interactions; optionally cap by max \(P\).
 pub fn select_interactions(
     result: &CellChatProbResult,
-    cfg: &CellChatConfig,
+    cfg: &LigandFieldConfig,
 ) -> Vec<usize> {
     let mut keep: Vec<(usize, f64)> = Vec::new();
     for k in 0..result.interactions.len() {
@@ -639,10 +651,10 @@ pub fn select_interactions(
     keep.into_iter().map(|(k, _)| k).collect()
 }
 
-/// Shared plan consumed by per-gene Lasso workers when `[cellchat].enabled`.
+/// Shared plan consumed by per-gene Lasso workers when `[ligand_field].enabled`.
 #[derive(Debug, Clone)]
-pub struct CellChatLrPlan {
-    pub mode: CellChatLrMode,
+pub struct LigandFieldPlan {
+    pub mode: LigandFieldMode,
     pub kh: f64,
     pub hill_coef: f64,
     pub replace_lr_pairs: bool,
@@ -658,14 +670,14 @@ pub struct CellChatLrPlan {
     pub pair_names: Vec<String>,
 }
 
-impl CellChatLrPlan {
+impl LigandFieldPlan {
     /// Build a Lasso plan from selected **complex-level** interactions.
     ///
     /// Each selected CellChat interaction is expanded into independent `Lig$Rec`
     /// units for SpaceTravLR columns; the parent \(P_{s\to t}\) slice is copied
     /// to every child (so multi-subunit complexes keep a single communication
     /// probability, while local receptor subunits may still differ in \(X\)).
-    pub fn from_selected(result: CellChatProbResult, selected: &[usize], cfg: &CellChatConfig) -> Self {
+    pub fn from_selected(result: CellChatProbResult, selected: &[usize], cfg: &LigandFieldConfig) -> Self {
         let n_g = result.n_groups();
         let mut interactions = Vec::new();
         let mut pair_names = Vec::new();
@@ -688,7 +700,7 @@ impl CellChatLrPlan {
             }
         }
         Self {
-            mode: cfg.lr_mode,
+            mode: cfg.mode,
             kh: cfg.kh,
             hill_coef: cfg.hill_coef,
             replace_lr_pairs: cfg.replace_lr_pairs,
@@ -765,7 +777,7 @@ fn received_ligand_field(
 /// approximation (same as SpaceTravLR training for large N). Unique ligand genes are
 /// cached so shared ligands across interactions are not recomputed.
 pub fn build_hybrid_lr_matrix(
-    plan: &CellChatLrPlan,
+    plan: &LigandFieldPlan,
     xy: &Array2<f64>,
     expr: &Array2<f64>,
     gene_to_idx: &HashMap<String, usize>,
@@ -777,7 +789,7 @@ pub fn build_hybrid_lr_matrix(
 
 /// Like [`build_hybrid_lr_matrix`], with optional ligand grid factor.
 pub fn build_hybrid_lr_matrix_with_grid(
-    plan: &CellChatLrPlan,
+    plan: &LigandFieldPlan,
     xy: &Array2<f64>,
     expr: &Array2<f64>,
     gene_to_idx: &HashMap<String, usize>,
@@ -842,7 +854,7 @@ pub fn build_hybrid_lr_matrix_with_grid(
             })?;
 
         match plan.mode {
-            CellChatLrMode::Spatial => {
+            LigandFieldMode::Spatial => {
                 let recv = if let Some(cached) = field_cache.get(&lig_name) {
                     cached.clone()
                 } else {
@@ -855,7 +867,7 @@ pub fn build_hybrid_lr_matrix_with_grid(
                     out[[i, k]] = recv[i] * rec[i];
                 }
             }
-            CellChatLrMode::Meanfield => {
+            LigandFieldMode::Meanfield => {
                 // Flat-kernel received ligand: global mean of L (no spatial weights).
                 let l_mf = if !lig_expr.is_empty() {
                     lig_expr.mean().unwrap_or(0.0)
@@ -977,7 +989,7 @@ mod tests {
         let group_ids = vec![0, 0, 0, 1, 1, 1];
         let group_names = vec!["A".into(), "B".into()];
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
-        let cfg = CellChatConfig {
+        let cfg = LigandFieldConfig {
             enabled: true,
             min_cells: 2,
             n_perm: 0,
@@ -1013,8 +1025,8 @@ mod tests {
         gene_to_idx.insert("L".into(), 0);
         gene_to_idx.insert("R".into(), 1);
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
-        let plan = CellChatLrPlan {
-            mode: CellChatLrMode::Spatial,
+        let plan = LigandFieldPlan {
+            mode: LigandFieldMode::Spatial,
             kh: 0.5,
             hill_coef: 1.0,
             replace_lr_pairs: true,
@@ -1046,8 +1058,8 @@ mod tests {
         gene_to_idx.insert("L".into(), 0);
         gene_to_idx.insert("R".into(), 1);
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
-        let plan_mf = CellChatLrPlan {
-            mode: CellChatLrMode::Meanfield,
+        let plan_mf = LigandFieldPlan {
+            mode: LigandFieldMode::Meanfield,
             kh: 0.5,
             hill_coef: 1.0,
             replace_lr_pairs: true,
@@ -1064,8 +1076,8 @@ mod tests {
         assert!((x_mf[[3, 0]] - 1.0).abs() < 1e-9);
         assert_eq!(x_mf[[0, 0]], 0.0);
 
-        let plan_sp = CellChatLrPlan {
-            mode: CellChatLrMode::Spatial,
+        let plan_sp = LigandFieldPlan {
+            mode: LigandFieldMode::Spatial,
             ..plan_mf
         };
         let x_sp =
@@ -1091,12 +1103,12 @@ mod tests {
             pvalues: None,
             group_counts: vec![3, 3],
         };
-        let cfg = CellChatConfig {
+        let cfg = LigandFieldConfig {
             enabled: true,
-            lr_mode: CellChatLrMode::Spatial,
+            mode: LigandFieldMode::Spatial,
             ..Default::default()
         };
-        let plan = CellChatLrPlan::from_selected(result, &[0], &cfg);
+        let plan = LigandFieldPlan::from_selected(result, &[0], &cfg);
         assert_eq!(plan.interactions.len(), 2);
         let names: HashSet<_> = plan.pair_names.iter().map(|s| s.as_str()).collect();
         assert!(names.contains("Tgfb1$Tgfbr1"));
@@ -1114,7 +1126,7 @@ mod tests {
         let group_ids = vec![0, 0, 0];
         let group_names = vec!["A".into()];
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
-        let cfg = CellChatConfig {
+        let cfg = LigandFieldConfig {
             enabled: true,
             min_cells: 1,
             n_perm: 0,

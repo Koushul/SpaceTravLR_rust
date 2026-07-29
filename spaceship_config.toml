@@ -42,8 +42,6 @@ radius           = 300
 spatial_dim      = 48
 # Distance threshold for contact-based signaling
 contact_distance = 30
-# Linear scale on Gaussian weights in received-ligand aggregation
-weighted_ligand_scale_factor = 1.0
 
 [grn]
 # Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
@@ -64,12 +62,16 @@ use_tfl_modulators = true
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
 
-[cellchat]
-# Hybrid CellChat → SpaceTravLR LR terms (off by default).
+[ligand_field]
+# Received-ligand aggregation + optional communication-prob pair selection (off by default).
 enabled = false
+# mode: spatial | meanfield (alias: lr_mode)
+mode = "spatial"
+# Linear scale on Gaussian weights in received-ligand aggregation
+weighted_ligand_scale_factor = 1.0
+# Approximate received ligands via a spatial grid (spacing / radius). Omit for exact.
+# ligand_grid_factor = 0.2
 # db_path = "data/cellchat_mouse.csv"
-# lr_mode: spatial | meanfield
-lr_mode = "spatial"
 kh = 0.5
 hill_coef = 1.0
 min_cells = 10
@@ -182,11 +184,6 @@ beta_scale_factor = 100.0
 # beta_cap        = 10.0
 # Number of signal propagation rounds
 n_propagation     = 4
-# Approximate received ligands using a spatial grid for faster perturbation.
-# Value is grid_spacing / radius (smaller = more accurate, larger = faster).
-#   0.5 → ~3% error, ~12x faster at 5000+ cells
-#   0.3 → ~1% error, ~6x faster
-# ligand_grid_factor = 0.2
 # cells_csv = "cell_scope.csv"
 # cells_csv_column = "my_cells"
 # Clip simulated expression after each propagation iteration (omit max for no upper bound)

@@ -339,8 +339,8 @@ pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<St
     Ok(out)
 }
 
-/// Build a [`crate::cellchat::CellChatLrPlan`] from an open AnnData + cluster labels.
-pub fn prepare_cellchat_lr_plan<AnB: Backend>(
+/// Build a [`crate::ligand_field::LigandFieldPlan`] from an open AnnData + cluster labels.
+pub fn prepare_ligand_field_plan<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
     clusters: &Array1<usize>,
@@ -348,26 +348,26 @@ pub fn prepare_cellchat_lr_plan<AnB: Backend>(
     group_names: &[String],
     obs_row_subset: Option<&[usize]>,
     species: &str,
-    cfg: &crate::cellchat::CellChatConfig,
+    cfg: &crate::ligand_field::LigandFieldConfig,
     config_file_parent: Option<&Path>,
     output_dir: Option<&Path>,
-) -> anyhow::Result<Arc<crate::cellchat::CellChatLrPlan>> {
-    let db_path = crate::cellchat::resolve_cellchat_db_path(
+) -> anyhow::Result<Arc<crate::ligand_field::LigandFieldPlan>> {
+    let db_path = crate::ligand_field::resolve_cellchat_db_path(
         species,
         cfg.db_path.as_deref(),
         config_file_parent,
     )?;
-    let db = crate::cellchat::load_cellchat_db(&db_path)?;
+    let db = crate::ligand_field::load_cellchat_db(&db_path)?;
     let var_names = adata.var_names().into_vec();
     let var_set: HashSet<String> = var_names.iter().cloned().collect();
-    let interactions = crate::cellchat::filter_interactions_for_adata(
+    let interactions = crate::ligand_field::filter_interactions_for_adata(
         &db,
         &var_set,
         &cfg.signaling_types,
     );
     if interactions.is_empty() {
         anyhow::bail!(
-            "CellChat: no interactions after filtering DB {} against AnnData genes / signaling_types",
+            "Ligand field: no interactions after filtering DB {} against AnnData genes / signaling_types",
             db_path.display()
         );
     }
@@ -406,21 +406,21 @@ pub fn prepare_cellchat_lr_plan<AnB: Backend>(
     };
     if clusters.len() != n {
         anyhow::bail!(
-            "CellChat: clusters len {} != n_obs {}",
+            "Ligand field: clusters len {} != n_obs {}",
             clusters.len(),
             n
         );
     }
     if group_names.len() != num_clusters {
         anyhow::bail!(
-            "CellChat: group_names len {} != num_clusters {}",
+            "Ligand field: group_names len {} != num_clusters {}",
             group_names.len(),
             num_clusters
         );
     }
     let group_ids: Vec<usize> = clusters.iter().copied().collect();
 
-    let result = crate::cellchat::compute_commun_prob(
+    let result = crate::ligand_field::compute_commun_prob(
         &expr,
         &gene_names,
         &group_ids,
@@ -428,10 +428,10 @@ pub fn prepare_cellchat_lr_plan<AnB: Backend>(
         &interactions,
         cfg,
     )?;
-    let selected = crate::cellchat::select_interactions(&result, cfg);
+    let selected = crate::ligand_field::select_interactions(&result, cfg);
     if selected.is_empty() {
         anyhow::bail!(
-            "CellChat: no interactions passed filters (min_prob={}, p_threshold={}, max_interactions={:?})",
+            "Ligand field: no interactions passed filters (min_prob={}, p_threshold={}, max_interactions={:?})",
             cfg.min_prob,
             cfg.p_threshold,
             cfg.max_interactions
@@ -440,11 +440,11 @@ pub fn prepare_cellchat_lr_plan<AnB: Backend>(
 
     if let Some(dir) = output_dir {
         let _ = std::fs::create_dir_all(dir);
-        let csv_path = dir.join("cellchat_commun_prob.csv");
-        crate::cellchat::write_prob_csv(&csv_path, &result, Some(&selected))?;
+        let csv_path = dir.join("ligand_field_commun_prob.csv");
+        crate::ligand_field::write_prob_csv(&csv_path, &result, Some(&selected))?;
     }
 
-    let plan = crate::cellchat::CellChatLrPlan::from_selected(result, &selected, cfg)
+    let plan = crate::ligand_field::LigandFieldPlan::from_selected(result, &selected, cfg)
         .with_cell_groups(group_ids);
     Ok(Arc::new(plan))
 }
@@ -2354,8 +2354,8 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     /// no LR/TFL/extra columns — written as `.tf_ablated`, not `.orphan`. When TF modulators are
     /// on, missing or all-zero TF support uses `.orphan` like any other orphan.
     pub gene_excluded_tf_modulators_ablation: bool,
-    /// Hybrid CellChat plan: replaces/weights LR columns in [`Self::build_x_modulators_and_target_y`].
-    pub cellchat_plan: Option<Arc<crate::cellchat::CellChatLrPlan>>,
+    /// Hybrid ligand-field plan: replaces/weights LR columns in [`Self::build_x_modulators_and_target_y`].
+    pub ligand_field_plan: Option<Arc<crate::ligand_field::LigandFieldPlan>>,
 }
 
 impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB> {
@@ -2559,16 +2559,16 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             obs_row_subset,
             modulator_scales: None,
             gene_excluded_tf_modulators_ablation,
-            cellchat_plan: None,
+            ligand_field_plan: None,
         })
     }
 
-    /// Attach a CellChat hybrid plan: optionally replace LR pairs and enable hybrid LR features.
+    /// Attach a ligand-field plan: optionally replace LR pairs and enable hybrid LR features.
     /// Pairs that include `target_gene` as ligand or receptor are dropped from both the
     /// modulator list and the plan tensor so column counts stay aligned.
-    pub fn apply_cellchat_plan(
+    pub fn apply_ligand_field_plan(
         &mut self,
-        plan: Arc<crate::cellchat::CellChatLrPlan>,
+        plan: Arc<crate::ligand_field::LigandFieldPlan>,
     ) -> anyhow::Result<()> {
         if plan.replace_lr_pairs {
             let var_set: HashSet<String> = self.adata.var_names().into_vec().into_iter().collect();
@@ -2649,7 +2649,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                         }
                     }
                 }
-                let filtered = crate::cellchat::CellChatLrPlan {
+                let filtered = crate::ligand_field::LigandFieldPlan {
                     mode: plan.mode,
                     kh: plan.kh,
                     hill_coef: plan.hill_coef,
@@ -2661,12 +2661,12 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     prob,
                     pair_names,
                 };
-                self.cellchat_plan = Some(Arc::new(filtered));
+                self.ligand_field_plan = Some(Arc::new(filtered));
             } else {
-                self.cellchat_plan = Some(plan);
+                self.ligand_field_plan = Some(plan);
             }
         } else {
-            self.cellchat_plan = Some(plan);
+            self.ligand_field_plan = Some(plan);
         }
         Ok(())
     }
@@ -3120,9 +3120,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let extra_mod_arc = Arc::new(resolved_ex_mod);
             let extra_lr_arc = Arc::new(resolved_ex_lr);
 
-            let cellchat_plan_arc: Option<Arc<crate::cellchat::CellChatLrPlan>> =
-                if spaceship_config.cellchat.enabled {
-                    let t_cc = pipeline_step_begin(&hud, "CellChat communication probabilities");
+            let ligand_field_plan_arc: Option<Arc<crate::ligand_field::LigandFieldPlan>> =
+                if spaceship_config.ligand_field.enabled {
+                    let t_cc = pipeline_step_begin(&hud, "Ligand-field pair selection probabilities");
                     let group_names: Vec<String> = (0..num_clusters)
                         .map(|c| {
                             cluster_to_cell_type
@@ -3132,7 +3132,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 .unwrap_or_else(|| c.to_string())
                         })
                         .collect();
-                    let plan = prepare_cellchat_lr_plan(
+                    let plan = prepare_ligand_field_plan(
                         setup_adata.as_ref(),
                         layer,
                         clusters.as_ref(),
@@ -3140,15 +3140,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         &group_names,
                         obs_row_subset.as_deref(),
                         species,
-                        &spaceship_config.cellchat,
+                        &spaceship_config.ligand_field,
                         cfg_parent,
                         Some(Path::new(training_dir)),
                     )?;
-                    pipeline_step_end(&hud, "CellChat communication probabilities", t_cc);
+                    pipeline_step_end(&hud, "Ligand-field pair selection probabilities", t_cc);
                     log_line(
                         &hud,
                         format!(
-                            "CellChat: {} interactions (mode={:?}, replace_lr={})",
+                            "Ligand field: {} interactions (mode={:?}, replace_lr={})",
                             plan.interactions.len(),
                             plan.mode,
                             plan.replace_lr_pairs
@@ -3161,9 +3161,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
 
             let layer_for_workers = layer.to_string();
             let cnn_for_workers = cnn.clone();
-            let ligand_grid_factor = spaceship_config.perturbation.ligand_grid_factor;
+            let ligand_grid_factor = spaceship_config.ligand_field.ligand_grid_factor;
             let weighted_ligand_scale_factor =
-                spaceship_config.spatial.weighted_ligand_scale_factor;
+                spaceship_config.ligand_field.weighted_ligand_scale_factor;
 
             drop(setup_adata);
 
@@ -3254,7 +3254,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let gene_mean_arc = gene_mean_arc.clone();
                 let extra_mod_arc_w = extra_mod_arc.clone();
                 let extra_lr_arc_w = extra_lr_arc.clone();
-                let cellchat_plan_w = cellchat_plan_arc.clone();
+                let ligand_field_plan_w = ligand_field_plan_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
@@ -3445,12 +3445,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 }
                             };
 
-                            if let Some(ref plan) = cellchat_plan_w {
+                            if let Some(ref plan) = ligand_field_plan_w {
                                 if plan.replace_lr_pairs {
-                                    if let Err(e) = estimator.apply_cellchat_plan(plan.clone()) {
+                                    if let Err(e) = estimator.apply_ligand_field_plan(plan.clone()) {
                                         log_line(
                                             &hud,
-                                            format!("fail cellchat {}: {}", gene, e),
+                                            format!("fail ligand_field {}: {}", gene, e),
                                         );
                                         if let Some(ref h) = hud {
                                             if let Ok(mut g) = h.lock() {
@@ -4212,7 +4212,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         for g in &self.extra_modulators {
             all_unique_genes.insert(g.clone());
         }
-        if let Some(plan) = self.cellchat_plan.as_ref() {
+        if let Some(plan) = self.ligand_field_plan.as_ref() {
             for inter in &plan.interactions {
                 for g in inter
                     .ligand_subunits
@@ -4242,7 +4242,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         // Collect unique ligand genes from LR and TFL pairs for received-ligand computation
         let mut unique_lig_genes: Vec<String> = Vec::new();
         let mut lig_seen: HashSet<String> = HashSet::new();
-        if self.cellchat_plan.is_none() {
+        if self.ligand_field_plan.is_none() {
             for pair in &self.lr_pairs {
                 let parts: Vec<&str> = pair.split('$').collect();
                 if parts.len() == 2 {
@@ -4315,7 +4315,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         }
 
         let offset_lr = self.regulators.len();
-        if let Some(plan) = self.cellchat_plan.as_ref() {
+        if let Some(plan) = self.ligand_field_plan.as_ref() {
             let grid_factor = self.ligand_grid_factor.or({
                 if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
                     Some(DEFAULT_LIGAND_GRID_FACTOR)
@@ -4323,7 +4323,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     None
                 }
             });
-            let lr_mat = crate::cellchat::build_hybrid_lr_matrix_with_grid(
+            let lr_mat = crate::ligand_field::build_hybrid_lr_matrix_with_grid(
                 plan,
                 xy,
                 &expr_matrix,

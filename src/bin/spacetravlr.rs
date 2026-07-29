@@ -172,19 +172,19 @@ enum Commands {
     CollectInteractions(CollectInteractionsCli),
     /// UMAP lab: build the web UI, start the API + static server, print the URL.
     Gui(GuiCli),
-    /// Compute CellChat-style communication probabilities and write a CSV (hybrid LR preview).
-    #[command(name = "cellchat")]
-    CellChat(CellChatCli),
+    /// Compute ligand-field communication probabilities and write a CSV (hybrid LR preview).
+    #[command(name = "ligand-field", alias = "cellchat")]
+    LigandField(LigandFieldCli),
 }
 
 #[derive(Parser, Debug, Clone)]
-struct CellChatCli {
+struct LigandFieldCli {
     #[arg(long, value_name = "PATH", help = "AnnData .h5ad")]
     h5ad: PathBuf,
     #[arg(
         long,
         value_name = "PATH",
-        help = "spaceship_config.toml overlay (must enable [cellchat] or pass flags)"
+        help = "spaceship_config.toml overlay (must enable [ligand_field] or pass --enable)"
     )]
     config: Option<PathBuf>,
     #[arg(long, help = "obs column for groups (default: data.cluster_annot / cell_type)")]
@@ -196,10 +196,10 @@ struct CellChatCli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "output CSV (default: ./cellchat_commun_prob.csv)"
+        help = "output CSV (default: ./ligand_field_commun_prob.csv)"
     )]
     out: Option<PathBuf>,
-    #[arg(long, help = "force-enable CellChat even if [cellchat].enabled = false")]
+    #[arg(long, help = "force-enable ligand field even if [ligand_field].enabled = false")]
     enable: bool,
 }
 
@@ -584,7 +584,7 @@ struct Cli {
         long = "weighted-ligand-scale-factor",
         value_name = "F",
         help_heading = "Training",
-        help = "Scales Gaussian weights when aggregating received ligands — overrides [spatial].weighted_ligand_scale_factor"
+        help = "Scales Gaussian weights when aggregating received ligands — overrides [ligand_field].weighted_ligand_scale_factor"
     )]
     weighted_ligand_scale_factor: Option<f64>,
 
@@ -1343,7 +1343,7 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
         cfg.lasso.tol = v;
     }
     if let Some(v) = cli.weighted_ligand_scale_factor {
-        cfg.spatial.weighted_ligand_scale_factor = v;
+        cfg.ligand_field.weighted_ligand_scale_factor = v;
     }
     if let Some(v) = cli.spatial_dim {
         cfg.spatial.spatial_dim = v.max(1);
@@ -1608,51 +1608,51 @@ fn print_plain_preamble(
     );
 }
 
-fn run_cellchat_cli(cli: &Cli, cc: &CellChatCli) -> anyhow::Result<()> {
+fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
     use anndata::{AnnDataOp, Backend};
     use spacetravlr::spatial_estimator::{
-        clusters_array1_from_obs_column, prepare_cellchat_lr_plan,
+        clusters_array1_from_obs_column, prepare_ligand_field_plan,
     };
 
     let mut cfg = SpaceshipConfig::try_load_merged(
-        cc.config
+        lf.config
             .as_ref()
             .or(cli.config.as_ref())
             .map(|p| p.as_path()),
     )?;
-    if cc.enable {
-        cfg.cellchat.enabled = true;
+    if lf.enable {
+        cfg.ligand_field.enabled = true;
     }
-    if !cfg.cellchat.enabled {
+    if !cfg.ligand_field.enabled {
         anyhow::bail!(
-            "CellChat is disabled. Pass --enable or set [cellchat].enabled = true in the config."
+            "Ligand field is disabled. Pass --enable or set [ligand_field].enabled = true in the config."
         );
     }
 
-    let adata_path = cc.h5ad.clone();
-    let layer = cc
+    let adata_path = lf.h5ad.clone();
+    let layer = lf
         .layer
         .clone()
         .unwrap_or_else(|| cfg.data.layer.clone());
-    let cluster_key = cc
+    let cluster_key = lf
         .cluster_key
         .clone()
         .unwrap_or_else(|| cfg.data.cluster_annot.clone());
-    let out_dir = cc
+    let out_dir = lf
         .out
         .as_ref()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    let out_name = cc
+    let out_name = lf
         .out
         .as_ref()
         .and_then(|p| p.file_name().map(|s| s.to_os_string()))
-        .unwrap_or_else(|| std::ffi::OsString::from("cellchat_commun_prob.csv"));
+        .unwrap_or_else(|| std::ffi::OsString::from("ligand_field_commun_prob.csv"));
 
     let adata = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(&adata_path)?)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let var_names = adata.var_names().into_vec();
-    let species = cc
+    let species = lf
         .species
         .as_deref()
         .map(str::trim)
@@ -1682,13 +1682,13 @@ fn run_cellchat_cli(cli: &Cli, cc: &CellChatCli) -> anyhow::Result<()> {
         .map(|c| name_of.get(&c).cloned().unwrap_or_else(|| c.to_string()))
         .collect();
 
-    let cfg_parent = cc
+    let cfg_parent = lf
         .config
         .as_ref()
         .or(cli.config.as_ref())
         .and_then(|p| p.parent());
 
-    let plan = prepare_cellchat_lr_plan(
+    let plan = prepare_ligand_field_plan(
         &adata,
         &layer,
         &clusters,
@@ -1696,18 +1696,18 @@ fn run_cellchat_cli(cli: &Cli, cc: &CellChatCli) -> anyhow::Result<()> {
         &group_names,
         None,
         &species,
-        &cfg.cellchat,
+        &cfg.ligand_field,
         cfg_parent,
         Some(&out_dir),
     )?;
 
-    let default_csv = out_dir.join("cellchat_commun_prob.csv");
+    let default_csv = out_dir.join("ligand_field_commun_prob.csv");
     let desired = out_dir.join(&out_name);
     if desired != default_csv && default_csv.is_file() {
         std::fs::rename(&default_csv, &desired)?;
     }
     eprintln!(
-        "CellChat: {} interactions (mode={:?}) → {}",
+        "Ligand field: {} interactions (mode={:?}) → {}",
         plan.interactions.len(),
         plan.mode,
         desired.display()
@@ -2879,7 +2879,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::RunSummary(rs)) => return run_run_summary(&cli, rs),
         Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
         Some(Commands::Gui(g)) => return run_spacetravlr_gui(g),
-        Some(Commands::CellChat(cc)) => return run_cellchat_cli(&cli, cc),
+        Some(Commands::LigandField(lf)) => return run_ligand_field_cli(&cli, lf),
         None => {}
     }
 
