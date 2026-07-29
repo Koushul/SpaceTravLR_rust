@@ -17,8 +17,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # mold lowers peak link RAM vs GNU ld; avoids ld SIGBUS on large bins (burn/wgpu/RCTD) on ubuntu-latest.
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # mold lowers peak link RAM vs GNU ld; avoids ld SIGBUS on large bins (burn/wgpu/RCTD).
+      # Drive the link via clang: GCC on ubuntu-latest often rejects `-fuse-ld=mold` (exit 101).
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +28,7 @@ jobs:
       - name: Install mold linker
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold
+          sudo apt-get install -y mold clang
 
       - name: spacetravlr binary compile env (env! in spacetravlr.rs)
         run: |
