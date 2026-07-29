@@ -33,9 +33,10 @@ pub enum CellChatLrMode {
     HillSpatial,
     /// Current SpaceTravLR product \(\widetilde{L}_c\cdot R_c\), but pair set / filter from CellChat.
     SpatialProduct,
-    /// CellChat mean-field received ligand (no spatial kernel):
-    /// \(X_{c,k}=\big(\sum_s P_{s\to\mathrm{type}(c)}^k\,\bar{L}_s^{(k)}\big)\,R_c^{(k)}\)
-    /// with \(\bar{L}_s\) the sender-type ligand trimean. Same pair set as other modes.
+    /// CellChat mean-field / flat-kernel received ligand (no spatial weights):
+    /// \(X_{c,k}=\bar{L}^{(k)}\,R_c^{(k)}\) with \(\bar{L}\) the global mean of ligand
+    /// expression. Pair set still comes from CellChat filters. Fair A/B vs
+    /// `spatial_product` (same pairs; only the received-L aggregator differs).
     Meanfield,
 }
 
@@ -299,8 +300,7 @@ pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
         }
         out.push(inter);
     }
-    // SpaceTravLR modulators are single-gene Lig$Rec; expand complexes before use.
-    Ok(expand_complexes_to_independent_units(&out))
+    Ok(out) // keep multi-subunit complexes intact for CellChat-style P
 }
 
 /// Resolve `cellchat_{species}.csv` from config path, env, or `data/` search.
@@ -479,6 +479,7 @@ fn fill_prob_tensor(
     kh: f64,
     hill_coef: f64,
     population_size_weight: bool,
+    min_cells: usize,
 ) -> Array3<f64> {
     let n_g = counts.len();
     let n_k = interactions.len();
@@ -489,7 +490,7 @@ fn fill_prob_tensor(
     }
     for (k, inter) in interactions.iter().enumerate() {
         for i in 0..n_g {
-            if counts[i] == 0 {
+            if counts[i] < min_cells {
                 continue;
             }
             let lig = complex_level(group_expr, i, &inter.ligand_subunits, gene_to_col);
@@ -497,7 +498,7 @@ fn fill_prob_tensor(
                 continue;
             }
             for j in 0..n_g {
-                if counts[j] == 0 {
+                if counts[j] < min_cells {
                     continue;
                 }
                 let rec = complex_level(group_expr, j, &inter.receptor_subunits, gene_to_col);
@@ -515,6 +516,10 @@ fn fill_prob_tensor(
 }
 
 /// Compute CellChat communication probabilities (and optional permutation p-values).
+///
+/// Follows Jin et al.: scale expression by its global max (`data/max(data)`), then
+/// group trimeans, geometric-mean complexes, and Hill \(P=(LR)^n/(K_h^n+(LR)^n)\).
+/// Cofactor / agonist–antagonist terms from full CellChatDB are not applied.
 pub fn compute_commun_prob(
     expr: &Array2<f64>,
     gene_names: &[String],
@@ -544,8 +549,16 @@ pub fn compute_commun_prob(
         .map(|(i, g)| (g.as_str(), i))
         .collect();
 
+    // CellChat: data.use <- data/max(data) so Kh=0.5 is on a [0,1]-scaled matrix.
+    let max_v = expr.iter().copied().fold(0.0_f64, f64::max);
+    let expr_scaled = if max_v > 0.0 && max_v.is_finite() {
+        expr * (1.0 / max_v)
+    } else {
+        expr.clone()
+    };
+
     let (group_expr, counts) =
-        group_trimean_expression(expr, group_ids, n_groups, cfg.min_cells);
+        group_trimean_expression(&expr_scaled, group_ids, n_groups, cfg.min_cells);
     let prob = fill_prob_tensor(
         &group_expr,
         &counts,
@@ -554,6 +567,7 @@ pub fn compute_commun_prob(
         cfg.kh,
         cfg.hill_coef,
         cfg.population_size_weight,
+        cfg.min_cells,
     );
 
     let pvalues = if cfg.n_perm > 0 && !interactions.is_empty() {
@@ -566,7 +580,7 @@ pub fn compute_commun_prob(
                 shuffled.swap(i, j);
             }
             let (ge, ct) =
-                group_trimean_expression(expr, &shuffled, n_groups, cfg.min_cells);
+                group_trimean_expression(&expr_scaled, &shuffled, n_groups, cfg.min_cells);
             let null = fill_prob_tensor(
                 &ge,
                 &ct,
@@ -575,6 +589,7 @@ pub fn compute_commun_prob(
                 cfg.kh,
                 cfg.hill_coef,
                 cfg.population_size_weight,
+                cfg.min_cells,
             );
             ndarray::Zip::from(&mut exceed)
                 .and(&null)
@@ -650,14 +665,28 @@ pub struct CellChatLrPlan {
 }
 
 impl CellChatLrPlan {
+    /// Build a Lasso plan from selected **complex-level** interactions.
+    ///
+    /// Each selected CellChat interaction is expanded into independent `Lig$Rec`
+    /// units for SpaceTravLR columns; the parent \(P_{s\to t}\) slice is copied
+    /// to every child (so multi-subunit complexes keep a single communication
+    /// probability, while local receptor subunits may still differ in \(X\)).
     pub fn from_selected(result: CellChatProbResult, selected: &[usize], cfg: &CellChatConfig) -> Self {
         let n_g = result.n_groups();
-        let mut interactions = Vec::with_capacity(selected.len());
-        let mut pair_names = Vec::with_capacity(selected.len());
-        let mut prob = Array3::<f64>::zeros((selected.len(), n_g, n_g));
-        for (new_k, &old_k) in selected.iter().enumerate() {
-            interactions.push(result.interactions[old_k].clone());
-            pair_names.push(result.interactions[old_k].pair_name.clone());
+        let mut interactions = Vec::new();
+        let mut pair_names = Vec::new();
+        let mut parent_of: Vec<usize> = Vec::new();
+        for &old_k in selected {
+            let units =
+                expand_complexes_to_independent_units(std::slice::from_ref(&result.interactions[old_k]));
+            for unit in units {
+                pair_names.push(unit.pair_name.clone());
+                interactions.push(unit);
+                parent_of.push(old_k);
+            }
+        }
+        let mut prob = Array3::<f64>::zeros((interactions.len(), n_g, n_g));
+        for (new_k, &old_k) in parent_of.iter().enumerate() {
             for i in 0..n_g {
                 for j in 0..n_g {
                     prob[[new_k, i, j]] = result.prob[[old_k, i, j]];
@@ -767,28 +796,6 @@ fn received_ligand_field(
         None => calculate_weighted_ligands(xy, &lig, radius, scale_factor),
     };
     recv.column(0).to_owned()
-}
-
-/// Sender-type ligand trimeans \(\bar{L}_s\) (CellChat aggregate; ignores coordinates).
-fn group_ligand_trimeans(
-    ligand_expr: &Array1<f64>,
-    cell_group: &[usize],
-    n_groups: usize,
-    min_cells: usize,
-) -> Array1<f64> {
-    let mut buckets: Vec<Vec<f64>> = (0..n_groups).map(|_| Vec::new()).collect();
-    for (i, &g) in cell_group.iter().enumerate() {
-        if g < n_groups {
-            buckets[g].push(ligand_expr[i]);
-        }
-    }
-    let mut out = Array1::<f64>::zeros(n_groups);
-    for s in 0..n_groups {
-        if buckets[s].len() >= min_cells {
-            out[s] = tri_mean(&buckets[s]);
-        }
-    }
-    out
 }
 
 /// Build per-cell LR design columns for the plan's selected interactions.
@@ -937,25 +944,16 @@ pub fn build_hybrid_lr_matrix_with_grid(
                 }
             }
             CellChatLrMode::Meanfield => {
-                let lig_bar = group_ligand_trimeans(
-                    &lig_expr,
-                    &plan.cell_group,
-                    n_g,
-                    plan.min_cells.max(1),
-                );
+                // Flat-kernel received ligand: global mean of L (no spatial weights).
+                // Do not multiply by P — P already embeds group L and R (Hill), so
+                // P·L̄·R would double-count both sides vs spatial_product's L̃·R.
+                let l_mf = if !lig_expr.is_empty() {
+                    lig_expr.mean().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
                 for i in 0..n {
-                    let j = plan.cell_group[i];
-                    if j >= n_g {
-                        continue;
-                    }
-                    let mut acc = 0.0;
-                    for s in 0..n_g {
-                        let p = plan.prob[[k, s, j]];
-                        if p > 0.0 {
-                            acc += p * lig_bar[s];
-                        }
-                    }
-                    out[[i, k]] = acc * rec[i];
+                    out[[i, k]] = l_mf * rec[i];
                 }
             }
         }
@@ -1128,8 +1126,8 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_meanfield_uses_group_ligand_not_space() {
-        // Distant senders (x=0) vs receivers (x=100): spatial product ~0, meanfield >0.
+    fn hybrid_meanfield_uses_global_ligand_not_space() {
+        // Distant senders (x=0) vs receivers (x=100): spatial product ~0, meanfield uses global mean L.
         let xy = array![[0.0, 0.0], [0.0, 0.0], [100.0, 0.0], [100.0, 0.0]];
         let expr = array![
             [2.0, 0.0],
@@ -1157,9 +1155,10 @@ mod tests {
         };
         let x_mf =
             build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
-        assert!(x_mf[[2, 0]] > 1.0); // ~2 * 1 * R
-        assert!(x_mf[[3, 0]] > 1.0);
-        assert_eq!(x_mf[[0, 0]], 0.0);
+        // global mean L = 1.0; receivers have R=1 → feature 1.0
+        assert!((x_mf[[2, 0]] - 1.0).abs() < 1e-9);
+        assert!((x_mf[[3, 0]] - 1.0).abs() < 1e-9);
+        assert_eq!(x_mf[[0, 0]], 0.0); // R=0 on senders
 
         let plan_sp = CellChatLrPlan {
             mode: CellChatLrMode::SpatialProduct,
@@ -1169,6 +1168,66 @@ mod tests {
             build_hybrid_lr_matrix(&plan_sp, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
         assert!(x_sp[[2, 0]] < 1e-6);
         assert!(x_sp[[3, 0]] < 1e-6);
+    }
+
+    #[test]
+    fn from_selected_expands_complex_and_copies_prob() {
+        let inter = CellChatInteraction::from_row(
+            "Tgfb1",
+            "Tgfbr1_Tgfbr2",
+            "TGFb",
+            "Secreted Signaling",
+        );
+        let mut prob = Array3::<f64>::zeros((1, 2, 2));
+        prob[[0, 0, 1]] = 0.7;
+        let result = CellChatProbResult {
+            group_names: vec!["A".into(), "B".into()],
+            interactions: vec![inter],
+            prob,
+            pvalues: None,
+            group_counts: vec![3, 3],
+        };
+        let cfg = CellChatConfig {
+            enabled: true,
+            lr_mode: CellChatLrMode::SpatialProduct,
+            ..Default::default()
+        };
+        let plan = CellChatLrPlan::from_selected(result, &[0], &cfg);
+        assert_eq!(plan.interactions.len(), 2);
+        let names: HashSet<_> = plan.pair_names.iter().map(|s| s.as_str()).collect();
+        assert!(names.contains("Tgfb1$Tgfbr1"));
+        assert!(names.contains("Tgfb1$Tgfbr2"));
+        assert!((plan.prob[[0, 0, 1]] - 0.7).abs() < 1e-12);
+        assert!((plan.prob[[1, 0, 1]] - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_normalization_changes_hill_scale() {
+        // Without max-norm, L=R=2 → LR=4 → Hill(Kh=0.5) ≈ 0.89
+        // With max-norm (max=2), L=R=1 → LR=1 → Hill ≈ 0.67
+        let gene_names = vec!["L".into(), "R".into()];
+        let expr = array![[2.0, 2.0], [2.0, 2.0], [2.0, 2.0]];
+        let group_ids = vec![0, 0, 0];
+        let group_names = vec!["A".into()];
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let cfg = CellChatConfig {
+            enabled: true,
+            min_cells: 1,
+            n_perm: 0,
+            ..Default::default()
+        };
+        let res = compute_commun_prob(
+            &expr,
+            &gene_names,
+            &group_ids,
+            &group_names,
+            &[inter],
+            &cfg,
+        )
+        .unwrap();
+        let p = res.prob[[0, 0, 0]];
+        let expected = hill_commun_prob(1.0, 1.0, 0.5, 1.0);
+        assert!((p - expected).abs() < 1e-9, "p={p} expected={expected}");
     }
 
     #[test]
@@ -1207,20 +1266,25 @@ mod tests {
     }
 
     #[test]
-    fn load_mouse_db_expands_complexes() {
+    fn load_mouse_db_keeps_complexes_until_expand() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/cellchat_mouse.csv");
         if !root.is_file() {
             return;
         }
         let db = load_cellchat_db(&root).unwrap();
         assert!(db.len() > 1000);
-        // All units are single-gene Lig$Rec (SpaceTravLR-compatible).
-        for inter in &db {
+        assert!(
+            db.iter()
+                .any(|i| i.receptor_subunits.len() > 1 || i.ligand_subunits.len() > 1),
+            "expected multi-subunit complexes in raw DB"
+        );
+        let units = expand_complexes_to_independent_units(&db);
+        for inter in &units {
             assert_eq!(inter.ligand_subunits.len(), 1, "{}", inter.pair_name);
             assert_eq!(inter.receptor_subunits.len(), 1, "{}", inter.pair_name);
             assert!(!inter.pair_name.contains('_'));
         }
-        assert!(db.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr1"));
-        assert!(db.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr2"));
+        assert!(units.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr1"));
+        assert!(units.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr2"));
     }
 }
