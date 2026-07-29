@@ -4,10 +4,8 @@
 //! probability on cell-type aggregates (trimean expression, geometric-mean
 //! multi-subunit complexes), then builds **per-cell** LR design columns for
 //! Lasso. Group-level \(P_{i\to j}^k\) alone is constant within a cluster and
-//! would be absorbed by the intercept; the hybrid therefore uses \(P\) to
-//! weight **type-stratified spatially received ligand** × local receptor
-//! (or a spatial Hill transform). For fair benchmarks, `meanfield` replaces
-//! spatial \(\widetilde{L}\) with CellChat-style type-level received ligand.
+//! would be absorbed by the intercept; \(P\) therefore **selects** LR pairs.
+//! Received ligand is either mean-field (global) or spatial (Gaussian field).
 
 use crate::config::expand_user_path;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -22,22 +20,18 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-/// How hybrid LR columns are built from CellChat probabilities + spatial expression.
+/// How received ligand enters per-cell LR columns (pair set from CellChat).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CellChatLrMode {
-    /// \(X_{c,k}=\sum_s P_{s\to\mathrm{type}(c)}^k\cdot\widetilde{L}_{c\leftarrow s}^{(k)}\cdot R_c^{(k)}\)
-    #[default]
-    WeightedSpatial,
-    /// \(X_{c,k}=(\widetilde{L}_c R_c)/(K_h+\widetilde{L}_c R_c)\) for CellChat-selected pairs.
-    HillSpatial,
-    /// Current SpaceTravLR product \(\widetilde{L}_c\cdot R_c\), but pair set / filter from CellChat.
-    SpatialProduct,
-    /// CellChat mean-field / flat-kernel received ligand (no spatial weights):
-    /// \(X_{c,k}=\bar{L}^{(k)}\,R_c^{(k)}\) with \(\bar{L}\) the global mean of ligand
-    /// expression. Pair set still comes from CellChat filters. Fair A/B vs
-    /// `spatial_product` (same pairs; only the received-L aggregator differs).
+    /// Mean-field / flat-kernel received ligand: \(X_{c,k}=\bar{L}^{(k)}\,R_c^{(k)}\)
+    /// with \(\bar{L}\) the global mean of ligand expression.
     Meanfield,
+    /// Spatial-field received ligand: \(X_{c,k}=\widetilde{L}_c^{(k)}\,R_c^{(k)}\)
+    /// with Gaussian neighborhood aggregation (SpaceTravLR default).
+    #[default]
+    #[serde(alias = "spatial_product")]
+    Spatial,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +72,7 @@ impl Default for CellChatConfig {
         Self {
             enabled: false,
             db_path: None,
-            lr_mode: CellChatLrMode::WeightedSpatial,
+            lr_mode: CellChatLrMode::Spatial,
             kh: 0.5,
             hill_coef: 1.0,
             min_cells: 10,
@@ -745,42 +739,6 @@ fn receptor_complex_expr(
     Some(geom_mean_columns(expr, &cols))
 }
 
-/// Type-stratified received ligand: for each sender group `s`, Gaussian-weighted
-/// mean of ligand expression using only cells of type `s` (other cells zeroed).
-/// Uses the grid approximation when `grid_factor` is set (recommended for N ≳ 5k).
-fn type_stratified_received_ligand(
-    xy: &Array2<f64>,
-    ligand_expr: &Array1<f64>,
-    cell_group: &[usize],
-    n_groups: usize,
-    radius: f64,
-    scale_factor: f64,
-    grid_factor: Option<f64>,
-) -> Array2<f64> {
-    let n = xy.nrows();
-    let mut out = Array2::<f64>::zeros((n, n_groups));
-    if n == 0 {
-        return out;
-    }
-    let use_grid = grid_factor.filter(|g| g.is_finite() && *g > 0.0);
-    // Sequential over groups: `calculate_weighted_ligands*` already parallelizes over
-    // receiver cells. Nesting Rayon here under gene-workers corrupted the allocator.
-    for s in 0..n_groups {
-        let mut lig = Array2::<f64>::zeros((n, 1));
-        for i in 0..n {
-            if cell_group.get(i).copied().unwrap_or(usize::MAX) == s {
-                lig[[i, 0]] = ligand_expr[i];
-            }
-        }
-        let recv = match use_grid {
-            Some(gf) => calculate_weighted_ligands_grid(xy, &lig, radius, scale_factor, gf),
-            None => calculate_weighted_ligands(xy, &lig, radius, scale_factor),
-        };
-        out.column_mut(s).assign(&recv.column(0));
-    }
-    out
-}
-
 fn received_ligand_field(
     xy: &Array2<f64>,
     ligand_expr: &Array1<f64>,
@@ -829,7 +787,6 @@ pub fn build_hybrid_lr_matrix_with_grid(
 ) -> Result<Array2<f64>> {
     let n = xy.nrows();
     let n_k = plan.interactions.len();
-    let n_g = plan.group_names.len();
     if plan.cell_group.len() != n {
         bail!(
             "CellChat plan cell_group len {} != n_cells {}",
@@ -868,7 +825,6 @@ pub fn build_hybrid_lr_matrix_with_grid(
     };
 
     // Cache received fields by ligand gene (post-expansion: one subunit).
-    let mut stratified_cache: HashMap<String, Array2<f64>> = HashMap::new();
     let mut field_cache: HashMap<String, Array1<f64>> = HashMap::new();
 
     for (k, inter) in plan.interactions.iter().enumerate() {
@@ -886,51 +842,7 @@ pub fn build_hybrid_lr_matrix_with_grid(
             })?;
 
         match plan.mode {
-            CellChatLrMode::WeightedSpatial => {
-                let recv_by_type = if let Some(cached) = stratified_cache.get(&lig_name) {
-                    cached.clone()
-                } else {
-                    let computed = type_stratified_received_ligand(
-                        xy,
-                        &lig_expr,
-                        &plan.cell_group,
-                        n_g,
-                        radius,
-                        scale_factor,
-                        grid_factor,
-                    );
-                    stratified_cache.insert(lig_name.clone(), computed.clone());
-                    computed
-                };
-                for i in 0..n {
-                    let j = plan.cell_group[i];
-                    if j >= n_g {
-                        continue;
-                    }
-                    let mut acc = 0.0;
-                    for s in 0..n_g {
-                        let p = plan.prob[[k, s, j]];
-                        if p > 0.0 {
-                            acc += p * recv_by_type[[i, s]];
-                        }
-                    }
-                    out[[i, k]] = acc * rec[i];
-                }
-            }
-            CellChatLrMode::HillSpatial => {
-                let recv = if let Some(cached) = field_cache.get(&lig_name) {
-                    cached.clone()
-                } else {
-                    let computed =
-                        received_ligand_field(xy, &lig_expr, radius, scale_factor, grid_factor);
-                    field_cache.insert(lig_name.clone(), computed.clone());
-                    computed
-                };
-                for i in 0..n {
-                    out[[i, k]] = hill_commun_prob(recv[i], rec[i], plan.kh, plan.hill_coef);
-                }
-            }
-            CellChatLrMode::SpatialProduct => {
+            CellChatLrMode::Spatial => {
                 let recv = if let Some(cached) = field_cache.get(&lig_name) {
                     cached.clone()
                 } else {
@@ -945,8 +857,6 @@ pub fn build_hybrid_lr_matrix_with_grid(
             }
             CellChatLrMode::Meanfield => {
                 // Flat-kernel received ligand: global mean of L (no spatial weights).
-                // Do not multiply by P — P already embeds group L and R (Hill), so
-                // P·L̄·R would double-count both sides vs spatial_product's L̃·R.
                 let l_mf = if !lig_expr.is_empty() {
                     lig_expr.mean().unwrap_or(0.0)
                 } else {
@@ -1090,8 +1000,8 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_weighted_uses_sender_specific_ligand() {
-        // Cells: sender A at x=0 with L=1; receivers B at x=1 with R=1.
+    fn hybrid_spatial_uses_neighborhood_ligand() {
+        // Nearby senders (x=0) vs receivers (x=1): spatial field > 0 on receivers.
         let xy = array![[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 0.0]];
         let expr = array![
             [1.0, 0.0], // A
@@ -1103,10 +1013,8 @@ mod tests {
         gene_to_idx.insert("L".into(), 0);
         gene_to_idx.insert("R".into(), 1);
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
-        let mut prob = Array3::<f64>::zeros((1, 2, 2));
-        prob[[0, 0, 1]] = 1.0; // only A→B
         let plan = CellChatLrPlan {
-            mode: CellChatLrMode::WeightedSpatial,
+            mode: CellChatLrMode::Spatial,
             kh: 0.5,
             hill_coef: 1.0,
             replace_lr_pairs: true,
@@ -1114,11 +1022,10 @@ mod tests {
             interactions: vec![inter],
             cell_group: vec![0, 0, 1, 1],
             group_names: vec!["A".into(), "B".into()],
-            prob,
+            prob: Array3::<f64>::zeros((1, 2, 2)),
             pair_names: vec!["L$R".into()],
         };
         let x = build_hybrid_lr_matrix(&plan, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
-        // Receivers (rows 2,3) should get positive signal; senders with R=0 get 0.
         assert!(x[[2, 0]] > 0.0);
         assert!(x[[3, 0]] > 0.0);
         assert_eq!(x[[0, 0]], 0.0);
@@ -1127,7 +1034,7 @@ mod tests {
 
     #[test]
     fn hybrid_meanfield_uses_global_ligand_not_space() {
-        // Distant senders (x=0) vs receivers (x=100): spatial product ~0, meanfield uses global mean L.
+        // Distant senders (x=0) vs receivers (x=100): spatial ~0, meanfield uses global mean L.
         let xy = array![[0.0, 0.0], [0.0, 0.0], [100.0, 0.0], [100.0, 0.0]];
         let expr = array![
             [2.0, 0.0],
@@ -1139,8 +1046,6 @@ mod tests {
         gene_to_idx.insert("L".into(), 0);
         gene_to_idx.insert("R".into(), 1);
         let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
-        let mut prob = Array3::<f64>::zeros((1, 2, 2));
-        prob[[0, 0, 1]] = 1.0;
         let plan_mf = CellChatLrPlan {
             mode: CellChatLrMode::Meanfield,
             kh: 0.5,
@@ -1150,18 +1055,17 @@ mod tests {
             interactions: vec![inter.clone()],
             cell_group: vec![0, 0, 1, 1],
             group_names: vec!["A".into(), "B".into()],
-            prob: prob.clone(),
+            prob: Array3::<f64>::zeros((1, 2, 2)),
             pair_names: vec!["L$R".into()],
         };
         let x_mf =
             build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
-        // global mean L = 1.0; receivers have R=1 → feature 1.0
         assert!((x_mf[[2, 0]] - 1.0).abs() < 1e-9);
         assert!((x_mf[[3, 0]] - 1.0).abs() < 1e-9);
-        assert_eq!(x_mf[[0, 0]], 0.0); // R=0 on senders
+        assert_eq!(x_mf[[0, 0]], 0.0);
 
         let plan_sp = CellChatLrPlan {
-            mode: CellChatLrMode::SpatialProduct,
+            mode: CellChatLrMode::Spatial,
             ..plan_mf
         };
         let x_sp =
@@ -1189,7 +1093,7 @@ mod tests {
         };
         let cfg = CellChatConfig {
             enabled: true,
-            lr_mode: CellChatLrMode::SpatialProduct,
+            lr_mode: CellChatLrMode::Spatial,
             ..Default::default()
         };
         let plan = CellChatLrPlan::from_selected(result, &[0], &cfg);
