@@ -2654,6 +2654,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     kh: plan.kh,
                     hill_coef: plan.hill_coef,
                     replace_lr_pairs: plan.replace_lr_pairs,
+                    min_cells: plan.min_cells,
                     interactions,
                     cell_group: plan.cell_group.clone(),
                     group_names: plan.group_names.clone(),

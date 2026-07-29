@@ -27,9 +27,12 @@ where \(L_i,R_j\) are group trimeans of those single genes (no complex geometric
 | `weighted_spatial` (default) | \(X_{c,k}=\sum_s P_{s\to\mathrm{type}(c)}^k\cdot\widetilde{L}_{c\leftarrow s}^{(k)}\cdot R_c^{(k)}\) |
 | `hill_spatial` | \(X_{c,k}=(\widetilde{L}_c R_c)/(K_h+\widetilde{L}_c R_c)\) on CellChat-selected pairs |
 | `spatial_product` | Classic \(\widetilde{L}_c\cdot R_c\), pair set from CellChat filters |
+| `meanfield` | CellChat received L (no spatial kernel): \(X_{c,k}=\big(\sum_s P_{s\to\mathrm{type}(c)}^k\,\bar{L}_s^{(k)}\big)\,R_c^{(k)}\) |
 
 \(\widetilde{L}_{c\leftarrow s}\) is the Gaussian received-ligand field using **only** cells of type \(s\).
+\(\bar{L}_s\) is the sender-type ligand trimean (CellChat aggregate).
 
+For a **fair A/B** of CellChat vs spatial received ligand, fix the CellChat pair set (`replace_lr_pairs`, `max_interactions`, filters) and compare `meanfield` vs `spatial_product` only.
 5. **Lasso** — same sparse group Lasso / optional CNN path as usual; LR columns are standard `Lig$Rec` strings.
 
 ## Config

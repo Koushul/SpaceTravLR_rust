@@ -68,7 +68,7 @@ use_tfl_modulators = true
 # Hybrid CellChat → SpaceTravLR LR terms (off by default).
 enabled = false
 # db_path = "data/cellchat_mouse.csv"
-# lr_mode: weighted_spatial | hill_spatial | spatial_product
+# lr_mode: weighted_spatial | hill_spatial | spatial_product | meanfield
 lr_mode = "weighted_spatial"
 kh = 0.5
 hill_coef = 1.0

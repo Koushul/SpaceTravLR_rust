@@ -6,7 +6,8 @@
 //! Lasso. Group-level \(P_{i\to j}^k\) alone is constant within a cluster and
 //! would be absorbed by the intercept; the hybrid therefore uses \(P\) to
 //! weight **type-stratified spatially received ligand** × local receptor
-//! (or a spatial Hill transform).
+//! (or a spatial Hill transform). For fair benchmarks, `meanfield` replaces
+//! spatial \(\widetilde{L}\) with CellChat-style type-level received ligand.
 
 use crate::config::expand_user_path;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -32,6 +33,10 @@ pub enum CellChatLrMode {
     HillSpatial,
     /// Current SpaceTravLR product \(\widetilde{L}_c\cdot R_c\), but pair set / filter from CellChat.
     SpatialProduct,
+    /// CellChat mean-field received ligand (no spatial kernel):
+    /// \(X_{c,k}=\big(\sum_s P_{s\to\mathrm{type}(c)}^k\,\bar{L}_s^{(k)}\big)\,R_c^{(k)}\)
+    /// with \(\bar{L}_s\) the sender-type ligand trimean. Same pair set as other modes.
+    Meanfield,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -632,6 +637,8 @@ pub struct CellChatLrPlan {
     pub kh: f64,
     pub hill_coef: f64,
     pub replace_lr_pairs: bool,
+    /// Min cells per group when computing mean-field ligand trimeans.
+    pub min_cells: usize,
     /// Selected interactions (already filtered).
     pub interactions: Vec<CellChatInteraction>,
     /// Group label per cell (aligned to training obs rows / xy).
@@ -662,6 +669,7 @@ impl CellChatLrPlan {
             kh: cfg.kh,
             hill_coef: cfg.hill_coef,
             replace_lr_pairs: cfg.replace_lr_pairs,
+            min_cells: cfg.min_cells,
             interactions,
             cell_group: Vec::new(),
             group_names: result.group_names,
@@ -759,6 +767,28 @@ fn received_ligand_field(
         None => calculate_weighted_ligands(xy, &lig, radius, scale_factor),
     };
     recv.column(0).to_owned()
+}
+
+/// Sender-type ligand trimeans \(\bar{L}_s\) (CellChat aggregate; ignores coordinates).
+fn group_ligand_trimeans(
+    ligand_expr: &Array1<f64>,
+    cell_group: &[usize],
+    n_groups: usize,
+    min_cells: usize,
+) -> Array1<f64> {
+    let mut buckets: Vec<Vec<f64>> = (0..n_groups).map(|_| Vec::new()).collect();
+    for (i, &g) in cell_group.iter().enumerate() {
+        if g < n_groups {
+            buckets[g].push(ligand_expr[i]);
+        }
+    }
+    let mut out = Array1::<f64>::zeros(n_groups);
+    for s in 0..n_groups {
+        if buckets[s].len() >= min_cells {
+            out[s] = tri_mean(&buckets[s]);
+        }
+    }
+    out
 }
 
 /// Build per-cell LR design columns for the plan's selected interactions.
@@ -904,6 +934,28 @@ pub fn build_hybrid_lr_matrix_with_grid(
                 };
                 for i in 0..n {
                     out[[i, k]] = recv[i] * rec[i];
+                }
+            }
+            CellChatLrMode::Meanfield => {
+                let lig_bar = group_ligand_trimeans(
+                    &lig_expr,
+                    &plan.cell_group,
+                    n_g,
+                    plan.min_cells.max(1),
+                );
+                for i in 0..n {
+                    let j = plan.cell_group[i];
+                    if j >= n_g {
+                        continue;
+                    }
+                    let mut acc = 0.0;
+                    for s in 0..n_g {
+                        let p = plan.prob[[k, s, j]];
+                        if p > 0.0 {
+                            acc += p * lig_bar[s];
+                        }
+                    }
+                    out[[i, k]] = acc * rec[i];
                 }
             }
         }
@@ -1060,6 +1112,7 @@ mod tests {
             kh: 0.5,
             hill_coef: 1.0,
             replace_lr_pairs: true,
+            min_cells: 1,
             interactions: vec![inter],
             cell_group: vec![0, 0, 1, 1],
             group_names: vec!["A".into(), "B".into()],
@@ -1072,6 +1125,50 @@ mod tests {
         assert!(x[[3, 0]] > 0.0);
         assert_eq!(x[[0, 0]], 0.0);
         assert_eq!(x[[1, 0]], 0.0);
+    }
+
+    #[test]
+    fn hybrid_meanfield_uses_group_ligand_not_space() {
+        // Distant senders (x=0) vs receivers (x=100): spatial product ~0, meanfield >0.
+        let xy = array![[0.0, 0.0], [0.0, 0.0], [100.0, 0.0], [100.0, 0.0]];
+        let expr = array![
+            [2.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ];
+        let mut gene_to_idx = HashMap::new();
+        gene_to_idx.insert("L".into(), 0);
+        gene_to_idx.insert("R".into(), 1);
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let mut prob = Array3::<f64>::zeros((1, 2, 2));
+        prob[[0, 0, 1]] = 1.0;
+        let plan_mf = CellChatLrPlan {
+            mode: CellChatLrMode::Meanfield,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            min_cells: 1,
+            interactions: vec![inter.clone()],
+            cell_group: vec![0, 0, 1, 1],
+            group_names: vec!["A".into(), "B".into()],
+            prob: prob.clone(),
+            pair_names: vec!["L$R".into()],
+        };
+        let x_mf =
+            build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
+        assert!(x_mf[[2, 0]] > 1.0); // ~2 * 1 * R
+        assert!(x_mf[[3, 0]] > 1.0);
+        assert_eq!(x_mf[[0, 0]], 0.0);
+
+        let plan_sp = CellChatLrPlan {
+            mode: CellChatLrMode::SpatialProduct,
+            ..plan_mf
+        };
+        let x_sp =
+            build_hybrid_lr_matrix(&plan_sp, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
+        assert!(x_sp[[2, 0]] < 1e-6);
+        assert!(x_sp[[3, 0]] < 1e-6);
     }
 
     #[test]

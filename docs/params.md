@@ -69,7 +69,7 @@ Off by default. When `enabled = true`, SpaceTravLR computes CellChat-style commu
 |-----------|----------|--------------|---------|-----------|
 | `enabled` | `false` | Master switch for the hybrid path. | `true` to replace/weight LR with CellChat. | Leave off for stock Gaussian \(L\times R\). |
 | `db_path` |  | Path to `cellchat_{species}.csv`. | Custom curated DB. | Auto-resolve from `data/` / `SPACETRAVLR_DATA_DIR`. |
-| `lr_mode` | `weighted_spatial` | How \(P\) enters per-cell LR features. | `hill_spatial` for saturating local Hill; `spatial_product` for classic product on CellChat pairs. | — |
+| `lr_mode` | `weighted_spatial` | How \(P\) / received L enters per-cell LR features. | `hill_spatial` for saturating local Hill; `spatial_product` for classic product on CellChat pairs; `meanfield` for CellChat type-level received L × local R (fair A/B vs `spatial_product`). | — |
 | `kh` | `0.5` | Half-saturation in the Hill term. | Harder to saturate. | Easier saturation. |
 | `hill_coef` | `1.0` | Hill coefficient \(n\). | Steeper switch. | Near-linear mass action. |
 | `min_cells` | `10` | Drop groups smaller than this. | More groups kept. | Stricter group filter. |
