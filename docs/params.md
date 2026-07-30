@@ -68,17 +68,20 @@ Used whenever LR modulators are on (`use_lr_modulators` / `train_modulators` inc
 |-----------|----------|--------------|---------|-----------|
 | `db_path` |  | Path to `cellchat_{species}.csv`. | Custom curated DB. | Auto-resolve from `data/` / `SPACETRAVLR_DATA_DIR`. |
 | `mode` | `spatial` | Received-ligand aggregator (`lr_mode` alias). | `meanfield` = global mean \(L\times R\). | `spatial` = Gaussian \(\widetilde{L}R\) (needs `obsm` spatial coords). |
+| `pair_selection` | `prob` | How LR pairs are chosen before Lasso. | `expressed` = all present pairs ranked by mean \(L\times R\`. | `prob` = CellChat \(P\) rank/filter. |
+| `received_ligand_norm` | `global_n` | How spatial weights reduce to \(\widetilde L\). | `kernel_mass` = \(Σ w L/Σ w\) (fair vs meanfield). | `global_n` = legacy `(1/N)Σ w L`. |
 | `weighted_ligand_scale_factor` | `1.0` | Linear multiplier on Gaussian weights in received-ligand aggregation. | Stronger effective paracrine input per neighbor. | Weaker paracrine signal (before normalization). |
-| `ligand_grid_factor` |  | Grid spacing as fraction of `[spatial].radius` for approximate received ligands. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |
+| `ligand_grid_factor` |  | Grid spacing as fraction of `[spatial].radius` for approximate received ligands. Ignored for `kernel_mass` training path. | Larger (e.g. `0.5`) → faster, ~few % error. | Smaller or omit → exact, slower on 5k+ cells. |
 | `kh` | `0.5` | Half-saturation in the Hill term. | Harder to saturate. | Easier saturation. |
 | `hill_coef` | `1.0` | Hill coefficient \(n\). | Steeper switch. | Near-linear mass action. |
 | `min_cells` | `10` | Drop groups smaller than this. | More groups kept. | Stricter group filter. |
 | `population_size_weight` | `false` | Multiply \(P\) by sender×receiver fractions. | Emphasize abundant populations. | Expression-only \(P\). |
 | `n_perm` | `0` | Label-shuffle permutations for p-values (`0` = skip). | e.g. `100` for significance testing. | Keep `0` for speed. |
 | `p_threshold` | `0.05` | Keep interactions with min p ≤ this (needs `n_perm > 0`). | More pairs. | Stricter significance. |
-| `min_prob` | `0.0` | Drop interactions whose max \(P\) is below this. | Stronger-only edges. | Keep weak links. |
+| `min_prob` | `0.0` | Drop interactions whose max \(P\) is below this (ignored when `pair_selection = expressed`). | Stronger-only edges. | Keep weak links. |
 | `replace_lr_pairs` | `true` | Replace GRN `lr` edges with probability-selected `Lig$Rec` units (complexes pre-expanded). | Force DB pair set. | `false` to keep GRN pairs (probs still written for inspection). |
-| `max_interactions` | `200` | Cap after ranking by max \(P\). | Broader LR block. | Faster, sparser. |
+| `max_interactions` | `200` | Cap after ranking by max \(P\) or mean \(L\times R\). | Broader LR block. | Faster, sparser. |
+| `write_ligand_diagnostics` | `true` | Write `ligand_field_L_diagnostics.csv` (meanfield vs spatial \(L\)). | Keep on for A/B audits. | `false` to skip I/O. |
 | `signaling_types` |  | Restrict to classes (e.g. `Secreted Signaling`). | Focus paracrine. | Empty = all classes. |
 | `random_seed` | `42` | Permutation RNG seed. | — | — |
 
@@ -96,6 +99,7 @@ Lasso runs **per target gene × cluster** (or per cell in export semantics) befo
 | `tol` | `1e-4` | Relative convergence tolerance. | Tighter convergence. | Looser, faster stop. |
 | `scale_modulators` | `true` | Column-wise ÷ std (no mean centering), CellOracle-style. | Keep on when modulator scales differ widely. | `false` if you want raw-scale optimization. |
 | `unscale_betas_on_export` | `false` | Divide exported β by column std to return to expression units. | `true` for interpretable coefficients in feather files. | `false` to keep scaled-space β (compare to CellOracle exports). |
+| `export_scaled_betas` | `true` | Also write `{gene}_betadata_scaled.feather` when unscaling on export. | Keep on for meanfield vs spatial coeff A/B. | `false` to skip the extra file. |
 | `parallel_lasso_clusters` | `false` | Rayon parallel over clusters within a gene (independent of `n_parallel`). | `true` when many clusters × one gene is slow. | `false` for lowest memory / simplest logs. |
 | `gram_override` | `true` | `true` = Gram-matrix FISTA; `false` = residual gradients; omit key for auto when `n > p`. | Force Gram on large `n` for speed. | `false` when Gram path is unstable. |
 

@@ -1494,4 +1494,118 @@ mod tests {
         assert!(units.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr1"));
         assert!(units.iter().any(|i| i.pair_name == "Tgfb1$Tgfbr2"));
     }
+
+    #[test]
+    fn expressed_selection_ignores_min_prob_and_ranks_by_score() {
+        let inter_a = CellChatInteraction::from_row("La", "Ra", "P", "Secreted Signaling");
+        let inter_b = CellChatInteraction::from_row("Lb", "Rb", "P", "Secreted Signaling");
+        let mut prob = Array3::<f64>::zeros((2, 1, 1));
+        prob[[0, 0, 0]] = 0.01; // below a typical min_prob
+        prob[[1, 0, 0]] = 0.9;
+        let result = CellChatProbResult {
+            group_names: vec!["A".into()],
+            interactions: vec![inter_a, inter_b],
+            prob,
+            pvalues: None,
+            group_counts: vec![10],
+        };
+        let cfg_prob = LigandFieldConfig {
+            pair_selection: PairSelectionMode::Prob,
+            min_prob: 0.05,
+            max_interactions: Some(10),
+            ..Default::default()
+        };
+        let keep_prob = select_interactions(&result, &cfg_prob);
+        assert_eq!(keep_prob, vec![1]);
+
+        let cfg_expr = LigandFieldConfig {
+            pair_selection: PairSelectionMode::Expressed,
+            min_prob: 0.05,
+            max_interactions: Some(1),
+            ..Default::default()
+        };
+        // Higher expression product for interaction 0 → selected despite low P.
+        let scores = vec![10.0, 1.0];
+        let keep_expr = select_interactions_with_expr_scores(&result, &cfg_expr, Some(&scores));
+        assert_eq!(keep_expr, vec![0]);
+    }
+
+    #[test]
+    fn kernel_mass_spatial_matches_meanfield_when_ligand_uniform() {
+        // Uniform L → kernel-mass neighborhood mean equals global mean.
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [10.0, 0.0], [11.0, 0.0]];
+        let expr = array![
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+        ];
+        let mut gene_to_idx = HashMap::new();
+        gene_to_idx.insert("L".into(), 0);
+        gene_to_idx.insert("R".into(), 1);
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let plan_sp = LigandFieldPlan {
+            mode: LigandFieldMode::Spatial,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::KernelMass,
+            interactions: vec![inter.clone()],
+            cell_group: vec![0, 0, 1, 1],
+            group_names: vec!["A".into(), "B".into()],
+            prob: Array3::<f64>::zeros((1, 2, 2)),
+            pair_names: vec!["L$R".into()],
+            received_ligand_cache: None,
+        };
+        let plan_mf = LigandFieldPlan {
+            mode: LigandFieldMode::Meanfield,
+            received_ligand_norm: ReceivedLigandNorm::KernelMass,
+            ..plan_sp.clone()
+        };
+        let x_sp = build_hybrid_lr_matrix(&plan_sp, &xy, &expr, &gene_to_idx, 2.0, 1.0).unwrap();
+        let x_mf = build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 2.0, 1.0).unwrap();
+        for i in 0..4 {
+            assert_abs_diff_eq!(x_sp[[i, 0]], x_mf[[i, 0]], epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn precompute_cache_reused_by_hybrid_build() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0]];
+        let expr = array![[2.0, 1.0], [0.0, 1.0]];
+        let mut gene_to_idx = HashMap::new();
+        gene_to_idx.insert("L".into(), 0);
+        gene_to_idx.insert("R".into(), 1);
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let mut plan = LigandFieldPlan {
+            mode: LigandFieldMode::Meanfield,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
+            interactions: vec![inter],
+            cell_group: vec![0, 1],
+            group_names: vec!["A".into(), "B".into()],
+            prob: Array3::<f64>::zeros((1, 2, 2)),
+            pair_names: vec!["L$R".into()],
+            received_ligand_cache: None,
+        };
+        precompute_received_ligand_cache(
+            &mut plan,
+            &xy,
+            &expr,
+            &gene_to_idx,
+            1.0,
+            1.0,
+            None,
+        )
+        .unwrap();
+        assert!(plan.received_ligand_cache.as_ref().unwrap().contains_key("L"));
+        let x = build_hybrid_lr_matrix(&plan, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
+        // mean(L)=1 → X = 1 * R
+        assert_abs_diff_eq!(x[[0, 0]], 1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(x[[1, 0]], 1.0, epsilon = 1e-12);
+    }
 }
