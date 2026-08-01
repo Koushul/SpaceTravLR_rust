@@ -1,0 +1,11 @@
+[package]
+name = "spacetravlr-cnn-pack"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+ndarray = { version = "0.16", default-features = false, features = ["std"] }
+ndarray-npy = { version = "0.9", default-features = false, features = ["npz"] }
+spacetravlr-cnn-wasm = { path = "../spacetravlr-cnn-wasm", default-features = false }

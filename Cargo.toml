@@ -5,6 +5,8 @@ members = [
     "crates/enrichr",
     "crates/rctd-core",
     "crates/spacetravlr-rctd",
+    "crates/spacetravlr-cnn-wasm",
+    "crates/spacetravlr-cnn-pack",
 ]
 resolver = "2"
 
@@ -79,6 +81,15 @@ umap-lab = [
     "dep:tracing-subscriber",
     "dep:tempfile",
 ]
+cnn-web = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:spacetravlr-cnn-wasm",
+    "dep:spacetravlr-cnn-pack",
+]
 self-update = [
     "dep:ureq",
     "dep:tar",
@@ -111,6 +122,11 @@ required-features = ["spatial-viewer"]
 name = "umap_lab"
 path = "src/bin/umap_lab.rs"
 required-features = ["umap-lab"]
+
+[[bin]]
+name = "spacetravlr-cnn-web"
+path = "src/bin/spacetravlr_cnn_web.rs"
+required-features = ["cnn-web"]
 
 [[bin]]
 name = "cnn_train_bench"
@@ -205,6 +221,8 @@ tar = { version = "0.4", optional = true }
 sha2 = { version = "0.10", optional = true }
 semver = { version = "1", optional = true }
 spacetravlr-rctd = { path = "crates/spacetravlr-rctd", optional = true, default-features = false }
+spacetravlr-cnn-wasm = { path = "crates/spacetravlr-cnn-wasm", optional = true, default-features = false }
+spacetravlr-cnn-pack = { path = "crates/spacetravlr-cnn-pack", optional = true }
 colored = "2.2"
 viuer = { version = "0.11", features = ["print-file", "icy_sixel"], optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
