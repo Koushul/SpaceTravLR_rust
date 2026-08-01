@@ -9,3 +9,8 @@ anyhow = "1"
 ndarray = { version = "0.16", default-features = false, features = ["std"] }
 ndarray-npy = { version = "0.9", default-features = false, features = ["npz"] }
 spacetravlr-cnn-wasm = { path = "../spacetravlr-cnn-wasm", default-features = false }
+
+[dev-dependencies]
+burn = { version = "0.16.1", default-features = false, features = ["std", "wgpu", "autodiff"] }
+burn-autodiff = { version = "0.16.1" }
+spacetravlr-cnn-wasm = { path = "../spacetravlr-cnn-wasm", default-features = false, features = ["webgpu"] }

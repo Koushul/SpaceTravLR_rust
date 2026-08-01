@@ -8290,6 +8290,8 @@ name = "spacetravlr-cnn-pack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "burn 0.16.1",
+ "burn-autodiff 0.16.1",
  "ndarray 0.16.1",
  "ndarray-npy",
  "spacetravlr-cnn-wasm",
@@ -8306,12 +8308,14 @@ dependencies = [
  "getrandom 0.2.17",
  "js-sys",
  "ndarray 0.16.1",
+ "pollster",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

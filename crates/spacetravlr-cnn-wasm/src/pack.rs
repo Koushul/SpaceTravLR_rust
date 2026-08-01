@@ -92,6 +92,13 @@ pub struct GeneTrainResult {
     pub gene: String,
     pub clusters: Vec<ClusterTrainResult>,
     pub wall_ms: u32,
+    /// `"webgpu"` or `"ndarray"`
+    #[serde(default = "default_backend_name")]
+    pub backend: String,
+}
+
+fn default_backend_name() -> String {
+    "ndarray".into()
 }
 
 pub fn encode_pack(pack: &CnnGeneTrainPack) -> Result<Vec<u8>, bincode::Error> {

@@ -1,5 +1,11 @@
 import "./style.css";
-import init, { train_pack, smoke_train_ms } from "../pkg/spacetravlr_cnn_wasm.js";
+import init, {
+  train_pack,
+  smoke_train_ms,
+  init_webgpu,
+  use_ndarray_backend,
+  active_backend_name,
+} from "../pkg/spacetravlr_cnn_wasm.js";
 
 type Info = {
   h5ad: string;
@@ -22,15 +28,19 @@ type GeneResult = {
   gene: string;
   clusters: ClusterResult[];
   wall_ms: number;
+  backend?: string;
 };
+
+let computeBackend = "ndarray";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
 app.innerHTML = `
   <h1 class="brand">SpaceTravLR</h1>
   <p class="lede">
-    Browser WebAssembly CNN trainer (Burn NdArray). The server prepares Lasso anchors and
-    spatial maps from your AnnData; Adam epochs run in WASM in this tab.
+    Browser WebAssembly CNN trainer. Prefers <strong>WebGPU</strong> when the browser
+    exposes it; otherwise Burn <strong>NdArray</strong> (CPU WASM). The server prepares
+    Lasso anchors and spatial maps; Adam epochs run in this tab.
   </p>
   <section class="panel">
     <div class="row">
@@ -76,6 +86,18 @@ function setBusy(busy: boolean) {
   btnTrain.disabled = busy;
 }
 
+function refreshMeta(info?: Info) {
+  const h5 = info?.h5ad ?? metaEl.dataset.h5ad ?? "";
+  const sd = info?.spatial_dim ?? metaEl.dataset.spatialDim ?? "?";
+  const ml = info?.max_ligands ?? metaEl.dataset.maxLigands ?? "?";
+  if (info) {
+    metaEl.dataset.h5ad = info.h5ad;
+    metaEl.dataset.spatialDim = String(info.spatial_dim);
+    metaEl.dataset.maxLigands = String(info.max_ligands);
+  }
+  metaEl.textContent = `compute=${computeBackend} · spatial_dim=${sd} · max_ligands=${ml} · ${h5}`;
+}
+
 function renderResults(genes: GeneResult[]) {
   resultsEl.innerHTML = genes
     .map((g) => {
@@ -93,9 +115,28 @@ function renderResults(genes: GeneResult[]) {
           return `<div class="gene-card"><h3>${g.gene} · cluster ${c.cluster_id} · ${c.n_cells} cells${c.diverged ? " · DIVERGED" : ""}</h3><p class="meta">${c.wall_ms} ms · MSE ${first?.toFixed(4) ?? "—"} → ${last?.toFixed(4) ?? "—"}</p><div class="bars">${bars}</div></div>`;
         })
         .join("");
-      return `<div><h2 style="font-size:1.15rem;margin:1.2rem 0 0.2rem">${g.gene} <span class="meta">(${g.wall_ms} ms total)</span></h2>${cards}</div>`;
+      return `<div><h2 style="font-size:1.15rem;margin:1.2rem 0 0.2rem">${g.gene} <span class="meta">(${g.wall_ms} ms · ${g.backend ?? computeBackend})</span></h2>${cards}</div>`;
     })
     .join("");
+}
+
+async function selectComputeBackend() {
+  const nav = navigator as Navigator & { gpu?: unknown };
+  if (!nav.gpu) {
+    use_ndarray_backend();
+    computeBackend = "ndarray";
+    log("WebGPU not available in this browser — using NdArray (CPU WASM).");
+    return;
+  }
+  try {
+    const name = await init_webgpu();
+    computeBackend = name;
+    log(`WebGPU initialized (Burn WGPU). active=${active_backend_name()}`);
+  } catch (e) {
+    use_ndarray_backend();
+    computeBackend = "ndarray";
+    log(`WebGPU init failed (${e}) — falling back to NdArray.`);
+  }
 }
 
 async function loadInfo() {
@@ -103,24 +144,26 @@ async function loadInfo() {
   const info = (await r.json()) as Info;
   genesInput.value = info.default_genes.join(",");
   epochsInput.value = String(info.wasm_epochs);
-  metaEl.textContent = `${info.backend} · spatial_dim=${info.spatial_dim} · max_ligands=${info.max_ligands} · ${info.h5ad}`;
+  refreshMeta(info);
 }
 
 async function main() {
   try {
     await init();
     log("WASM module loaded.");
+    await selectComputeBackend();
     await loadInfo();
+    refreshMeta();
   } catch (e) {
     metaEl.textContent = `WASM init failed: ${e}`;
     log(String(e));
   }
 
-  btnSmoke.addEventListener("click", () => {
+  btnSmoke.addEventListener("click", async () => {
     setBusy(true);
     try {
-      const ms = smoke_train_ms();
-      log(`WASM smoke train: ${ms} ms`);
+      const ms = await smoke_train_ms();
+      log(`WASM smoke (${active_backend_name()}): ${ms} ms`);
     } catch (e) {
       log(`smoke failed: ${e}`);
     } finally {
@@ -163,7 +206,7 @@ async function main() {
       .map((g) => g.trim())
       .filter(Boolean);
     const epochs = Number(epochsInput.value) || 8;
-    log(`Preparing + WASM-training ${genes.join(", ")} for ${epochs} epochs…`);
+    log(`Preparing + WASM-training (${active_backend_name()}) ${genes.join(", ")} for ${epochs} epochs…`);
     try {
       const prep = await fetch("/api/prepare", {
         method: "POST",
@@ -178,11 +221,13 @@ async function main() {
         const pr = await fetch(`/api/pack?gene=${encodeURIComponent(gene)}`);
         if (!pr.ok) throw new Error(await pr.text());
         const buf = new Uint8Array(await pr.arrayBuffer());
-        log(`  ${gene}: pack ${buf.byteLength} bytes → WASM train…`);
+        log(`  ${gene}: pack ${buf.byteLength} bytes → ${active_backend_name()} train…`);
         const t0 = performance.now();
-        const result = train_pack(buf) as GeneResult;
+        const result = (await train_pack(buf)) as GeneResult;
         const dt = Math.round(performance.now() - t0);
-        log(`  ${gene}: done in ${dt} ms (wasm wall ${result.wall_ms} ms), ${result.clusters.length} clusters`);
+        log(
+          `  ${gene}: done in ${dt} ms (wasm wall ${result.wall_ms} ms, backend=${result.backend ?? active_backend_name()}), ${result.clusters.length} clusters`,
+        );
         out.push(result);
       }
       renderResults(out);

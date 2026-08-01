@@ -3,10 +3,11 @@ use crate::pack::{
     ClusterTrainResult, CnnClusterPack, CnnGeneTrainPack, CnnTrainHyperparams, GeneTrainResult,
 };
 use burn::backend::NdArray;
+#[cfg(not(target_arch = "wasm32"))]
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::decay::WeightDecayConfig;
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::{ElementConversion, Tensor, backend::Backend};
+use burn::tensor::{ElementConversion, Tensor, backend::AutodiffBackend, backend::Backend};
 use burn_autodiff::Autodiff;
 use ndarray::{Array1, Array2, Array4};
 use rand::seq::SliceRandom;
@@ -16,7 +17,7 @@ use rand_chacha::rand_core::SeedableRng;
 #[cfg(target_arch = "wasm32")]
 use js_sys;
 
-type TrainBackend = Autodiff<NdArray<f32, i32>>;
+type NdArrayTrain = Autodiff<NdArray<f32, i32>>;
 
 #[cfg(target_arch = "wasm32")]
 fn now_ms() -> u64 {
@@ -107,9 +108,13 @@ fn tensor1<B: Backend>(a: &Array1<f32>, device: &B::Device) -> Tensor<B, 1> {
     Tensor::from_data(burn::tensor::TensorData::new(data, [a.len()]), device)
 }
 
-fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> ClusterTrainResult {
+/// Async train loop — required on wasm WebGPU (`into_scalar` is sync-blocked there).
+pub async fn train_one_cluster_async<B: AutodiffBackend>(
+    pack: &CnnClusterPack,
+    hp: &CnnTrainHyperparams,
+    device: &B::Device,
+) -> ClusterTrainResult {
     let t0 = now_ms();
-    let device = Default::default();
     let n = pack.n_cells as usize;
     let n_mod = pack.n_modulators as usize;
     let n_clust = pack.n_clusters as usize;
@@ -124,16 +129,16 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
     let sf = Array2::from_shape_vec((n, n_clust), pack.spatial_features.clone()).expect("sf shape");
     let y = Array1::from_vec(pack.y.clone());
 
-    let anchors = Tensor::<TrainBackend, 1>::from_data(
+    let anchors = Tensor::<B, 1>::from_data(
         burn::tensor::TensorData::new(pack.anchors.clone(), [pack.anchors.len()]),
-        &device,
+        device,
     );
     let cfg = CellularNicheNetworkConfig {
         n_modulators: n_mod,
         n_clusters: n_clust,
         vision_in_channels: ch.max(1),
     };
-    let mut model = cfg.init::<TrainBackend>(&device, anchors, hp.output_activation);
+    let mut model = cfg.init::<B>(device, anchors, hp.output_activation);
 
     let mut adam = AdamConfig::new()
         .with_beta_1(hp.adam_beta_1)
@@ -143,9 +148,18 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
         adam = adam.with_weight_decay(Some(WeightDecayConfig::new(wd)));
     }
     if let Some(gc) = hp.grad_clip_norm {
-        adam = adam.with_grad_clipping(Some(GradientClippingConfig::Norm(gc)));
+        // Norm clipping reads the gradient norm with sync `into_scalar`, which panics on
+        // WASM WebGPU. Skip clipping in the browser; native Metal/Vulkan keep it.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            adam = adam.with_grad_clipping(Some(GradientClippingConfig::Norm(gc)));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = gc;
+        }
     }
-    let mut optim = adam.init::<TrainBackend, CellularNicheNetwork<TrainBackend>>();
+    let mut optim = adam.init::<B, CellularNicheNetwork<B>>();
     let mse_loss = burn::nn::loss::MseLoss::new();
 
     let bs_eff = if hp.cnn_minibatch_size == 0 {
@@ -160,7 +174,7 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
     let min_ep = hp.cnn_early_stop_min_epochs as usize;
     let mut best_mse = f32::INFINITY;
     let mut no_improve = 0usize;
-    let mut best_model: Option<CellularNicheNetwork<TrainBackend>> = None;
+    let mut best_model: Option<CellularNicheNetwork<B>> = None;
 
     for epoch in 0..epochs {
         let lr = cnn_lr_for_epoch(hp, epoch);
@@ -179,7 +193,7 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
         };
 
         let mut epoch_mse_den = 0.0f32;
-        let mut epoch_mse_acc = Tensor::<TrainBackend, 1>::zeros([1], &device);
+        let mut epoch_mse_acc = Tensor::<B, 1>::zeros([1], device);
         let mut batch_in_epoch = 0usize;
         let mut pos = 0usize;
         while pos < n && batch_in_epoch < max_batches_from_cells {
@@ -193,15 +207,14 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
             let sf_b = gather_rows_2(&sf, batch_idx);
             let y_b = gather_rows_1(&y, batch_idx);
 
-            let sm_t = tensor4::<TrainBackend>(&sm_b, &device);
-            let x_t = tensor2::<TrainBackend>(&x_b, &device);
-            let sf_t = tensor2::<TrainBackend>(&sf_b, &device);
-            let y_t = tensor1::<TrainBackend>(&y_b, &device);
+            let sm_t = tensor4::<B>(&sm_b, device);
+            let x_t = tensor2::<B>(&x_b, device);
+            let sf_t = tensor2::<B>(&sf_b, device);
+            let y_t = tensor1::<B>(&y_b, device);
 
             let betas = model.get_betas(sm_t, sf_t);
             let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), x_t);
-            let y_loss =
-                mse_loss.forward(y_pred.clone(), y_t, burn::nn::loss::Reduction::Mean);
+            let y_loss = mse_loss.forward(y_pred.clone(), y_t, burn::nn::loss::Reduction::Mean);
             let mut total = y_loss.clone();
             if hp.mean_beta_lasso_prior_weight > 0.0 {
                 let mean_betas = betas.mean_dim(0);
@@ -215,12 +228,11 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
             if hp.lasso_pred_align_weight > 0.0 {
                 if let Some(ref yl) = pack.y_lasso {
                     let yl_b: Vec<f32> = batch_idx.iter().map(|&i| yl[i]).collect();
-                    let yl_t = Tensor::<TrainBackend, 1>::from_data(
+                    let yl_t = Tensor::<B, 1>::from_data(
                         burn::tensor::TensorData::new(yl_b, [batch_n]),
-                        &device,
+                        device,
                     );
-                    let align =
-                        mse_loss.forward(y_pred, yl_t, burn::nn::loss::Reduction::Mean);
+                    let align = mse_loss.forward(y_pred, yl_t, burn::nn::loss::Reduction::Mean);
                     total = total + align.mul_scalar(hp.lasso_pred_align_weight);
                 }
             }
@@ -237,7 +249,7 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
         }
 
         let mse = if epoch_mse_den > 0.0 {
-            let sum = epoch_mse_acc.into_scalar().elem::<f32>();
+            let sum = epoch_mse_acc.into_scalar_async().await.elem::<f32>();
             finite_or_zero(sum / epoch_mse_den)
         } else {
             f32::NAN
@@ -273,20 +285,79 @@ fn train_one_cluster(pack: &CnnClusterPack, hp: &CnnTrainHyperparams) -> Cluster
     }
 }
 
-pub fn train_gene_pack(pack: &CnnGeneTrainPack) -> GeneTrainResult {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn train_one_cluster<B: AutodiffBackend>(
+    pack: &CnnClusterPack,
+    hp: &CnnTrainHyperparams,
+    device: &B::Device,
+) -> ClusterTrainResult {
+    pollster::block_on(train_one_cluster_async::<B>(pack, hp, device))
+}
+
+pub async fn train_gene_pack_on_async<B: AutodiffBackend>(
+    pack: &CnnGeneTrainPack,
+    device: &B::Device,
+    backend_name: &str,
+) -> GeneTrainResult {
     let t0 = now_ms();
     let mut clusters = Vec::with_capacity(pack.clusters.len());
     for c in &pack.clusters {
-        clusters.push(train_one_cluster(c, &pack.hyperparams));
+        clusters.push(train_one_cluster_async::<B>(c, &pack.hyperparams, device).await);
     }
     GeneTrainResult {
         gene: pack.gene.clone(),
         clusters,
         wall_ms: elapsed_ms(t0),
+        backend: backend_name.to_string(),
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn train_gene_pack_on<B: AutodiffBackend>(
+    pack: &CnnGeneTrainPack,
+    device: &B::Device,
+    backend_name: &str,
+) -> GeneTrainResult {
+    pollster::block_on(train_gene_pack_on_async::<B>(pack, device, backend_name))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn train_gene_pack(pack: &CnnGeneTrainPack) -> GeneTrainResult {
+    let device = Default::default();
+    train_gene_pack_on::<NdArrayTrain>(pack, &device, "ndarray")
+}
+
+pub async fn train_gene_pack_async(pack: &CnnGeneTrainPack) -> GeneTrainResult {
+    let device = Default::default();
+    train_gene_pack_on_async::<NdArrayTrain>(pack, &device, "ndarray").await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn train_gene_pack_bytes(bytes: &[u8]) -> Result<GeneTrainResult, String> {
     let pack = crate::pack::decode_pack(bytes).map_err(|e| e.to_string())?;
     Ok(train_gene_pack(&pack))
+}
+
+pub async fn train_gene_pack_bytes_async(bytes: &[u8]) -> Result<GeneTrainResult, String> {
+    let pack = crate::pack::decode_pack(bytes).map_err(|e| e.to_string())?;
+    Ok(train_gene_pack_async(&pack).await)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn train_gene_pack_bytes_on<B: AutodiffBackend>(
+    bytes: &[u8],
+    device: &B::Device,
+    backend_name: &str,
+) -> Result<GeneTrainResult, String> {
+    let pack = crate::pack::decode_pack(bytes).map_err(|e| e.to_string())?;
+    Ok(train_gene_pack_on::<B>(&pack, device, backend_name))
+}
+
+pub async fn train_gene_pack_bytes_on_async<B: AutodiffBackend>(
+    bytes: &[u8],
+    device: &B::Device,
+    backend_name: &str,
+) -> Result<GeneTrainResult, String> {
+    let pack = crate::pack::decode_pack(bytes).map_err(|e| e.to_string())?;
+    Ok(train_gene_pack_on_async::<B>(&pack, device, backend_name).await)
 }

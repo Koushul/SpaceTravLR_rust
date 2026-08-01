@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>WebGPU smoke</title></head>
+  <body>
+    <pre id="out">starting…</pre>
+    <script type="module">
+      const out = document.getElementById("out");
+      const lines = [];
+      function log(s) {
+        lines.push(String(s));
+        out.textContent = lines.join("\n");
+        console.log(s);
+      }
+      try {
+        const {
+          default: init,
+          init_webgpu,
+          use_ndarray_backend,
+          active_backend_name,
+          smoke_train_ms,
+          webgpu_available,
+        } = await import("./pkg/spacetravlr_cnn_wasm.js");
+        await init();
+        log(`wasm loaded; navigator.gpu=${!!navigator.gpu}; webgpu_available=${webgpu_available()}`);
+        if (navigator.gpu) {
+          try {
+            const backend = await init_webgpu();
+            log(`init_webgpu ok → ${backend}`);
+          } catch (e) {
+            use_ndarray_backend();
+            log(`init_webgpu failed → ndarray (${e})`);
+          }
+        } else {
+          use_ndarray_backend();
+          log("no navigator.gpu → ndarray");
+        }
+        const t0 = performance.now();
+        const ms = await smoke_train_ms();
+        const host = Math.round(performance.now() - t0);
+        log(`smoke_train_ms=${ms} host_ms=${host} active=${active_backend_name()}`);
+        window.__SMOKE__ = {
+          ok: true,
+          backend: active_backend_name(),
+          wall_ms: ms,
+          host_ms: host,
+          webgpu_available: webgpu_available(),
+        };
+      } catch (e) {
+        log(`FATAL ${e}`);
+        window.__SMOKE__ = { ok: false, error: String(e) };
+      }
+    </script>
+  </body>
+</html>
