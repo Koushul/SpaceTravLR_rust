@@ -43,6 +43,9 @@ scripts/*.py
 PIIS0092867425005720.pdf
 data/geo_perturbseq/
 data/hf_perturbmulti/
+data/anndata/
+docs/tutorials/marimo/__marimo__/
+docs/tutorials/marimo/site/
 perturb_multi_imputation/
 snrna_human_tonsil_2026-04-20/
 notebooks/
