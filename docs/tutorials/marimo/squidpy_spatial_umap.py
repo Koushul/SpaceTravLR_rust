@@ -19,7 +19,6 @@ def _():
     import json
     import sys
     from pathlib import Path
-    from urllib.request import urlopen
 
     import marimo as mo
     import matplotlib.pyplot as plt
@@ -27,7 +26,7 @@ def _():
 
     IN_BROWSER = sys.platform == "emscripten"
     DATA_REL = "visium_demo"
-    return DATA_REL, IN_BROWSER, Path, io, json, mo, np, plt, urlopen
+    return DATA_REL, IN_BROWSER, Path, io, json, mo, np, plt
 
 
 @app.cell
@@ -51,13 +50,50 @@ hosted WASM notebook stays interactive without those packages in the browser.
 
 
 @app.cell
-def _(DATA_REL, Path, io, json, mo, np, urlopen):
-    def read_bytes(name: str) -> bytes:
+async def _(DATA_REL, IN_BROWSER, Path, io, json, mo, np):
+    async def fetch_bytes(name: str) -> bytes:
         rel = f"{DATA_REL}/{name}"
-        notebook_dir = mo.notebook_dir()
+        errors = []
+
+        if IN_BROWSER:
+            from pyodide.http import pyfetch
+
+            urls = []
+            loc = mo.notebook_location()
+            if loc is not None:
+                loc_str = str(loc).rstrip("/")
+                if loc_str.startswith(("http://", "https://")):
+                    urls.append(f"{loc_str}/public/{rel}")
+            urls.extend(
+                [
+                    f"./public/{rel}",
+                    f"public/{rel}",
+                    f"/public/{rel}",
+                ]
+            )
+            for url in urls:
+                try:
+                    resp = await pyfetch(url)
+                    if getattr(resp, "ok", True) is False:
+                        errors.append(f"{url}: HTTP {getattr(resp, 'status', '?')}")
+                        continue
+                    data = await resp.bytes()
+                    if data:
+                        return bytes(data)
+                    errors.append(f"{url}: empty body")
+                except Exception as exc:
+                    errors.append(f"{url}: {exc}")
+            raise FileNotFoundError(
+                f"Could not fetch public/{rel} in WASM ({'; '.join(errors[-5:])})"
+            )
+
         candidates = []
+        notebook_dir = mo.notebook_dir()
         if notebook_dir is not None:
             candidates.append(Path(notebook_dir) / "public" / rel)
+        loc = mo.notebook_location()
+        if loc is not None and not str(loc).startswith(("http://", "https://")):
+            candidates.append(Path(str(loc)) / "public" / rel)
         candidates.extend(
             [
                 Path("public") / rel,
@@ -66,37 +102,19 @@ def _(DATA_REL, Path, io, json, mo, np, urlopen):
             ]
         )
         for path in candidates:
-            try:
-                if path.is_file():
-                    return path.read_bytes()
-            except OSError:
-                pass
-        for url in (f"./public/{rel}", f"/public/{rel}", f"public/{rel}"):
-            try:
-                with urlopen(url) as resp:
-                    return resp.read()
-            except Exception:
-                continue
+            if path.is_file():
+                return path.read_bytes()
+            errors.append(f"missing {path}")
         raise FileNotFoundError(
-            f"Could not load public/{rel}. Run prepare_visium_demo.py first."
+            f"Could not load public/{rel}. Run prepare_visium_demo.py first. "
+            f"({'; '.join(errors[-5:])})"
         )
-
-    def load_npy(name: str):
-        return np.load(io.BytesIO(read_bytes(name)), allow_pickle=False)
-
-    def load_json(name: str):
-        return json.loads(read_bytes(name).decode("utf-8"))
 
     def hex_to_rgb(hex_color: str):
         h = hex_color.lstrip("#")
         return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
 
-    return hex_to_rgb, load_json, load_npy, read_bytes
-
-
-@app.cell
-def _(load_json, load_npy):
-    meta = load_json("meta.json")
+    meta = json.loads((await fetch_bytes("meta.json")).decode("utf-8"))
     N_NEIGHBORS_OPTS = list(meta["n_neighbors_opts"])
     MIN_DIST_OPTS = list(meta["min_dist_opts"])
     bundle = {
@@ -106,10 +124,10 @@ def _(load_json, load_npy):
         "categories": list(meta["categories"]),
         "palette": dict(meta["palette"]),
         "gene_example": str(meta["gene_example"]),
-        "spatial": load_npy("spatial.npy"),
-        "labels": load_npy("labels.npy"),
+        "spatial": np.load(io.BytesIO(await fetch_bytes("spatial.npy")), allow_pickle=False),
+        "labels": np.load(io.BytesIO(await fetch_bytes("labels.npy")), allow_pickle=False),
     }
-    return MIN_DIST_OPTS, N_NEIGHBORS_OPTS, bundle
+    return MIN_DIST_OPTS, N_NEIGHBORS_OPTS, bundle, fetch_bytes, hex_to_rgb
 
 
 @app.cell
@@ -157,13 +175,16 @@ def _(MIN_DIST_OPTS, N_NEIGHBORS_OPTS, mo):
 
 
 @app.cell
-def _(MIN_DIST_OPTS, N_NEIGHBORS_OPTS, load_npy, min_dist, n_neighbors):
+async def _(MIN_DIST_OPTS, N_NEIGHBORS_OPTS, fetch_bytes, io, min_dist, n_neighbors, np):
     nn = N_NEIGHBORS_OPTS[n_neighbors.value]
     md = MIN_DIST_OPTS[min_dist.value]
     umap_result = {
         "n_neighbors": nn,
         "min_dist": md,
-        "umap": load_npy(f"umap/nn{nn}_md{md}.npy"),
+        "umap": np.load(
+            io.BytesIO(await fetch_bytes(f"umap/nn{nn}_md{md}.npy")),
+            allow_pickle=False,
+        ),
     }
     return umap_result,
 
