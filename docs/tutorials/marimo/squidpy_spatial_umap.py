@@ -3,16 +3,8 @@
 # dependencies = [
 #     "marimo",
 #     "numpy",
-#     "pandas",
 #     "matplotlib",
-#     "scanpy; sys_platform != 'emscripten'",
-#     "squidpy; sys_platform != 'emscripten'",
-#     "umap-learn; sys_platform != 'emscripten'",
-#     "anndata; sys_platform != 'emscripten'",
 # ]
-#
-# [tool.marimo.runtime]
-# cache_cells = true
 # ///
 
 import marimo
@@ -23,16 +15,19 @@ app = marimo.App(width="medium", app_title="Squidpy intro: spatial + interactive
 
 @app.cell
 def _():
+    import io
+    import json
     import sys
+    from pathlib import Path
+    from urllib.request import urlopen
 
     import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
 
     IN_BROWSER = sys.platform == "emscripten"
-    N_NEIGHBORS_OPTS = [5, 15, 30, 50]
-    MIN_DIST_OPTS = [0.05, 0.1, 0.3, 0.5, 0.8]
-    return IN_BROWSER, MIN_DIST_OPTS, N_NEIGHBORS_OPTS, mo, np, plt
+    DATA_REL = "visium_demo"
+    return DATA_REL, IN_BROWSER, Path, io, json, mo, np, plt, urlopen
 
 
 @app.cell
@@ -48,99 +43,82 @@ This notebook walks through a **Squidpy** starter workflow:
 3. Recompute **UMAP** while you change `n_neighbors` and `min_dist`
 4. Compare the **tissue map** next to the **UMAP embedding**
 
-In the browser build, Squidpy/Scanpy run once at export time; UMAP results for
-each parameter combo are cached so sliders stay interactive without a Python
-server.
+Demo assets under `public/visium_demo/` were prepared with Squidpy/Scanpy so the
+hosted WASM notebook stays interactive without those packages in the browser.
 """
     )
     return
 
 
 @app.cell
-def _(IN_BROWSER, mo):
-    if IN_BROWSER:
-        _msg = mo.md(
-            "*Running in WebAssembly — using cached Visium embeddings. "
-            "Parameter changes swap precomputed UMAPs instantly.*"
+def _(DATA_REL, Path, io, json, mo, np, urlopen):
+    def read_bytes(name: str) -> bytes:
+        rel = f"{DATA_REL}/{name}"
+        notebook_dir = mo.notebook_dir()
+        candidates = []
+        if notebook_dir is not None:
+            candidates.append(Path(notebook_dir) / "public" / rel)
+        candidates.extend(
+            [
+                Path("public") / rel,
+                Path.cwd() / "public" / rel,
+                Path.cwd() / "docs/tutorials/marimo/public" / rel,
+            ]
         )
-    else:
-        _msg = mo.md(
-            "*Running locally — Squidpy will download/load the Visium dataset "
-            "and recompute UMAP for the parameter grid.*"
+        for path in candidates:
+            try:
+                if path.is_file():
+                    return path.read_bytes()
+            except OSError:
+                pass
+        for url in (f"./public/{rel}", f"/public/{rel}", f"public/{rel}"):
+            try:
+                with urlopen(url) as resp:
+                    return resp.read()
+            except Exception:
+                continue
+        raise FileNotFoundError(
+            f"Could not load public/{rel}. Run prepare_visium_demo.py first."
         )
-    _msg
-    return
 
+    def load_npy(name: str):
+        return np.load(io.BytesIO(read_bytes(name)), allow_pickle=False)
 
-@app.cell
-def _(IN_BROWSER, np, plt):
+    def load_json(name: str):
+        return json.loads(read_bytes(name).decode("utf-8"))
+
     def hex_to_rgb(hex_color: str):
         h = hex_color.lstrip("#")
         return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
 
-    def load_visium_bundle():
-        """Load spatial coords, clusters, PCA, and palette from Squidpy Visium."""
-        if IN_BROWSER:
-            raise RuntimeError("Native Squidpy load is unavailable in the browser")
-
-        import scanpy as sc
-        import squidpy as sq
-
-        adata = sq.datasets.visium_hne_adata()
-        if "X_pca" not in adata.obsm:
-            sc.pp.pca(adata)
-
-        cluster_key = "cluster" if "cluster" in adata.obs else "leiden"
-        labels = np.asarray(adata.obs[cluster_key].astype(str).to_numpy(), dtype=object)
-        categories = [
-            str(c) for c in adata.obs[cluster_key].astype("category").cat.categories
-        ]
-        color_key = f"{cluster_key}_colors"
-        if color_key in adata.uns:
-            palette = {
-                cat: str(adata.uns[color_key][i % len(adata.uns[color_key])])
-                for i, cat in enumerate(categories)
-            }
-        else:
-            cmap = plt.get_cmap("tab20")
-            palette = {
-                cat: "#%02x%02x%02x"
-                % tuple(int(255 * c) for c in cmap(i % 20)[:3])
-                for i, cat in enumerate(categories)
-            }
-
-        return {
-            "n_obs": int(adata.n_obs),
-            "n_vars": int(adata.n_vars),
-            "cluster_key": str(cluster_key),
-            "spatial": np.asarray(adata.obsm["spatial"], dtype=np.float64).copy(),
-            "pca": np.asarray(adata.obsm["X_pca"][:, :30], dtype=np.float64).copy(),
-            "labels": labels,
-            "categories": categories,
-            "palette": palette,
-            "gene_example": "Sox2"
-            if "Sox2" in adata.var_names
-            else str(adata.var_names[0]),
-        }
-
-    return load_visium_bundle, hex_to_rgb
+    return hex_to_rgb, load_json, load_npy, read_bytes
 
 
 @app.cell
-def _(IN_BROWSER, load_visium_bundle, mo):
-    @mo.persistent_cache(method="lazy")
-    def visium_bundle():
-        return load_visium_bundle()
-
-    if not IN_BROWSER:
-        bundle = visium_bundle()
-    else:
-        bundle = visium_bundle()
-    return bundle, visium_bundle
+def _(load_json, load_npy):
+    meta = load_json("meta.json")
+    N_NEIGHBORS_OPTS = list(meta["n_neighbors_opts"])
+    MIN_DIST_OPTS = list(meta["min_dist_opts"])
+    bundle = {
+        "n_obs": int(meta["n_obs"]),
+        "n_vars": int(meta["n_vars"]),
+        "cluster_key": str(meta["cluster_key"]),
+        "categories": list(meta["categories"]),
+        "palette": dict(meta["palette"]),
+        "gene_example": str(meta["gene_example"]),
+        "spatial": load_npy("spatial.npy"),
+        "labels": load_npy("labels.npy"),
+    }
+    return MIN_DIST_OPTS, N_NEIGHBORS_OPTS, bundle
 
 
 @app.cell
-def _(bundle, mo):
+def _(IN_BROWSER, bundle, mo):
+    _where = (
+        "WebAssembly (precomputed assets)"
+        if IN_BROWSER
+        else "local (public/visium_demo)"
+    )
     mo.md(
         f"""
 ## 1. Load with Squidpy
@@ -152,6 +130,9 @@ import scanpy as sc
 adata = sq.datasets.visium_hne_adata()
 adata  # {bundle["n_obs"]} spots × {bundle["n_vars"]} genes
 ```
+
+This session is reading the prepared demo bundle from `public/visium_demo/`
+({_where}).
 
 Cluster column: `{bundle["cluster_key"]}` · example gene: `{bundle["gene_example"]}`
 """
@@ -176,42 +157,22 @@ def _(MIN_DIST_OPTS, N_NEIGHBORS_OPTS, mo):
 
 
 @app.cell
-def _(IN_BROWSER, MIN_DIST_OPTS, N_NEIGHBORS_OPTS, bundle, mo, np):
-    @mo.persistent_cache(method="lazy")
-    def compute_umap(n_neighbors_idx: int, min_dist_idx: int):
-        import scanpy as sc
-        from anndata import AnnData
-
-        n_neighbors = N_NEIGHBORS_OPTS[n_neighbors_idx]
-        min_dist = MIN_DIST_OPTS[min_dist_idx]
-        ad = AnnData(np.zeros((bundle["pca"].shape[0], 1)))
-        ad.obsm["X_pca"] = bundle["pca"]
-        sc.pp.neighbors(ad, n_neighbors=n_neighbors, use_rep="X_pca")
-        sc.tl.umap(ad, min_dist=min_dist)
-        return {
-            "n_neighbors": n_neighbors,
-            "min_dist": min_dist,
-            "umap": np.asarray(ad.obsm["X_umap"], dtype=np.float64),
-        }
-
-    if not IN_BROWSER:
-        for _nn_i in range(len(N_NEIGHBORS_OPTS)):
-            for _md_i in range(len(MIN_DIST_OPTS)):
-                compute_umap(_nn_i, _md_i)
-    return compute_umap,
-
-
-@app.cell
-def _(compute_umap, min_dist, n_neighbors):
-    umap_result = compute_umap(n_neighbors.value, min_dist.value)
+def _(MIN_DIST_OPTS, N_NEIGHBORS_OPTS, load_npy, min_dist, n_neighbors):
+    nn = N_NEIGHBORS_OPTS[n_neighbors.value]
+    md = MIN_DIST_OPTS[min_dist.value]
+    umap_result = {
+        "n_neighbors": nn,
+        "min_dist": md,
+        "umap": load_npy(f"umap/nn{nn}_md{md}.npy"),
+    }
     return umap_result,
 
 
 @app.cell
-def _(hex_to_rgb, bundle, mo, np, plt, umap_result):
+def _(bundle, hex_to_rgb, mo, np, plt, umap_result):
     labels = bundle["labels"]
     palette = bundle["palette"]
-    colors = np.array([hex_to_rgb(palette[lab]) for lab in labels])
+    colors = np.array([hex_to_rgb(str(palette[str(lab)])) for lab in labels])
 
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.8), layout="constrained")
 
