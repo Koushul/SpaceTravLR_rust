@@ -1,0 +1,103 @@
+{
+  "dataset": "squidpy.datasets.slideseqv2",
+  "dataset_title": "Slide-seq V2 mouse hippocampus",
+  "n_obs": 5000,
+  "n_vars": 4000,
+  "n_obs_full": 41786,
+  "cluster_key_published": "cluster",
+  "cluster_key_banksy": "banksy",
+  "published_categories": [
+    "Astrocytes",
+    "CA1_CA2_CA3_Subiculum",
+    "DentatePyramids",
+    "Endothelial_Stalk",
+    "Endothelial_Tip",
+    "Ependymal",
+    "Interneurons",
+    "Microglia",
+    "Mural",
+    "Neurogenesis",
+    "Oligodendrocytes",
+    "Polydendrocytes",
+    "Subiculum_Entorhinal_cl2",
+    "Subiculum_Entorhinal_cl3"
+  ],
+  "published_palette": {
+    "Astrocytes": "#1f77b4",
+    "CA1_CA2_CA3_Subiculum": "#ff7f0e",
+    "DentatePyramids": "#279e68",
+    "Endothelial_Stalk": "#d62728",
+    "Endothelial_Tip": "#aa40fc",
+    "Ependymal": "#8c564b",
+    "Interneurons": "#e377c2",
+    "Microglia": "#b5bd61",
+    "Mural": "#17becf",
+    "Neurogenesis": "#aec7e8",
+    "Oligodendrocytes": "#ffbb78",
+    "Polydendrocytes": "#98df8a",
+    "Subiculum_Entorhinal_cl2": "#ff9896",
+    "Subiculum_Entorhinal_cl3": "#c5b0d5"
+  },
+  "lambda_opts": [
+    0.1,
+    0.2,
+    0.4
+  ],
+  "default_lambda": 0.2,
+  "banksy_resolution": 0.6,
+  "banksy": {
+    "0.1": {
+      "n_clusters": 9,
+      "palette": {
+        "0": "#1f77b4",
+        "1": "#aec7e8",
+        "2": "#ff7f0e",
+        "3": "#ffbb78",
+        "4": "#2ca02c",
+        "5": "#98df8a",
+        "6": "#d62728",
+        "7": "#ff9896",
+        "8": "#9467bd"
+      }
+    },
+    "0.2": {
+      "n_clusters": 8,
+      "palette": {
+        "0": "#1f77b4",
+        "1": "#aec7e8",
+        "2": "#ff7f0e",
+        "3": "#ffbb78",
+        "4": "#2ca02c",
+        "5": "#98df8a",
+        "6": "#d62728",
+        "7": "#ff9896"
+      }
+    },
+    "0.4": {
+      "n_clusters": 9,
+      "palette": {
+        "0": "#1f77b4",
+        "1": "#aec7e8",
+        "2": "#ff7f0e",
+        "3": "#ffbb78",
+        "4": "#2ca02c",
+        "5": "#98df8a",
+        "6": "#d62728",
+        "7": "#ff9896",
+        "8": "#9467bd"
+      }
+    }
+  },
+  "n_neighbors_opts": [
+    5,
+    15,
+    30,
+    50
+  ],
+  "min_dist_opts": [
+    0.1,
+    0.3,
+    0.5
+  ],
+  "gene_example": "Snap25"
+}

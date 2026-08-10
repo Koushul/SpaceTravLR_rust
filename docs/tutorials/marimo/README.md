@@ -1,19 +1,19 @@
-# Squidpy spatial + interactive UMAP (marimo)
+# Slide-seq + BANKSY + interactive UMAP (marimo)
 
-Interactive intro tutorial:
+Interactive tutorial:
 
-- Load Squidpy Visium H&E (`sq.datasets.visium_hne_adata`)
-- Spatial scatter colored by cluster
-- Swap **UMAP** embeddings for `n_neighbors` / `min_dist`
+- Load Squidpy **Slide-seq V2 mouse hippocampus** (`sq.datasets.slideseqv2`)
+- Run **BANKSY** (`pybanksy`) spatial clustering for several `λ`
+- Spatial + UMAP plots with interactive `λ`, color (BANKSY vs published), and UMAP params
 
 ## Prepare demo assets (once)
 
 ```bash
-pip install scanpy squidpy umap-learn anndata numpy
-python docs/tutorials/marimo/prepare_visium_demo.py
+pip install scanpy squidpy umap-learn anndata numpy pybanksy matplotlib
+python docs/tutorials/marimo/prepare_slideseq_banksy.py
 ```
 
-Writes `docs/tutorials/marimo/public/visium_demo/` (coords, labels, UMAP grid).
+Writes `docs/tutorials/marimo/public/slideseq_banksy/` (~7MB).
 
 ## Run locally
 
@@ -22,9 +22,7 @@ pip install marimo numpy matplotlib
 marimo run docs/tutorials/marimo/squidpy_spatial_umap.py
 ```
 
-## Export WASM (for static hosting)
-
-Use `/tmp` for uv caches (or disable them) so home-quota fills do not break export:
+## Export WASM
 
 ```bash
 export UV_NO_CACHE=1
@@ -37,7 +35,5 @@ marimo export html-wasm docs/tutorials/marimo/squidpy_spatial_umap.py \
   --show-code \
   --no-sandbox
 ```
-
-Then serve `docs/tutorials/marimo/site/` over HTTP (required for WASM).
 
 Live demo: https://graceful-hollow-a6tk.here.now/
