@@ -2,232 +2,683 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Functional proof: SpaceTravLR β niches (tonsil GC)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>SpaceTravLR · Functional proof of β niches</title>
+<meta name="description" content="Statistical and biological evidence that SpaceTravLR β niches are functional on tonsil germinal-center B cells."/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;700&display=swap" rel="stylesheet"/>
 <style>
-  :root { --bg:#f7f4ef; --ink:#1c1917; --muted:#57534e; --line:#d6d3d1; --accent:#0f766e; }
-  body { margin:0; font-family:"IBM Plex Sans",system-ui,sans-serif; color:var(--ink);
-    background: radial-gradient(1000px 500px at 0% 0%, #dcefea, transparent 55%), var(--bg); line-height:1.5; }
-  main { max-width:980px; margin:0 auto; padding:2.4rem 1.2rem 4rem; }
-  h1,h2 { font-family:Fraunces,Georgia,serif; letter-spacing:-.02em; }
-  h1 { font-size:clamp(1.7rem,3vw,2.3rem); margin:0 0 .4rem; }
-  h2 { font-size:1.3rem; margin:2rem 0 .6rem; }
-  .lead,.note { color:var(--muted); }
-  .note { border-left:3px solid var(--accent); padding-left:1rem; }
-  .grid { display:grid; gap:1rem; }
-  @media(min-width:820px){ .grid-2{ grid-template-columns:1fr 1fr; } }
-  figure { margin:1rem 0 1.4rem; }
-  img { width:100%; height:auto; display:block; }
-  figcaption { color:var(--muted); font-size:.85rem; margin-top:.4rem; }
-  table { width:100%; border-collapse:collapse; font-size:.86rem; background:rgba(255,255,255,.55); }
-  th,td { border-bottom:1px solid var(--line); padding:.4rem .5rem; text-align:left; }
-  .kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:.7rem; margin:1rem 0 1.4rem; }
-  .kpi div { background:rgba(255,255,255,.65); padding:.7rem .8rem; border:1px solid var(--line); }
-  .kpi strong { display:block; font-size:1.25rem; color:var(--accent); }
-  a { color:var(--accent); }
+  :root {
+    --bg: #f3f6f4;
+    --bg-elev: #ffffff;
+    --ink: #14201c;
+    --muted: #5b6b64;
+    --line: #d5ddd8;
+    --accent: #0b6e63;
+    --accent-soft: #d8efe9;
+    --warn: #8a5a12;
+    --warn-soft: #f5ebd7;
+    --shadow: 0 1px 2px rgba(20, 32, 28, 0.04), 0 8px 24px rgba(20, 32, 28, 0.05);
+    --radius: 12px;
+    --max: 720px;
+    --pad: clamp(1rem, 4vw, 1.5rem);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    overflow-x: clip;
+  }
+
+  body {
+    margin: 0;
+    color: var(--ink);
+    font-family: "DM Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    background:
+      radial-gradient(900px 420px at 0% -5%, #d9ebe5 0%, transparent 55%),
+      radial-gradient(700px 360px at 100% 0%, #e8ece3 0%, transparent 50%),
+      var(--bg);
+    overflow-x: clip;
+  }
+
+  img, svg, video {
+    max-width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  a {
+    color: var(--accent);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+    word-break: break-word;
+  }
+
+  .wrap {
+    width: min(100%, calc(var(--max) + 2 * var(--pad)));
+    margin: 0 auto;
+    padding: 0 var(--pad) 3.5rem;
+  }
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    backdrop-filter: blur(10px);
+    background: rgba(243, 246, 244, 0.88);
+    border-bottom: 1px solid rgba(213, 221, 216, 0.8);
+  }
+
+  .topbar-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 3.25rem;
+    width: min(100%, calc(var(--max) + 2 * var(--pad)));
+    margin: 0 auto;
+    padding: 0.55rem var(--pad);
+  }
+
+  .brand {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .brand span { color: var(--accent); }
+
+  .top-link {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .top-link:hover { color: var(--accent); }
+
+  header.hero {
+    padding: 1.75rem 0 0.25rem;
+  }
+
+  .eyebrow {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.65rem;
+  }
+
+  h1 {
+    font-family: "Source Serif 4", Georgia, serif;
+    font-weight: 700;
+    font-size: clamp(1.65rem, 5.5vw, 2.35rem);
+    line-height: 1.15;
+    letter-spacing: -0.03em;
+    margin: 0 0 0.75rem;
+    max-width: 18ch;
+  }
+
+  .lead {
+    margin: 0;
+    color: var(--muted);
+    max-width: 42ch;
+    font-size: 1.02rem;
+  }
+
+  .callout {
+    margin: 1.1rem 0 0;
+    padding: 0.85rem 1rem;
+    border-radius: var(--radius);
+    background: var(--warn-soft);
+    color: var(--warn);
+    font-size: 0.92rem;
+    border: 1px solid #ead9b5;
+  }
+
+  .callout a { color: #6d470e; }
+
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+    margin: 1.4rem 0 0.4rem;
+  }
+
+  @media (min-width: 640px) {
+    .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+
+  .kpi {
+    min-width: 0;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 0.85rem 0.9rem;
+  }
+
+  .kpi .value {
+    display: block;
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: clamp(1.35rem, 4vw, 1.7rem);
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+
+  .kpi .label {
+    display: block;
+    margin-top: 0.35rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+
+  .kpi .sub {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: 0.7rem;
+    color: #7a8a83;
+    font-weight: 500;
+  }
+
+  section {
+    margin-top: 2.1rem;
+    padding-top: 0.2rem;
+  }
+
+  h2 {
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: clamp(1.2rem, 3.5vw, 1.45rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.55rem;
+  }
+
+  section > p {
+    margin: 0 0 0.9rem;
+    color: var(--muted);
+  }
+
+  .bullets {
+    margin: 0 0 1rem;
+    padding: 0;
+    list-style: none;
+  }
+
+  .bullets li {
+    position: relative;
+    padding: 0.55rem 0 0.55rem 1rem;
+    border-top: 1px solid var(--line);
+    color: var(--ink);
+    font-size: 0.95rem;
+  }
+
+  .bullets li:last-child { border-bottom: 1px solid var(--line); }
+
+  .bullets li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 1rem;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .bullets strong { font-weight: 700; }
+
+  .panel {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    margin: 0 0 1rem;
+  }
+
+  .panel figure {
+    margin: 0;
+  }
+
+  .panel img {
+    width: 100%;
+    background: #fafbfa;
+  }
+
+  .panel figcaption,
+  .caption {
+    padding: 0.75rem 0.9rem 0.9rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
+  .stack {
+    display: grid;
+    gap: 0.85rem;
+  }
+
+  @media (min-width: 700px) {
+    .stack-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  .table-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-elev);
+    box-shadow: var(--shadow);
+    margin: 0 0 1rem;
+  }
+
+  table {
+    width: 100%;
+    min-width: 420px;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+
+  th, td {
+    padding: 0.65rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    background: #eef3f0;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  tr:last-child td { border-bottom: 0; }
+
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .genes {
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  .term {
+    max-width: 28rem;
+  }
+
+  .chip {
+    display: inline-block;
+    padding: 0.12rem 0.45rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  footer {
+    margin-top: 2.5rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  @media (max-width: 480px) {
+    .hide-sm { display: none; }
+    table { min-width: 0; font-size: 0.78rem; }
+    th, td { padding: 0.55rem 0.6rem; }
+  }
 </style>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet"/>
 </head>
 <body>
-<main>
-  <h1>Functional proof for SpaceTravLR β niches</h1>
-  <p class="lead">Human tonsil snRNA germinal-center B cells (n=1848,
-  k=19 niches). Evidence is statistical + biological and
-  <em>does not</em> treat expression-derived Light/Dark/Intermediate zone labels as truth.</p>
-  <p class="note">Companion method comparison:
-  <a href="https://plucky-meadow-perf.here.now/">plucky-meadow-perf.here.now</a>
-  (β vs BANKSY / COVET / NicheCompass).</p>
-
-  <div class="kpi">
-    <div><strong>0.81</strong>bootstrap ARI stability</div>
-    <div><strong>0.92</strong>same-label spatial kNN<br/><span class="note">perm p=5.0e-03</span></div>
-    <div><strong>0.22</strong>latent silhouette</div>
-    <div><strong>0.19</strong>within/between dist<br/><span class="note">perm p=5.0e-03</span></div>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#">SpaceTrav<span>LR</span></a>
+      <a class="top-link" href="https://plucky-meadow-perf.here.now/">Method comparison →</a>
+    </div>
   </div>
 
-  <h2>1. Statistical evidence</h2>
-  <ul>
-    <li><b>Stability:</b> 80% cell bootstrap + re-Leiden on the β PCA latent yields mean ARI
-      0.81 (5–95%: 0.75–0.88) vs the original niches.</li>
-    <li><b>Spatial contiguity:</b> 92.0% of spatial kNN edges share a niche label
-      (null≈6.4%, permutation p=0.0050).</li>
-    <li><b>Compactness:</b> within-niche / between-niche distance ratio=0.192
-      (null≈1.017, p=0.0050).</li>
-    <li><b>Latent separation:</b> silhouette=0.223 on the β PCA embedding.</li>
-  </ul>
-  <div class="grid grid-2">
-    <figure><img src="img/stability_ari.png"/><figcaption>Bootstrap niche stability.</figcaption></figure>
-    <figure><img src="img/spatial_contiguity_perm.png"/><figcaption>Observed spatial structure vs label shuffles.</figcaption></figure>
+  <div class="wrap">
+    <header class="hero">
+      <p class="eyebrow">Tonsil GC · Functional proof</p>
+      <h1>β niches are statistically stable and biologically specialized</h1>
+      <p class="lead">
+        SpaceTravLR β niches on human tonsil germinal-center B cells
+        (n=1,848 · k=19), tested without treating expression-derived
+        Light/Dark/Intermediate zones as ground truth.
+      </p>
+      <p class="callout">
+        Zone labels are expression-confounded and used only as a cautionary reference.
+        Primary evidence is stability, spatial structure, independent programs,
+        microenvironment contacts, and pathway enrichment.
+      </p>
+    </header>
+
+    <div class="kpis" role="list">
+      <div class="kpi" role="listitem">
+        <span class="value">0.81</span>
+        <span class="label">Bootstrap ARI</span>
+        <span class="sub">5–95%: 0.75–0.88</span>
+      </div>
+      <div class="kpi" role="listitem">
+        <span class="value">92%</span>
+        <span class="label">Same-label kNN</span>
+        <span class="sub">null ~6% · p≈0.005</span>
+      </div>
+      <div class="kpi" role="listitem">
+        <span class="value">0.19</span>
+        <span class="label">Within/between dist.</span>
+        <span class="sub">null ~1.02 · p≈0.005</span>
+      </div>
+      <div class="kpi" role="listitem">
+        <span class="value">0.30</span>
+        <span class="label">Tfh contact η²</span>
+        <span class="sub">microenvironment</span>
+      </div>
+    </div>
+
+    <section>
+      <h2>1. Statistical evidence</h2>
+      <ul class="bullets">
+        <li><strong>Stability.</strong> 80% cell bootstrap + re-Leiden on the β PCA latent recovers the original niches at mean ARI 0.81.</li>
+        <li><strong>Spatial contiguity.</strong> 92% of spatial kNN edges share a niche label (null ≈ 6.4%, permutation p = 0.005).</li>
+        <li><strong>Compactness.</strong> Within/between distance ratio = 0.19 (null ≈ 1.02, p = 0.005).</li>
+        <li><strong>Latent separation.</strong> Silhouette = 0.22 on the β PCA embedding.</li>
+      </ul>
+      <div class="stack stack-2">
+        <div class="panel">
+          <figure>
+            <img src="img/stability_ari.png" alt="Bootstrap ARI stability histogram" loading="lazy"/>
+            <figcaption>Bootstrap niche stability.</figcaption>
+          </figure>
+        </div>
+        <div class="panel">
+          <figure>
+            <img src="img/spatial_contiguity_perm.png" alt="Spatial contiguity versus label permutation" loading="lazy"/>
+            <figcaption>Observed spatial structure vs shuffled labels.</figcaption>
+          </figure>
+        </div>
+      </div>
+      <div class="panel">
+        <figure>
+          <img src="img/niches_spatial.png" alt="SpaceTravLR beta niches in physical space" loading="lazy"/>
+          <figcaption>SpaceTravLR β niches in physical space.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>2. Independent GC programs</h2>
+      <p>
+        Literature gene programs were scored after niche discovery (not used to cluster).
+        Association is tested by ANOVA η² and label permutation.
+      </p>
+
+      <div class="table-wrap" tabindex="0" aria-label="Program association table">
+        <table>
+          <thead>
+            <tr>
+              <th>Program</th>
+              <th class="num">η²</th>
+              <th class="num">p<sub>perm</sub></th>
+              <th class="num hide-sm">Moran I</th>
+              <th class="hide-sm">Genes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CSR / proliferation</td>
+              <td class="num">0.096</td>
+              <td class="num">0.005</td>
+              <td class="num hide-sm">0.155</td>
+              <td class="genes hide-sm">AICDA, CXCR4, FOXO1, BCL6, TOP2A</td>
+            </tr>
+            <tr>
+              <td>Selection / activation</td>
+              <td class="num">0.055</td>
+              <td class="num">0.005</td>
+              <td class="num hide-sm">0.101</td>
+              <td class="genes hide-sm">CD83, CXCR5, CD40, LMO2, BATF</td>
+            </tr>
+            <tr>
+              <td>FDC cue</td>
+              <td class="num">0.048</td>
+              <td class="num">0.005</td>
+              <td class="num hide-sm">0.072</td>
+              <td class="genes hide-sm">FCER2, CR2, FDCSP, CXCL13</td>
+            </tr>
+            <tr>
+              <td>BAFF / BCR axis</td>
+              <td class="num">0.028</td>
+              <td class="num">0.005</td>
+              <td class="num hide-sm">0.024</td>
+              <td class="genes hide-sm">TNFRSF13B/C, BANK1, CD86, CR2</td>
+            </tr>
+            <tr>
+              <td>Plasma exit</td>
+              <td class="num">0.023</td>
+              <td class="num">0.005</td>
+              <td class="num hide-sm">0.023</td>
+              <td class="genes hide-sm">IRF4, PRDM1</td>
+            </tr>
+            <tr>
+              <td>Tfh receptor axis</td>
+              <td class="num">0.021</td>
+              <td class="num">0.015</td>
+              <td class="num hide-sm">0.016</td>
+              <td class="genes hide-sm">ICOS, PDCD1, CXCR5, CD40</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="stack stack-2">
+        <div class="panel">
+          <figure>
+            <img src="img/program_eta2.png" alt="Program eta-squared bar chart" loading="lazy"/>
+            <figcaption>Program–niche η² with permutation p-values.</figcaption>
+          </figure>
+        </div>
+        <div class="panel">
+          <figure>
+            <img src="img/program_spatial.png" alt="Spatial maps of program scores" loading="lazy"/>
+            <figcaption>Spatial maps of program scores + Moran’s I.</figcaption>
+          </figure>
+        </div>
+      </div>
+
+      <div class="panel">
+        <figure>
+          <img src="img/program_by_niche.png" alt="Program by niche heatmap" loading="lazy"/>
+          <figcaption>Niches specialize along orthogonal GC programs (rows ordered by CSR/proliferation).</figcaption>
+        </figure>
+      </div>
+
+      <div class="panel">
+        <figure>
+          <img src="img/program_eta2_vs_banksy.png" alt="Program association versus BANKSY" loading="lazy"/>
+          <figcaption>
+            BANKSY mean η² (0.092) exceeds SpaceTravLR (0.045) by construction—BANKSY niches are expression-derived.
+            β niches still recover significant program structure while remaining far more spatially contiguous
+            (same-label kNN 92% vs 53%).
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>3. Microenvironment contacts</h2>
+      <p>
+        For each GC cell, we measure the fraction of full-tissue spatial neighbors that are Tfh or FDC.
+        Niche identity explains neighbor composition beyond chance.
+      </p>
+
+      <div class="table-wrap" tabindex="0" aria-label="Neighbor enrichment table">
+        <table>
+          <thead>
+            <tr>
+              <th>Neighbor type</th>
+              <th class="num">η²</th>
+              <th class="num">p<sub>perm</sub></th>
+              <th class="num">Mean frac.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>B germinal center</td>
+              <td class="num">0.313</td>
+              <td class="num">0.005</td>
+              <td class="num">0.640</td>
+            </tr>
+            <tr>
+              <td>T follicular helper</td>
+              <td class="num">0.296</td>
+              <td class="num">0.005</td>
+              <td class="num">0.081</td>
+            </tr>
+            <tr>
+              <td>T CD4</td>
+              <td class="num">0.154</td>
+              <td class="num">0.005</td>
+              <td class="num">0.032</td>
+            </tr>
+            <tr>
+              <td>FDC</td>
+              <td class="num">0.086</td>
+              <td class="num">0.005</td>
+              <td class="num">0.051</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <figure>
+          <img src="img/neighbor_by_niche.png" alt="Neighbor fractions by niche" loading="lazy"/>
+          <figcaption>Niches differ in Tfh / FDC neighborhood exposure.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>4. Pathway enrichment from niche markers</h2>
+      <p>
+        Wilcoxon DE (niche vs rest, FDR &lt; 0.05, logFC &gt; 0.25) followed by Enrichr
+        (GO Biological Process / Reactome).
+      </p>
+
+      <div class="table-wrap" tabindex="0" aria-label="Enrichment table">
+        <table>
+          <thead>
+            <tr>
+              <th>Niche</th>
+              <th class="hide-sm">Library</th>
+              <th>Term</th>
+              <th class="num">Adj. p</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="chip">1</span></td>
+              <td class="hide-sm">Reactome</td>
+              <td class="term">Interferon Gamma Signaling</td>
+              <td class="num">8.5×10<sup>−13</sup></td>
+            </tr>
+            <tr>
+              <td><span class="chip">1</span></td>
+              <td class="hide-sm">Reactome</td>
+              <td class="term">Interferon Signaling</td>
+              <td class="num">1.3×10<sup>−10</sup></td>
+            </tr>
+            <tr>
+              <td><span class="chip">1</span></td>
+              <td class="hide-sm">Reactome</td>
+              <td class="term">Cytokine Signaling in Immune System</td>
+              <td class="num">5.0×10<sup>−9</sup></td>
+            </tr>
+            <tr>
+              <td><span class="chip">1</span></td>
+              <td class="hide-sm">Reactome</td>
+              <td class="term">PD-1 Signaling</td>
+              <td class="num">1.4×10<sup>−8</sup></td>
+            </tr>
+            <tr>
+              <td><span class="chip">1</span></td>
+              <td class="hide-sm">GO BP</td>
+              <td class="term">Antigen processing &amp; presentation of endogenous peptide antigen</td>
+              <td class="num">1.9×10<sup>−8</sup></td>
+            </tr>
+            <tr>
+              <td><span class="chip">1</span></td>
+              <td class="hide-sm">GO BP</td>
+              <td class="term">Positive regulation of T cell mediated cytotoxicity</td>
+              <td class="num">6.3×10<sup>−8</sup></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <figure>
+          <img src="img/enrichr_top.png" alt="Top Enrichr terms" loading="lazy"/>
+          <figcaption>Top Enrichr terms across niches.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>5. Kept β features encode immune axes</h2>
+      <p>
+        The 159 spatially filtered β features (Moran × η², FDR, decorrelated) concentrate on known GC pathways.
+      </p>
+      <div class="panel">
+        <figure>
+          <img src="img/beta_axes.png" alt="Biological axes among kept beta features" loading="lazy"/>
+          <figcaption>IL21, BAFF/APRIL, CXCL13, PD-1/CD28, WNT, TGF-β, ECM–integrin, and TF modulators.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>6. Takeaways</h2>
+      <ul class="bullets">
+        <li>β niches are stable, spatially contiguous, and compact versus label permutation.</li>
+        <li>Independent GC programs associate with niches above chance, even though niches were not defined from those genes.</li>
+        <li>Niches differ strongly in Tfh / FDC / T helper contact rates—distinct microenvironments.</li>
+        <li>Marker-gene enrichment recovers antigen presentation, interferon/cytokine signaling, and PD-1 pathways.</li>
+        <li>BANKSY scores higher on expression-program η² by design; SpaceTravLR preserves microniche geometry that BANKSY loses.</li>
+      </ul>
+    </section>
+
+    <footer>
+      SpaceTravLR functional proof · tonsil snRNA GC B cells ·
+      companion <a href="https://plucky-meadow-perf.here.now/">method comparison</a>
+    </footer>
   </div>
-  <figure><img src="img/niches_spatial.png"/><figcaption>SpaceTravLR β niches in physical space.</figcaption></figure>
-
-  <h2>2. Independent GC functional programs</h2>
-  <p>Gene programs from GC biology literature were scored <em>after</em> niche discovery
-  (not used to cluster). Association with niches is tested by ANOVA η² and label-permutation.</p>
-  <table border="1" class="dataframe">
-  <thead>
-    <tr style="text-align: right;">
-      <th>program</th>
-      <th>n_genes</th>
-      <th>genes</th>
-      <th>eta2_vs_niche</th>
-      <th>anova_p</th>
-      <th>eta2_perm_p</th>
-      <th>moran_I</th>
-      <th>mean</th>
-      <th>std</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>CSR_proliferation</td>
-      <td>5</td>
-      <td>AICDA,CXCR4,FOXO1,BCL6,TOP2A</td>
-      <td>0.0959</td>
-      <td>8.58e-30</td>
-      <td>0.00498</td>
-      <td>0.155</td>
-      <td>0.544</td>
-      <td>0.833</td>
-    </tr>
-    <tr>
-      <td>selection_activation</td>
-      <td>5</td>
-      <td>CD83,CXCR5,CD40,LMO2,BATF</td>
-      <td>0.0546</td>
-      <td>5.65e-14</td>
-      <td>0.00498</td>
-      <td>0.101</td>
-      <td>0.189</td>
-      <td>0.729</td>
-    </tr>
-    <tr>
-      <td>FDC_cue</td>
-      <td>4</td>
-      <td>FCER2,CR2,FDCSP,CXCL13</td>
-      <td>0.048</td>
-      <td>1.25e-11</td>
-      <td>0.00498</td>
-      <td>0.0717</td>
-      <td>0.391</td>
-      <td>0.697</td>
-    </tr>
-    <tr>
-      <td>BAFF_BCR_axis</td>
-      <td>5</td>
-      <td>TNFRSF13B,TNFRSF13C,BANK1,CD86,CR2</td>
-      <td>0.0282</td>
-      <td>3.01e-05</td>
-      <td>0.00498</td>
-      <td>0.0244</td>
-      <td>0.335</td>
-      <td>0.666</td>
-    </tr>
-    <tr>
-      <td>plasma_exit</td>
-      <td>2</td>
-      <td>IRF4,PRDM1</td>
-      <td>0.0227</td>
-      <td>0.00102</td>
-      <td>0.00498</td>
-      <td>0.0227</td>
-      <td>-0.00165</td>
-      <td>0.664</td>
-    </tr>
-    <tr>
-      <td>Tfh_receptor_axis</td>
-      <td>4</td>
-      <td>ICOS,PDCD1,CXCR5,CD40</td>
-      <td>0.0206</td>
-      <td>0.00352</td>
-      <td>0.0149</td>
-      <td>0.016</td>
-      <td>-0.175</td>
-      <td>0.542</td>
-    </tr>
-  </tbody>
-</table>
-  <div class="grid grid-2">
-    <figure><img src="img/program_eta2.png"/><figcaption>Program–niche η² with permutation p-values.</figcaption></figure>
-    <figure><img src="img/program_spatial.png"/><figcaption>Spatial maps of program scores + Moran’s I.</figcaption></figure>
-  </div>
-  <figure><img src="img/program_by_niche.png"/><figcaption>Niches specialize along orthogonal GC programs (rows ordered by CSR/proliferation).</figcaption></figure>
-  <figure><img src="img/program_eta2_vs_banksy.png"/><figcaption>Same programs scored against BANKSY niches as an expression-driven control.
-    BANKSY mean η²=0.092 &gt; SpaceTravLR mean η²=0.045
-    — expected, because BANKSY niches are built from expression. β niches still recover significant program structure
-    without clustering on expression, while remaining far more spatially contiguous
-    (same-label kNN 92.0% vs BANKSY 52.8%).</figcaption></figure>
-
-  <h2>3. Microenvironment: Tfh / FDC contacts</h2>
-  <p>For each GC cell, fraction of full-tissue spatial neighbors that are Tfh or FDC.
-  Niche ID explains neighbor composition beyond chance.</p>
-  <table border="1" class="dataframe">
-  <thead>
-    <tr style="text-align: right;">
-      <th>neighbor_type</th>
-      <th>eta2_vs_niche</th>
-      <th>anova_p</th>
-      <th>eta2_perm_p</th>
-      <th>global_mean_fraction</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>B_germinal_center</td>
-      <td>0.313</td>
-      <td>5.42e-135</td>
-      <td>0.00498</td>
-      <td>0.64</td>
-    </tr>
-    <tr>
-      <td>T_follicular_helper</td>
-      <td>0.296</td>
-      <td>1.79e-125</td>
-      <td>0.00498</td>
-      <td>0.0815</td>
-    </tr>
-    <tr>
-      <td>T_CD4</td>
-      <td>0.154</td>
-      <td>1.74e-54</td>
-      <td>0.00498</td>
-      <td>0.0317</td>
-    </tr>
-    <tr>
-      <td>FDC</td>
-      <td>0.0861</td>
-      <td>7.11e-26</td>
-      <td>0.00498</td>
-      <td>0.051</td>
-    </tr>
-  </tbody>
-</table>
-  <figure><img src="img/neighbor_by_niche.png"/><figcaption>Niches differ in Tfh/FDC neighborhood exposure.</figcaption></figure>
-
-  <h2>4. Niche marker genes → pathway enrichment</h2>
-  <p>Wilcoxon DE (niche vs rest, FDR&lt;0.05, logFC&gt;0.25) then Enrichr
-  (GO BP / Reactome). Top hits:</p>
-  <table><thead><tr><th>niche</th><th>library</th><th>term</th><th>adj p</th></tr></thead><tbody><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Interferon Gamma Signaling</td><td>8.53e-13</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Interferon Signaling</td><td>1.28e-10</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Cytokine Signaling in Immune System</td><td>4.97e-09</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Translocation of ZAP-70 to Immunological Synapse</td><td>9.48e-09</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>PD-1 Signaling</td><td>1.36e-08</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Phosphorylation of CD3 and TCR Zeta Chains</td><td>1.36e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Antigen Processing and Presentation of Endogenous Peptide Antigen (GO:0002483)</td><td>1.92e-08</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Endosomal Vacuolar Pathway</td><td>3.75e-08</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Downstream TCR Signaling</td><td>4.74e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Antigen Processing and Presentation of Exogenous Peptide Antigen (GO:0002478)</td><td>6.28e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Positive Regulation of T Cell Mediated Cytotoxicity (GO:0001916)</td><td>6.28e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Regulation of T Cell Mediated Cytotoxicity (GO:0001914)</td><td>7.57e-08</td></tr></tbody></table>
-  <figure><img src="img/enrichr_top.png"/><figcaption>Top Enrichr terms across niches.</figcaption></figure>
-
-  <h2>5. Spatially filtered β features encode immune axes</h2>
-  <p>The 159 kept β features (Moran × η², FDR, decorrelated) concentrate on known GC pathways —
-  not arbitrary noise.</p>
-  <figure><img src="img/beta_axes.png"/><figcaption>Biological axes among kept SpaceTravLR βs.</figcaption></figure>
-
-  <h2>6. Interpretation</h2>
-  <ul>
-    <li>β niches are <b>stable</b> (bootstrap ARI≈0.81), <b>spatially contiguous</b>
-      (92.0% same-label kNN vs ~6.4% under shuffle), and <b>compact</b>
-      (within/between distance ratio=0.19).</li>
-    <li>Independent GC programs associate with β niches above label-permutation (η² up to 0.096).
-      BANKSY shows higher program η² by construction (expression niches); β niches still carry functional signal
-      while preserving microniche geometry BANKSY loses.</li>
-    <li>Niches differ strongly in <b>Tfh / FDC / T helper contact rates</b>
-      (Tfh neighbor η²=0.30), i.e. distinct microenvironments.</li>
-    <li>DEG→Enrichr recovers antigen presentation, interferon / cytokine signaling, and PD-1 pathway terms.</li>
-    <li>Kept β features concentrate on IL21, BAFF/APRIL, CXCL13, PD-1/CD28, WNT, TGF-β, ECM–integrin, and TF modulators.</li>
-  </ul>
-</main>
 </body>
 </html>
