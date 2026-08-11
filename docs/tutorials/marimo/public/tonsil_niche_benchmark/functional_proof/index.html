@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Functional proof: SpaceTravLR β niches (tonsil GC)</title>
+<style>
+  :root { --bg:#f7f4ef; --ink:#1c1917; --muted:#57534e; --line:#d6d3d1; --accent:#0f766e; }
+  body { margin:0; font-family:"IBM Plex Sans",system-ui,sans-serif; color:var(--ink);
+    background: radial-gradient(1000px 500px at 0% 0%, #dcefea, transparent 55%), var(--bg); line-height:1.5; }
+  main { max-width:980px; margin:0 auto; padding:2.4rem 1.2rem 4rem; }
+  h1,h2 { font-family:Fraunces,Georgia,serif; letter-spacing:-.02em; }
+  h1 { font-size:clamp(1.7rem,3vw,2.3rem); margin:0 0 .4rem; }
+  h2 { font-size:1.3rem; margin:2rem 0 .6rem; }
+  .lead,.note { color:var(--muted); }
+  .note { border-left:3px solid var(--accent); padding-left:1rem; }
+  .grid { display:grid; gap:1rem; }
+  @media(min-width:820px){ .grid-2{ grid-template-columns:1fr 1fr; } }
+  figure { margin:1rem 0 1.4rem; }
+  img { width:100%; height:auto; display:block; }
+  figcaption { color:var(--muted); font-size:.85rem; margin-top:.4rem; }
+  table { width:100%; border-collapse:collapse; font-size:.86rem; background:rgba(255,255,255,.55); }
+  th,td { border-bottom:1px solid var(--line); padding:.4rem .5rem; text-align:left; }
+  .kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:.7rem; margin:1rem 0 1.4rem; }
+  .kpi div { background:rgba(255,255,255,.65); padding:.7rem .8rem; border:1px solid var(--line); }
+  .kpi strong { display:block; font-size:1.25rem; color:var(--accent); }
+  a { color:var(--accent); }
+</style>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet"/>
+</head>
+<body>
+<main>
+  <h1>Functional proof for SpaceTravLR β niches</h1>
+  <p class="lead">Human tonsil snRNA germinal-center B cells (n=1848,
+  k=19 niches). Evidence is statistical + biological and
+  <em>does not</em> treat expression-derived Light/Dark/Intermediate zone labels as truth.</p>
+  <p class="note">Companion method comparison:
+  <a href="https://plucky-meadow-perf.here.now/">plucky-meadow-perf.here.now</a>
+  (β vs BANKSY / COVET / NicheCompass).</p>
+
+  <div class="kpi">
+    <div><strong>0.81</strong>bootstrap ARI stability</div>
+    <div><strong>0.92</strong>same-label spatial kNN<br/><span class="note">perm p=5.0e-03</span></div>
+    <div><strong>0.22</strong>latent silhouette</div>
+    <div><strong>0.19</strong>within/between dist<br/><span class="note">perm p=5.0e-03</span></div>
+  </div>
+
+  <h2>1. Statistical evidence</h2>
+  <ul>
+    <li><b>Stability:</b> 80% cell bootstrap + re-Leiden on the β PCA latent yields mean ARI
+      0.81 (5–95%: 0.75–0.88) vs the original niches.</li>
+    <li><b>Spatial contiguity:</b> 92.0% of spatial kNN edges share a niche label
+      (null≈6.4%, permutation p=0.0050).</li>
+    <li><b>Compactness:</b> within-niche / between-niche distance ratio=0.192
+      (null≈1.017, p=0.0050).</li>
+    <li><b>Latent separation:</b> silhouette=0.223 on the β PCA embedding.</li>
+  </ul>
+  <div class="grid grid-2">
+    <figure><img src="img/stability_ari.png"/><figcaption>Bootstrap niche stability.</figcaption></figure>
+    <figure><img src="img/spatial_contiguity_perm.png"/><figcaption>Observed spatial structure vs label shuffles.</figcaption></figure>
+  </div>
+  <figure><img src="img/niches_spatial.png"/><figcaption>SpaceTravLR β niches in physical space.</figcaption></figure>
+
+  <h2>2. Independent GC functional programs</h2>
+  <p>Gene programs from GC biology literature were scored <em>after</em> niche discovery
+  (not used to cluster). Association with niches is tested by ANOVA η² and label-permutation.</p>
+  <table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>program</th>
+      <th>n_genes</th>
+      <th>genes</th>
+      <th>eta2_vs_niche</th>
+      <th>anova_p</th>
+      <th>eta2_perm_p</th>
+      <th>moran_I</th>
+      <th>mean</th>
+      <th>std</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>CSR_proliferation</td>
+      <td>5</td>
+      <td>AICDA,CXCR4,FOXO1,BCL6,TOP2A</td>
+      <td>0.0959</td>
+      <td>8.58e-30</td>
+      <td>0.00498</td>
+      <td>0.155</td>
+      <td>0.544</td>
+      <td>0.833</td>
+    </tr>
+    <tr>
+      <td>selection_activation</td>
+      <td>5</td>
+      <td>CD83,CXCR5,CD40,LMO2,BATF</td>
+      <td>0.0546</td>
+      <td>5.65e-14</td>
+      <td>0.00498</td>
+      <td>0.101</td>
+      <td>0.189</td>
+      <td>0.729</td>
+    </tr>
+    <tr>
+      <td>FDC_cue</td>
+      <td>4</td>
+      <td>FCER2,CR2,FDCSP,CXCL13</td>
+      <td>0.048</td>
+      <td>1.25e-11</td>
+      <td>0.00498</td>
+      <td>0.0717</td>
+      <td>0.391</td>
+      <td>0.697</td>
+    </tr>
+    <tr>
+      <td>BAFF_BCR_axis</td>
+      <td>5</td>
+      <td>TNFRSF13B,TNFRSF13C,BANK1,CD86,CR2</td>
+      <td>0.0282</td>
+      <td>3.01e-05</td>
+      <td>0.00498</td>
+      <td>0.0244</td>
+      <td>0.335</td>
+      <td>0.666</td>
+    </tr>
+    <tr>
+      <td>plasma_exit</td>
+      <td>2</td>
+      <td>IRF4,PRDM1</td>
+      <td>0.0227</td>
+      <td>0.00102</td>
+      <td>0.00498</td>
+      <td>0.0227</td>
+      <td>-0.00165</td>
+      <td>0.664</td>
+    </tr>
+    <tr>
+      <td>Tfh_receptor_axis</td>
+      <td>4</td>
+      <td>ICOS,PDCD1,CXCR5,CD40</td>
+      <td>0.0206</td>
+      <td>0.00352</td>
+      <td>0.0149</td>
+      <td>0.016</td>
+      <td>-0.175</td>
+      <td>0.542</td>
+    </tr>
+  </tbody>
+</table>
+  <div class="grid grid-2">
+    <figure><img src="img/program_eta2.png"/><figcaption>Program–niche η² with permutation p-values.</figcaption></figure>
+    <figure><img src="img/program_spatial.png"/><figcaption>Spatial maps of program scores + Moran’s I.</figcaption></figure>
+  </div>
+  <figure><img src="img/program_by_niche.png"/><figcaption>Niches specialize along orthogonal GC programs (rows ordered by CSR/proliferation).</figcaption></figure>
+  <figure><img src="img/program_eta2_vs_banksy.png"/><figcaption>Same programs scored against BANKSY niches as an expression-driven control.
+    BANKSY mean η²=0.092 &gt; SpaceTravLR mean η²=0.045
+    — expected, because BANKSY niches are built from expression. β niches still recover significant program structure
+    without clustering on expression, while remaining far more spatially contiguous
+    (same-label kNN 92.0% vs BANKSY 52.8%).</figcaption></figure>
+
+  <h2>3. Microenvironment: Tfh / FDC contacts</h2>
+  <p>For each GC cell, fraction of full-tissue spatial neighbors that are Tfh or FDC.
+  Niche ID explains neighbor composition beyond chance.</p>
+  <table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>neighbor_type</th>
+      <th>eta2_vs_niche</th>
+      <th>anova_p</th>
+      <th>eta2_perm_p</th>
+      <th>global_mean_fraction</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>B_germinal_center</td>
+      <td>0.313</td>
+      <td>5.42e-135</td>
+      <td>0.00498</td>
+      <td>0.64</td>
+    </tr>
+    <tr>
+      <td>T_follicular_helper</td>
+      <td>0.296</td>
+      <td>1.79e-125</td>
+      <td>0.00498</td>
+      <td>0.0815</td>
+    </tr>
+    <tr>
+      <td>T_CD4</td>
+      <td>0.154</td>
+      <td>1.74e-54</td>
+      <td>0.00498</td>
+      <td>0.0317</td>
+    </tr>
+    <tr>
+      <td>FDC</td>
+      <td>0.0861</td>
+      <td>7.11e-26</td>
+      <td>0.00498</td>
+      <td>0.051</td>
+    </tr>
+  </tbody>
+</table>
+  <figure><img src="img/neighbor_by_niche.png"/><figcaption>Niches differ in Tfh/FDC neighborhood exposure.</figcaption></figure>
+
+  <h2>4. Niche marker genes → pathway enrichment</h2>
+  <p>Wilcoxon DE (niche vs rest, FDR&lt;0.05, logFC&gt;0.25) then Enrichr
+  (GO BP / Reactome). Top hits:</p>
+  <table><thead><tr><th>niche</th><th>library</th><th>term</th><th>adj p</th></tr></thead><tbody><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Interferon Gamma Signaling</td><td>8.53e-13</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Interferon Signaling</td><td>1.28e-10</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Cytokine Signaling in Immune System</td><td>4.97e-09</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Translocation of ZAP-70 to Immunological Synapse</td><td>9.48e-09</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>PD-1 Signaling</td><td>1.36e-08</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Phosphorylation of CD3 and TCR Zeta Chains</td><td>1.36e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Antigen Processing and Presentation of Endogenous Peptide Antigen (GO:0002483)</td><td>1.92e-08</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Endosomal Vacuolar Pathway</td><td>3.75e-08</td></tr><tr><td>1</td><td>Reactome_Pathways_2024</td><td>Downstream TCR Signaling</td><td>4.74e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Antigen Processing and Presentation of Exogenous Peptide Antigen (GO:0002478)</td><td>6.28e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Positive Regulation of T Cell Mediated Cytotoxicity (GO:0001916)</td><td>6.28e-08</td></tr><tr><td>1</td><td>GO_Biological_Process_2025</td><td>Regulation of T Cell Mediated Cytotoxicity (GO:0001914)</td><td>7.57e-08</td></tr></tbody></table>
+  <figure><img src="img/enrichr_top.png"/><figcaption>Top Enrichr terms across niches.</figcaption></figure>
+
+  <h2>5. Spatially filtered β features encode immune axes</h2>
+  <p>The 159 kept β features (Moran × η², FDR, decorrelated) concentrate on known GC pathways —
+  not arbitrary noise.</p>
+  <figure><img src="img/beta_axes.png"/><figcaption>Biological axes among kept SpaceTravLR βs.</figcaption></figure>
+
+  <h2>6. Interpretation</h2>
+  <ul>
+    <li>β niches are <b>stable</b> (bootstrap ARI≈0.81), <b>spatially contiguous</b>
+      (92.0% same-label kNN vs ~6.4% under shuffle), and <b>compact</b>
+      (within/between distance ratio=0.19).</li>
+    <li>Independent GC programs associate with β niches above label-permutation (η² up to 0.096).
+      BANKSY shows higher program η² by construction (expression niches); β niches still carry functional signal
+      while preserving microniche geometry BANKSY loses.</li>
+    <li>Niches differ strongly in <b>Tfh / FDC / T helper contact rates</b>
+      (Tfh neighbor η²=0.30), i.e. distinct microenvironments.</li>
+    <li>DEG→Enrichr recovers antigen presentation, interferon / cytokine signaling, and PD-1 pathway terms.</li>
+    <li>Kept β features concentrate on IL21, BAFF/APRIL, CXCL13, PD-1/CD28, WNT, TGF-β, ECM–integrin, and TF modulators.</li>
+  </ul>
+</main>
+</body>
+</html>

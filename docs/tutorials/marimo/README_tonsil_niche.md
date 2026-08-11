@@ -48,3 +48,16 @@ marimo export html-wasm docs/tutorials/marimo/tonsil_niche_benchmark.py \
   --show-code \
   --no-sandbox
 ```
+
+## Functional proof (SpaceTravLR β niches)
+
+Biological + statistical evidence that β niches are functional, without using
+expression-derived GC zones as ground truth:
+
+```bash
+python docs/tutorials/marimo/prepare_tonsil_niche_functional_proof.py
+```
+
+Live report: https://saffron-prana-ahwn.here.now/
+
+Assets: `public/tonsil_niche_benchmark/functional_proof/`.
