@@ -24,8 +24,8 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::betadata::{
-    betadata_cluster_keys_from_obs_dataframe, betadata_feather_per_cell_column,
-    betadata_feather_plottable_columns, obs_series_row_str, resolve_betadata_cluster_key_column,
+    betadata_cluster_keys_from_obs_dataframe, betadata_feather_all_float_columns_for_cells,
+    betadata_feather_per_cell_column, obs_series_row_str, resolve_betadata_cluster_key_column,
     write_betadata_feather,
 };
 use crate::config::{SpaceshipConfig, expand_user_path};
@@ -37,7 +37,7 @@ const DEFAULT_N_NEIGHBORS: usize = 15;
 const DEFAULT_N_PCS: usize = 40;
 const DEFAULT_EF: usize = 30;
 const DEFAULT_SPATIAL_K: usize = 8;
-const DEFAULT_MORAN_PERM: usize = 49;
+const DEFAULT_MORAN_PERM: usize = 0;
 const DEFAULT_Q_MAX: f64 = 0.05;
 const DEFAULT_CORR_MAX: f64 = 0.85;
 const DEFAULT_RES_MIN: f64 = 0.2;
@@ -46,6 +46,7 @@ const DEFAULT_RES_STEP: f64 = 0.1;
 const DEFAULT_LEIDEN_MAX_ITER: usize = 100;
 const DEFAULT_GRID: usize = 8;
 const DEFAULT_SEED: u64 = 0;
+const DEFAULT_SPATIAL_TEST_CAP: usize = 4000;
 
 #[derive(Clone, Debug)]
 pub struct MicronichesParams {
@@ -67,6 +68,7 @@ pub struct MicronichesParams {
     pub max_features: Option<usize>,
     pub features_csv: Option<PathBuf>,
     pub max_genes: Option<usize>,
+    pub spatial_test_cap: usize,
     pub seed: u64,
 }
 
@@ -91,6 +93,7 @@ impl Default for MicronichesParams {
             max_features: None,
             features_csv: None,
             max_genes: None,
+            spatial_test_cap: DEFAULT_SPATIAL_TEST_CAP,
             seed: DEFAULT_SEED,
         }
     }
@@ -323,8 +326,8 @@ fn permute_moran_p(
     seed: u64,
 ) -> f64 {
     if n_perm == 0 {
-        // Heuristic: treat high Moran's I as significant for ranking when perms disabled.
-        return if observed > 0.1 { 0.01 } else { 0.5 };
+        // Heuristic matching the tonsil spatial-filter pipeline: high Moran's I → p=0.01.
+        return if observed > 0.1 { 0.01 } else { 1.0 };
     }
     let mut rng = StdRng::seed_from_u64(seed);
     let mut buf = values.to_vec();
@@ -668,6 +671,58 @@ fn pick_labels_by_silhouette(
     Ok((best_labels, best_res, best_sil, sweep))
 }
 
+fn score_one_gene(
+    gene: &str,
+    path: &Path,
+    obs_names: &[String],
+    cluster_keys: &[String],
+    spatial: &Array2<f64>,
+    knn: &[Vec<usize>],
+    params: &MicronichesParams,
+) -> anyhow::Result<Vec<FeatureCandidate>> {
+    let columns = betadata_feather_all_float_columns_for_cells(
+        path.to_str().unwrap_or_default(),
+        obs_names,
+        cluster_keys,
+    )?;
+    let mut out = Vec::new();
+    for (feature, values) in columns {
+        let m = mad(&values);
+        if m <= 1e-12 {
+            continue;
+        }
+        let mi = moran_i(&values, knn);
+        let e2 = eta2_spatial_grid(&values, spatial, params.spatial_grid);
+        let seed = params
+            .seed
+            .wrapping_add(gene.len() as u64)
+            .wrapping_mul(31)
+            .wrapping_add(feature.len() as u64);
+        let p = permute_moran_p(&values, knn, mi, params.moran_n_perm, seed);
+        out.push(FeatureCandidate {
+            gene: gene.to_string(),
+            feature,
+            values,
+            mad: m,
+            moran_i: mi,
+            eta2: e2,
+            p_perm: p,
+            q_bh: 1.0,
+            spatial_score: mi.max(0.0) * e2,
+        });
+    }
+    Ok(out)
+}
+
+fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let p = p.clamp(0.0, 1.0);
+    let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 fn score_feature_matrix(
     feathers: &[(String, PathBuf)],
     obs_names: &[String],
@@ -676,67 +731,71 @@ fn score_feature_matrix(
     params: &MicronichesParams,
 ) -> anyhow::Result<Vec<FeatureCandidate>> {
     let knn = spatial_knn_indices(spatial, params.spatial_k);
-    let mut scored: Vec<FeatureCandidate> = Vec::new();
+    let gene_results: Vec<anyhow::Result<Vec<FeatureCandidate>>> = feathers
+        .par_iter()
+        .map(|(gene, path)| {
+            score_one_gene(gene, path, obs_names, cluster_keys, spatial, &knn, params)
+        })
+        .collect();
 
-    for (gene, path) in feathers {
-        let cols = betadata_feather_plottable_columns(path.to_str().unwrap_or_default())?;
-        for feature in cols {
-            let vals_f32 = betadata_feather_per_cell_column(
-                path.to_str().unwrap_or_default(),
-                &feature,
-                obs_names,
-                cluster_keys,
-            )?;
-            let values: Vec<f64> = vals_f32.iter().map(|v| *v as f64).collect();
-            let m = mad(&values);
-            if m <= 1e-12 {
-                continue;
-            }
-            let mi = moran_i(&values, &knn);
-            let e2 = eta2_spatial_grid(&values, spatial, params.spatial_grid);
-            let seed = params
-                .seed
-                .wrapping_add(gene.len() as u64)
-                .wrapping_mul(31)
-                .wrapping_add(feature.len() as u64);
-            let p = permute_moran_p(&values, &knn, mi, params.moran_n_perm, seed);
-            scored.push(FeatureCandidate {
-                gene: gene.clone(),
-                feature,
-                values,
-                mad: m,
-                moran_i: mi,
-                eta2: e2,
-                p_perm: p,
-                q_bh: 1.0,
-                spatial_score: mi.max(0.0) * e2,
-            });
-        }
+    let mut scored: Vec<FeatureCandidate> = Vec::new();
+    for r in gene_results {
+        scored.extend(r?);
     }
+    if scored.is_empty() {
+        bail!("no β features passed the MAD noise gate");
+    }
+
+    // Rank by spatial_score and FDR only the top cap (matches prior Python filter).
+    scored.sort_by(|a, b| {
+        b.spatial_score
+            .partial_cmp(&a.spatial_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let cap = params.spatial_test_cap.max(32).min(scored.len());
+    scored.truncate(cap);
 
     let pvals: Vec<f64> = scored.iter().map(|c| c.p_perm).collect();
     let q = bh_fdr(&pvals);
     for (c, qq) in scored.iter_mut().zip(q) {
         c.q_bh = qq;
     }
+
     let mut kept: Vec<_> = scored
         .iter()
         .filter(|c| c.q_bh <= params.q_bh_max && c.spatial_score > 0.0)
         .cloned()
         .collect();
+
+    if !kept.is_empty() {
+        let mut is: Vec<f64> = kept.iter().map(|c| c.moran_i).collect();
+        let mut es: Vec<f64> = kept.iter().map(|c| c.eta2).collect();
+        is.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        es.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let i_min = percentile_sorted(&is, 0.50);
+        let e_min = percentile_sorted(&es, 0.25);
+        let adaptive: Vec<_> = kept
+            .iter()
+            .filter(|c| c.moran_i >= i_min && c.eta2 >= e_min)
+            .cloned()
+            .collect();
+        if adaptive.len() >= 16 {
+            kept = adaptive;
+        }
+    }
+
     if kept.is_empty() {
-        // Tiny / noisy runs: keep top spatial scores regardless of FDR.
-        let mut ranked = scored;
-        ranked.sort_by(|a, b| {
-            b.spatial_score
-                .partial_cmp(&a.spatial_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        kept = ranked.into_iter().take(32).collect();
+        // Fallback: strongest spatial scores regardless of FDR.
+        kept = scored.into_iter().take(256).collect();
     }
     if kept.is_empty() {
         bail!("no spatially informative β features found");
     }
+    kept.sort_by(|a, b| {
+        b.spatial_score
+            .partial_cmp(&a.spatial_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     kept = greedy_decorrelate(kept, params.corr_max);
     if let Some(max_f) = params.max_features {
         if kept.len() > max_f {

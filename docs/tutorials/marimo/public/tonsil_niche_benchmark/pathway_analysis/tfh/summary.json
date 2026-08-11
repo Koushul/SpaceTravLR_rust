@@ -1,0 +1,181 @@
+{
+  "name": "tfh",
+  "n_cells": 294,
+  "n_niches": 5,
+  "cli_summary": {
+    "n_cells": 294,
+    "n_kept_features": 51,
+    "n_pcs": 40,
+    "n_clusters": 5,
+    "chosen_resolution": 0.2,
+    "silhouette": 0.36301960326463545,
+    "cell_type_subset": "T_follicular_helper",
+    "annot_col": "cell_type",
+    "optimized_by_silhouette": true,
+    "resolution_sweep": [
+      {
+        "resolution": 0.2,
+        "silhouette": 0.36301960326463545,
+        "n_clusters": 5
+      },
+      {
+        "resolution": 0.3,
+        "silhouette": 0.36301960326463545,
+        "n_clusters": 5
+      },
+      {
+        "resolution": 0.4,
+        "silhouette": 0.30829339941538575,
+        "n_clusters": 6
+      },
+      {
+        "resolution": 0.5,
+        "silhouette": 0.30829339941538575,
+        "n_clusters": 6
+      },
+      {
+        "resolution": 0.6,
+        "silhouette": 0.2589979844927641,
+        "n_clusters": 7
+      },
+      {
+        "resolution": 0.7,
+        "silhouette": 0.27863495977815766,
+        "n_clusters": 9
+      },
+      {
+        "resolution": 0.8,
+        "silhouette": 0.27863495977815766,
+        "n_clusters": 9
+      },
+      {
+        "resolution": 0.9,
+        "silhouette": 0.27863495977815766,
+        "n_clusters": 9
+      },
+      {
+        "resolution": 1.0,
+        "silhouette": 0.270570699641479,
+        "n_clusters": 10
+      },
+      {
+        "resolution": 1.1,
+        "silhouette": 0.2862026457732269,
+        "n_clusters": 11
+      },
+      {
+        "resolution": 1.2,
+        "silhouette": 0.27872884824961736,
+        "n_clusters": 12
+      },
+      {
+        "resolution": 1.3,
+        "silhouette": 0.32928655735514273,
+        "n_clusters": 13
+      },
+      {
+        "resolution": 1.4,
+        "silhouette": 0.2704975117458271,
+        "n_clusters": 13
+      },
+      {
+        "resolution": 1.5,
+        "silhouette": 0.2968796790185097,
+        "n_clusters": 14
+      },
+      {
+        "resolution": 1.6,
+        "silhouette": 0.31841597756804363,
+        "n_clusters": 14
+      },
+      {
+        "resolution": 1.7,
+        "silhouette": 0.3129260126979343,
+        "n_clusters": 15
+      },
+      {
+        "resolution": 1.8,
+        "silhouette": 0.3129260126979343,
+        "n_clusters": 15
+      },
+      {
+        "resolution": 1.9,
+        "silhouette": 0.3129260126979343,
+        "n_clusters": 15
+      },
+      {
+        "resolution": 2.0,
+        "silhouette": 0.31403376094062113,
+        "n_clusters": 16
+      }
+    ],
+    "output_dir": "/tmp/tonsil_tfh_microniches_full"
+  },
+  "contact_focus": "B_germinal_center",
+  "contact_eta2": {
+    "eta2": 0.08445006339344927,
+    "anova_p": 3.834670730175352e-05
+  },
+  "top_programs": [
+    {
+      "program": "Tfh_canonical",
+      "n_genes_present": 9,
+      "genes_present": "CXCL13,PDCD1,ICOS,CXCR5,BCL6,IL21,MAF,TOX2,SH2D1A",
+      "eta2_vs_niche": 0.04340938138844518,
+      "anova_p": 0.01192935559482076,
+      "kruskal_p": 0.014586585402075887,
+      "mean": 0.3603052420568854,
+      "kruskal_q": 0.07293292701037943
+    },
+    {
+      "program": "cytokine_help",
+      "n_genes_present": 4,
+      "genes_present": "IL21,CD40LG,CXCL13,IFNG",
+      "eta2_vs_niche": 0.016164978559243034,
+      "anova_p": 0.31657331792037774,
+      "kruskal_p": 0.24026852566016352,
+      "mean": 0.06887984676801498,
+      "kruskal_q": 0.3633584068650011
+    },
+    {
+      "program": "exhaustion_checkpoint",
+      "n_genes_present": 5,
+      "genes_present": "PDCD1,TIGIT,LAG3,HAVCR2,CTLA4",
+      "eta2_vs_niche": 0.013304794481308772,
+      "anova_p": 0.42189751651328566,
+      "kruskal_p": 0.3633584068650011,
+      "mean": -0.0729347319032111,
+      "kruskal_q": 0.3633584068650011
+    },
+    {
+      "program": "TCR_activation",
+      "n_genes_present": 5,
+      "genes_present": "CD69,FOS,NFKBIA,NR4A2,NR4A3",
+      "eta2_vs_niche": 0.009958129664629096,
+      "anova_p": 0.5743049384724424,
+      "kruskal_p": 0.09768209975394912,
+      "mean": -0.017443380682037796,
+      "kruskal_q": 0.24420524938487279
+    },
+    {
+      "program": "cell_cycle",
+      "n_genes_present": 4,
+      "genes_present": "TOP2A,HMGB2,CENPF,RRM2",
+      "eta2_vs_niche": 0.003926454547696102,
+      "anova_p": 0.8877290367902213,
+      "kruskal_p": 0.33427513760469785,
+      "mean": -0.02231314091646785,
+      "kruskal_q": 0.3633584068650011
+    }
+  ],
+  "n_enrichment_rows": 114,
+  "cycling_threshold_q75": 0.2863742824889682,
+  "mean_frac_cycling": 0.2493586028110201,
+  "niches_by_contact": {
+    "0": 0.5985507246376811,
+    "2": 0.5416666666666666,
+    "4": 0.5292096219931272,
+    "3": 0.5229217110573042,
+    "1": 0.3852941176470588
+  }
+}

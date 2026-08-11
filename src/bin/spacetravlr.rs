@@ -302,8 +302,8 @@ struct GetMicronichesCli {
     spatial_k: usize,
     #[arg(
         long,
-        default_value_t = 49,
-        help = "Moran's I permutations for FDR (0 = heuristic p-values)"
+        default_value_t = 0,
+        help = "Moran's I permutations for FDR (0 = heuristic p=0.01 when I>0.1; FDR applied to top --spatial-test-cap features)"
     )]
     moran_n_perm: usize,
     #[arg(long, default_value_t = 0.05, help = "Max BH q-value for keeping β features")]
@@ -332,6 +332,12 @@ struct GetMicronichesCli {
         help = "Skip spatial filter; use this gene,feature CSV of kept βs"
     )]
     features_csv: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value_t = 4000,
+        help = "After Moran×η² ranking, FDR only this many top spatial β features"
+    )]
+    spatial_test_cap: usize,
     #[arg(long, default_value_t = 0, help = "RNG seed for Moran permutations")]
     seed: u64,
 }
@@ -1819,6 +1825,7 @@ fn run_get_microniches(gm: &GetMicronichesCli) -> anyhow::Result<()> {
         max_features: gm.max_features,
         features_csv: gm.features_csv.clone(),
         max_genes: gm.max_genes,
+        spatial_test_cap: gm.spatial_test_cap,
         seed: gm.seed,
     };
     let result = run_microniches(gm.run_toml.as_path(), &params, gm.out.as_deref())?;
