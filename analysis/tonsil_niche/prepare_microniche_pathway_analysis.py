@@ -274,20 +274,27 @@ def analyze_cohort(
     out_dir.mkdir(parents=True, exist_ok=True)
     img.mkdir(parents=True, exist_ok=True)
 
-    lab = pd.read_csv(labels_csv)
+    lab = pd.read_csv(labels_csv, index_col=0)
+    if lab.index.name in (None, "", "Unnamed: 0") or "microniche" not in lab.columns:
+        # tolerate legacy cell_id,microniche[,x,y] exports
+        lab = pd.read_csv(labels_csv)
+        if "cell_id" in lab.columns:
+            lab = lab.set_index("cell_id")
+        elif lab.columns[0] != "microniche":
+            lab = lab.set_index(lab.columns[0])
     summary = json.loads(summary_json.read_text()) if summary_json.is_file() else {}
     # align to AnnData
-    lab["cell_id"] = lab["cell_id"].astype(str)
+    lab.index = lab.index.astype(str)
     full_ids = full.obs_names.astype(str)
-    idx = full_ids.get_indexer(lab["cell_id"].to_numpy())
+    idx = full_ids.get_indexer(lab.index.to_numpy())
     if (idx < 0).any():
         missing = int((idx < 0).sum())
-        raise RuntimeError(f"{name}: {missing} label cell_ids not in AnnData")
+        raise RuntimeError(f"{name}: {missing} label obs names not in AnnData")
     mask = np.zeros(full.n_obs, dtype=bool)
     mask[idx] = True
     ad = load_expr_subset(full, mask)
     # reorder labels to ad.obs_names
-    lab = lab.set_index("cell_id").loc[ad.obs_names.astype(str)]
+    lab = lab.loc[ad.obs_names.astype(str)]
     labels = lab["microniche"].astype(str).to_numpy()
     spatial = np.asarray(ad.obsm["spatial"], dtype=np.float64)
     xy_full = np.asarray(full.obsm["spatial"], dtype=np.float64)

@@ -1018,21 +1018,17 @@ fn write_outputs(
     dest: &Path,
     cell_ids: &[String],
     labels: &[String],
-    spatial: &Array2<f64>,
+    _spatial: &Array2<f64>,
     pca: &Array2<f64>,
     kept: &[KeptBetaFeature],
     summary: &MicronichesSummary,
 ) -> anyhow::Result<()> {
     {
+        // Pandas-style: obs names as the index, single `microniche` column.
         let mut w = csv::Writer::from_path(dest.join("microniche_labels.csv"))?;
-        w.write_record(["cell_id", "microniche", "x", "y"])?;
-        for i in 0..cell_ids.len() {
-            w.write_record([
-                cell_ids[i].as_str(),
-                labels[i].as_str(),
-                &spatial[(i, 0)].to_string(),
-                &spatial[(i, 1)].to_string(),
-            ])?;
+        w.write_record(["", "microniche"])?;
+        for (id, lab) in cell_ids.iter().zip(labels.iter()) {
+            w.write_record([id.as_str(), lab.as_str()])?;
         }
         w.flush()?;
     }
@@ -1210,6 +1206,14 @@ stale_lock_secs = 0
         assert!(out.join("summary.json").is_file());
         assert!(out.join("kept_beta_features.csv").is_file());
         assert!(res.summary.optimized_by_silhouette);
+        let labels_csv = std::fs::read_to_string(out.join("microniche_labels.csv")).unwrap();
+        let mut lines = labels_csv.lines();
+        assert_eq!(lines.next(), Some(",microniche"));
+        let first = lines.next().expect("label row");
+        let parts: Vec<_> = first.split(',').collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].starts_with('c'));
+        assert!(!parts[1].is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -138,6 +138,13 @@ fn cli_writes_microniche_outputs() {
     assert!(out_dir.join("summary.json").is_file());
     assert!(out_dir.join("kept_beta_features.csv").is_file());
     assert!(out_dir.join("resolution_sweep.csv").is_file());
+    let labels_csv = std::fs::read_to_string(out_dir.join("microniche_labels.csv")).unwrap();
+    assert!(
+        labels_csv.lines().next() == Some(",microniche"),
+        "expected index + microniche header, got: {:?}",
+        labels_csv.lines().next()
+    );
+    assert_eq!(labels_csv.lines().nth(1).unwrap().split(',').count(), 2);
     let summary = std::fs::read_to_string(out_dir.join("summary.json")).unwrap();
     assert!(summary.contains("optimized_by_silhouette"));
     let _ = std::fs::remove_dir_all(&dir);

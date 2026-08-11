@@ -72,7 +72,7 @@ spacetravlr get-microniches \
   --out ./microniches
 ```
 
-Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`. Writes `microniche_labels.csv`, `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
+Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`. Writes `microniche_labels.csv` (obs names as index, `microniche` column), `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
 
 ### Input
 
