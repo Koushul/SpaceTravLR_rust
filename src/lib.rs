@@ -172,16 +172,22 @@ pub use perturb_mode::{
 };
 #[cfg(feature = "tui")]
 pub mod perturb_tui;
+pub mod microniches;
+pub use microniches::{
+    MicronichesParams, MicronichesResult, MicronichesSummary, run_microniches,
+    resolve_run_adata_path,
+};
 pub mod run_summary_html;
 pub mod scanpy_preprocess;
 pub mod rust_preprocess;
 pub use rust_preprocess::{
     FuzzyGraph, UmapLabKnnCache, RustPreprocessParams, RustPreprocessSteps, UmapLabLoaded,
-    clamp_umap_min_dist_spread, fuzzy_graph_induced_subgraph, leiden_labels_from_graph,
-    leiden_labels_subcluster_into, rust_preprocess_h5ad, rust_preprocess_h5ad_to_memory,
-    rust_preprocess_h5ad_with_steps, umap_lab_gene_expression_from_h5ad,
-    umap_lab_gene_expression_from_h5ad_source, umap_lab_load_pca_session, umap_lab_read_obs_column,
-    umap_lab_run_embedding, umap_lab_run_magic_imputed_leiden,
+    clamp_umap_min_dist_spread, fuzzy_graph_from_pca, fuzzy_graph_induced_subgraph,
+    leiden_labels_from_graph, leiden_labels_subcluster_into, rust_preprocess_h5ad,
+    rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps,
+    umap_lab_gene_expression_from_h5ad, umap_lab_gene_expression_from_h5ad_source,
+    umap_lab_load_pca_session, umap_lab_read_obs_column, umap_lab_run_embedding,
+    umap_lab_run_magic_imputed_leiden,
 };
 #[cfg(feature = "self-update")]
 pub mod self_update;

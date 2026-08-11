@@ -809,6 +809,48 @@ fn spectral_init_2d(graph: &FuzzyGraph, n_components: usize, seed: u64) -> Array
     init
 }
 
+/// Build a Scanpy-like fuzzy kNN graph on dense PCA / embedding rows (no UMAP optimization).
+pub fn fuzzy_graph_from_pca(
+    pca: &ndarray::Array2<f64>,
+    n_components: usize,
+    n_neighbors: usize,
+    ef_construction: usize,
+) -> Result<FuzzyGraph> {
+    let n = pca.nrows();
+    let dim = n_components.min(pca.ncols());
+    anyhow::ensure!(n > 1, "need at least 2 cells for a neighborhood graph");
+    anyhow::ensure!(dim >= 1, "need at least 1 PCA component");
+    let knn_neighbors = n_neighbors.min(n);
+    let points = pca_to_points_f32(pca, dim);
+    let mut knn_log = Vec::new();
+    let (knn_idx, knn_dist) = knn_indices_dists(points, knn_neighbors, ef_construction, &mut knn_log);
+
+    let mut data_vec = Vec::with_capacity(n * dim);
+    for row in pca.outer_iter() {
+        for j in 0..dim {
+            data_vec.push(*row.get(j).unwrap_or(&0.0) as f32);
+        }
+    }
+    let data = Array2Umap::from_shape_vec((n, dim), data_vec)
+        .map_err(|e| anyhow!("fuzzy-graph data shape: {e}"))?;
+    let config = UmapConfig {
+        n_components: 2,
+        manifold: ManifoldParams::default(),
+        graph: GraphParams {
+            n_neighbors: knn_neighbors,
+            symmetrize: true,
+            ..Default::default()
+        },
+        optimization: OptimizationParams {
+            n_epochs: Some(0),
+            ..Default::default()
+        },
+    };
+    let umap = Umap::new(config);
+    let manifold = umap.learn_manifold(data.view(), knn_idx.view(), knn_dist.view());
+    Ok(manifold.graph().clone())
+}
+
 pub fn run_umap_on_pca(
     pca: &ndarray::Array2<f64>,
     params: &RustPreprocessParams,

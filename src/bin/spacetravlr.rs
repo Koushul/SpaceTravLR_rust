@@ -28,9 +28,10 @@ use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
 };
 use spacetravlr::{
-    BetadataCollectAggregate, RunSummaryParams, betadata_collect_interactions_all_cell_types,
+    BetadataCollectAggregate, MicronichesParams, RunSummaryParams,
+    betadata_collect_interactions_all_cell_types,
     betadata_collect_interactions_all_cell_types_full, load_obs_column_for_collect_interactions,
-    load_obs_for_collect_interactions, write_collected_interactions_feather,
+    load_obs_for_collect_interactions, run_microniches, write_collected_interactions_feather,
     write_collected_interactions_full_feather, write_run_summary_html,
 };
 use std::path::{Path, PathBuf};
@@ -67,6 +68,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Use --plain for compact line-oriented logs instead of the full-screen dashboard (when built with `tui`).
 • Subcommand run-summary writes the HTML report without training.
 • Subcommand collect-interactions builds a multi–cell-type interaction database from *_betadata.feather files.
+• Subcommand get-microniches discovers spatial microniches from trained β feathers (spatial β filter → PCA → Leiden; silhouette-optimized resolution by default).
 • Subcommand gui runs `npm run build` in web/umap_lab, then starts the UMAP lab server and prints the URL.
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
@@ -170,6 +172,8 @@ enum Commands {
     RunSummary(RunSummaryCli),
     /// Scan *_betadata.feather under a run directory; aggregate β per modulator × target × cell type.
     CollectInteractions(CollectInteractionsCli),
+    /// Discover spatial microniches from trained SpaceTravLR βs (filter → PCA → Leiden).
+    GetMicroniches(GetMicronichesCli),
     /// UMAP lab: build the web UI, start the API + static server, print the URL.
     Gui(GuiCli),
 }
@@ -250,6 +254,92 @@ struct CollectInteractionsCli {
         help = "Output .feather path (default: <[execution].output_dir>/plucked_feathers.feather)"
     )]
     out: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct GetMicronichesCli {
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "spacetravlr_run_repro.toml from the finished training run"
+    )]
+    run_toml: PathBuf,
+    #[arg(
+        long = "cell-type",
+        value_name = "LABEL",
+        help = "Keep only cells with this value in --annot (e.g. B_germinal_center)"
+    )]
+    cell_type: Option<String>,
+    #[arg(
+        long,
+        default_value = "cell_type",
+        help = "obs column used with --cell-type"
+    )]
+    annot: String,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Output directory (default: <run output>/microniches)"
+    )]
+    out: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "R",
+        help = "Fixed Leiden resolution (default: sweep resolutions and pick best silhouette)"
+    )]
+    resolution: Option<f64>,
+    #[arg(long, default_value_t = 0.2, help = "Silhouette sweep: min resolution")]
+    resolution_min: f64,
+    #[arg(long, default_value_t = 2.0, help = "Silhouette sweep: max resolution")]
+    resolution_max: f64,
+    #[arg(long, default_value_t = 0.1, help = "Silhouette sweep: resolution step")]
+    resolution_step: f64,
+    #[arg(long, default_value_t = 15, help = "kNN size on β PCA for Leiden graph")]
+    n_neighbors: usize,
+    #[arg(long, default_value_t = 40, help = "Number of PCA components on filtered βs")]
+    n_pcs: usize,
+    #[arg(long, default_value_t = 8, help = "Spatial kNN for Moran's I filter")]
+    spatial_k: usize,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Moran's I permutations for FDR (0 = heuristic p=0.01 when I>0.1; FDR applied to top --spatial-test-cap features)"
+    )]
+    moran_n_perm: usize,
+    #[arg(long, default_value_t = 0.05, help = "Max BH q-value for keeping β features")]
+    q_bh_max: f64,
+    #[arg(
+        long,
+        default_value_t = 0.85,
+        help = "Max |Pearson| when greedily decorrelating kept βs"
+    )]
+    corr_max: f64,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Optional cap on kept β features after filtering"
+    )]
+    max_features: Option<usize>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Optional cap on betadata genes scanned (debug / smoke)"
+    )]
+    max_genes: Option<usize>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Skip spatial filter; use this gene,feature CSV of kept βs"
+    )]
+    features_csv: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value_t = 4000,
+        help = "After Moran×η² ranking, FDR only this many top spatial β features"
+    )]
+    spatial_test_cap: usize,
+    #[arg(long, default_value_t = 0, help = "RNG seed for Moran permutations")]
+    seed: u64,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -1715,6 +1805,39 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_get_microniches(gm: &GetMicronichesCli) -> anyhow::Result<()> {
+    let params = MicronichesParams {
+        annot_col: gm.annot.clone(),
+        cell_type: gm.cell_type.clone(),
+        n_neighbors: gm.n_neighbors,
+        n_pcs: gm.n_pcs,
+        ef_construction: 30,
+        leiden_resolution: gm.resolution,
+        resolution_min: gm.resolution_min,
+        resolution_max: gm.resolution_max,
+        resolution_step: gm.resolution_step,
+        leiden_max_iter: 100,
+        spatial_k: gm.spatial_k,
+        moran_n_perm: gm.moran_n_perm,
+        q_bh_max: gm.q_bh_max,
+        corr_max: gm.corr_max,
+        spatial_grid: 8,
+        max_features: gm.max_features,
+        features_csv: gm.features_csv.clone(),
+        max_genes: gm.max_genes,
+        spatial_test_cap: gm.spatial_test_cap,
+        seed: gm.seed,
+    };
+    let result = run_microniches(gm.run_toml.as_path(), &params, gm.out.as_deref())?;
+    let s = &result.summary;
+    println!(
+        "microniches: {} cells · {} niches · resolution={:.3} · silhouette={:.3} · kept_β={}",
+        s.n_cells, s.n_clusters, s.chosen_resolution, s.silhouette, s.n_kept_features
+    );
+    println!("{}", s.output_dir);
+    Ok(())
+}
+
 #[cfg(feature = "tui")]
 fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     if cli.plain {
@@ -2741,6 +2864,7 @@ fn main() -> anyhow::Result<()> {
     match &cli.command {
         Some(Commands::RunSummary(rs)) => return run_run_summary(&cli, rs),
         Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
+        Some(Commands::GetMicroniches(gm)) => return run_get_microniches(gm),
         Some(Commands::Gui(g)) => return run_spacetravlr_gui(g),
         None => {}
     }

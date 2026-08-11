@@ -9,7 +9,7 @@ description: Documents SpaceTravLR_rust training (spacetravlr) and in-silico per
 
 Apply when helping with:
 
-- `**spacetravlr**` — spatial GRN training from `.h5ad`, config overrides, `run-summary`, `--join-output-dir`, `--condition`
+- `**spacetravlr**` — spatial GRN training from `.h5ad`, config overrides, `run-summary`, `get-microniches`, `--join-output-dir`, `--condition`
 - `**spacetravlr-perturb**` — load a finished run via `spacetravlr_run_repro.toml` + `*_betadata.feather`, TUI or `**--export` / `--out**` batch mode
 - Choosing **config files**, **artifacts** (feathers, repro TOML, locks, optional CNN `.npz`), or **environment variables** for compute
 
@@ -22,7 +22,7 @@ Apply when helping with:
 
 | Binary                | Default crate feature | Role                                                                                                                 |
 | --------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `spacetravlr`         | `tui`                 | Train all targets; TUI dashboard unless `--plain`; optional `run-summary` subcommand                                 |
+| `spacetravlr`         | `tui`                 | Train all targets; TUI dashboard unless `--plain`; `run-summary`, `get-microniches`, and related subcommands |
 | `spacetravlr-perturb` | `tui`                 | Perturbation only; TUI by default, `**--export` / `--out`** single-gene batch, or `**--batch-toml**` multi-job batch |
 
 
@@ -59,6 +59,20 @@ Written under `**[execution].output_dir`** (leader run). Records the **effective
 - **TUI (default)** — full-screen dashboard (`--plain` disables it → line logs)
 - `**--demo`** — fake dashboard only; no AnnData / no exports
 - `**run-summary**` subcommand — HTML report without training (`spacetravlr run-summary --help`)
+- `**get-microniches**` — discover spatial microniches from a finished run’s β feathers (`spacetravlr get-microniches --help`)
+
+### `get-microniches`
+
+Loads `spacetravlr_run_repro.toml` + `*_betadata.feather`, optionally subsets by `--cell-type`, spatially filters β features (Moran’s I × η², BH-FDR, decorrelation), then Z-score → PCA → fuzzy kNN Leiden. **By default** sweeps Leiden resolution and picks the best mean silhouette (`--resolution` fixes it).
+
+```bash
+spacetravlr get-microniches \
+  --run-toml path/to/spacetravlr_run_repro.toml \
+  --cell-type B_germinal_center \
+  --out ./microniches
+```
+
+Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`. Writes `microniche_labels.csv` (obs names as index, `microniche` column), `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
 
 ### Input
 

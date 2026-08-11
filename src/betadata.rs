@@ -1230,6 +1230,56 @@ pub fn betadata_feather_per_cell_column(
     Ok(out)
 }
 
+/// Load every float β column (skipping intercept / id) for the given cells in one feather read.
+/// Used by `get-microniches` spatial filtering so each gene file is opened once.
+pub fn betadata_feather_all_float_columns_for_cells(
+    path: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+) -> Result<Vec<(String, Vec<f64>)>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let (mapping, _) =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
+    let n_obs = obs_names.len();
+    let mut out = Vec::new();
+    for (i, name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx || is_intercept_column(name) {
+            continue;
+        }
+        let Ok(series) = df.column(name.as_str()).and_then(|c| c.cast(&DataType::Float64)) else {
+            continue;
+        };
+        let ca = series.f64()?;
+        let mut values = vec![0f64; n_obs];
+        for cell in 0..n_obs {
+            values[cell] = ca.get(mapping[cell]).unwrap_or(0.0);
+        }
+        out.push((name.clone(), values));
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Serialize)]
 pub struct TopBetaCoefficient {
     pub column: String,

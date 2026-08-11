@@ -1,0 +1,227 @@
+{
+  "stats": {
+    "n_cells": 1848,
+    "n_niches": 19,
+    "niche_sizes": {
+      "0": 140,
+      "1": 143,
+      "10": 22,
+      "11": 89,
+      "12": 101,
+      "13": 64,
+      "14": 64,
+      "15": 101,
+      "16": 23,
+      "17": 70,
+      "18": 23,
+      "2": 171,
+      "3": 154,
+      "4": 166,
+      "5": 80,
+      "6": 124,
+      "7": 57,
+      "8": 139,
+      "9": 117
+    },
+    "silhouette_latent": 0.22269160073391078,
+    "spatial_knn_same_label": 0.9201659451659452,
+    "spatial_knn_same_label_perm_p": 0.004975124378109453,
+    "spatial_knn_same_label_null_mean": 0.06436056998557,
+    "within_between_dist_ratio": 0.19155144998197313,
+    "within_between_dist_ratio_perm_p": 0.004975124378109453,
+    "within_between_null_mean": 1.0168214139948422,
+    "bootstrap_stability": {
+      "n_boot": 30,
+      "ari_mean": 0.8127366379664285,
+      "ari_std": 0.039984838356028514,
+      "ari_q05": 0.7497709222244442,
+      "ari_q95": 0.8767133555501563
+    },
+    "bootstrap_aris": [
+      0.796337345811087,
+      0.7627953616319175,
+      0.8530411145177382,
+      0.8193637270194442,
+      0.7507126092223535,
+      0.7746522594462971,
+      0.7644019194593793,
+      0.7518415103709337,
+      0.8249289828956763,
+      0.8862130348958152,
+      0.7958286332854678,
+      0.7382132182229754,
+      0.7490004510443367,
+      0.8227384630696859,
+      0.8055049430480357,
+      0.8194769868522964,
+      0.816852157989319,
+      0.8465575745397781,
+      0.8355423001461515,
+      0.8081504483723864,
+      0.8007896116038967,
+      0.8514324044115791,
+      0.8333244756965869,
+      0.7945991977790312,
+      0.8156162599657072,
+      0.8270908442235039,
+      0.8651026363499067,
+      0.8122241157490037,
+      0.8952815818596741,
+      0.864484969512888
+    ]
+  },
+  "programs": [
+    {
+      "program": "CSR_proliferation",
+      "n_genes": 5,
+      "genes": "AICDA,CXCR4,FOXO1,BCL6,TOP2A",
+      "eta2_vs_niche": 0.09594681110834098,
+      "anova_p": 8.580669801199104e-30,
+      "eta2_perm_p": 0.004975124378109453,
+      "moran_I": 0.1545880452397589,
+      "mean": 0.5440345068720682,
+      "std": 0.8330058779138988
+    },
+    {
+      "program": "selection_activation",
+      "n_genes": 5,
+      "genes": "CD83,CXCR5,CD40,LMO2,BATF",
+      "eta2_vs_niche": 0.054645664276392815,
+      "anova_p": 5.652649759201816e-14,
+      "eta2_perm_p": 0.004975124378109453,
+      "moran_I": 0.10142947967278704,
+      "mean": 0.18919432235793754,
+      "std": 0.7291401092573172
+    },
+    {
+      "program": "FDC_cue",
+      "n_genes": 4,
+      "genes": "FCER2,CR2,FDCSP,CXCL13",
+      "eta2_vs_niche": 0.047998518728818,
+      "anova_p": 1.2454470676973833e-11,
+      "eta2_perm_p": 0.004975124378109453,
+      "moran_I": 0.07165823282047154,
+      "mean": 0.3911375129287637,
+      "std": 0.6965675634182257
+    },
+    {
+      "program": "BAFF_BCR_axis",
+      "n_genes": 5,
+      "genes": "TNFRSF13B,TNFRSF13C,BANK1,CD86,CR2",
+      "eta2_vs_niche": 0.028234397219774648,
+      "anova_p": 3.0118133503941997e-05,
+      "eta2_perm_p": 0.004975124378109453,
+      "moran_I": 0.024413584238918862,
+      "mean": 0.3346244824725822,
+      "std": 0.6655452582996068
+    },
+    {
+      "program": "plasma_exit",
+      "n_genes": 2,
+      "genes": "IRF4,PRDM1",
+      "eta2_vs_niche": 0.022741705999159954,
+      "anova_p": 0.0010175914538352623,
+      "eta2_perm_p": 0.004975124378109453,
+      "moran_I": 0.022709692949619078,
+      "mean": -0.0016475847582796425,
+      "std": 0.6641533456838152
+    },
+    {
+      "program": "Tfh_receptor_axis",
+      "n_genes": 4,
+      "genes": "ICOS,PDCD1,CXCR5,CD40",
+      "eta2_vs_niche": 0.020640793666030537,
+      "anova_p": 0.0035197532352686063,
+      "eta2_perm_p": 0.014925373134328358,
+      "moran_I": 0.01600704654398726,
+      "mean": -0.1748990009317856,
+      "std": 0.5424574397081865
+    }
+  ],
+  "neighbors": [
+    {
+      "neighbor_type": "B_germinal_center",
+      "eta2_vs_niche": 0.31341686198276,
+      "anova_p": 5.422698131667175e-135,
+      "eta2_perm_p": 0.004975124378109453,
+      "global_mean_fraction": 0.6396825396825396
+    },
+    {
+      "neighbor_type": "T_follicular_helper",
+      "eta2_vs_niche": 0.2964226361614278,
+      "anova_p": 1.7867193474844825e-125,
+      "eta2_perm_p": 0.004975124378109453,
+      "global_mean_fraction": 0.08145743145743144
+    },
+    {
+      "neighbor_type": "T_CD4",
+      "eta2_vs_niche": 0.15391520638468248,
+      "anova_p": 1.739758790898536e-54,
+      "eta2_perm_p": 0.004975124378109453,
+      "global_mean_fraction": 0.031746031746031744
+    },
+    {
+      "neighbor_type": "FDC",
+      "eta2_vs_niche": 0.08613206502484634,
+      "anova_p": 7.11079309256358e-26,
+      "eta2_perm_p": 0.004975124378109453,
+      "global_mean_fraction": 0.05097402597402598
+    }
+  ],
+  "beta_axes": [
+    {
+      "axis": "ECM_integrin",
+      "n_kept_beta_features": 35,
+      "fraction": 0.22012578616352202
+    },
+    {
+      "axis": "BCR_modulators",
+      "n_kept_beta_features": 11,
+      "fraction": 0.06918238993710692
+    },
+    {
+      "axis": "IL21_cytokine",
+      "n_kept_beta_features": 9,
+      "fraction": 0.05660377358490566
+    },
+    {
+      "axis": "WNT",
+      "n_kept_beta_features": 7,
+      "fraction": 0.0440251572327044
+    },
+    {
+      "axis": "BAFF_APRIL",
+      "n_kept_beta_features": 6,
+      "fraction": 0.03773584905660377
+    },
+    {
+      "axis": "PD1_checkpoint",
+      "n_kept_beta_features": 6,
+      "fraction": 0.03773584905660377
+    },
+    {
+      "axis": "TGFB",
+      "n_kept_beta_features": 5,
+      "fraction": 0.031446540880503145
+    },
+    {
+      "axis": "CXCL13_chemokine",
+      "n_kept_beta_features": 3,
+      "fraction": 0.018867924528301886
+    },
+    {
+      "axis": "FDC_related_targets",
+      "n_kept_beta_features": 3,
+      "fraction": 0.018867924528301886
+    }
+  ],
+  "control_vs_banksy": {
+    "banksy_n_niches": 5,
+    "banksy_spatial_knn_same_label": 0.5284992784992785,
+    "spacetravlr_spatial_knn_same_label": 0.9201659451659452,
+    "program_eta2_mean_spacetravlr": 0.045034648499752826,
+    "program_eta2_mean_banksy": 0.09207617744008495
+  },
+  "n_enrichr_rows": 98,
+  "out": "/tmp/tonsil_niche_functional"
+}

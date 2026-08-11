@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>SpaceTravLR · Microniche pathways (GC + Tfh)</title>
+<meta name="description" content="get-microniches without features-csv: Tfh contact, cycling, and Enrichr pathway analysis for GC B and Tfh niches."/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;700&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --bg: #f3f6f4; --bg-elev: #fff; --ink: #14201c; --muted: #5b6b64;
+    --line: #d5ddd8; --accent: #0b6e63; --warn: #8a5a12;
+    --shadow: 0 1px 2px rgba(20,32,28,.04), 0 8px 24px rgba(20,32,28,.05);
+    --radius: 12px; --max: 760px; --pad: clamp(1rem, 4vw, 1.5rem);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { overflow-x: clip; }
+  body {
+    margin: 0; color: var(--ink); font-family: "DM Sans", system-ui, sans-serif; line-height: 1.55;
+    background:
+      radial-gradient(900px 420px at 0% -5%, #d9ebe5 0%, transparent 55%),
+      radial-gradient(700px 360px at 100% 0%, #e8ece3 0%, transparent 50%),
+      var(--bg);
+  }
+  img { max-width: 100%; height: auto; display: block; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  .wrap { width: min(100%, calc(var(--max) + 2 * var(--pad))); margin: 0 auto; padding: 0 var(--pad) 3.5rem; }
+  .topbar { position: sticky; top: 0; z-index: 20; backdrop-filter: blur(10px); background: rgba(243,246,244,.88); border-bottom: 1px solid rgba(213,221,216,.8); }
+  .topbar-inner { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-height: 3.25rem; width: min(100%, calc(var(--max) + 2 * var(--pad))); margin: 0 auto; padding: .55rem var(--pad); }
+  .brand { font-weight: 700; letter-spacing: -.02em; color: var(--ink); text-decoration: none; }
+  .brand span { color: var(--accent); }
+  .tabs { display: flex; gap: .5rem; flex-wrap: wrap; margin: 1rem 0 0; }
+  .tabs a { text-decoration: none; font-size: .82rem; font-weight: 600; color: var(--muted); padding: .4rem .7rem; border-radius: 999px; border: 1px solid var(--line); background: #fff; }
+  .tabs a:hover, .tabs a.active { color: var(--accent); border-color: #9ec5bc; }
+  header { padding: 1.75rem 0 .25rem; }
+  .eyebrow { display: inline-block; margin: 0 0 .65rem; font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-family: "Source Serif 4", Georgia, serif; font-size: clamp(1.65rem, 5.5vw, 2.35rem); line-height: 1.15; letter-spacing: -.03em; margin: 0 0 .75rem; max-width: 18ch; }
+  .lead { margin: 0; color: var(--muted); max-width: 48ch; }
+  .stats { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .65rem; margin: 1.25rem 0 0; }
+  @media (min-width: 640px) { .stats { grid-template-columns: repeat(4, minmax(0,1fr)); } }
+  .stat { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: .75rem .85rem; box-shadow: var(--shadow); }
+  .stat .k { display: block; font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .stat .v { display: block; margin-top: .2rem; font-size: 1.2rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  section { margin-top: 2.1rem; }
+  h2 { font-family: "Source Serif 4", Georgia, serif; font-size: clamp(1.2rem, 3.5vw, 1.45rem); margin: 0 0 .55rem; letter-spacing: -.02em; }
+  section > p { margin: 0 0 .9rem; color: var(--muted); }
+  .panel { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; margin: 0 0 1rem; }
+  .panel figcaption { padding: .75rem .9rem .9rem; font-size: .82rem; color: var(--muted); line-height: 1.45; }
+  pre { margin: 0 0 1rem; padding: 1rem 1.05rem; overflow-x: auto; background: #13201c; color: #d7ebe4; border-radius: var(--radius); font-size: .75rem; line-height: 1.5; }
+  .stack { display: grid; gap: .85rem; }
+  @media (min-width: 700px) { .stack-2 { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  .bullets { margin: 0; padding: 0; list-style: none; }
+  .bullets li { position: relative; padding: .55rem 0 .55rem 1rem; border-top: 1px solid var(--line); font-size: .95rem; }
+  .bullets li:last-child { border-bottom: 1px solid var(--line); }
+  .bullets li::before { content: ""; position: absolute; left: 0; top: 1rem; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+  footer { margin-top: 2.5rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+  .table-wrap { width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); margin: 0 0 1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; min-width: 420px; }
+  th, td { padding: .55rem .7rem; text-align: right; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #eef3f0; color: var(--muted); font-size: .68rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: 0; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#">SpaceTrav<span>LR</span></a>
+      <a href="../get_microniches/" style="font-size:.82rem;font-weight:600;color:var(--muted);text-decoration:none;">CLI docs →</a>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <header>
+      <p class="eyebrow">get-microniches · no --features-csv</p>
+      <h1>Contact, cycling, and pathways</h1>
+      <p class="lead">
+        Full Moran×η² β filter from the tonsil run TOML, then silhouette-optimized Leiden.
+        GC niches are scored for Tfh contact and proliferation; Tfh niches for GC contact and help programs.
+      </p>
+      <nav class="tabs" aria-label="Cohorts">
+        <a class="active" href="#gc">GC B cells</a>
+        <a href="#tfh">Tfh</a>
+      </nav>
+    </header>
+
+    <section>
+      <h2>Command</h2>
+      <pre>spacetravlr get-microniches \
+  --run-toml …/spacetravlr_run_repro.toml \
+  --cell-type B_germinal_center \   # or T_follicular_helper
+  --corr-max 0.95 \                 # GC; Tfh used 0.90
+  --out ./microniches</pre>
+      <p>No <code>--features-csv</code>. Spatial filter ranks βs by Moran×η², FDR on the top 4,000, then decorrelates.</p>
+    </section>
+
+    <section id="gc">
+      <h2>GC B cells</h2>
+      <div class="stats">
+        <div class="stat"><span class="k">Cells</span><span class="v">1,848</span></div>
+        <div class="stat"><span class="k">Niches</span><span class="v">18</span></div>
+        <div class="stat"><span class="k">Kept βs</span><span class="v">121</span></div>
+        <div class="stat"><span class="k">Tfh η²</span><span class="v">0.276</span></div>
+      </div>
+      <p style="margin-top:1rem">Silhouette-chosen resolution 0.5 (silhouette ≈ 0.263). Tfh neighbor fraction varies strongly across niches (ANOVA p ≈ 10⁻¹¹⁵).</p>
+
+      <div class="panel"><figure>
+        <img src="gc/img/spatial_niches.png" alt="GC spatial microniches" loading="lazy"/>
+        <figcaption>18 GC microniches from the full spatial β filter (no features-csv).</figcaption>
+      </figure></div>
+
+      <div class="stack stack-2">
+        <div class="panel"><figure>
+          <img src="gc/img/contact_by_niche.png" alt="Tfh contact by GC niche" loading="lazy"/>
+          <figcaption>Niche 0 is the most Tfh-exposed (~20% of spatial neighbors).</figcaption>
+        </figure></div>
+        <div class="panel"><figure>
+          <img src="gc/img/cycling_vs_contact.png" alt="Cycling vs Tfh contact" loading="lazy"/>
+          <figcaption>Cell-cycle module vs Tfh contact (niche means).</figcaption>
+        </figure></div>
+      </div>
+
+      <div class="panel"><figure>
+        <img src="gc/img/neighbor_heatmap.png" alt="Neighbor composition heatmap" loading="lazy"/>
+        <figcaption>Neighbor composition ordered by Tfh contact.</figcaption>
+      </figure></div>
+
+      <div class="panel"><figure>
+        <img src="gc/img/program_by_niche.png" alt="GC program specialization" loading="lazy"/>
+        <figcaption>Independent GC programs (CSR/proliferation, selection, FDC cue, …) specialize across niches. CSR/proliferation η²≈0.088; cell_cycle η²≈0.054 (both Kruskal q≪0.001).</figcaption>
+      </figure></div>
+
+      <div class="stack stack-2">
+        <div class="panel"><figure>
+          <img src="gc/img/cycle_spatial.png" alt="Cell cycle spatial map" loading="lazy"/>
+          <figcaption>Cell-cycle module (TOP2A/HMGB2/CENPF/RRM2).</figcaption>
+        </figure></div>
+        <div class="panel"><figure>
+          <img src="gc/img/pathways_top.png" alt="GC Enrichr pathways" loading="lazy"/>
+          <figcaption>Enrichr on niche DEGs (GO BP, Reactome, Hallmark).</figcaption>
+        </figure></div>
+      </div>
+
+      <h2 style="margin-top:1.5rem">GC takeaways</h2>
+      <ul class="bullets">
+        <li><strong>Highest Tfh-contact niche (0)</strong> is enriched for interferon-γ / interferon signaling, PD-1 signaling, and antigen presentation — consistent with light-zone help/selection.</li>
+        <li><strong>Cycling niches</strong> (e.g. 10, 6, 17, 13) reach ~35–39% cells in the top cell-cycle quartile; niche 13 markers include TOP2A, HMGB2, CENPF.</li>
+        <li>CSR/proliferation and cell-cycle modules are the strongest program associations with niche identity.</li>
+      </ul>
+
+      <div class="table-wrap" tabindex="0">
+        <table>
+          <thead><tr><th>Niche</th><th>Tfh contact</th><th>Frac cycling</th><th>n</th></tr></thead>
+          <tbody>
+            <tr><td>0</td><td>0.199</td><td>—</td><td>—</td></tr>
+            <tr><td>15</td><td>0.161</td><td>—</td><td>—</td></tr>
+            <tr><td>10</td><td>—</td><td>0.391</td><td>23</td></tr>
+            <tr><td>6</td><td>—</td><td>0.385</td><td>109</td></tr>
+            <tr><td>13</td><td>—</td><td>0.363</td><td>190</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tfh">
+      <h2>T follicular helper</h2>
+      <div class="stats">
+        <div class="stat"><span class="k">Cells</span><span class="v">294</span></div>
+        <div class="stat"><span class="k">Niches</span><span class="v">5</span></div>
+        <div class="stat"><span class="k">Kept βs</span><span class="v">51</span></div>
+        <div class="stat"><span class="k">GC η²</span><span class="v">0.084</span></div>
+      </div>
+      <p style="margin-top:1rem">Resolution 0.2 (silhouette ≈ 0.363). GC B neighbor fraction differs by niche (η²≈0.084, p≈4×10⁻⁵).</p>
+
+      <div class="panel"><figure>
+        <img src="tfh/img/spatial_niches.png" alt="Tfh spatial microniches" loading="lazy"/>
+        <figcaption>5 Tfh microniches from the same full-filter CLI (no features-csv).</figcaption>
+      </figure></div>
+
+      <div class="stack stack-2">
+        <div class="panel"><figure>
+          <img src="tfh/img/contact_by_niche.png" alt="GC contact by Tfh niche" loading="lazy"/>
+          <figcaption>Niche 0 most GC-proximal (~60% GC neighbors); niche 1 lowest (~39%).</figcaption>
+        </figure></div>
+        <div class="panel"><figure>
+          <img src="tfh/img/cycling_vs_contact.png" alt="Tfh cycling vs GC contact" loading="lazy"/>
+          <figcaption>Cycling vs GC contact across Tfh niches.</figcaption>
+        </figure></div>
+      </div>
+
+      <div class="panel"><figure>
+        <img src="tfh/img/neighbor_heatmap.png" alt="Tfh neighbor heatmap" loading="lazy"/>
+        <figcaption>Neighbor composition ordered by GC contact.</figcaption>
+      </figure></div>
+
+      <div class="panel"><figure>
+        <img src="tfh/img/program_by_niche.png" alt="Tfh program specialization" loading="lazy"/>
+        <figcaption>Tfh_canonical is the strongest program association (η²≈0.043).</figcaption>
+      </figure></div>
+
+      <div class="stack stack-2">
+        <div class="panel"><figure>
+          <img src="tfh/img/cycle_spatial.png" alt="Tfh cell cycle map" loading="lazy"/>
+          <figcaption>Cell-cycle module on Tfh cells.</figcaption>
+        </figure></div>
+        <div class="panel"><figure>
+          <img src="tfh/img/pathways_top.png" alt="Tfh Enrichr pathways" loading="lazy"/>
+          <figcaption>Pathways from top niche marker genes (score-ranked; small-n DE).</figcaption>
+        </figure></div>
+      </div>
+
+      <h2 style="margin-top:1.5rem">Tfh takeaways</h2>
+      <ul class="bullets">
+        <li><strong>Niche 4</strong> (largest, n=97) is enriched for TCR signaling, PD-1 signaling, CD28 costimulation, and adaptive immunity — an activated/help-competent state.</li>
+        <li><strong>GC contact</strong> is highest in niches 0/2/4 (~53–60%) and lowest in niche 1 (~39%), separating follicle-proximal vs more peripheral Tfh.</li>
+        <li>Cycling is modest overall; niche 3 has the highest cycling fraction (~29%).</li>
+      </ul>
+    </section>
+
+    <footer>
+      SpaceTravLR <code>get-microniches</code> pathway report ·
+      <a href="../get_microniches/">CLI demo</a> ·
+      <a href="../report/">method benchmark</a>
+    </footer>
+  </div>
+</body>
+</html>

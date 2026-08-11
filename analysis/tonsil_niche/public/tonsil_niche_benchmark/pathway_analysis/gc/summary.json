@@ -1,0 +1,224 @@
+{
+  "name": "gc",
+  "n_cells": 1848,
+  "n_niches": 18,
+  "cli_summary": {
+    "n_cells": 1848,
+    "n_kept_features": 121,
+    "n_pcs": 40,
+    "n_clusters": 18,
+    "chosen_resolution": 0.5,
+    "silhouette": 0.26301713489062734,
+    "cell_type_subset": "B_germinal_center",
+    "annot_col": "cell_type",
+    "optimized_by_silhouette": true,
+    "resolution_sweep": [
+      {
+        "resolution": 0.2,
+        "silhouette": 0.25991806011843316,
+        "n_clusters": 12
+      },
+      {
+        "resolution": 0.3,
+        "silhouette": 0.22796771440319077,
+        "n_clusters": 12
+      },
+      {
+        "resolution": 0.4,
+        "silhouette": 0.23249139460835408,
+        "n_clusters": 16
+      },
+      {
+        "resolution": 0.5,
+        "silhouette": 0.26301713489062734,
+        "n_clusters": 18
+      },
+      {
+        "resolution": 0.6,
+        "silhouette": 0.20317795606996078,
+        "n_clusters": 20
+      },
+      {
+        "resolution": 0.7,
+        "silhouette": 0.2199098314260773,
+        "n_clusters": 20
+      },
+      {
+        "resolution": 0.8,
+        "silhouette": 0.21174857054681104,
+        "n_clusters": 22
+      },
+      {
+        "resolution": 0.9,
+        "silhouette": 0.19649162601892387,
+        "n_clusters": 24
+      },
+      {
+        "resolution": 1.0,
+        "silhouette": 0.22053310466425174,
+        "n_clusters": 25
+      },
+      {
+        "resolution": 1.1,
+        "silhouette": 0.2352977261371928,
+        "n_clusters": 28
+      },
+      {
+        "resolution": 1.2,
+        "silhouette": 0.22105412192533308,
+        "n_clusters": 28
+      },
+      {
+        "resolution": 1.3,
+        "silhouette": 0.22174828068030603,
+        "n_clusters": 31
+      },
+      {
+        "resolution": 1.4,
+        "silhouette": 0.2261982178822193,
+        "n_clusters": 32
+      },
+      {
+        "resolution": 1.5,
+        "silhouette": 0.2529738340414106,
+        "n_clusters": 36
+      },
+      {
+        "resolution": 1.6,
+        "silhouette": 0.2529738340414106,
+        "n_clusters": 36
+      },
+      {
+        "resolution": 1.7,
+        "silhouette": 0.2573527684406701,
+        "n_clusters": 34
+      },
+      {
+        "resolution": 1.8,
+        "silhouette": 0.2525236775493129,
+        "n_clusters": 37
+      },
+      {
+        "resolution": 1.9,
+        "silhouette": 0.25272067408678867,
+        "n_clusters": 38
+      },
+      {
+        "resolution": 2.0,
+        "silhouette": 0.25663103175958624,
+        "n_clusters": 38
+      }
+    ],
+    "output_dir": "/tmp/tonsil_gc_microniches_full"
+  },
+  "contact_focus": "T_follicular_helper",
+  "contact_eta2": {
+    "eta2": 0.27597572954332916,
+    "anova_p": 3.703333028140277e-115
+  },
+  "top_programs": [
+    {
+      "program": "CSR_proliferation",
+      "n_genes_present": 5,
+      "genes_present": "AICDA,CXCR4,FOXO1,BCL6,TOP2A",
+      "eta2_vs_niche": 0.0878244910983541,
+      "anova_p": 4.629326212012682e-27,
+      "kruskal_p": 2.0684839985165963e-26,
+      "mean": 0.5440345068720682,
+      "kruskal_q": 1.654787198813277e-25
+    },
+    {
+      "program": "cell_cycle",
+      "n_genes_present": 4,
+      "genes_present": "TOP2A,HMGB2,CENPF,RRM2",
+      "eta2_vs_niche": 0.05383805154299499,
+      "anova_p": 4.32553753459104e-14,
+      "kruskal_p": 1.0459429670843786e-13,
+      "mean": -0.2745815118483008,
+      "kruskal_q": 4.1837718683375143e-13
+    },
+    {
+      "program": "selection_activation",
+      "n_genes_present": 5,
+      "genes_present": "CD83,CXCR5,CD40,LMO2,BATF",
+      "eta2_vs_niche": 0.05219084546304453,
+      "anova_p": 1.6918362693545003e-13,
+      "kruskal_p": 3.6496382668652674e-13,
+      "mean": 0.18919432235793754,
+      "kruskal_q": 9.732368711640713e-13
+    },
+    {
+      "program": "FDC_cue",
+      "n_genes_present": 4,
+      "genes_present": "FCER2,CR2,FDCSP,CXCL13",
+      "eta2_vs_niche": 0.04686378587904352,
+      "anova_p": 1.2988234770759064e-11,
+      "kruskal_p": 6.765641640361748e-11,
+      "mean": 0.3911375129287637,
+      "kruskal_q": 1.3531283280723496e-10
+    },
+    {
+      "program": "BAFF_BCR_axis",
+      "n_genes_present": 5,
+      "genes_present": "TNFRSF13B,TNFRSF13C,BANK1,CD86,CR2",
+      "eta2_vs_niche": 0.030130434461253693,
+      "anova_p": 4.36552657765218e-06,
+      "kruskal_p": 1.4643680624417807e-05,
+      "mean": 0.3346244824725822,
+      "kruskal_q": 1.6735634999334637e-05
+    },
+    {
+      "program": "B_activation",
+      "n_genes_present": 4,
+      "genes_present": "CD69,NFKBIA,FOS,CD86",
+      "eta2_vs_niche": 0.026551341732086765,
+      "anova_p": 5.1454319764498665e-05,
+      "kruskal_p": 1.2277615480672089e-05,
+      "mean": -0.024416333875012127,
+      "kruskal_q": 1.6735634999334637e-05
+    },
+    {
+      "program": "plasma_exit",
+      "n_genes_present": 2,
+      "genes_present": "IRF4,PRDM1",
+      "eta2_vs_niche": 0.026171316331531396,
+      "anova_p": 6.63729114839964e-05,
+      "kruskal_p": 1.3845187798091353e-05,
+      "mean": -0.0016475847582796425,
+      "kruskal_q": 1.6735634999334637e-05
+    },
+    {
+      "program": "Tfh_receptor_axis",
+      "n_genes_present": 4,
+      "genes_present": "ICOS,PDCD1,CXCR5,CD40",
+      "eta2_vs_niche": 0.022012143960049555,
+      "anova_p": 0.000965041593986394,
+      "kruskal_p": 0.007616946128146687,
+      "mean": -0.1748990009317856,
+      "kruskal_q": 0.007616946128146687
+    }
+  ],
+  "n_enrichment_rows": 195,
+  "cycling_threshold_q75": 0.8760941320536088,
+  "mean_frac_cycling": 0.2499838798121572,
+  "niches_by_contact": {
+    "0": 0.19861111111111113,
+    "15": 0.16137071651090343,
+    "4": 0.13078880407124682,
+    "5": 0.11619047619047618,
+    "2": 0.09852941176470588,
+    "13": 0.08701754385964913,
+    "17": 0.08250401284109149,
+    "11": 0.07820197044334976,
+    "14": 0.07575757575757575,
+    "1": 0.06402831402831403,
+    "10": 0.05217391304347826,
+    "7": 0.04477611940298507,
+    "16": 0.04351503759398496,
+    "12": 0.04090909090909091,
+    "9": 0.0318840579710145,
+    "8": 0.031351869606903164,
+    "6": 0.02140672782874618,
+    "3": 0.0
+  }
+}
