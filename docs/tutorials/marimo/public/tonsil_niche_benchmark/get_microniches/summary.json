@@ -1,0 +1,84 @@
+{
+  "n_cells": 1848,
+  "n_kept_features": 159,
+  "n_pcs": 40,
+  "n_clusters": 14,
+  "chosen_resolution": 0.2,
+  "silhouette": 0.26834401638234584,
+  "cell_type_subset": "B_germinal_center",
+  "annot_col": "cell_type",
+  "optimized_by_silhouette": true,
+  "resolution_sweep": [
+    {
+      "resolution": 0.2,
+      "silhouette": 0.26834401638234584,
+      "n_clusters": 14
+    },
+    {
+      "resolution": 0.3,
+      "silhouette": 0.22621062163249614,
+      "n_clusters": 15
+    },
+    {
+      "resolution": 0.4,
+      "silhouette": 0.2153332692059595,
+      "n_clusters": 17
+    },
+    {
+      "resolution": 0.5,
+      "silhouette": 0.21382399962788814,
+      "n_clusters": 18
+    },
+    {
+      "resolution": 0.6,
+      "silhouette": 0.19589299593852005,
+      "n_clusters": 19
+    },
+    {
+      "resolution": 0.7,
+      "silhouette": 0.20942036536929123,
+      "n_clusters": 22
+    },
+    {
+      "resolution": 0.8,
+      "silhouette": 0.2138338078706823,
+      "n_clusters": 22
+    },
+    {
+      "resolution": 0.9,
+      "silhouette": 0.21881274166139525,
+      "n_clusters": 24
+    },
+    {
+      "resolution": 1.0,
+      "silhouette": 0.220696775810919,
+      "n_clusters": 24
+    },
+    {
+      "resolution": 1.1,
+      "silhouette": 0.24038658223310147,
+      "n_clusters": 26
+    },
+    {
+      "resolution": 1.2,
+      "silhouette": 0.24317276594837864,
+      "n_clusters": 28
+    },
+    {
+      "resolution": 1.3,
+      "silhouette": 0.2419050646383494,
+      "n_clusters": 29
+    },
+    {
+      "resolution": 1.4,
+      "silhouette": 0.22984545404468146,
+      "n_clusters": 28
+    },
+    {
+      "resolution": 1.5,
+      "silhouette": 0.2493528841356201,
+      "n_clusters": 31
+    }
+  ],
+  "output_dir": "/tmp/tonsil_get_microniches_cli"
+}
