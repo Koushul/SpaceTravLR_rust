@@ -10,12 +10,14 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anndata::{AnnData, AnnDataOp, Backend};
 use anndata_hdf5::H5;
 use anyhow::{Context, bail};
+use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array1, Array2};
 use rand::Rng;
 use rand::SeedableRng;
@@ -616,6 +618,26 @@ fn resolution_grid(min: f64, max: f64, step: f64) -> Vec<f64> {
     out
 }
 
+fn progress_bar(len: u64, label: &str) -> ProgressBar {
+    if std::io::stderr().is_terminal() && len > 0 {
+        let pb = ProgressBar::new(len);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(&format!(
+                    "{{spinner:.green}} [{{bar:40.cyan/blue}}] {{pos}}/{{len}} ({{percent}}%) {{per_sec}} eta {{eta}} {label}"
+                ))
+                .expect("progress template")
+                .progress_chars("#>-"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(200));
+        pb
+    } else {
+        let pb = ProgressBar::hidden();
+        pb.set_length(len);
+        pb
+    }
+}
+
 fn pick_labels_by_silhouette(
     graph: &FuzzyGraph,
     pca: &Array2<f64>,
@@ -641,6 +663,7 @@ fn pick_labels_by_silhouette(
         params.resolution_max,
         params.resolution_step,
     );
+    let pb = progress_bar(grid.len() as u64, "silhouette sweep");
     let mut best_labels = Vec::new();
     let mut best_sil = f64::NEG_INFINITY;
     let mut best_res = grid[0];
@@ -663,7 +686,9 @@ fn pick_labels_by_silhouette(
             best_res = res;
             best_labels = labels;
         }
+        pb.inc(1);
     }
+    pb.finish_and_clear();
     if best_labels.is_empty() {
         best_labels = leiden_labels_from_graph(graph, best_res, params.leiden_max_iter);
         best_sil = mean_silhouette(pca, &best_labels)?;
@@ -731,12 +756,16 @@ fn score_feature_matrix(
     params: &MicronichesParams,
 ) -> anyhow::Result<Vec<FeatureCandidate>> {
     let knn = spatial_knn_indices(spatial, params.spatial_k);
+    let pb = Arc::new(progress_bar(feathers.len() as u64, "spatial β filter"));
     let gene_results: Vec<anyhow::Result<Vec<FeatureCandidate>>> = feathers
         .par_iter()
         .map(|(gene, path)| {
-            score_one_gene(gene, path, obs_names, cluster_keys, spatial, &knn, params)
+            let r = score_one_gene(gene, path, obs_names, cluster_keys, spatial, &knn, params);
+            pb.inc(1);
+            r
         })
         .collect();
+    pb.finish_and_clear();
 
     let mut scored: Vec<FeatureCandidate> = Vec::new();
     for r in gene_results {
@@ -812,9 +841,11 @@ fn load_specified_features(
     cluster_keys: &[String],
 ) -> anyhow::Result<Vec<FeatureCandidate>> {
     let by_gene: HashMap<&str, &PathBuf> = feathers.iter().map(|(g, p)| (g.as_str(), p)).collect();
+    let pb = progress_bar(wanted.len() as u64, "loading β features");
     let mut out = Vec::new();
     for (gene, feature) in wanted {
         let Some(path) = by_gene.get(gene.as_str()) else {
+            pb.inc(1);
             continue;
         };
         let vals_f32 = betadata_feather_per_cell_column(
@@ -826,6 +857,7 @@ fn load_specified_features(
         let values: Vec<f64> = vals_f32.iter().map(|v| *v as f64).collect();
         let feature_mad = mad(&values);
         if feature_mad <= 1e-12 {
+            pb.inc(1);
             continue;
         }
         out.push(FeatureCandidate {
@@ -839,7 +871,9 @@ fn load_specified_features(
             q_bh: 0.0,
             spatial_score: 0.0,
         });
+        pb.inc(1);
     }
+    pb.finish_and_clear();
     if out.is_empty() {
         bail!("none of the requested features were found in betadata feathers");
     }
@@ -1164,6 +1198,57 @@ stale_lock_secs = 0
         let pca = dense_pca(&x, 3).unwrap();
         assert_eq!(pca.nrows(), 30);
         assert_eq!(pca.ncols(), 3);
+    }
+
+    #[test]
+    fn progress_bar_tracks_increments() {
+        let pb = progress_bar(7, "unit-test");
+        assert_eq!(pb.length(), Some(7));
+        assert_eq!(pb.position(), 0);
+        for i in 1..=7 {
+            pb.inc(1);
+            assert_eq!(pb.position(), i);
+        }
+        pb.finish_and_clear();
+        assert_eq!(pb.position(), 7);
+    }
+
+    #[test]
+    fn spatial_filter_progress_reaches_gene_count() {
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_microniches_progress_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repro = write_toy_run(&dir).unwrap();
+        // Add a second gene feather so the filter bar length is > 1.
+        let obs: Vec<String> = (0..60).map(|i| format!("c{i}")).collect();
+        let data = Array2::<f64>::from_shape_fn((60, 2), |(i, j)| ((i / 20) + j) as f64);
+        write_betadata_feather(
+            dir.join("GENE2_betadata.feather").to_str().unwrap(),
+            "CellID",
+            &obs,
+            &["beta_A".into(), "beta_B".into()],
+            &data,
+        )
+        .unwrap();
+
+        let mut params = MicronichesParams::default();
+        params.cell_type = Some("Alpha".into());
+        params.moran_n_perm = 0;
+        params.n_neighbors = 8;
+        params.n_pcs = 2;
+        params.q_bh_max = 0.25;
+        params.resolution_min = 0.4;
+        params.resolution_max = 0.8;
+        params.resolution_step = 0.4;
+        let out = dir.join("out_progress");
+        let res = run_microniches(&repro, &params, Some(&out)).expect("run with progress");
+        assert!(res.summary.n_kept_features >= 1);
+        assert!(res.summary.optimized_by_silhouette);
+        // Silhouette sweep also uses a progress bar; ensure it produced a sweep.
+        assert!(res.summary.resolution_sweep.len() >= 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
