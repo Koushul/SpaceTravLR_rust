@@ -696,7 +696,7 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
 
 #[test]
 fn test_transition_ko_vs_oe_opposite_direction() {
-    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{NullSubtractMode, TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -717,6 +717,7 @@ fn test_transition_ko_vs_oe_opposite_direction() {
         magnitude_threshold: 0.0,
         use_full_graph: true,
         full_graph_max_cells: 100,
+        null_subtract_mode: NullSubtractMode::ClipRenorm,
     };
 
     let config = PerturbConfig {
@@ -805,7 +806,7 @@ fn test_transition_ko_vs_oe_opposite_direction() {
 
 #[test]
 fn test_transition_magnitude_monotonic_with_perturbation_strength() {
-    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{NullSubtractMode, TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 25;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -826,6 +827,7 @@ fn test_transition_magnitude_monotonic_with_perturbation_strength() {
         magnitude_threshold: 0.0,
         use_full_graph: true,
         full_graph_max_cells: 100,
+        null_subtract_mode: NullSubtractMode::ClipRenorm,
     };
 
     let perturb_levels = [0.0, 0.5, 0.9]; // baseline is 1.0 for all cells
@@ -877,7 +879,7 @@ fn test_transition_magnitude_monotonic_with_perturbation_strength() {
 
 #[test]
 fn test_transition_no_perturbation_no_vectors() {
-    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{NullSubtractMode, TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 16;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -914,6 +916,7 @@ fn test_transition_no_perturbation_no_vectors() {
         magnitude_threshold: 0.0,
         use_full_graph: true,
         full_graph_max_cells: 100,
+        null_subtract_mode: NullSubtractMode::ClipRenorm,
     };
 
     let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);
@@ -932,7 +935,7 @@ fn test_transition_no_perturbation_no_vectors() {
 
 #[test]
 fn test_transition_isolated_gene_no_field() {
-    use spacetravlr::transition_umap::{TransitionUmapParams, compute_umap_transition_grid};
+    use spacetravlr::transition_umap::{NullSubtractMode, TransitionUmapParams, compute_umap_transition_grid};
 
     let n_cells = 16;
     let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
@@ -969,6 +972,7 @@ fn test_transition_isolated_gene_no_field() {
         magnitude_threshold: 0.0,
         use_full_graph: true,
         full_graph_max_cells: 100,
+        null_subtract_mode: NullSubtractMode::ClipRenorm,
     };
 
     let grid = compute_umap_transition_grid(&gene_mtx, &result.delta, &umap, &params);

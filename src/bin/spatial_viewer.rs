@@ -50,7 +50,8 @@ use spacetravlr::perturb_batch::{
 };
 use spacetravlr::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
 use spacetravlr::transition_umap::{
-    SignatureUmapParams, TransitionGrid, TransitionUmapParams, compute_signature_umap_grid,
+    NullSubtractMode, SignatureUmapParams, TransitionGrid, TransitionUmapParams,
+    compute_signature_umap_grid,
     compute_umap_transition_grid, signature_sum_per_cell,
 };
 use tokio::sync::RwLock;
@@ -4036,6 +4037,7 @@ async fn api_perturb_umap_field(
             magnitude_threshold: body.magnitude_threshold.max(0.0),
             use_full_graph: body.use_full_graph,
             full_graph_max_cells: body.full_graph_max_cells.max(64).min(8192),
+            null_subtract_mode: NullSubtractMode::ClipRenorm,
         };
         let include_cv = body.include_cell_vectors;
         let quick = body.quick_ko_sanity;
