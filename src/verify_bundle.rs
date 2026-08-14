@@ -58,12 +58,7 @@ const VERIFY_LOG_WEBGPU: &str = "CNN/compute backend = WebGPU";
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
 }
 
@@ -234,7 +229,8 @@ fn verify_workspace_and_config() -> Option<(PathBuf, PathBuf)> {
 }
 
 fn wgpu_probe_section() -> String {
-    let mut out = String::from("WebGPU / wgpu (adapter probe — same path as training CNN backend)\n");
+    let mut out =
+        String::from("WebGPU / wgpu (adapter probe — same path as training CNN backend)\n");
     let adapter_info = pollster::block_on(async {
         let instance = wgpu::Instance::default();
         instance
@@ -306,11 +302,7 @@ fn sysinfo_host_section() -> String {
         let _ = writeln!(s, "  cpu_brand (first):  {}", cpu0.brand().trim());
         let _ = writeln!(s, "  cpu_freq_mhz (first): {}", cpu0.frequency());
     }
-    let _ = writeln!(
-        s,
-        "  global_cpu_usage %: {:.1}",
-        sys.global_cpu_usage()
-    );
+    let _ = writeln!(s, "  global_cpu_usage %: {:.1}", sys.global_cpu_usage());
     let total = sys.total_memory();
     let used = sys.used_memory();
     let avail = sys.available_memory();
@@ -335,16 +327,8 @@ fn sysinfo_host_section() -> String {
 fn std_host_section() -> String {
     let mut s = String::from("Host (std — always available)\n");
     use std::fmt::Write;
-    let _ = writeln!(
-        s,
-        "  std::env::consts::OS:   {}",
-        std::env::consts::OS
-    );
-    let _ = writeln!(
-        s,
-        "  std::env::consts::ARCH: {}",
-        std::env::consts::ARCH
-    );
+    let _ = writeln!(s, "  std::env::consts::OS:   {}", std::env::consts::OS);
+    let _ = writeln!(s, "  std::env::consts::ARCH: {}", std::env::consts::ARCH);
     let _ = writeln!(
         s,
         "  std::env::consts::FAMILY: {}",
@@ -552,7 +536,11 @@ fn list_marker_files_for_debug(run_root: &Path) -> Vec<String> {
             if !p.is_dir() {
                 continue;
             }
-            let group = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let group = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             if let Ok(files) = list_betadata_like_files(&p) {
                 for n in files {
                     out.push(format!("{CONDITION_RUNS_SUBDIR}/{group}/{n}"));
@@ -592,8 +580,7 @@ fn list_betadata_like_files(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
     for ent in std::fs::read_dir(dir)? {
         let name = ent?.file_name().to_string_lossy().into_owned();
-        if name.contains("betadata") || name.ends_with(".orphan") || name.ends_with(".tf_ablated")
-        {
+        if name.contains("betadata") || name.ends_with(".orphan") || name.ends_with(".tf_ablated") {
             names.push(name);
         }
     }
@@ -630,17 +617,23 @@ fn feather_max_abs_non_id(path: &Path) -> anyhow::Result<f64> {
 
 fn download_h5ad(dest: &Path) -> anyhow::Result<()> {
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let url = std::env::var("SPACETRAVLR_VERIFY_H5AD_URL").unwrap_or_else(|_| VERIFY_H5AD_URL.into());
+    let url =
+        std::env::var("SPACETRAVLR_VERIFY_H5AD_URL").unwrap_or_else(|_| VERIFY_H5AD_URL.into());
     let st = Command::new("curl")
         .args(["-fL", "--retry", "3", "--connect-timeout", "30", "-o"])
         .arg(dest)
         .arg(&url)
         .status()
-        .context("spawn curl (install curl or set SPACETRAVLR_VERIFY_H5AD to a local .h5ad path)")?;
-    anyhow::ensure!(st.success(), "curl download failed with status {:?}", st.code());
+        .context(
+            "spawn curl (install curl or set SPACETRAVLR_VERIFY_H5AD to a local .h5ad path)",
+        )?;
+    anyhow::ensure!(
+        st.success(),
+        "curl download failed with status {:?}",
+        st.code()
+    );
     let meta = std::fs::metadata(dest).with_context(|| format!("stat {}", dest.display()))?;
     anyhow::ensure!(
         meta.len() >= VERIFY_MIN_H5AD_BYTES,
@@ -655,7 +648,11 @@ fn resolve_h5ad_for_verify(work: &Path) -> anyhow::Result<PathBuf> {
     if let Ok(p) = std::env::var("SPACETRAVLR_VERIFY_H5AD") {
         let exp = expand_user_path(p.trim());
         let pb = PathBuf::from(exp);
-        anyhow::ensure!(pb.is_file(), "SPACETRAVLR_VERIFY_H5AD is not a file: {}", pb.display());
+        anyhow::ensure!(
+            pb.is_file(),
+            "SPACETRAVLR_VERIFY_H5AD is not a file: {}",
+            pb.display()
+        );
         return Ok(pb);
     }
     let dest = work.join("SlideTags_human_tonsil.h5ad");
@@ -685,8 +682,15 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     log.writeln_str(&hr(w))?;
     log.writeln_str(" SpaceTravLR — verify log")?;
     log.writeln_str(&hr(w))?;
-    log.writeln_str(&format!("Started (UTC):     {}", Utc::now().format("%Y-%m-%d %H:%M:%S UTC")))?;
-    log.writeln_str(&format!("spacetravlr:       {} (git {})", env!("CARGO_PKG_VERSION"), env!("SPACETRAVLR_GIT_SHA")))?;
+    log.writeln_str(&format!(
+        "Started (UTC):     {}",
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ))?;
+    log.writeln_str(&format!(
+        "spacetravlr:       {} (git {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("SPACETRAVLR_GIT_SHA")
+    ))?;
     if let Ok(exe) = std::env::current_exe() {
         log.writeln_str(&format!("This binary:       {}", exe.display()))?;
     }
@@ -753,7 +757,9 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             );
             println!(
                 "{}",
-                format!("Verify log written to: {}", log_path.display()).green().bold()
+                format!("Verify log written to: {}", log_path.display())
+                    .green()
+                    .bold()
             );
             bail!(
                 "missing spaceship_config.toml — set SPACETRAVLR_ROOT to your SpaceTravLR_rust repo, cd into that repo, or install data/spaceship_config.toml next to this binary (same layout as install.sh). This binary was built with CARGO_MANIFEST_DIR={} (only valid on the builder machine).",
@@ -763,7 +769,8 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     };
 
     let work_path = std::env::temp_dir().join(format!("spacetravlr_verify_{stamp}"));
-    std::fs::create_dir_all(&work_path).with_context(|| format!("mkdir {}", work_path.display()))?;
+    std::fs::create_dir_all(&work_path)
+        .with_context(|| format!("mkdir {}", work_path.display()))?;
 
     let skip_prep_strip = env_flag("SPACETRAVLR_VERIFY_SKIP_PREP_STRIP");
     let allow_cpu = env_flag("SPACETRAVLR_VERIFY_ALLOW_CPU");
@@ -805,7 +812,8 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     log.writeln_str(&rule(w))?;
     log.flush()?;
 
-    let h5ad_raw = resolve_h5ad_for_verify(work_path.as_path()).context("dataset (download or SPACETRAVLR_VERIFY_H5AD)")?;
+    let h5ad_raw = resolve_h5ad_for_verify(work_path.as_path())
+        .context("dataset (download or SPACETRAVLR_VERIFY_H5AD)")?;
     emit_check(
         &mut log,
         &mut all_ok,
@@ -836,7 +844,8 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     };
 
     let vars_path = h5ad_train.as_ref().unwrap_or(&h5ad_raw);
-    let vars = read_h5ad_var_names(vars_path).with_context(|| format!("read var_names {}", vars_path.display()))?;
+    let vars = read_h5ad_var_names(vars_path)
+        .with_context(|| format!("read var_names {}", vars_path.display()))?;
 
     let mut genes_resolved: Vec<String> = Vec::new();
     let mut missing: Vec<&'static str> = Vec::new();
@@ -881,15 +890,11 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     let stderr_path = work_path.join("verify_training.stderr.log");
 
     log.writeln_str("")?;
-    log.writeln_str("(When [data].condition is set, each group trains under output_dir/conditions/<id>/.)")?;
-    log.writeln_str(&format!(
-        "  training_stdout:   {}",
-        stdout_path.display()
-    ))?;
-    log.writeln_str(&format!(
-        "  training_stderr:   {}",
-        stderr_path.display()
-    ))?;
+    log.writeln_str(
+        "(When [data].condition is set, each group trains under output_dir/conditions/<id>/.)",
+    )?;
+    log.writeln_str(&format!("  training_stdout:   {}", stdout_path.display()))?;
+    log.writeln_str(&format!("  training_stderr:   {}", stderr_path.display()))?;
     log.writeln_str("")?;
     log.flush()?;
 
@@ -926,25 +931,16 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
         ));
     } else if let Some(ref h5_train) = h5ad_train {
         let h5_str = h5_train.to_string_lossy().into_owned();
-        let cmd_line = training_subprocess_command_line(
-            &exe,
-            &cfg_str,
-            &h5_str,
-            &out_str,
-            &genes_csv,
-            max_lr,
-        );
+        let cmd_line =
+            training_subprocess_command_line(&exe, &cfg_str, &h5_str, &out_str, &genes_csv, max_lr);
         log.writeln_str(&format!("  training_command:  {cmd_line}"))?;
-        log.writeln_str(&format!(
-            "  training_cwd:      {}",
-            workspace.display()
-        ))?;
+        log.writeln_str(&format!("  training_cwd:      {}", workspace.display()))?;
         log.flush()?;
 
-        let stdout_file =
-            File::create(&stdout_path).with_context(|| format!("create {}", stdout_path.display()))?;
-        let stderr_file =
-            File::create(&stderr_path).with_context(|| format!("create {}", stderr_path.display()))?;
+        let stdout_file = File::create(&stdout_path)
+            .with_context(|| format!("create {}", stdout_path.display()))?;
+        let stderr_file = File::create(&stderr_path)
+            .with_context(|| format!("create {}", stderr_path.display()))?;
         let st_train = Command::new(&exe)
             .arg("--plain")
             .arg("--config")
@@ -1215,12 +1211,17 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
         }
     }
     log.writeln_str(&hr(w))?;
-    log.writeln_str(&format!("End (UTC): {}", Utc::now().format("%Y-%m-%d %H:%M:%S UTC")))?;
+    log.writeln_str(&format!(
+        "End (UTC): {}",
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ))?;
     log.flush()?;
 
     println!(
         "{}",
-        format!("Verify log written to: {}", log_path.display()).green().bold()
+        format!("Verify log written to: {}", log_path.display())
+            .green()
+            .bold()
     );
 
     if all_ok {
@@ -1250,7 +1251,10 @@ mod verify_diag_tests {
 
     #[test]
     fn tail_lines_keeps_last_n() {
-        let s = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let s = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let tail = tail_lines(&s, 3);
         assert!(tail.contains("line8"));
         assert!(tail.contains("line10"));

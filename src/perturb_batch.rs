@@ -595,10 +595,8 @@ impl UnifiedBatchProgress {
         } else {
             format!(" · {} in flight", active.len())
         };
-        self.pb.set_message(format!(
-            "{frac:.1}/{}{active_hint}",
-            self.total_genes
-        ));
+        self.pb
+            .set_message(format!("{frac:.1}/{}{active_hint}", self.total_genes));
     }
 
     pub fn job_started(&self, worker_id: usize, gene: &str) {
@@ -873,9 +871,7 @@ pub fn run_batch_jobs(
         let rt = Arc::clone(&runtime);
         let opts = opts.clone();
         let screen = screen_progress.clone();
-        let job_permille = screen
-            .as_ref()
-            .and_then(|p| p.slot_progress(worker_id));
+        let job_permille = screen.as_ref().and_then(|p| p.slot_progress(worker_id));
         handles.push(thread::spawn(move || -> anyhow::Result<()> {
             loop {
                 let job = { q.lock().expect("batch queue poisoned").pop_front() };
@@ -886,12 +882,7 @@ pub fn run_batch_jobs(
                     sp.job_started(worker_id, &job.gene);
                 }
                 let gene = job.gene.clone();
-                let res = run_one_job(
-                    rt.as_ref(),
-                    job,
-                    &opts,
-                    job_permille.as_ref(),
-                );
+                let res = run_one_job(rt.as_ref(), job, &opts, job_permille.as_ref());
                 if let Some(ref sp) = screen {
                     if res.is_ok() {
                         sp.job_finished(worker_id);
@@ -920,8 +911,7 @@ mod tests {
 
     #[test]
     fn hoist_top_level_beta_scale_into_perturbation_section() {
-        let dir =
-            std::env::temp_dir().join(format!("spacetravlr_hoist_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("spacetravlr_hoist_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("perturb.toml");
         std::fs::write(

@@ -170,10 +170,7 @@ pub fn resolve_run_adata_path(cfg: &SpaceshipConfig, run_toml: &Path) -> anyhow:
     let toml_dir = run_toml.parent().unwrap_or_else(|| Path::new("."));
     let candidates = [
         toml_dir.join(&raw),
-        toml_dir
-            .parent()
-            .unwrap_or(toml_dir)
-            .join(&raw),
+        toml_dir.parent().unwrap_or(toml_dir).join(&raw),
         PathBuf::from(&raw),
     ];
     for c in &candidates {
@@ -308,7 +305,11 @@ fn bh_fdr(pvals: &[f64]) -> Vec<f64> {
         return Vec::new();
     }
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| pvals[a].partial_cmp(&pvals[b]).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|&a, &b| {
+        pvals[a]
+            .partial_cmp(&pvals[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut q = vec![0.0; n];
     let mut running = f64::INFINITY;
     for (rank_rev, &idx) in order.iter().enumerate().rev() {
@@ -957,10 +958,7 @@ pub fn run_microniches(
         feathers.truncate(max_g);
     }
     if feathers.is_empty() {
-        bail!(
-            "no *_betadata.feather files under {}",
-            output_dir.display()
-        );
+        bail!("no *_betadata.feather files under {}", output_dir.display());
     }
 
     eprintln!(
@@ -983,7 +981,11 @@ pub fn run_microniches(
     eprintln!("get-microniches: kept {} β features", kept.len());
 
     let x = zscore_columns(matrix_from_features(&kept));
-    let n_pcs = params.n_pcs.min(x.ncols()).min(x.nrows().saturating_sub(1)).max(1);
+    let n_pcs = params
+        .n_pcs
+        .min(x.ncols())
+        .min(x.nrows().saturating_sub(1))
+        .max(1);
     let pca = dense_pca(&x, n_pcs)?;
     eprintln!(
         "get-microniches: PCA {}×{} → fuzzy graph (k={})…",
@@ -1036,7 +1038,15 @@ pub fn run_microniches(
         output_dir: dest.display().to_string(),
     };
 
-    write_outputs(&dest, &obs_names, &labels, &spatial, &pca, &kept_features, &summary)?;
+    write_outputs(
+        &dest,
+        &obs_names,
+        &labels,
+        &spatial,
+        &pca,
+        &kept_features,
+        &summary,
+    )?;
 
     Ok(MicronichesResult {
         cell_ids: obs_names,
@@ -1108,7 +1118,9 @@ fn write_outputs(
     // Save PCA as a lightweight feather for downstream use.
     let pc_names: Vec<String> = (0..pca.ncols()).map(|i| format!("PC{i}")).collect();
     write_betadata_feather(
-        dest.join("microniche_pca.feather").to_str().unwrap_or("microniche_pca.feather"),
+        dest.join("microniche_pca.feather")
+            .to_str()
+            .unwrap_or("microniche_pca.feather"),
         "CellID",
         cell_ids,
         &pc_names,
@@ -1120,8 +1132,8 @@ fn write_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anndata::data::ArrayData;
     use anndata::AxisArraysOp;
+    use anndata::data::ArrayData;
     use polars::prelude::{DataFrame, NamedFrom, Series};
 
     fn write_toy_run(dir: &Path) -> anyhow::Result<PathBuf> {
@@ -1233,15 +1245,17 @@ stale_lock_secs = 0
         )
         .unwrap();
 
-        let mut params = MicronichesParams::default();
-        params.cell_type = Some("Alpha".into());
-        params.moran_n_perm = 0;
-        params.n_neighbors = 8;
-        params.n_pcs = 2;
-        params.q_bh_max = 0.25;
-        params.resolution_min = 0.4;
-        params.resolution_max = 0.8;
-        params.resolution_step = 0.4;
+        let params = MicronichesParams {
+            cell_type: Some("Alpha".into()),
+            moran_n_perm: 0,
+            n_neighbors: 8,
+            n_pcs: 2,
+            q_bh_max: 0.25,
+            resolution_min: 0.4,
+            resolution_max: 0.8,
+            resolution_step: 0.4,
+            ..Default::default()
+        };
         let out = dir.join("out_progress");
         let res = run_microniches(&repro, &params, Some(&out)).expect("run with progress");
         assert!(res.summary.n_kept_features >= 1);
@@ -1273,15 +1287,17 @@ stale_lock_secs = 0
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let repro = write_toy_run(&dir).unwrap();
-        let mut params = MicronichesParams::default();
-        params.cell_type = Some("Alpha".into());
-        params.moran_n_perm = 19;
-        params.resolution_min = 0.3;
-        params.resolution_max = 1.2;
-        params.resolution_step = 0.3;
-        params.n_neighbors = 8;
-        params.n_pcs = 3;
-        params.q_bh_max = 0.2;
+        let params = MicronichesParams {
+            cell_type: Some("Alpha".into()),
+            moran_n_perm: 19,
+            resolution_min: 0.3,
+            resolution_max: 1.2,
+            resolution_step: 0.3,
+            n_neighbors: 8,
+            n_pcs: 3,
+            q_bh_max: 0.2,
+            ..Default::default()
+        };
         let out = dir.join("out_micro");
         let res = run_microniches(&repro, &params, Some(&out)).expect("run microniches");
         assert_eq!(res.summary.n_cells, 40);
@@ -1310,11 +1326,13 @@ stale_lock_secs = 0
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let repro = write_toy_run(&dir).unwrap();
-        let mut params = MicronichesParams::default();
-        params.leiden_resolution = Some(0.6);
-        params.moran_n_perm = 9;
-        params.q_bh_max = 0.25;
-        params.n_neighbors = 8;
+        let params = MicronichesParams {
+            leiden_resolution: Some(0.6),
+            moran_n_perm: 9,
+            q_bh_max: 0.25,
+            n_neighbors: 8,
+            ..Default::default()
+        };
         let res = run_microniches(&repro, &params, Some(&dir.join("fixed"))).unwrap();
         assert!(!res.summary.optimized_by_silhouette);
         assert!((res.summary.chosen_resolution - 0.6).abs() < 1e-9);

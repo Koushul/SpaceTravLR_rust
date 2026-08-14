@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::Path;
 
+use crate::adata_terminal_scatter::read_h5ad_obs_column_str_h5;
 use anyhow::Context;
 use colored::Colorize;
-use crate::adata_terminal_scatter::read_h5ad_obs_column_str_h5;
 use hdf5_metno::types::VarLenUnicode;
 use hdf5_metno::{Dataset, File as H5File, Group, LocationType};
 use ndarray::Array1;
@@ -206,7 +206,13 @@ fn wrap_fill_lines(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn peek_row_wrapped(out: &mut String, label: &str, value: &str, term_w: usize, value_style: PeekStyle) {
+fn peek_row_wrapped(
+    out: &mut String,
+    label: &str,
+    value: &str,
+    term_w: usize,
+    value_style: PeekStyle,
+) {
     let (head, head_cols) = peek_head_prefix(label);
     let budget = term_w.saturating_sub(head_cols).max(12);
     let first_chunks = wrap_fill_lines(value, budget);
@@ -269,7 +275,13 @@ fn format_name_grid(names: &[String], term_w: usize) -> String {
     lines.join("\n")
 }
 
-fn peek_label_grid(out: &mut String, label: &str, names: &[String], term_w: usize, grid_style: PeekStyle) {
+fn peek_label_grid(
+    out: &mut String,
+    label: &str,
+    names: &[String],
+    term_w: usize,
+    grid_style: PeekStyle,
+) {
     if names.is_empty() {
         return;
     }
@@ -369,10 +381,7 @@ fn x_n_obs_n_vars(root: &Group) -> anyhow::Result<Option<(usize, usize)>> {
             }
             if xg.link_exists("indptr") {
                 let ip_len = xg.dataset("indptr")?.size();
-                anyhow::ensure!(
-                    ip_len >= 2,
-                    "csr X: indptr length {ip_len} is too short"
-                );
+                anyhow::ensure!(ip_len >= 2, "csr X: indptr length {ip_len} is too short");
                 let n_obs = ip_len - 1;
                 return Ok(Some((n_obs, 0)));
             }
@@ -422,9 +431,8 @@ fn infer_n_obs_n_vars(root: &Group) -> anyhow::Result<(usize, usize)> {
         return Ok((o, v));
     }
     if let (None, Some(v)) = (n_obs, n_var) {
-        let o = n_obs_idx.context(
-            "could not infer n_obs: X has no row count and obs index is missing",
-        )?;
+        let o = n_obs_idx
+            .context("could not infer n_obs: X has no row count and obs index is missing")?;
         return Ok((o, v));
     }
 
@@ -451,7 +459,9 @@ fn read_dataset_len2_usize(ds: &Dataset) -> Option<(usize, usize)> {
 }
 
 fn sorted_group_member_summaries(g: &Group) -> anyhow::Result<Vec<String>> {
-    let mut names = g.member_names().with_context(|| "list HDF5 group members")?;
+    let mut names = g
+        .member_names()
+        .with_context(|| "list HDF5 group members")?;
     names.sort();
     let mut out = Vec::with_capacity(names.len());
     for n in names {
@@ -507,7 +517,13 @@ fn try_peek_tenx_filtered_matrix(
     feature_names.retain(|n| !n.starts_with('_'));
 
     let mut out = String::new();
-    peek_row_wrapped(&mut out, "path", &path.display().to_string(), term_w, PeekStyle::PATH);
+    peek_row_wrapped(
+        &mut out,
+        "path",
+        &path.display().to_string(),
+        term_w,
+        PeekStyle::PATH,
+    );
     peek_row_wrapped(
         &mut out,
         "size",
@@ -583,7 +599,13 @@ fn peek_generic_hdf5_report(
 ) -> anyhow::Result<String> {
     let members = sorted_group_member_summaries(root)?;
     let mut out = String::new();
-    peek_row_wrapped(&mut out, "path", &path.display().to_string(), term_w, PeekStyle::PATH);
+    peek_row_wrapped(
+        &mut out,
+        "path",
+        &path.display().to_string(),
+        term_w,
+        PeekStyle::PATH,
+    );
     peek_row_wrapped(
         &mut out,
         "size",
@@ -598,13 +620,7 @@ fn peek_generic_hdf5_report(
         term_w,
         PeekStyle::META,
     );
-    peek_label_grid(
-        &mut out,
-        "root",
-        &members,
-        term_w,
-        PeekStyle::OBS_GRID,
-    );
+    peek_label_grid(&mut out, "root", &members, term_w, PeekStyle::OBS_GRID);
     Ok(out)
 }
 
@@ -671,19 +687,16 @@ fn value_counts_block(
         let row0 = if peek_color_enabled() {
             format!(
                 "  {}\t{}\t{}%\t",
-                (i + 1).to_string().truecolor(GB_GRAY.0, GB_GRAY.1, GB_GRAY.2),
+                (i + 1)
+                    .to_string()
+                    .truecolor(GB_GRAY.0, GB_GRAY.1, GB_GRAY.2),
                 fmt_usize_sep(*cnt)
                     .truecolor(GB_BRIGHT_YELLOW.0, GB_BRIGHT_YELLOW.1, GB_BRIGHT_YELLOW.2)
                     .bold(),
                 pct_s.truecolor(GB_BRIGHT_AQUA.0, GB_BRIGHT_AQUA.1, GB_BRIGHT_AQUA.2),
             )
         } else {
-            format!(
-                "  {}\t{}\t{}%\t",
-                i + 1,
-                fmt_usize_sep(*cnt),
-                pct_s
-            )
+            format!("  {}\t{}\t{}%\t", i + 1, fmt_usize_sep(*cnt), pct_s)
         };
         let row0_cols = format!("  {}\t{}\t{}%\t", i + 1, fmt_usize_sep(*cnt), pct_s)
             .chars()
@@ -753,7 +766,13 @@ fn peek_annadata_h5_report(
     }
 
     let mut out = String::new();
-    peek_row_wrapped(&mut out, "path", &path.display().to_string(), term_w, PeekStyle::PATH);
+    peek_row_wrapped(
+        &mut out,
+        "path",
+        &path.display().to_string(),
+        term_w,
+        PeekStyle::PATH,
+    );
     peek_row_wrapped(
         &mut out,
         "size",
@@ -812,8 +831,8 @@ fn peek_annadata_h5_report(
         let obs = h5
             .group("obs")
             .context("h5ad: missing obs group — cannot read --obs")?;
-        let cells = read_h5ad_obs_column_str_h5(&obs, col)
-            .with_context(|| format!("read obs[{col:?}]"))?;
+        let cells =
+            read_h5ad_obs_column_str_h5(&obs, col).with_context(|| format!("read obs[{col:?}]"))?;
         let _ = writeln!(out);
         out.push_str(&value_counts_block(col, &cells, n_obs, term_w)?);
     }
@@ -860,8 +879,8 @@ pub fn print_h5ad_peek(path: &Path, obs_column: Option<&str>) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anndata::{AnnData, AnnDataOp};
     use anndata::data::ArrayData;
+    use anndata::{AnnData, AnnDataOp};
     use anndata_hdf5::H5;
     use ndarray::Array2;
     use polars::prelude::{DataFrame, NamedFrom, Series};
@@ -872,13 +891,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.h5ad");
         let a = AnnData::<H5>::new(&path).unwrap();
-        a.set_obs_names(vec!["c0".into(), "c1".into()].into()).unwrap();
-        a.set_var_names(vec!["G0".into(), "G1".into()].into()).unwrap();
-        let obs = DataFrame::new(vec![Series::new(
-            "cell_type".into(),
-            vec!["a".to_string(), "b".to_string()],
-        )
-        .into()])
+        a.set_obs_names(vec!["c0".into(), "c1".into()].into())
+            .unwrap();
+        a.set_var_names(vec!["G0".into(), "G1".into()].into())
+            .unwrap();
+        let obs = DataFrame::new(vec![
+            Series::new("cell_type".into(), vec!["a".to_string(), "b".to_string()]).into(),
+        ])
         .unwrap();
         a.set_obs(obs).unwrap();
         let var = DataFrame::new(vec![Series::new("mt".into(), vec![false, true]).into()]).unwrap();

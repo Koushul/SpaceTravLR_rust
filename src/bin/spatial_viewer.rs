@@ -45,8 +45,8 @@ use spacetravlr::perturb::{
     PerturbWithTargetsInputs, compute_splash_all_progress, perturb_with_targets,
 };
 use spacetravlr::perturb_batch::{
-    effective_parallelism, expand_prepared_jobs, load_batch_file,
-    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes, BatchRunOptions,
+    BatchRunOptions, effective_parallelism, expand_prepared_jobs, load_batch_file,
+    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
 };
 use spacetravlr::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
 use spacetravlr::transition_umap::{

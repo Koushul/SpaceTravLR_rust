@@ -7,8 +7,8 @@ use std::process::Command;
 
 use common::uv_python::uv_available;
 use spacetravlr::rust_preprocess::{
-    rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps, RustPreprocessParams,
-    RustPreprocessSteps,
+    RustPreprocessParams, RustPreprocessSteps, rust_preprocess_h5ad_to_memory,
+    rust_preprocess_h5ad_with_steps,
 };
 
 fn write_h5ad_digit_var_with_feature_name(path: &std::path::Path) -> std::process::ExitStatus {
@@ -54,10 +54,8 @@ fn rust_preprocess_memory_repairs_digit_var_index_from_feature_name() {
         eprintln!("skip: uv not on PATH");
         return;
     }
-    let dir = std::env::temp_dir().join(format!(
-        "rust_preprocess_digit_var_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("rust_preprocess_digit_var_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let h5 = dir.join("digit_var.h5ad");
@@ -71,12 +69,9 @@ fn rust_preprocess_memory_repairs_digit_var_index_from_feature_name() {
         n_pca_components: 8,
         ..Default::default()
     };
-    let adata = rust_preprocess_h5ad_to_memory(
-        &h5,
-        &params,
-        &RustPreprocessSteps::UMAP_LAB_PCA_ONLY,
-    )
-    .expect("rust_preprocess_h5ad_to_memory");
+    let adata =
+        rust_preprocess_h5ad_to_memory(&h5, &params, &RustPreprocessSteps::UMAP_LAB_PCA_ONLY)
+            .expect("rust_preprocess_h5ad_to_memory");
 
     assert_eq!(adata.n_obs(), 40, "obs count");
     assert!(
@@ -115,10 +110,7 @@ fn rust_preprocess_write_roundtrip_keeps_symbolic_var_index() {
         eprintln!("skip: uv not on PATH");
         return;
     }
-    let dir = std::env::temp_dir().join(format!(
-        "rust_preprocess_write_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("rust_preprocess_write_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let h5_in = dir.join("in.h5ad");
@@ -149,7 +141,10 @@ fn rust_preprocess_write_roundtrip_keeps_symbolic_var_index() {
     for name in adata2.var_names() {
         let t = name.trim();
         let digit_only = !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
-        assert!(!digit_only, "reloaded var name must not be digit-only: {name:?}");
+        assert!(
+            !digit_only,
+            "reloaded var name must not be digit-only: {name:?}"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&dir);

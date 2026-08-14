@@ -35,16 +35,16 @@ fn help_lists_process_h5ad_and_impute() {
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        s.contains("--verify"),
-        "expected --verify in help:\n{s}"
-    );
+    assert!(s.contains("--verify"), "expected --verify in help:\n{s}");
     assert!(
         s.contains("--plot-umap-backend"),
         "expected --plot-umap-backend in help:\n{s}"
     );
     assert!(s.contains("--umap"), "expected --umap in help:\n{s}");
-    assert!(s.contains("--rust-magic"), "expected --rust-magic in help:\n{s}");
+    assert!(
+        s.contains("--rust-magic"),
+        "expected --rust-magic in help:\n{s}"
+    );
     assert!(
         s.contains("--process-h5ad"),
         "expected --process-h5ad in help:\n{s}"
@@ -102,10 +102,7 @@ fn help_lists_process_h5ad_and_impute() {
 
 #[test]
 fn prep_umap_requires_h5ad_flag() {
-    let out = spacetravlr_cmd()
-        .arg("--umap")
-        .output()
-        .expect("spawn");
+    let out = spacetravlr_cmd().arg("--umap").output().expect("spawn");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -379,10 +376,8 @@ fn plot_umap_obs_errors_when_column_missing() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_plot_umap_obs_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("spacetravlr_plot_umap_obs_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let h5_path = dir.join("umap_obs.h5ad");
@@ -481,15 +476,13 @@ a.write_h5ad(p)
 #[test]
 fn plot_umap_leiden_scanpy_backend_errors_without_h5ad() {
     let out = spacetravlr_cmd()
-        .args([
-            "--plot-umap",
-            "--leiden",
-            "--plot-umap-backend",
-            "scanpy",
-        ])
+        .args(["--plot-umap", "--leiden", "--plot-umap-backend", "scanpy"])
         .output()
         .expect("spawn");
-    assert!(!out.status.success(), "expected failure for scanpy + --leiden");
+    assert!(
+        !out.status.success(),
+        "expected failure for scanpy + --leiden"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("omit scanpy") || err.contains("rust"),

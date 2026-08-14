@@ -54,11 +54,7 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
         (c, 0.0, x)
     };
     let clamp_byte = |t: f64| -> u8 { (t * 255.0).round().clamp(0.0, 255.0) as u8 };
-    (
-        clamp_byte(rp + m),
-        clamp_byte(gp + m),
-        clamp_byte(bp + m),
-    )
+    (clamp_byte(rp + m), clamp_byte(gp + m), clamp_byte(bp + m))
 }
 
 fn hue_deg(c: Color) -> f64 {
@@ -79,7 +75,11 @@ fn theme_palette_for_slot(slot: usize) -> ThemePalette {
 /// active `ratatui-themes` palette: up to seven types map to evenly spaced semantic colors
 /// (sorted by hue); further types use golden-angle hues with saturation/value tuned for
 /// light vs dark themes.
-pub fn cell_type_color_for_label(theme_slot: usize, label: &str, sorted_unique: &[String]) -> Color {
+pub fn cell_type_color_for_label(
+    theme_slot: usize,
+    label: &str,
+    sorted_unique: &[String],
+) -> Color {
     let n = sorted_unique.len().max(1);
     let idx = sorted_unique.iter().position(|s| s == label).unwrap_or(0) % n;
     cell_type_color(theme_slot, idx, sorted_unique.len())
@@ -106,10 +106,7 @@ pub fn cell_type_color(theme_slot: usize, type_index: usize, n_types: usize) -> 
             .enumerate()
             .map(|(i, &c)| (hue_deg(c), i))
             .collect();
-        pairs.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let sorted_idx = ((ti * SEEDS) / max_palette).min(SEEDS - 1);
         let seed_i = pairs[sorted_idx].1;
         return seeds[seed_i];

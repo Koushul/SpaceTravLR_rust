@@ -102,10 +102,8 @@ fn make_cells_csv_requires_run_toml() {
 
 #[test]
 fn make_cells_csv_cli_writes_grouped_obs_names() {
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_make_cells_csv_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("spacetravlr_make_cells_csv_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let h5ad = dir.join("toy.h5ad");
@@ -131,18 +129,9 @@ fn make_cells_csv_cli_writes_grouped_obs_names() {
 
     let obs: Vec<String> = (0..6).map(|i| format!("cell_{i}")).collect();
     let parsed = parse_obs_columns_csv(&expected_csv, &obs).unwrap();
-    assert_eq!(
-        parsed.indices_for_column("Alpha").unwrap(),
-        &[0usize, 1]
-    );
-    assert_eq!(
-        parsed.indices_for_column("Beta").unwrap(),
-        &[2usize, 3]
-    );
-    assert_eq!(
-        parsed.indices_for_column("Gamma").unwrap(),
-        &[4usize, 5]
-    );
+    assert_eq!(parsed.indices_for_column("Alpha").unwrap(), &[0usize, 1]);
+    assert_eq!(parsed.indices_for_column("Beta").unwrap(), &[2usize, 3]);
+    assert_eq!(parsed.indices_for_column("Gamma").unwrap(), &[4usize, 5]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -150,10 +139,8 @@ fn make_cells_csv_cli_writes_grouped_obs_names() {
 #[test]
 fn write_cells_csv_from_run_toml_library_matches_cli() {
     spacetravlr::ensure_process_env();
-    let dir = std::env::temp_dir().join(format!(
-        "spacetravlr_make_cells_lib_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("spacetravlr_make_cells_lib_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let h5ad = dir.join("toy.h5ad");

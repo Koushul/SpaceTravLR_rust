@@ -73,7 +73,9 @@ fn linux_x86_64_prebuilt_tarball_target() -> Result<String> {
             "standard" => Ok(LINUX_GNU_TRIPLE.to_string()),
             "compat" => Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT_SUFFIX}")),
             "compat28" => Ok(format!("{LINUX_GNU_TRIPLE}{LINUX_GNU_COMPAT28_SUFFIX}")),
-            _ => bail!("invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard, compat, or compat28"),
+            _ => {
+                bail!("invalid SPACETRAVLR_LINUX_VARIANT={v:?}; use standard, compat, or compat28")
+            }
         };
     }
     let (maj, min) = host_glibc_major_minor()?;

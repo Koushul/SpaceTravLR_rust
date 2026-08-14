@@ -313,19 +313,18 @@ impl PerturbRuntime {
             .iter()
             .map(|&i| cluster_keys_full[i].clone())
             .collect();
-        let expression_preview_labels: Vec<String> =
-            if obs_df.column("cell_type").is_ok() {
-                let col = obs_df
-                    .column("cell_type")
-                    .with_context(|| "read obs column cell_type")?;
-                let series = col.as_materialized_series();
-                row_idx
-                    .iter()
-                    .map(|&i| obs_series_row_str(series, i))
-                    .collect::<anyhow::Result<Vec<_>>>()?
-            } else {
-                cluster_keys.clone()
-            };
+        let expression_preview_labels: Vec<String> = if obs_df.column("cell_type").is_ok() {
+            let col = obs_df
+                .column("cell_type")
+                .with_context(|| "read obs column cell_type")?;
+            let series = col.as_materialized_series();
+            row_idx
+                .iter()
+                .map(|&i| obs_series_row_str(series, i))
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            cluster_keys.clone()
+        };
         let clusters: Vec<usize> = row_idx.iter().map(|&i| clusters_full[i]).collect();
         let xy_full = load_spatial_coords_f64(&adata)?;
         let xy = subset_xy_rows(&xy_full, &row_idx)?;
@@ -728,10 +727,7 @@ pub fn write_cells_csv_from_run_toml(
     eprintln!(
         "Wrote {} ({} columns, {} cells) using obs[{:?}] from {}",
         out.display(),
-        ctx.cell_type_labels
-            .iter()
-            .collect::<HashSet<_>>()
-            .len(),
+        ctx.cell_type_labels.iter().collect::<HashSet<_>>().len(),
         ctx.obs_names.len(),
         annot_col,
         cfg.resolve_adata_path()
@@ -832,44 +828,40 @@ pub fn export_joint_perturb_result(args: ExportJointPerturbArgs<'_>) -> anyhow::
         }
     }
 
-    let (out_dir, feather_path, feather_name_for_summary) = if let Some(ref custom) =
-        joint_feather_path
-    {
-        let feather_path = if custom
-            .parent()
-            .is_none_or(|p| p.as_os_str().is_empty())
-        {
-            let name = custom
+    let (out_dir, feather_path, feather_name_for_summary) =
+        if let Some(ref custom) = joint_feather_path {
+            let feather_path = if custom.parent().is_none_or(|p| p.as_os_str().is_empty()) {
+                let name = custom
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("export path has no file name"))?;
+                runtime.run_dir.join(name)
+            } else {
+                custom.clone()
+            };
+            let parent = feather_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("export path has no parent directory"))?
+                .to_path_buf();
+            std::fs::create_dir_all(&parent)?;
+            let fname = feather_path
                 .file_name()
-                .ok_or_else(|| anyhow::anyhow!("export path has no file name"))?;
-            runtime.run_dir.join(name)
+                .and_then(|s| s.to_str())
+                .unwrap_or("joint_perturb_expr.feather")
+                .to_string();
+            (parent, feather_path, fname)
         } else {
-            custom.clone()
+            let out_dir = request_output_dir(
+                runtime.run_dir.as_path(),
+                &selected,
+                desired_expr,
+                n_propagation,
+                job_id,
+            );
+            std::fs::create_dir_all(&out_dir)?;
+            let feather_name = "joint_perturb_expr.feather";
+            let out_path = out_dir.join(feather_name);
+            (out_dir.clone(), out_path, feather_name.to_string())
         };
-        let parent = feather_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("export path has no parent directory"))?
-            .to_path_buf();
-        std::fs::create_dir_all(&parent)?;
-        let fname = feather_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("joint_perturb_expr.feather")
-            .to_string();
-        (parent, feather_path, fname)
-    } else {
-        let out_dir = request_output_dir(
-            runtime.run_dir.as_path(),
-            &selected,
-            desired_expr,
-            n_propagation,
-            job_id,
-        );
-        std::fs::create_dir_all(&out_dir)?;
-        let feather_name = "joint_perturb_expr.feather";
-        let out_path = out_dir.join(feather_name);
-        (out_dir.clone(), out_path, feather_name.to_string())
-    };
 
     write_betadata_feather(
         feather_path
@@ -1391,18 +1383,8 @@ mod tests {
             std::env::temp_dir().join(format!("spacetravlr_make_cells_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("cells.csv");
-        let obs = vec![
-            "c1".into(),
-            "c2".into(),
-            "c3".into(),
-            "c4".into(),
-        ];
-        let labels = vec![
-            "B".into(),
-            "A".into(),
-            "A".into(),
-            "B".into(),
-        ];
+        let obs = vec!["c1".into(), "c2".into(), "c3".into(), "c4".into()];
+        let labels = vec!["B".into(), "A".into(), "A".into(), "B".into()];
         write_cells_csv_grouped_by_label(&p, &obs, &labels).unwrap();
         let body = std::fs::read_to_string(&p).unwrap();
         assert!(body.starts_with("A,B\n"));
