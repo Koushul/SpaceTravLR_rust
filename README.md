@@ -2,8 +2,12 @@
 
 <!-- <img alt="SpaceTravLR training dashboard UI" src="data/rust_chef.png" width="600"/> -->
 
-[![Compilation Status](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/release.yml)
-[![SpaceShip CI](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/rust.yml)
+[![CI](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/rust.yml)
+[![Docs](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/Koushul/SpaceTravLR_rust/actions/workflows/docs.yml)
+[![Read the Docs](https://readthedocs.org/projects/spacetravlr-rust/badge/?version=latest)](https://spacetravlr-rust.readthedocs.io/en/latest/)
+[![GitHub release](https://img.shields.io/github/v/release/Koushul/SpaceTravLR_rust)](https://github.com/Koushul/SpaceTravLR_rust/releases/latest)
+[![License](https://img.shields.io/github/license/Koushul/SpaceTravLR_rust)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.86+-orange?logo=rust)](https://www.rust-lang.org)
 
 Rust implementation of [SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR) — spatial gene regulatory network inference and in-silico perturbation from Visium-style `.h5ad`.
 
@@ -15,7 +19,7 @@ For supported platforms, PATH setup, self-updates, and troubleshooting, see **[i
 
 **Documentation:** [koushul.github.io/SpaceTravLR_rust](https://koushul.github.io/SpaceTravLR_rust/) (GitHub Pages, live). Read the Docs target: [spacetravlr-rust.readthedocs.io](https://spacetravlr-rust.readthedocs.io/en/latest/) — requires a [one-time import](docs/install.md#documentation-site) on readthedocs.org ([`.readthedocs.yaml`](.readthedocs.yaml)). Local: `pip install -r docs/requirements.txt && mkdocs serve`.
 
-![SpaceTravLR training dashboard UI](data/demo.gif)
+<!-- ![SpaceTravLR training dashboard UI](data/demo.gif) -->
 
 ## Tech stack
 
