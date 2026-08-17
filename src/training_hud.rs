@@ -30,6 +30,8 @@ pub struct RunConfigSummary {
     pub gene_selection: String,
     pub cnn_training_mode: String,
     pub condition_split: String,
+    pub pool_lasso: bool,
+    pub sample_column: String,
 }
 
 pub struct RunConfigSummaryBuildArgs<'a> {
@@ -111,6 +113,15 @@ impl RunConfigSummary {
             gene_selection,
             cnn_training_mode,
             condition_split: condition_split.unwrap_or("—").to_string(),
+            pool_lasso: cfg.training.pool_lasso,
+            sample_column: cfg
+                .data
+                .sample
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("—")
+                .to_string(),
         }
     }
 }
@@ -162,6 +173,12 @@ pub struct TrainingHudState {
     pub celloracle_infer_total: usize,
     /// Completed target fits during CellOracle; updated from Rayon without holding the HUD mutex.
     pub celloracle_infer_done: Arc<AtomicUsize>,
+    /// `[training].pool_lasso`: jointly scaled Lasso, then one CNN per sample.
+    pub pool_lasso: bool,
+    /// Sample labels from `[data].sample` (empty when not pool-lasso).
+    pub pool_sample_labels: Vec<String>,
+    /// Per-gene pool-lasso sample progress: `(1-based index, n_samples, label)`.
+    pub gene_pool_sample: HashMap<String, (usize, usize, String)>,
 }
 
 impl TrainingHudState {
@@ -207,6 +224,9 @@ impl TrainingHudState {
             is_demo: false,
             celloracle_infer_total: 0,
             celloracle_infer_done: Arc::new(AtomicUsize::new(0)),
+            pool_lasso: false,
+            pool_sample_labels: Vec::new(),
+            gene_pool_sample: HashMap::new(),
         }
     }
 
@@ -251,6 +271,7 @@ impl TrainingHudState {
         self.is_demo = false;
         self.celloracle_infer_total = 0;
         self.celloracle_infer_done.store(0, Ordering::Relaxed);
+        self.gene_pool_sample.clear();
     }
 
     pub fn record_gene_time(&mut self, gene: &str, secs: f64) {
@@ -350,6 +371,31 @@ impl TrainingHudState {
         self.active_genes.remove(gene);
         self.gene_lasso_cluster_progress.remove(gene);
         self.gene_cnn_epoch_slots.remove(gene);
+        self.gene_pool_sample.remove(gene);
+    }
+
+    pub fn set_pool_lasso_samples(&mut self, labels: Vec<String>) {
+        self.pool_lasso = !labels.is_empty();
+        self.pool_sample_labels = labels;
+        self.gene_pool_sample.clear();
+    }
+
+    pub fn set_gene_pool_sample(&mut self, gene: &str, idx_1based: usize, n: usize, label: &str) {
+        self.gene_pool_sample
+            .insert(gene.to_string(), (idx_1based, n, label.to_string()));
+    }
+
+    /// Gene-progress units: one per gene, or one per (gene × sample) under pool-lasso.
+    pub fn gene_progress_pos_total(&self) -> (u64, u64) {
+        let n_samp = self.pool_sample_labels.len().max(1);
+        let total = (self.total_genes.max(1) * n_samp) as u64;
+        let in_flight: usize = self
+            .gene_pool_sample
+            .values()
+            .map(|(i, _, _)| i.saturating_sub(1))
+            .sum();
+        let pos = (self.genes_rounds * n_samp + in_flight) as u64;
+        (pos.min(total), total)
     }
 
     pub fn should_cancel(&self) -> bool {
@@ -480,5 +526,78 @@ pub fn pipeline_step_end(hud: &Option<TrainingHud>, label: &str, started: Instan
     if hud.is_none() {
         let s = started.elapsed().as_secs_f64();
         println!("+ {:.1}s  {}", s, label);
+    }
+}
+
+#[cfg(test)]
+mod pool_progress_tests {
+    use super::TrainingHudState;
+    use crate::config::SpaceshipConfig;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn empty_hud() -> TrainingHudState {
+        let cfg = SpaceshipConfig::default();
+        let summary = super::RunConfigSummary::build(super::RunConfigSummaryBuildArgs {
+            config_path: None,
+            compute_backend: "cpu",
+            compute_device_detail: "—",
+            compute_notice: "",
+            cfg: &cfg,
+            max_genes: None,
+            gene_filter: None,
+            condition_split: None,
+        });
+        TrainingHudState::new(
+            "x.h5ad".into(),
+            "/tmp/out".into(),
+            summary,
+            false,
+            1,
+            1,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn progress_without_pool_is_gene_units() {
+        let mut g = empty_hud();
+        g.total_genes = 10;
+        g.genes_rounds = 3;
+        assert_eq!(g.gene_progress_pos_total(), (3, 10));
+    }
+
+    #[test]
+    fn progress_with_pool_counts_sample_fits() {
+        let mut g = empty_hud();
+        g.total_genes = 4;
+        g.set_pool_lasso_samples(vec!["s1".into(), "s2".into()]);
+        g.genes_rounds = 1;
+        g.set_gene_pool_sample("FOO", 2, 2, "s2");
+        assert_eq!(g.gene_progress_pos_total(), (3, 8));
+    }
+
+    #[test]
+    fn pool_progress_sample_one_does_not_advance_bar() {
+        let mut g = empty_hud();
+        g.total_genes = 2;
+        g.set_pool_lasso_samples(vec!["s1".into(), "s2".into()]);
+        g.set_gene_pool_sample("A", 1, 2, "s1");
+        g.set_gene_pool_sample("B", 1, 2, "s1");
+        assert_eq!(g.gene_progress_pos_total(), (0, 4));
+        g.set_gene_pool_sample("A", 2, 2, "s2");
+        assert_eq!(g.gene_progress_pos_total(), (1, 4));
+        g.remove_gene("A");
+        g.genes_rounds = 1;
+        assert_eq!(g.gene_progress_pos_total(), (2, 4));
+    }
+
+    #[test]
+    fn pool_progress_clamps_to_total() {
+        let mut g = empty_hud();
+        g.total_genes = 1;
+        g.set_pool_lasso_samples(vec!["s1".into(), "s2".into()]);
+        g.genes_rounds = 3;
+        assert_eq!(g.gene_progress_pos_total(), (2, 2));
     }
 }

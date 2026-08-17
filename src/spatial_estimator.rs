@@ -57,20 +57,55 @@ pub fn gene_performance_feather_path(training_dir: &Path) -> PathBuf {
     training_dir.join(GENE_PERFORMANCE_FEATHER_NAME)
 }
 
+/// Parent-dir marker written after every sample has a feather / orphan / tf_ablated.
+/// Locks live on the parent; sample feathers live under `conditions/<sample>/` (or
+/// `samples/<sample>/`), so resume and the TUI must not rely on parent `*_betadata.feather`.
+const POOL_LASSO_GENE_DONE_SUFFIX: &str = ".done";
+
+fn gene_terminal_artifact_in_dir(dir: &Path, gene: &str) -> bool {
+    dir.join(format!("{gene}_betadata.feather")).is_file()
+        || dir.join(format!("{gene}.orphan")).is_file()
+        || dir.join(format!("{gene}.tf_ablated")).is_file()
+}
+
+fn pool_lasso_parent_done_marker(training_dir: &str, gene: &str) -> PathBuf {
+    Path::new(training_dir).join(format!("{gene}{POOL_LASSO_GENE_DONE_SUFFIX}"))
+}
+
 fn pool_lasso_gene_already_done(training_dir: &str, gene: &str, sample_dirs: &[PathBuf]) -> bool {
-    let orphan = format!("{training_dir}/{gene}.orphan");
-    let tf_ablated = format!("{training_dir}/{gene}.tf_ablated");
-    if Path::new(&orphan).exists() || Path::new(&tf_ablated).exists() {
+    let parent = Path::new(training_dir);
+    if parent
+        .join(format!("{gene}{POOL_LASSO_GENE_DONE_SUFFIX}"))
+        .is_file()
+        || parent.join(format!("{gene}.orphan")).is_file()
+        || parent.join(format!("{gene}.tf_ablated")).is_file()
+    {
         return true;
     }
     if sample_dirs.is_empty() {
         return false;
     }
-    sample_dirs.iter().all(|d| {
-        d.join(format!("{gene}_betadata.feather")).is_file()
-            || d.join(format!("{gene}.orphan")).is_file()
-            || d.join(format!("{gene}.tf_ablated")).is_file()
-    })
+    sample_dirs
+        .iter()
+        .all(|d| gene_terminal_artifact_in_dir(d, gene))
+}
+
+fn write_pool_lasso_gene_done_marker(training_dir: &str, gene: &str) {
+    let _ = File::create(pool_lasso_parent_done_marker(training_dir, gene));
+}
+
+fn backfill_pool_lasso_done_marker(training_dir: &str, gene: &str, sample_dirs: &[PathBuf]) {
+    if pool_lasso_gene_already_done(training_dir, gene, sample_dirs) {
+        let marker = pool_lasso_parent_done_marker(training_dir, gene);
+        if !marker.is_file()
+            && !Path::new(training_dir).join(format!("{gene}.orphan")).is_file()
+            && !Path::new(training_dir)
+                .join(format!("{gene}.tf_ablated"))
+                .is_file()
+        {
+            let _ = File::create(marker);
+        }
+    }
 }
 
 fn record_mean_r2_from_summaries(
@@ -3184,6 +3219,13 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             }
                         ),
                     );
+                    if let Some(ref h) = hud {
+                        if let Ok(mut g) = h.lock() {
+                            g.set_pool_lasso_samples(
+                                plans.iter().map(|p| p.label.clone()).collect(),
+                            );
+                        }
+                    }
                     Some(Arc::new(plans))
                 } else {
                     None
@@ -3410,9 +3452,14 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     || std::path::Path::new(&tf_ablated_path).exists()
                             };
 
-                            // Skip already-done
-                            if already_done
-                            {
+                            if already_done {
+                                if sample_plans.is_some() {
+                                    backfill_pool_lasso_done_marker(
+                                        &training_dir,
+                                        &gene,
+                                        &sample_dirs,
+                                    );
+                                }
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
                                         g.genes_skipped += 1;
@@ -3627,6 +3674,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             };
                             let export_per_cell = matches!(cnn_mode_w, CnnTrainingMode::Full);
                             if let Some(ref plans) = sample_plans {
+                                let n_samp = plans.len();
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        g.set_gene_status(
+                                            &gene,
+                                            format!("pooled lasso · {n_samp} samples | {n_mods} mods"),
+                                        );
+                                    }
+                                }
                                 let pooled = estimator.run_pooled_lasso_samples(
                                     plans.as_slice(),
                                     &xy,
@@ -3673,7 +3729,40 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                         let mut cnn_summaries_acc: Vec<
                                             crate::estimator::ClusterTrainingSummary,
                                         > = Vec::new();
-                                        for slice in &slices {
+                                        let n_samp = slices.len();
+                                        for (si, slice) in slices.iter().enumerate() {
+                                            if let Some(ref h) = hud {
+                                                if let Ok(mut g) = h.lock() {
+                                                    g.set_gene_pool_sample(
+                                                        &gene,
+                                                        si + 1,
+                                                        n_samp,
+                                                        &slice.label,
+                                                    );
+                                                    g.set_gene_status(
+                                                        &gene,
+                                                        format!(
+                                                            "sample {}/{} {} | {n_mods} mods",
+                                                            si + 1,
+                                                            n_samp,
+                                                            slice.label
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                            if gene_terminal_artifact_in_dir(&slice.output_dir, &gene)
+                                            {
+                                                if slice
+                                                    .output_dir
+                                                    .join(format!("{gene}_betadata.feather"))
+                                                    .is_file()
+                                                {
+                                                    any_wrote = true;
+                                                } else {
+                                                    any_orphan = true;
+                                                }
+                                                continue;
+                                            }
                                             if let Some(est) = estimator.estimator.as_mut() {
                                                 est.lasso_coefficients = pooled_coefs.clone();
                                                 est.lasso_intercepts = pooled_intercepts.clone();
@@ -3705,11 +3794,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     }
                                                 }
                                                 if worker_run_full_cnn {
+                                                    if let Some(ref slot) = cnn_epoch_slot_fit {
+                                                        slot.reconfigure(epochs);
+                                                    }
                                                     est.reinit_models_from_lasso_anchors(
                                                         num_clusters,
                                                         &device,
                                                         &cnn_w,
                                                     );
+                                                    let gene_cnn = gene.clone();
+                                                    let hud_cnn = hud.clone();
                                                     est.fit_cnn_refinement(
                                                         ClusteredGcnNwrCnnRefineInputs {
                                                             x: &x_s,
@@ -3728,7 +3822,15 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                                 .clone(),
                                                             random_seed: random_seed_w,
                                                         },
-                                                        |_, _| {},
+                                                        |done, total| {
+                                                            if let Some(hh) = hud_cnn.as_ref() {
+                                                                if let Ok(mut g) = hh.lock() {
+                                                                    g.set_gene_lasso_cluster_progress(
+                                                                        &gene_cnn, done, total,
+                                                                    );
+                                                                }
+                                                            }
+                                                        },
                                                     );
                                                 }
                                                 let sample_cnn: Vec<_> =
@@ -3784,10 +3886,35 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 );
                                             }
                                         }
+                                        if any_wrote
+                                            || slices.iter().all(|s| {
+                                                gene_terminal_artifact_in_dir(&s.output_dir, &gene)
+                                            })
+                                        {
+                                            write_pool_lasso_gene_done_marker(&training_dir, &gene);
+                                        }
                                         if any_wrote {
                                             if let Some(ref h) = hud {
                                                 if let Ok(mut g) = h.lock() {
                                                     g.genes_done += 1;
+                                                    if !cnn_summaries_acc.is_empty() {
+                                                        g.record_training_metrics(
+                                                            &gene,
+                                                            &cnn_summaries_acc,
+                                                            None,
+                                                            Some((
+                                                                cnn_w.drop_cnn_if_insample_worse_than_lasso,
+                                                                cnn_w.cnn_vs_lasso_arbitration_margin,
+                                                            )),
+                                                        );
+                                                    } else if !pooled_summaries.is_empty() {
+                                                        g.record_training_metrics(
+                                                            &gene,
+                                                            &pooled_summaries,
+                                                            None,
+                                                            None,
+                                                        );
+                                                    }
                                                 }
                                                 log_line(
                                                     &hud,
@@ -5699,5 +5826,143 @@ mod mean_lasso_r2_patch_tests {
             "patch_var_orphan_markers_force_zero_under_flock failed after {MAX_ATTEMPTS} attempts: {:?}",
             last_err
         );
+    }
+}
+
+#[cfg(test)]
+mod pool_lasso_done_marker_tests {
+    use super::{
+        backfill_pool_lasso_done_marker, gene_terminal_artifact_in_dir, pool_lasso_gene_already_done,
+        write_pool_lasso_gene_done_marker,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "spacetravlr_pool_done_{name}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn already_done_false_when_no_artifacts() {
+        let root = temp_root("empty");
+        let s1 = root.join("conditions").join("s1");
+        let s2 = root.join("conditions").join("s2");
+        fs::create_dir_all(&s1).unwrap();
+        fs::create_dir_all(&s2).unwrap();
+        assert!(!pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "GATA4",
+            &[s1, s2]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn already_done_requires_every_sample() {
+        let root = temp_root("partial");
+        let s1 = root.join("conditions").join("s1");
+        let s2 = root.join("conditions").join("s2");
+        fs::create_dir_all(&s1).unwrap();
+        fs::create_dir_all(&s2).unwrap();
+        fs::write(s1.join("GATA4_betadata.feather"), b"x").unwrap();
+        assert!(!pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "GATA4",
+            &[s1.clone(), s2.clone()]
+        ));
+        fs::write(s2.join("GATA4.orphan"), b"").unwrap();
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "GATA4",
+            &[s1, s2]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parent_done_marker_short_circuits_sample_scan() {
+        let root = temp_root("marker");
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        write_pool_lasso_gene_done_marker(root.to_str().unwrap(), "Tnf");
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "Tnf",
+            &[s1]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backfill_writes_parent_marker_when_samples_complete() {
+        let root = temp_root("backfill");
+        let s1 = root.join("conditions").join("s1");
+        let s2 = root.join("conditions").join("s2");
+        fs::create_dir_all(&s1).unwrap();
+        fs::create_dir_all(&s2).unwrap();
+        fs::write(s1.join("AICDA_betadata.feather"), b"x").unwrap();
+        fs::write(s2.join("AICDA_betadata.feather"), b"x").unwrap();
+        let dirs = vec![s1.clone(), s2.clone()];
+        backfill_pool_lasso_done_marker(root.to_str().unwrap(), "AICDA", &dirs);
+        assert!(root.join("AICDA.done").is_file());
+        assert!(gene_terminal_artifact_in_dir(&s1, "AICDA"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parent_orphan_or_tf_ablated_counts_as_done() {
+        let root = temp_root("parent_term");
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        let dirs = vec![s1];
+        fs::write(root.join("FOO.orphan"), b"").unwrap();
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "FOO",
+            &dirs
+        ));
+        fs::remove_file(root.join("FOO.orphan")).unwrap();
+        fs::write(root.join("FOO.tf_ablated"), b"").unwrap();
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "FOO",
+            &dirs
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_sample_dirs_only_done_with_parent_marker() {
+        let root = temp_root("empty_dirs");
+        assert!(!pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "BAR",
+            &[]
+        ));
+        write_pool_lasso_gene_done_marker(root.to_str().unwrap(), "BAR");
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "BAR",
+            &[]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backfill_skips_when_parent_already_orphaned() {
+        let root = temp_root("no_backfill_orphan");
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        fs::write(s1.join("X_betadata.feather"), b"x").unwrap();
+        fs::write(root.join("X.orphan"), b"").unwrap();
+        backfill_pool_lasso_done_marker(root.to_str().unwrap(), "X", &[s1]);
+        assert!(!root.join("X.done").is_file());
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -376,6 +376,9 @@ fn apply_demo_hud_baseline(g: &mut TrainingHudState, total_genes: usize) {
     g.perf_stats_generation = 0;
     g.finished = None;
     g.started = std::time::Instant::now();
+    g.pool_lasso = false;
+    g.pool_sample_labels.clear();
+    g.gene_pool_sample.clear();
 }
 
 pub fn run_demo_training(

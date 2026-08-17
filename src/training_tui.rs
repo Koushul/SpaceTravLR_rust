@@ -596,17 +596,17 @@ fn format_bytes(b: u64) -> String {
     }
 }
 
-fn scan_output_metrics(
-    dir: &str,
+fn scan_dir_artifacts(
+    dir: &Path,
     active_local_genes: &HashSet<String>,
-) -> (u64, usize, usize, usize) {
+    bytes: &mut u64,
+    n_files: &mut usize,
+    disk_done: &mut usize,
+    external_locks: &mut usize,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return (0, 0, 0, 0);
+        return;
     };
-    let mut bytes = 0u64;
-    let mut n_files = 0usize;
-    let mut disk_done = 0usize;
-    let mut external_locks = 0usize;
     for e in entries.flatten() {
         let Ok(m) = e.metadata() else {
             continue;
@@ -614,20 +614,93 @@ fn scan_output_metrics(
         if !m.is_file() {
             continue;
         }
-        bytes += m.len();
-        n_files += 1;
+        *bytes += m.len();
+        *n_files += 1;
         let name = e.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.ends_with(".feather") || name.ends_with(".orphan") || name.ends_with(".tf_ablated")
+        if name.ends_with("_betadata.feather")
+            || name.ends_with(".orphan")
+            || name.ends_with(".tf_ablated")
+            || name.ends_with(".done")
         {
-            disk_done += 1;
+            *disk_done += 1;
         } else if name.ends_with(".lock") {
             let stem = name.strip_suffix(".lock").unwrap_or(name);
             if !active_local_genes.contains(stem) {
-                external_locks += 1;
+                *external_locks += 1;
             }
+        }
+    }
+}
+
+fn scan_split_subdir_tree(
+    root: &Path,
+    active_local_genes: &HashSet<String>,
+    bytes: &mut u64,
+    n_files: &mut usize,
+    disk_done: &mut usize,
+    external_locks: &mut usize,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        scan_dir_artifacts(
+            &p,
+            active_local_genes,
+            bytes,
+            n_files,
+            disk_done,
+            external_locks,
+        );
+        let nested = p.join("samples");
+        if nested.is_dir() {
+            scan_split_subdir_tree(
+                &nested,
+                active_local_genes,
+                bytes,
+                n_files,
+                disk_done,
+                external_locks,
+            );
+        }
+    }
+}
+
+fn scan_output_metrics(
+    dir: &str,
+    active_local_genes: &HashSet<String>,
+) -> (u64, usize, usize, usize) {
+    let root = Path::new(dir);
+    let mut bytes = 0u64;
+    let mut n_files = 0usize;
+    let mut disk_done = 0usize;
+    let mut external_locks = 0usize;
+    scan_dir_artifacts(
+        root,
+        active_local_genes,
+        &mut bytes,
+        &mut n_files,
+        &mut disk_done,
+        &mut external_locks,
+    );
+    for sub in ["conditions", "samples"] {
+        let p = root.join(sub);
+        if p.is_dir() {
+            scan_split_subdir_tree(
+                &p,
+                active_local_genes,
+                &mut bytes,
+                &mut n_files,
+                &mut disk_done,
+                &mut external_locks,
+            );
         }
     }
     (bytes, n_files, disk_done, external_locks)
@@ -1323,6 +1396,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 "full" => "full",
                 _ => "seed",
             };
+            let mode_txt = if st.pool_lasso || st.run_config.pool_lasso {
+                format!("{mode} · pool-lasso")
+            } else {
+                mode.to_string()
+            };
             let status_txt = if st.should_cancel() {
                 "Stopping"
             } else {
@@ -1363,7 +1441,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             Style::default().fg(pal.value).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled("  ·  ", Style::default().fg(pal.muted)),
-                        Span::styled(mode, Style::default().fg(pal.sky)),
+                        Span::styled(mode_txt, Style::default().fg(pal.sky)),
                         Span::styled("  ·  ", Style::default().fg(pal.muted)),
                         Span::styled(status_txt, Style::default().fg(status_c)),
                         Span::styled(" ✿", Style::default().fg(pal.grape)),
@@ -1580,6 +1658,31 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 cfg_lbl_style,
                 cond_c,
             );
+            if st.pool_lasso || rc.pool_lasso {
+                let n = st.pool_sample_labels.len();
+                let pool_txt = if n > 0 {
+                    format!(
+                        "on  ·  {} samples  ·  obs.{}",
+                        n,
+                        if rc.sample_column == "—" {
+                            "?"
+                        } else {
+                            rc.sample_column.as_str()
+                        }
+                    )
+                } else {
+                    format!("on  ·  obs.{}", rc.sample_column)
+                };
+                append_cfg_wrapped_lines(
+                    &mut cfg_lines,
+                    CFG_LABEL_W,
+                    cfg_val_wrap,
+                    "POOL",
+                    &pool_txt,
+                    cfg_lbl_style,
+                    pal.grape,
+                );
+            }
 
             let cfg_block = Block::default()
                 .borders(Borders::ALL)
@@ -1634,6 +1737,35 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     (None, None) => "preparing splits…".to_string(),
                 };
                 mission_lines.push(Line::from(vec![lbl("ACTIVE  "), val(active, pal.lilac)]));
+            }
+            if st.pool_lasso {
+                let n = st.pool_sample_labels.len();
+                let names = if n == 0 {
+                    "…".to_string()
+                } else {
+                    let shown = st.pool_sample_labels.iter().take(4).cloned().collect::<Vec<_>>();
+                    let mut s = shown.join(", ");
+                    if n > 4 {
+                        s.push_str(&format!(" (+{})", n - 4));
+                    }
+                    s
+                };
+                mission_lines.push(Line::from(vec![
+                    lbl("POOL  "),
+                    val(format!("{n} samples  ·  {names}"), pal.grape),
+                ]));
+                if !st.gene_pool_sample.is_empty() {
+                    let mut parts: Vec<String> = st
+                        .gene_pool_sample
+                        .iter()
+                        .map(|(gene, (i, n_s, label))| {
+                            format!("{gene} {i}/{n_s} {label}")
+                        })
+                        .collect();
+                    parts.sort();
+                    let shown = parts.into_iter().take(3).collect::<Vec<_>>().join("  ·  ");
+                    mission_lines.push(Line::from(vec![lbl("SAMPLE  "), val(shown, pal.lilac)]));
+                }
             }
             mission_lines.push(Line::from(vec![
                 lbl("GRID  "),
@@ -1998,8 +2130,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let r = (d as f64 / t as f64).clamp(0.0, 1.0);
                 (t, d, r, true)
             } else {
-                let t = st.total_genes.max(1) as u64;
-                let p = st.genes_rounds.min(st.total_genes) as u64;
+                let (p, t) = st.gene_progress_pos_total();
                 let r = (p as f64 / t as f64).clamp(0.0, 1.0);
                 (t, p, r, false)
             };
@@ -2046,10 +2177,22 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Span::styled(format!("{}/{} targets", pos, total), title_bold),
                 ])
             } else {
-                Line::from(vec![
+                let n_samp = st.pool_sample_labels.len();
+                let mut spans = vec![
                     Span::styled(" Gene progress ", sky_bold),
                     Span::styled(" · ", Style::default().fg(pal.muted)),
-                    Span::styled(format!("{}/{}", pos, total), title_bold),
+                    Span::styled(
+                        format!("{}/{}", st.genes_rounds, st.total_genes),
+                        title_bold,
+                    ),
+                ];
+                if st.pool_lasso && n_samp > 0 {
+                    spans.extend([
+                        Span::styled(" genes  ·  ", Style::default().fg(pal.muted)),
+                        Span::styled(format!("{pos}/{total} sample-fits"), title_bold),
+                    ]);
+                }
+                spans.extend([
                     Span::styled("  ·  ok ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_done), title_bold),
                     Span::styled("  fail ", Style::default().fg(pal.muted)),
@@ -2058,7 +2201,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     Span::styled(format!("{}", st.genes_orphan), title_bold),
                     Span::styled("  tf_ablated ", Style::default().fg(pal.muted)),
                     Span::styled(format!("{}", st.genes_tf_ablated), title_bold),
-                ])
+                ]);
+                Line::from(spans)
             };
             let prog_block = Block::default()
                 .borders(Borders::ALL)
@@ -2139,4 +2283,58 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
         crossterm::cursor::Show
     )?;
     Ok(dashboard_exit)
+}
+
+#[cfg(test)]
+mod scan_output_metrics_tests {
+    use super::scan_output_metrics;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "spacetravlr_scan_out_{name}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn counts_parent_locks_and_nested_sample_feathers() {
+        let root = temp_dir("nested");
+        fs::write(root.join("GENE.lock"), b"").unwrap();
+        fs::write(root.join("GENE.done"), b"").unwrap();
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        fs::write(s1.join("GENE_betadata.feather"), b"abc").unwrap();
+        let nested = root.join("conditions").join("treat").join("samples").join("s2");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("GENE_betadata.feather"), b"xyz").unwrap();
+
+        let active = HashSet::new();
+        let (bytes, n_files, disk_done, external_locks) =
+            scan_output_metrics(root.to_str().unwrap(), &active);
+        assert!(bytes >= 3 + 3);
+        assert!(n_files >= 4);
+        assert!(
+            disk_done >= 3,
+            "done + two feathers, got {disk_done}"
+        );
+        assert_eq!(external_locks, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn local_active_lock_is_not_external() {
+        let root = temp_dir("local_lock");
+        fs::write(root.join("FOO.lock"), b"").unwrap();
+        let mut active = HashSet::new();
+        active.insert("FOO".into());
+        let (_, _, _, external) = scan_output_metrics(root.to_str().unwrap(), &active);
+        assert_eq!(external, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

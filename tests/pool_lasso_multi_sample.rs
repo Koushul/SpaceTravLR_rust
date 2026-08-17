@@ -293,3 +293,158 @@ fn pool_lasso_full_cnn_identical_lasso_coefs_and_cellid_betadata() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn pool_lasso_resume_skips_completed_genes() {
+    let dir = setup_run_dir("resume");
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+
+    let mut done_genes = Vec::new();
+    for gene in ["Reg1", "Tgt1", "Reg2"] {
+        let p1 = sample_dir(&dir, "s1").join(format!("{gene}_betadata.feather"));
+        let p2 = sample_dir(&dir, "s2").join(format!("{gene}_betadata.feather"));
+        if p1.is_file() && p2.is_file() {
+            done_genes.push(gene);
+        }
+    }
+    assert!(
+        !done_genes.is_empty(),
+        "expected at least one completed gene before resume"
+    );
+
+    let mut mtimes = Vec::new();
+    for gene in &done_genes {
+        let marker = dir.join(format!("{gene}.done"));
+        assert!(
+            marker.is_file(),
+            "parent .done marker missing for {gene} after first run"
+        );
+        let feather = sample_dir(&dir, "s1").join(format!("{gene}_betadata.feather"));
+        mtimes.push(std::fs::metadata(&feather).unwrap().modified().unwrap());
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+
+    for (gene, t0) in done_genes.iter().zip(mtimes.iter()) {
+        let feather = sample_dir(&dir, "s1").join(format!("{gene}_betadata.feather"));
+        let t1 = std::fs::metadata(&feather).unwrap().modified().unwrap();
+        assert_eq!(
+            t0, &t1,
+            "{gene} feather rewritten on resume — already-done tracking failed"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn completed_pool_genes(dir: &Path) -> Vec<&'static str> {
+    let mut done = Vec::new();
+    for gene in ["Reg1", "Tgt1", "Reg2"] {
+        let p1 = sample_dir(dir, "s1").join(format!("{gene}_betadata.feather"));
+        let p2 = sample_dir(dir, "s2").join(format!("{gene}_betadata.feather"));
+        if p1.is_file() && p2.is_file() {
+            done.push(gene);
+        }
+    }
+    done
+}
+
+fn feather_mtime(dir: &Path, sample: &str, gene: &str) -> std::time::SystemTime {
+    std::fs::metadata(sample_dir(dir, sample).join(format!("{gene}_betadata.feather")))
+        .unwrap()
+        .modified()
+        .unwrap()
+}
+
+#[test]
+fn pool_lasso_resume_without_done_marker_still_skips() {
+    let dir = setup_run_dir("resume_legacy");
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+    let done_genes = completed_pool_genes(&dir);
+    assert!(!done_genes.is_empty());
+
+    for gene in &done_genes {
+        let _ = std::fs::remove_file(dir.join(format!("{gene}.done")));
+        assert!(!dir.join(format!("{gene}.done")).is_file());
+    }
+    let t0: Vec<_> = done_genes
+        .iter()
+        .map(|g| feather_mtime(&dir, "s1", g))
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+
+    for (gene, t) in done_genes.iter().zip(t0.iter()) {
+        assert_eq!(
+            feather_mtime(&dir, "s1", gene),
+            *t,
+            "{gene} rewritten when only sample feathers existed"
+        );
+        assert!(
+            dir.join(format!("{gene}.done")).is_file(),
+            "{gene}.done should be backfilled on skip"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pool_lasso_partial_sample_resume_keeps_finished_slide() {
+    let dir = setup_run_dir("resume_partial");
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+    let gene = *completed_pool_genes(&dir)
+        .first()
+        .expect("need a completed gene");
+
+    let t_s1 = feather_mtime(&dir, "s1", gene);
+    std::fs::remove_file(sample_dir(&dir, "s2").join(format!("{gene}_betadata.feather"))).unwrap();
+    let _ = std::fs::remove_file(dir.join(format!("{gene}.done")));
+    assert!(!sample_dir(&dir, "s2")
+        .join(format!("{gene}_betadata.feather"))
+        .is_file());
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+
+    assert_eq!(
+        feather_mtime(&dir, "s1", gene),
+        t_s1,
+        "finished sample s1 was retrained"
+    );
+    assert!(
+        sample_dir(&dir, "s2")
+            .join(format!("{gene}_betadata.feather"))
+            .is_file(),
+        "missing sample s2 was not rebuilt"
+    );
+    assert!(dir.join(format!("{gene}.done")).is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pool_lasso_resume_parent_done_skips_even_if_sample_feathers_missing() {
+    let dir = setup_run_dir("resume_parent_done");
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+    let gene = *completed_pool_genes(&dir)
+        .first()
+        .expect("need a completed gene");
+    assert!(dir.join(format!("{gene}.done")).is_file());
+
+    std::fs::remove_file(sample_dir(&dir, "s1").join(format!("{gene}_betadata.feather"))).unwrap();
+    std::fs::remove_file(sample_dir(&dir, "s2").join(format!("{gene}_betadata.feather"))).unwrap();
+
+    run_fit(&dir, CnnTrainingMode::Seed, None);
+
+    assert!(
+        !sample_dir(&dir, "s1")
+            .join(format!("{gene}_betadata.feather"))
+            .is_file(),
+        "parent .done must skip retraining even if sample feathers were deleted"
+    );
+    assert!(!sample_dir(&dir, "s2")
+        .join(format!("{gene}_betadata.feather"))
+        .is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}

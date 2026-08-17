@@ -1736,6 +1736,12 @@ fn print_plain_preamble(
         grn_modulator_label(cfg),
         summary.gene_selection,
     );
+    if cfg.training.pool_lasso {
+        let col = cfg.data.sample.as_deref().unwrap_or("?");
+        println!(
+            "pool-lasso  obs.{col}  ·  joint Lasso, CNN per sample  ·  gene locks at parent dir"
+        );
+    }
 }
 
 fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
@@ -3303,20 +3309,7 @@ fn main() -> anyhow::Result<()> {
         .build_global();
 
     let config_path_ref = cli.config.as_deref();
-    let split_label: Option<String> = match (
-        condition_column.as_deref(),
-        cfg.training
-            .pool_lasso
-            .then_some(cfg.data.sample.as_deref())
-            .flatten()
-            .map(str::trim)
-            .filter(|s| !s.is_empty()),
-    ) {
-        (Some(c), Some(s)) => Some(format!("{c}  ·  sample {s} (pool-lasso)")),
-        (Some(c), None) => Some(c.to_string()),
-        (None, Some(s)) => Some(format!("sample {s} (pool-lasso)")),
-        (None, None) => None,
-    };
+    let split_label: Option<String> = condition_column.clone();
     let run_summary = RunConfigSummary::build(RunConfigSummaryBuildArgs {
         config_path: config_path_ref,
         compute_backend: compute.label(),
