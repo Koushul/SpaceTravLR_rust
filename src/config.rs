@@ -176,6 +176,8 @@ pub struct DataConfig {
     pub layer: String,
     pub cluster_annot: String,
     pub condition: Option<String>,
+    /// `obs` column naming independent spatial samples (slides). Required with `[training].pool_lasso`.
+    pub sample: Option<String>,
     /// Optional path (tilde-expanded like `adata_path`): one AnnData `obs_names` value per line (`#` comments, blanks skipped).
     /// When set, perturbation loads only these rows (expression, spatial, betadata alignment). Results apply to this ROI only.
     pub perturb_obs_subset_file: Option<String>,
@@ -377,6 +379,10 @@ pub struct TrainingConfig {
     /// Cap after the `genes` filter (`--max-genes`, `[training] max_genes`). Persisted for join.
     #[serde(default)]
     pub max_genes: Option<usize>,
+    /// Fit one sparse group Lasso on concatenated, jointly scaled samples from `[data].sample`,
+    /// then train a CNN per sample from those pooled anchors. Requires `[data].sample`.
+    #[serde(default)]
+    pub pool_lasso: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -583,6 +589,7 @@ impl Default for DataConfig {
             layer: "imputed_count".into(),
             cluster_annot: "cell_type".into(),
             condition: None,
+            sample: None,
             perturb_obs_subset_file: None,
             spatial_species: default_data_spatial_species(),
             spatial_median_nn_target_um: None,
@@ -790,6 +797,7 @@ impl Default for TrainingConfig {
             score_threshold: 0.2,
             genes: None,
             max_genes: None,
+            pool_lasso: false,
         }
     }
 }
@@ -1296,6 +1304,25 @@ impl SpaceshipConfig {
         matches!(self.resolved_cnn_mode(), CnnTrainingMode::Full)
     }
 
+    /// `[training].pool_lasso` and `[data].sample` must be set together.
+    pub fn validate_pool_lasso_sample(&self) -> anyhow::Result<()> {
+        let sample = self
+            .data
+            .sample
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (self.training.pool_lasso, sample) {
+            (true, None) => anyhow::bail!(
+                "--pool-lasso / [training].pool_lasso requires --sample / [data].sample (an obs column naming independent slides)"
+            ),
+            (false, Some(col)) => anyhow::bail!(
+                "--sample / [data].sample = {col:?} requires --pool-lasso / [training].pool_lasso"
+            ),
+            _ => Ok(()),
+        }
+    }
+
     pub fn resolve_adata_path(&self) -> String {
         self.data.adata_path.trim().to_string()
     }
@@ -1555,6 +1582,59 @@ mod training_target_genes_tests {
         let resolved = resolve_training_target_genes(&v, Some(&f), Some(1));
         assert_eq!(resolved, manual);
         assert_eq!(resolved, vec!["b"]);
+    }
+}
+
+#[cfg(test)]
+mod pool_lasso_config_tests {
+    use super::SpaceshipConfig;
+
+    #[test]
+    fn default_pool_lasso_false_sample_none() {
+        let cfg = SpaceshipConfig::default();
+        assert!(!cfg.training.pool_lasso);
+        assert!(cfg.data.sample.is_none());
+        cfg.validate_pool_lasso_sample().unwrap();
+    }
+
+    #[test]
+    fn toml_pool_lasso_and_sample_roundtrip() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+sample = "library_id"
+
+[training]
+mode = "full"
+pool_lasso = true
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.training.pool_lasso);
+        assert_eq!(cfg.data.sample.as_deref(), Some("library_id"));
+        cfg.validate_pool_lasso_sample().unwrap();
+        let out = toml::to_string(&cfg).unwrap();
+        assert!(out.contains("pool_lasso"));
+        assert!(out.contains("library_id"));
+    }
+
+    #[test]
+    fn pool_lasso_without_sample_errors() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.training.pool_lasso = true;
+        let err = cfg.validate_pool_lasso_sample().unwrap_err().to_string();
+        assert!(err.contains("pool-lasso") || err.contains("pool_lasso"));
+        assert!(err.contains("sample"));
+    }
+
+    #[test]
+    fn sample_without_pool_lasso_errors() {
+        let mut cfg = SpaceshipConfig::default();
+        cfg.data.sample = Some("batch".into());
+        let err = cfg.validate_pool_lasso_sample().unwrap_err().to_string();
+        assert!(err.contains("sample"));
+        assert!(err.contains("pool-lasso") || err.contains("pool_lasso"));
     }
 }
 

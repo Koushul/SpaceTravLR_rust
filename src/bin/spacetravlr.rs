@@ -292,11 +292,23 @@ struct GetMicronichesCli {
     resolution_min: f64,
     #[arg(long, default_value_t = 2.0, help = "Silhouette sweep: max resolution")]
     resolution_max: f64,
-    #[arg(long, default_value_t = 0.1, help = "Silhouette sweep: resolution step")]
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Silhouette sweep: resolution step"
+    )]
     resolution_step: f64,
-    #[arg(long, default_value_t = 15, help = "kNN size on β PCA for Leiden graph")]
+    #[arg(
+        long,
+        default_value_t = 15,
+        help = "kNN size on β PCA for Leiden graph"
+    )]
     n_neighbors: usize,
-    #[arg(long, default_value_t = 40, help = "Number of PCA components on filtered βs")]
+    #[arg(
+        long,
+        default_value_t = 40,
+        help = "Number of PCA components on filtered βs"
+    )]
     n_pcs: usize,
     #[arg(long, default_value_t = 8, help = "Spatial kNN for Moran's I filter")]
     spatial_k: usize,
@@ -306,7 +318,11 @@ struct GetMicronichesCli {
         help = "Moran's I permutations for FDR (0 = heuristic p=0.01 when I>0.1; FDR applied to top --spatial-test-cap features)"
     )]
     moran_n_perm: usize,
-    #[arg(long, default_value_t = 0.05, help = "Max BH q-value for keeping β features")]
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Max BH q-value for keeping β features"
+    )]
     q_bh_max: f64,
     #[arg(
         long,
@@ -672,6 +688,22 @@ struct Cli {
         help = "Split training by this obs column (one subdirectory per value under output_dir/conditions/). With `--process-h5ad` or `--impute`, also selects this `adata.obs` column as the MAGIC batch axis (unless `--magic-batch-obs` is set)"
     )]
     condition: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "OBS_COLUMN",
+        help_heading = "Output",
+        help = "obs column naming independent spatial samples (slides). Requires `--pool-lasso`. CNN is trained per sample; Lasso is fit on the concatenated, jointly scaled design matrix"
+    )]
+    sample: Option<String>,
+
+    #[arg(
+        long = "pool-lasso",
+        action = ArgAction::SetTrue,
+        help_heading = "Training",
+        help = "Fit one sparse group Lasso on all `--sample` groups (joint modulator scaling), then train a CNN per sample from those pooled anchors. Requires `--sample` / [data].sample"
+    )]
+    pool_lasso: bool,
 
     #[arg(
         long = "join-output-dir",
@@ -1355,6 +1387,15 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Res
             cfg.data.condition = Some(t.to_string());
         }
     }
+    if let Some(ref s) = cli.sample {
+        let t = s.trim();
+        if !t.is_empty() {
+            cfg.data.sample = Some(t.to_string());
+        }
+    }
+    if cli.pool_lasso {
+        cfg.training.pool_lasso = true;
+    }
     if let Some(ref raw) = cli.extra_modulators {
         cfg.grn
             .extra_modulators
@@ -1363,6 +1404,7 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Res
     if let Some(ref raw) = cli.extra_lr {
         cfg.grn.extra_lr.extend(grn_extra::parse_extra_lr_cli(raw)?);
     }
+    cfg.validate_pool_lasso_sample()?;
     Ok(())
 }
 
@@ -1434,6 +1476,15 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
             cfg.data.condition = Some(t.to_string());
         }
     }
+    if let Some(ref s) = cli.sample {
+        let t = s.trim();
+        if !t.is_empty() {
+            cfg.data.sample = Some(t.to_string());
+        }
+    }
+    if cli.pool_lasso {
+        cfg.training.pool_lasso = true;
+    }
     if let Some(ref raw) = cli.extra_modulators {
         cfg.grn
             .extra_modulators
@@ -1452,6 +1503,7 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
         cfg.grn.train_modulators = Some(raw.trim().to_string());
     }
     cfg.grn.apply_train_modulators_shorthand()?;
+    cfg.validate_pool_lasso_sample()?;
     Ok(())
 }
 
@@ -1489,6 +1541,23 @@ fn validate_join_cli_against_repro(
             }
         }
     }
+    let repro_file_sample = cfg.data.sample.clone();
+    if let Some(cli_raw) = cli.sample.as_deref() {
+        let cli_s = cli_raw.trim();
+        if !cli_s.is_empty() {
+            if let Some(ref file_s) = repro_file_sample {
+                if !cli_s.eq_ignore_ascii_case(file_s.trim()) {
+                    anyhow::bail!(
+                        "{err_prefix} --sample {:?} does not match [data].sample = {:?} in {}; omit --sample to use the file, or fix the mismatch.",
+                        cli_s,
+                        file_s,
+                        repro.display()
+                    );
+                }
+            }
+        }
+    }
+    cfg.validate_pool_lasso_sample()?;
     Ok(())
 }
 
@@ -1766,8 +1835,7 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
     if let Some(ref cluster_col) = ci.cluster_col {
         let col = cluster_col.trim();
         anyhow::ensure!(!col.is_empty(), "--cluster-col must be non-empty");
-        let cluster_obs =
-            load_obs_column_for_collect_interactions(ci.run_toml.as_path(), col)?;
+        let cluster_obs = load_obs_column_for_collect_interactions(ci.run_toml.as_path(), col)?;
         let rows = betadata_collect_interactions_all_cell_types_full(
             dir_s,
             &ctx.obs_names,
@@ -2742,7 +2810,10 @@ fn run_spacetravlr_gui(gui: &GuiCli) -> anyhow::Result<()> {
     println!("{url}");
 
     let mut cmd = Command::new(&umap_bin);
-    cmd.arg("--bind").arg(bind).arg("--port").arg(gui.port.to_string());
+    cmd.arg("--bind")
+        .arg(bind)
+        .arg("--port")
+        .arg(gui.port.to_string());
     cmd.current_dir(&root);
     if let Some(sd) = gui.static_dir.as_ref() {
         cmd.arg("--static-dir").arg(sd);
@@ -3143,6 +3214,7 @@ fn main() -> anyhow::Result<()> {
 
     if join_training
         && condition_column.is_none()
+        && !cfg.training.pool_lasso
         && Path::new(&cfg.execution.output_dir)
             .join(spacetravlr::condition_split::CONDITION_RUNS_SUBDIR)
             .is_dir()
@@ -3231,6 +3303,20 @@ fn main() -> anyhow::Result<()> {
         .build_global();
 
     let config_path_ref = cli.config.as_deref();
+    let split_label: Option<String> = match (
+        condition_column.as_deref(),
+        cfg.training
+            .pool_lasso
+            .then_some(cfg.data.sample.as_deref())
+            .flatten()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(c), Some(s)) => Some(format!("{c}  ·  sample {s} (pool-lasso)")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, Some(s)) => Some(format!("sample {s} (pool-lasso)")),
+        (None, None) => None,
+    };
     let run_summary = RunConfigSummary::build(RunConfigSummaryBuildArgs {
         config_path: config_path_ref,
         compute_backend: compute.label(),
@@ -3239,7 +3325,7 @@ fn main() -> anyhow::Result<()> {
         cfg: &cfg,
         max_genes,
         gene_filter: gene_filter.as_deref(),
-        condition_split: condition_column.as_deref(),
+        condition_split: split_label.as_deref(),
     });
 
     let verbose = cli.verbose;
@@ -3254,7 +3340,12 @@ fn main() -> anyhow::Result<()> {
             n_parallel,
         );
         if join_training {
-            if condition_column.is_some() {
+            if cfg.training.pool_lasso {
+                println!(
+                    "join+pool-lasso  parent={}  gene locks at this dir; CNN per sample under conditions/ or samples/",
+                    output_dir.trim_end_matches('/')
+                );
+            } else if condition_column.is_some() {
                 println!(
                     "join+conditions  parent={}  locks per conditions/<group>/",
                     output_dir.trim_end_matches('/')
@@ -3610,7 +3701,10 @@ mod silly_sheep {
             const SEP: [u8; 3] = [b'.', b'`', b','];
             return (SEP[(hash2(r, c) % 3) as usize] as char, 0.68);
         }
-        let h = hash2(r.wrapping_mul(131).wrapping_add(c), c.wrapping_mul(17).wrapping_add(r));
+        let h = hash2(
+            r.wrapping_mul(131).wrapping_add(c),
+            c.wrapping_mul(17).wrapping_add(r),
+        );
         let ch = match base {
             b'a' if h % 6 == 0 => b'@',
             b's' if h % 6 == 0 => b'$',
@@ -3639,14 +3733,26 @@ mod silly_sheep {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn point_in_tri(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> bool {
+    fn point_in_tri(
+        px: f32,
+        py: f32,
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+        cx: f32,
+        cy: f32,
+    ) -> bool {
         fn edge(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
             (px - bx) * (ay - by) - (ax - bx) * (py - by)
         }
         let ab = edge(px, py, ax, ay, bx, by);
         let bc = edge(px, py, bx, by, cx, cy);
         let ca = edge(px, py, cx, cy, ax, ay);
-        let (has_neg, has_pos) = (ab < 0.0 || bc < 0.0 || ca < 0.0, ab > 0.0 || bc > 0.0 || ca > 0.0);
+        let (has_neg, has_pos) = (
+            ab < 0.0 || bc < 0.0 || ca < 0.0,
+            ab > 0.0 || bc > 0.0 || ca > 0.0,
+        );
         !(has_neg && has_pos)
     }
 
@@ -3660,7 +3766,11 @@ mod silly_sheep {
             if dx * dx + dy * dy <= 1.0 {
                 let sx = x - (ex - 0.012);
                 let sy = y - (ey + 0.015);
-                let bright = if sx * sx + sy * sy < 0.0004 { 1.0 } else { 0.85 };
+                let bright = if sx * sx + sy * sy < 0.0004 {
+                    1.0
+                } else {
+                    0.85
+                };
                 return (Mat::Eye, bright);
             }
         }
@@ -3717,8 +3827,12 @@ mod silly_sheep {
         // (angled slightly up), with a soft pink inner ear. Lit from the left
         // so the right ear sits a touch in shadow for depth.
         for &(ax, ay, bix, biy, bcx, bcy, lit) in &[
-            (0.14f32, 0.58f32, 0.62f32, 0.56f32, 0.66f32, 0.32f32, 0.74f32),
-            (1.70f32, 0.58f32, 1.22f32, 0.56f32, 1.18f32, 0.32f32, 0.44f32),
+            (
+                0.14f32, 0.58f32, 0.62f32, 0.56f32, 0.66f32, 0.32f32, 0.74f32,
+            ),
+            (
+                1.70f32, 0.58f32, 1.22f32, 0.56f32, 1.18f32, 0.32f32, 0.44f32,
+            ),
         ] {
             if point_in_tri(x, y, ax, ay, bix, biy, bcx, bcy) {
                 let cgx = (ax + bix + bcx) / 3.0;
@@ -3745,7 +3859,10 @@ mod silly_sheep {
             let dx = (x - cx) / rx;
             let dy = (y - cy) / ry;
             if dx * dx + dy * dy <= bump * bump {
-                return (Mat::Wool, dome_shade((x - cx) / rx, (y - cy) / ry, 0.34, 0.66));
+                return (
+                    Mat::Wool,
+                    dome_shade((x - cx) / rx, (y - cy) / ry, 0.34, 0.66),
+                );
             }
         }
 
@@ -3782,7 +3899,10 @@ mod silly_sheep {
             let dx = (x - cx) / rx;
             let dy = (y - cy) / ry;
             if dx * dx + dy * dy <= bump * bump {
-                return (Mat::Wool, dome_shade((x - cx) / rx, (y - cy) / ry, 0.34, 0.66));
+                return (
+                    Mat::Wool,
+                    dome_shade((x - cx) / rx, (y - cy) / ry, 0.34, 0.66),
+                );
             }
         }
 
@@ -3800,9 +3920,8 @@ mod silly_sheep {
 
         // A lush, wavy meadow for the sheep to stand in.
         {
-            let wave = 0.55 * (x * 8.0).sin()
-                + 0.30 * (x * 17.0 + 1.1).sin()
-                + 0.15 * (x * 41.0).sin();
+            let wave =
+                0.55 * (x * 8.0).sin() + 0.30 * (x * 17.0 + 1.1).sin() + 0.15 * (x * 41.0).sin();
             let top = -0.62 + 0.10 * wave;
             if y <= top {
                 // Bright, upright at the tips; darker and matted near the soil.
@@ -3831,7 +3950,10 @@ mod silly_sheep {
                     wool_text(r, c)
                 };
                 let s = (shade * mult).clamp(0.0, 1.0);
-                (ch, Some(lerp3((151.0, 150.0, 156.0), (251.0, 251.0, 248.0), s)))
+                (
+                    ch,
+                    Some(lerp3((151.0, 150.0, 156.0), (251.0, 251.0, 248.0), s)),
+                )
             }
             Mat::Face => {
                 let ch = if cov < 0.5 {
@@ -3839,7 +3961,10 @@ mod silly_sheep {
                 } else {
                     ramp_char(shade, b"+*x#%@")
                 };
-                (ch, Some(lerp3((58.0, 56.0, 68.0), (124.0, 118.0, 134.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((58.0, 56.0, 68.0), (124.0, 118.0, 134.0), shade)),
+                )
             }
             Mat::Ear => {
                 let ch = if cov < 0.5 {
@@ -3848,23 +3973,38 @@ mod silly_sheep {
                     const O: [char; 4] = ['c', 'e', 'o', 'C'];
                     O[(hash2(r, c) % 4) as usize]
                 };
-                (ch, Some(lerp3((82.0, 68.0, 72.0), (148.0, 124.0, 118.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((82.0, 68.0, 72.0), (148.0, 124.0, 118.0), shade)),
+                )
             }
             Mat::EarInner => {
                 let ch = if cov < 0.5 { '.' } else { 'o' };
-                (ch, Some(lerp3((196.0, 128.0, 138.0), (238.0, 168.0, 176.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((196.0, 128.0, 138.0), (238.0, 168.0, 176.0), shade)),
+                )
             }
             Mat::Eye => {
                 let ch = if cov < 0.6 { 'o' } else { 'O' };
-                (ch, Some(lerp3((150.0, 176.0, 205.0), (238.0, 248.0, 255.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((150.0, 176.0, 205.0), (238.0, 248.0, 255.0), shade)),
+                )
             }
             Mat::Mouth => {
                 let ch = if cov < 0.45 { '.' } else { 'w' };
-                (ch, Some(lerp3((176.0, 104.0, 114.0), (228.0, 152.0, 160.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((176.0, 104.0, 114.0), (228.0, 152.0, 160.0), shade)),
+                )
             }
             Mat::Nose => {
                 let ch = if cov < 0.5 { '.' } else { 'n' };
-                (ch, Some(lerp3((72.0, 68.0, 78.0), (108.0, 102.0, 112.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((72.0, 68.0, 78.0), (108.0, 102.0, 112.0), shade)),
+                )
             }
             Mat::Hat => {
                 let ch = if shade < 0.12 {
@@ -3884,7 +4024,10 @@ mod silly_sheep {
             }
             Mat::HatPom => {
                 let ch = if cov < 0.5 { 'o' } else { 'O' };
-                (ch, Some(lerp3((248.0, 244.0, 236.0), (255.0, 252.0, 248.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((248.0, 244.0, 236.0), (255.0, 252.0, 248.0), shade)),
+                )
             }
             Mat::Leg => {
                 let hoof = shade < 0.30;
@@ -3913,7 +4056,10 @@ mod silly_sheep {
                     const B: [char; 4] = [',', '.', '_', 'v'];
                     B[(hash2(r, c) % 4) as usize]
                 };
-                (ch, Some(lerp3((40.0, 94.0, 42.0), (122.0, 205.0, 92.0), shade)))
+                (
+                    ch,
+                    Some(lerp3((40.0, 94.0, 42.0), (122.0, 205.0, 92.0), shade)),
+                )
             }
         }
     }
@@ -3931,18 +4077,14 @@ mod silly_sheep {
         let width = w;
         const TITLE_ROWS: usize = 1;
         const BOTTOM_MARGIN: usize = 1;
-        let sheep_h = h
-            .saturating_sub(TITLE_ROWS + BOTTOM_MARGIN)
-            .max(7);
+        let sheep_h = h.saturating_sub(TITLE_ROWS + BOTTOM_MARGIN).max(7);
 
         // Fit the art-space box (≈3.0 wide × 2.0 tall) to the drawable area,
         // then shrink to ~2/3 so the sheep sits small with headroom above.
         // `scale` is pixels-per-art-unit: smaller scale → smaller sheep.
         let (xspan, yspan) = (3.0f32, 2.0f32);
         const SHEEP_SHRINK: f32 = 0.72;
-        let scale = (width as f32 / xspan)
-            .min(2.0 * sheep_h as f32 / yspan)
-            * SHEEP_SHRINK;
+        let scale = (width as f32 / xspan).min(2.0 * sheep_h as f32 / yspan) * SHEEP_SHRINK;
         let cx = width as f32 / 2.0;
         let cy = 0.5f32;
         let off_x = 0.06f32;

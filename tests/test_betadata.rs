@@ -125,9 +125,7 @@ fn test_splash_expanded_cells() {
         "cell3".into(),
     ];
     let cluster_keys = cluster_keys_from_usize(&[0usize, 0, 1, 1]);
-    let mapping = Arc::new(
-        BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &cluster_keys).0,
-    );
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &cluster_keys).0);
     bf.expand_to_cells(Arc::new(obs), mapping);
     assert_eq!(bf.n_cells, 4);
     assert_eq!(*bf.cell_to_beta_row, vec![0, 0, 1, 1]);
@@ -203,7 +201,10 @@ fn splash_beta_scale_affects_ligands_not_tfs() {
 
     let c1 = s1.col("beta_C").unwrap()[0];
     let c2 = s2.col("beta_C").unwrap()[0];
-    assert!(c2 > c1 + eps, "ligand channel should grow with beta_scale_factor");
+    assert!(
+        c2 > c1 + eps,
+        "ligand channel should grow with beta_scale_factor"
+    );
 }
 
 #[test]
@@ -433,7 +434,10 @@ fn compute_cell_mapping_partial_cluster_still_maps_others() {
     let obs = vec!["a".into(), "b".into(), "c".into()];
     let keys = vec!["0".into(), "1".into(), "999".into()];
     let (m, _) = BetaFrame::compute_cell_mapping(&row_labels, &obs, &keys);
-    assert_eq!(m, vec![0, 1, BetaFrame::missing_beta_row_index(row_labels.len())]);
+    assert_eq!(
+        m,
+        vec![0, 1, BetaFrame::missing_beta_row_index(row_labels.len())]
+    );
 }
 
 #[test]
@@ -461,11 +465,17 @@ fn splash_unmapped_cluster_uses_zero_betas_not_row_zero() {
 
     let rw_lig = GeneMatrix::new(array![[3.0], [2.0]], vec!["C".to_string()]);
     let rw_tfl = GeneMatrix::new(array![[2.0], [1.0]], vec!["C".to_string()]);
-    let gex = GeneMatrix::new(array![[1.5, 0.8], [1.0, 0.5]], vec!["C".to_string(), "A".to_string()]);
+    let gex = GeneMatrix::new(
+        array![[1.5, 0.8], [1.0, 0.5]],
+        vec!["C".to_string(), "A".to_string()],
+    );
     let splash = bf.splash(&rw_lig, &rw_tfl, &gex, 1.0, None);
     let a0 = splash.col("beta_A").unwrap()[0];
     let a1 = splash.col("beta_A").unwrap()[1];
-    assert!((a0 - 0.7).abs() < 1e-6, "mapped cell should use cluster 0 β");
+    assert!(
+        (a0 - 0.7).abs() < 1e-6,
+        "mapped cell should use cluster 0 β"
+    );
     assert!(a1.abs() < 1e-6, "unmapped cell must not inherit row 0 β");
 }
 

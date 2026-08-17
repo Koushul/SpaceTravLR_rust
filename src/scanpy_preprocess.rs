@@ -71,7 +71,7 @@
 
 use crate::config::expand_user_path;
 use crate::rust_preprocess::{
-    rust_preprocess_h5ad_with_steps, RustPreprocessParams, RustPreprocessSteps,
+    RustPreprocessParams, RustPreprocessSteps, rust_preprocess_h5ad_with_steps,
 };
 use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend, ElemCollectionOp};
 use anndata_hdf5::H5;
@@ -1164,11 +1164,11 @@ pub fn copy_h5ad_for_verify_forcing_rust_full_prep(src: &Path, dst: &Path) -> an
         src.display()
     );
     if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("mkdir {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(dst);
-    std::fs::copy(src, dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+    std::fs::copy(src, dst)
+        .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     let adata = AnnData::<H5>::open(H5::open_rw(dst)?)
         .with_context(|| format!("open verify .h5ad rw: {}", dst.display()))?;
     let keys: Vec<String> = adata.layers().keys();

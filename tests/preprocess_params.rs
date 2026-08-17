@@ -6,7 +6,7 @@ use std::process::Command;
 
 use common::uv_python::uv_available;
 use spacetravlr::rust_preprocess::{
-    rust_preprocess_h5ad_to_memory, RustPreprocessParams, RustPreprocessSteps,
+    RustPreprocessParams, RustPreprocessSteps, rust_preprocess_h5ad_to_memory,
 };
 
 fn write_toy_h5ad(path: &std::path::Path, py_body: &str) -> bool {
@@ -114,7 +114,10 @@ fn n_pca_components_sets_x_pca_width() {
     let (_, _, ncol_high) = run_pca_only(&h5, &high);
 
     assert_eq!(ncol_low, 6, "expected X_pca ncol == n_pca_components (low)");
-    assert_eq!(ncol_high, 18, "expected X_pca ncol == n_pca_components (high)");
+    assert_eq!(
+        ncol_high, 18,
+        "expected X_pca ncol == n_pca_components (high)"
+    );
     assert_ne!(ncol_low, ncol_high);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -148,8 +151,14 @@ fn n_top_hvg_caps_gene_subset() {
     let (_, nvar_small, _) = run_pca_only(&h5, &small);
     let (_, nvar_large, _) = run_pca_only(&h5, &large);
 
-    assert!(nvar_small <= 40, "n_vars should respect small n_top_hvg, got {nvar_small}");
-    assert!(nvar_large <= 120, "n_vars should respect large n_top_hvg, got {nvar_large}");
+    assert!(
+        nvar_small <= 40,
+        "n_vars should respect small n_top_hvg, got {nvar_small}"
+    );
+    assert!(
+        nvar_large <= 120,
+        "n_vars should respect large n_top_hvg, got {nvar_large}"
+    );
     assert!(
         nvar_small < nvar_large,
         "larger n_top_hvg should retain more genes ({nvar_small} vs {nvar_large})"
@@ -201,7 +210,11 @@ fn min_genes_filters_sparse_cells() {
     let adata_strict =
         rust_preprocess_h5ad_to_memory(&h5, &strict, &steps).expect("strict preprocess");
 
-    assert_eq!(adata_perm.n_obs(), 40, "permissive QC should keep all cells");
+    assert_eq!(
+        adata_perm.n_obs(),
+        40,
+        "permissive QC should keep all cells"
+    );
     assert!(
         adata_strict.n_obs() < adata_perm.n_obs(),
         "strict min_genes=50 should drop sparse cells (got {} vs {})",

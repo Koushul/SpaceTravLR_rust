@@ -85,7 +85,6 @@ fn xdg_runtime_dir_is_usable(val: Option<std::ffi::OsString>) -> bool {
     }
 }
 
-
 #[cfg(unix)]
 fn unix_effective_uid() -> Option<u32> {
     std::process::Command::new("id")
@@ -130,13 +129,17 @@ mod env_tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(install_xdg_runtime_dir(&dir));
-        assert!(xdg_runtime_dir_is_usable(Some(dir.as_os_str().to_os_string())));
+        assert!(xdg_runtime_dir_is_usable(Some(
+            dir.as_os_str().to_os_string()
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn xdg_runtime_dir_not_usable_when_missing() {
-        assert!(!xdg_runtime_dir_is_usable(Some("/nonexistent/spacetravlr/xdg".into())));
+        assert!(!xdg_runtime_dir_is_usable(Some(
+            "/nonexistent/spacetravlr/xdg".into()
+        )));
     }
 }
 
@@ -161,6 +164,7 @@ pub mod model;
 mod modulator_scale;
 pub mod network;
 pub mod perturb;
+pub mod sample_pool;
 pub use perturb::{ComputeSplashAllProgressArgs, PerturbWithTargetsInputs};
 pub mod perturb_batch;
 pub mod perturb_mode;
@@ -170,18 +174,18 @@ pub use perturb_mode::{
     load_obs_for_collect_interactions, write_cells_csv_from_run_toml,
     write_cells_csv_grouped_by_label,
 };
+pub mod microniches;
 #[cfg(feature = "tui")]
 pub mod perturb_tui;
-pub mod microniches;
 pub use microniches::{
-    MicronichesParams, MicronichesResult, MicronichesSummary, run_microniches,
-    resolve_run_adata_path,
+    MicronichesParams, MicronichesResult, MicronichesSummary, resolve_run_adata_path,
+    run_microniches,
 };
 pub mod run_summary_html;
-pub mod scanpy_preprocess;
 pub mod rust_preprocess;
+pub mod scanpy_preprocess;
 pub use rust_preprocess::{
-    FuzzyGraph, UmapLabKnnCache, RustPreprocessParams, RustPreprocessSteps, UmapLabLoaded,
+    FuzzyGraph, RustPreprocessParams, RustPreprocessSteps, UmapLabKnnCache, UmapLabLoaded,
     clamp_umap_min_dist_spread, fuzzy_graph_from_pca, fuzzy_graph_induced_subgraph,
     leiden_labels_from_graph, leiden_labels_subcluster_into, rust_preprocess_h5ad,
     rust_preprocess_h5ad_to_memory, rust_preprocess_h5ad_with_steps,
@@ -192,7 +196,6 @@ pub use rust_preprocess::{
 #[cfg(feature = "self-update")]
 pub mod self_update;
 pub mod spatial_estimator;
-pub mod verify_bundle;
 #[cfg(feature = "tui")]
 pub mod training_demo;
 pub mod training_hud;
@@ -202,6 +205,7 @@ pub mod training_tui;
 pub mod transition_umap;
 #[cfg(feature = "tui")]
 pub mod tui_theme;
+pub mod verify_bundle;
 pub use betadata::{
     BetaAggregates, BetaFrame, BetaFrameFromParts, Betabase, BetadataCollectAggregate,
     CollectedInteraction, CollectedInteractionFull, CollectedInteractionRow,
@@ -224,10 +228,10 @@ pub use config::{
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
     ClusteredGcnNwrFitInputs, CnnEpochHudSlot, FittedClusterResult, PredictBetasInput,
-    run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs, TrainClusterCnnEpochsInput,
+    TrainClusterCnnEpochsInput, run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs,
 };
-pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use h5ad_peek::print_h5ad_peek;
+pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
     GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator, gene_performance_feather_path,

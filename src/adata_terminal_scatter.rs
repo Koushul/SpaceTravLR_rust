@@ -740,9 +740,7 @@ pub fn resolve_plot_h5ad_color_column(path: &Path, fallback: &str) -> anyhow::Re
 pub fn h5ad_obs_column_exists(path: &Path, col: &str) -> anyhow::Result<bool> {
     let h5 = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
     let obs = h5.group("obs").ok();
-    Ok(obs
-        .map(|g| g.link_exists(col))
-        .unwrap_or(false))
+    Ok(obs.map(|g| g.link_exists(col)).unwrap_or(false))
 }
 
 const UMAP_OBSM_KEYS: &[&str] = &["X_umap", "umap"];
@@ -925,21 +923,9 @@ pub fn print_h5ad_umap_scatter(path: &Path, color_obs: Option<&str>) -> anyhow::
             let (r1, g1, b1) = rgb_at(0.5);
             let (r2, g2, b2) = rgb_at(1.0);
             let legend_lines = vec![
-                format!(
-                    "{} {:.6}",
-                    "min".truecolor(r0, g0, b0),
-                    vmin
-                ),
-                format!(
-                    "{} {:.6}",
-                    "mid".truecolor(r1, g1, b1),
-                    mid
-                ),
-                format!(
-                    "{} {:.6}",
-                    "max".truecolor(r2, g2, b2),
-                    vmax
-                ),
+                format!("{} {:.6}", "min".truecolor(r0, g0, b0), vmin),
+                format!("{} {:.6}", "mid".truecolor(r1, g1, b1), mid),
+                format!("{} {:.6}", "max".truecolor(r2, g2, b2), vmax),
             ];
             (canvas, legend_lines, header_color)
         }

@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::perturb_batch::{
-    BatchRunOptions, PerturbBatchFile, batch_from_perturb_table, effective_parallelism,
-    resolve_prepared_job_cell_indices, resolve_relative_to, run_batch_jobs,
-    sanitize_gene_for_filename, validate_jobs_genes, PreparedPerturbJob,
+    BatchRunOptions, PerturbBatchFile, PreparedPerturbJob, batch_from_perturb_table,
+    effective_parallelism, resolve_prepared_job_cell_indices, resolve_relative_to, run_batch_jobs,
+    sanitize_gene_for_filename, validate_jobs_genes,
 };
 use crate::perturb_mode::PerturbRuntime;
 
@@ -180,8 +180,7 @@ pub fn run_perturb_screen(args: RunPerturbScreenArgs<'_>) -> anyhow::Result<()> 
                 };
                 batch_file.cells_csv = Some(resolved.to_string_lossy().into_owned());
                 if batch_file.cells_csv_column.is_none() {
-                    batch_file.cells_csv_column =
-                        runtime.cfg.perturbation.cells_csv_column.clone();
+                    batch_file.cells_csv_column = runtime.cfg.perturbation.cells_csv_column.clone();
                 }
             }
         }

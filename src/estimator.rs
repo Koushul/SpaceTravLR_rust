@@ -29,9 +29,7 @@ static BURN_AUTODIFF_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(())
 
 #[inline]
 fn burn_autodiff_global_lock() -> std::sync::MutexGuard<'static, ()> {
-    BURN_AUTODIFF_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    BURN_AUTODIFF_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn spatial_maps_for_cluster_cnn(
@@ -201,7 +199,9 @@ struct CnnTrainingLossBatch<'a, B: AutodiffBackend> {
     mse_loss: &'a burn::nn::loss::MseLoss,
 }
 
-fn cnn_training_loss<B: AutodiffBackend>(b: CnnTrainingLossBatch<'_, B>) -> (Tensor<B, 1>, Tensor<B, 1>) {
+fn cnn_training_loss<B: AutodiffBackend>(
+    b: CnnTrainingLossBatch<'_, B>,
+) -> (Tensor<B, 1>, Tensor<B, 1>) {
     let betas = b.model.get_betas(b.sm_tensor, b.sf_tensor);
     let y_pred = CellularNicheNetwork::linear_readout_y(betas.clone(), b.x_tensor);
     let y_loss = b
@@ -870,9 +870,14 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
             .collect();
         let n_celltypes = to_fit.len();
 
+        let skip_spatial = seed_only && cached_spatial.is_none();
         let owned_sf;
         let owned_sm;
-        let (spatial_features, spatial_maps) = if let Some(c) = cached_spatial {
+        let (spatial_features, spatial_maps) = if skip_spatial {
+            owned_sf = Array2::<f64>::zeros((0, 0));
+            owned_sm = Array4::<f32>::zeros((0, 0, 0, 0));
+            (&owned_sf, &owned_sm)
+        } else if let Some(c) = cached_spatial {
             (&c.spatial_features, &c.spatial_maps)
         } else {
             let r_sf = self.spatial_feature_radius;
@@ -1074,8 +1079,8 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                     };
                     let beta_prior_w = cnn.mean_beta_lasso_prior_weight as f32;
 
-                    let (model, cnn_train_mse_epochs, cnn_diverged) = train_cluster_cnn_epochs(
-                        TrainClusterCnnEpochsInput {
+                    let (model, cnn_train_mse_epochs, cnn_diverged) =
+                        train_cluster_cnn_epochs(TrainClusterCnnEpochsInput {
                             model,
                             device,
                             sm_c: &sm_c,
@@ -1091,8 +1096,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                             epochs,
                             cnn_epoch_slot: cnn_epoch_slot.as_ref(),
                             shuffle_seed: random_seed,
-                        },
-                    );
+                        });
 
                     let cnn_r2 = if cnn_diverged {
                         f64::NAN
@@ -1270,8 +1274,8 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 };
                 let beta_prior_w = cnn.mean_beta_lasso_prior_weight as f32;
 
-                let (model, cnn_train_mse_epochs, cnn_diverged) = train_cluster_cnn_epochs(
-                    TrainClusterCnnEpochsInput {
+                let (model, cnn_train_mse_epochs, cnn_diverged) =
+                    train_cluster_cnn_epochs(TrainClusterCnnEpochsInput {
                         model,
                         device,
                         sm_c: &sm_c,
@@ -1287,8 +1291,7 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                         epochs,
                         cnn_epoch_slot: cnn_epoch_slot.as_ref(),
                         shuffle_seed: random_seed,
-                    },
-                );
+                    });
 
                 let cnn_r2 = if cnn_diverged {
                     f64::NAN
@@ -1334,6 +1337,72 @@ impl<B: AutodiffBackend> ClusteredGCNNWR<B> {
                 }
             }
         }
+    }
+
+    /// Replace CNN modules with freshly initialized networks whose anchors are the stored
+    /// pooled Lasso intercept + coefficients. Call before each per-sample CNN refine so
+    /// sample *k+1* does not continue weights from sample *k*.
+    pub fn reinit_models_from_lasso_anchors(
+        &mut self,
+        num_clusters: usize,
+        device: &B::Device,
+        cnn: &CnnConfig,
+    ) {
+        let vision_in_channels = if cnn.multi_channel_spatial_maps {
+            num_clusters
+        } else {
+            1
+        };
+        let mut cluster_ids: Vec<usize> = self.lasso_coefficients.keys().copied().collect();
+        cluster_ids.sort_unstable();
+        self.models.clear();
+        for c_id in cluster_ids {
+            let Some(lasso_coef) = self.lasso_coefficients.get(&c_id) else {
+                continue;
+            };
+            let intercept = self.lasso_intercepts.get(&c_id).copied().unwrap_or(0.0);
+            let mut anchors_vec = vec![finite_or_zero_f32(intercept as f32)];
+            anchors_vec.extend(
+                lasso_coef
+                    .column(0)
+                    .iter()
+                    .map(|&v| finite_or_zero_f32(v as f32)),
+            );
+            let anchors_tensor = Tensor::<B, 1>::from_data(
+                burn::tensor::TensorData::new(anchors_vec, [lasso_coef.nrows() + 1]),
+                device,
+            );
+            let config = CellularNicheNetworkConfig {
+                n_modulators: lasso_coef.nrows(),
+                n_clusters: num_clusters,
+                vision_in_channels,
+            };
+            let model = config.init::<B>(device, anchors_tensor, cnn.output_activation);
+            self.models.insert(c_id, model);
+        }
+    }
+
+    /// In-sample Lasso R² per cluster on a (possibly sample-subset) design matrix.
+    pub fn lasso_r2_per_cluster_on_rows(
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        clusters: &Array1<usize>,
+        coefs: &HashMap<usize, Array2<f64>>,
+        intercepts: &HashMap<usize, f64>,
+    ) -> HashMap<usize, f64> {
+        let mut out = HashMap::new();
+        for (&c_id, coef) in coefs {
+            let indices: Vec<usize> = (0..x.nrows()).filter(|&i| clusters[i] == c_id).collect();
+            if indices.is_empty() {
+                continue;
+            }
+            let intercept = intercepts.get(&c_id).copied().unwrap_or(0.0);
+            let x_c = x.select(Axis(0), &indices);
+            let y_c = y.select(Axis(0), &indices);
+            let pred = y_lasso_vec_from_xy_cpu(&x_c, intercept, coef);
+            out.insert(c_id, r2_score_from_pred_slice(y_c.view(), &pred));
+        }
+        out
     }
 
     pub fn predict_betas(&self, input: PredictBetasInput<'_, B>) -> Array2<f64> {
@@ -2126,5 +2195,31 @@ mod tests {
         let lr_last = cnn_lr_for_epoch(base, t - 1, t, CnnLrSchedule::Cosine, 0, min_r);
         assert!((lr0 - base).abs() < 1e-9, "got {lr0}");
         assert!((lr_last - base * min_r).abs() < 1e-9, "got {lr_last}");
+    }
+
+    #[test]
+    fn reinit_models_from_lasso_anchors_match_stored_coefs() {
+        use crate::config::{CnnConfig, CnnOutputActivation};
+        use burn::backend::NdArray;
+        use burn_autodiff::Autodiff;
+
+        type B = Autodiff<NdArray<f32, i32>>;
+        let device = Default::default();
+        let mut est = ClusteredGCNNWR::<B>::new(GroupLassoParams::default(), 8, 1.0, false, false);
+        let coef = Array2::from_shape_vec((2, 1), vec![0.25, -0.5]).unwrap();
+        est.lasso_coefficients.insert(0, coef);
+        est.lasso_intercepts.insert(0, 1.25);
+        let cnn = CnnConfig {
+            output_activation: CnnOutputActivation::Identity,
+            ..Default::default()
+        };
+        est.reinit_models_from_lasso_anchors(2, &device, &cnn);
+        let model = est.models.get(&0).expect("model");
+        let data = model.anchors.clone().into_data();
+        let a: &[f32] = data.as_slice::<f32>().unwrap();
+        assert_eq!(a.len(), 3);
+        assert!((a[0] - 1.25).abs() < 1e-5);
+        assert!((a[1] - 0.25).abs() < 1e-5);
+        assert!((a[2] + 0.5).abs() < 1e-5);
     }
 }

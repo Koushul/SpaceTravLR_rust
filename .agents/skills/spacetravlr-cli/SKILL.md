@@ -123,6 +123,7 @@ Required AnnData shape: expression in `.X`, 2D coordinates in `.obsm['spatial']`
 
 - `--output-dir` — run directory (`*_betadata.feather`, logs, repro TOML)
 - `--condition` — `obs` column; training splits into `output_dir/conditions/<value>/` per group, repro TOML stays at the parent
+- `--sample` + `--pool-lasso` — independent slides: one jointly scaled sparse group Lasso across samples, then a CNN per sample written under `conditions/<sample>/` (or `conditions/<condition>/samples/<sample>/` when both flags are set). Gene locks stay on the parent. `--sample` and `--pool-lasso` must be set together.
 - `--join-output-dir DIR` — load `DIR/spacetravlr_run_repro.toml`; claim genes via `.lock`; only `--parallel` and a few join-safe overrides apply
 - `--clean-output-dir`, `--write-minimal-repro-h5ad`, `--save-cnn-weights`, `--write-cnn-train-data-npz`
 

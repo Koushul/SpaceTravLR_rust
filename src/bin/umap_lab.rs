@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use spacetravlr::config::expand_user_path;
 use spacetravlr::{
     FuzzyGraph, RustPreprocessParams, UmapLabKnnCache, UmapLabLoaded, leiden_labels_from_graph,
-    leiden_labels_subcluster_into, umap_lab_gene_expression_from_h5ad_source, umap_lab_load_pca_session, umap_lab_read_obs_column,
-    umap_lab_run_embedding, umap_lab_run_magic_imputed_leiden,
+    leiden_labels_subcluster_into, umap_lab_gene_expression_from_h5ad_source,
+    umap_lab_load_pca_session, umap_lab_read_obs_column, umap_lab_run_embedding,
+    umap_lab_run_magic_imputed_leiden,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -755,8 +756,7 @@ async fn api_gene(
             s.path.clone(),
             s.magic_imputed_h5ad.clone(),
             s.pca.nrows(),
-            body
-                .source
+            body.source
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -1748,8 +1748,7 @@ mod export_csv_tests {
         let csv = build_export_csv(&s, &annotations);
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(
-            lines[0],
-            "obs_name,leiden,annotation,umap_x,umap_y",
+            lines[0], "obs_name,leiden,annotation,umap_x,umap_y",
             "header: {lines:?}"
         );
         assert_eq!(lines.len(), 4, "header + 3 rows");
