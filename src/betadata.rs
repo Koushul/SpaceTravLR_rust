@@ -244,10 +244,7 @@ impl CellMappingSummary {
         } else {
             eprintln!(
                 "Warning: {} of {} cells could not map to a betadata row; using zero betas for those. ({} cells mapped via cluster key, {} via obs id.)",
-                self.n_unmapped,
-                self.n_cells,
-                self.n_via_cluster_key,
-                self.n_via_obs_id
+                self.n_unmapped, self.n_cells, self.n_via_cluster_key, self.n_via_obs_id
             );
         }
     }
@@ -1230,6 +1227,59 @@ pub fn betadata_feather_per_cell_column(
     Ok(out)
 }
 
+/// Load every float β column (skipping intercept / id) for the given cells in one feather read.
+/// Used by `get-microniches` spatial filtering so each gene file is opened once.
+pub fn betadata_feather_all_float_columns_for_cells(
+    path: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+) -> Result<Vec<(String, Vec<f64>)>> {
+    anyhow::ensure!(
+        obs_names.len() == cluster_keys.len(),
+        "obs_names len {} != cluster_keys len {}",
+        obs_names.len(),
+        cluster_keys.len()
+    );
+    let f = File::open(path).with_context(|| format!("open {}", path))?;
+    let df = IpcReader::new(f)
+        .finish()
+        .with_context(|| format!("read IPC {}", path))?;
+    let all_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    let label_idx = betadata_feather_label_column_index(&all_names);
+    let row_labels: Vec<String> = if let Some(idx) = label_idx {
+        let label_name = &all_names[idx];
+        feather_id_column_to_strings(df.column(label_name.as_str())?)?
+    } else {
+        (0..df.height()).map(|i| i.to_string()).collect()
+    };
+    let (mapping, _) =
+        betadata_feather_cell_mapping(&all_names, label_idx, &row_labels, obs_names, cluster_keys);
+    let n_obs = obs_names.len();
+    let mut out = Vec::new();
+    for (i, name) in all_names.iter().enumerate() {
+        if Some(i) == label_idx || is_intercept_column(name) {
+            continue;
+        }
+        let Ok(series) = df
+            .column(name.as_str())
+            .and_then(|c| c.cast(&DataType::Float64))
+        else {
+            continue;
+        };
+        let ca = series.f64()?;
+        let mut values = vec![0f64; n_obs];
+        for cell in 0..n_obs {
+            values[cell] = ca.get(mapping[cell]).unwrap_or(0.0);
+        }
+        out.push((name.clone(), values));
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Serialize)]
 pub struct TopBetaCoefficient {
     pub column: String,
@@ -1516,18 +1566,32 @@ fn classify_betadata_column_type(col: &str) -> &'static str {
 }
 
 fn aggregates_have_signal(agg: &BetaAggregates) -> bool {
-    [agg.mean, agg.min, agg.max, agg.sum, agg.positive, agg.negative]
-        .into_iter()
-        .flatten()
-        .any(|v| v.is_finite() && v.abs() > 1e-15)
+    [
+        agg.mean,
+        agg.min,
+        agg.max,
+        agg.sum,
+        agg.positive,
+        agg.negative,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|v| v.is_finite() && v.abs() > 1e-15)
 }
 
 fn aggregate_sort_key(agg: &BetaAggregates) -> f64 {
-    [agg.mean, agg.min, agg.max, agg.sum, agg.positive, agg.negative]
-        .into_iter()
-        .flatten()
-        .map(f64::abs)
-        .fold(0.0f64, f64::max)
+    [
+        agg.mean,
+        agg.min,
+        agg.max,
+        agg.sum,
+        agg.positive,
+        agg.negative,
+    ]
+    .into_iter()
+    .flatten()
+    .map(f64::abs)
+    .fold(0.0f64, f64::max)
 }
 
 fn unique_sorted_cell_types(labels: &[String]) -> Vec<String> {
@@ -1592,7 +1656,8 @@ impl CellTypeIndices {
         mapping: &[usize],
     ) -> Self {
         let n_obs = cell_type_labels.len();
-        let mut label_to_idx: HashMap<&str, usize> = HashMap::with_capacity(unique_cell_types.len());
+        let mut label_to_idx: HashMap<&str, usize> =
+            HashMap::with_capacity(unique_cell_types.len());
         for (i, ct) in unique_cell_types.iter().enumerate() {
             label_to_idx.insert(ct.as_ref(), i);
         }
@@ -1615,7 +1680,8 @@ impl CellTypeIndices {
         mapping: &[usize],
         obs_subset: &[usize],
     ) -> Self {
-        let mut label_to_idx: HashMap<&str, usize> = HashMap::with_capacity(unique_cell_types.len());
+        let mut label_to_idx: HashMap<&str, usize> =
+            HashMap::with_capacity(unique_cell_types.len());
         for (i, ct) in unique_cell_types.iter().enumerate() {
             label_to_idx.insert(ct.as_ref(), i);
         }
@@ -1940,13 +2006,10 @@ fn collect_interactions_all_cell_types_from_workspace(
             .coef_columns
             .par_iter()
             .map(|coef| collect_rows_for_cell_type_indices(coef, &ws.target_gene, ct_idx, mode))
-            .reduce(
-                Vec::new,
-                |mut acc, mut chunk| {
-                    acc.append(&mut chunk);
-                    acc
-                },
-            ),
+            .reduce(Vec::new, |mut acc, mut chunk| {
+                acc.append(&mut chunk);
+                acc
+            }),
         InteractionGrouping::ClusterPartitions(parts) => parts
             .labels
             .par_iter()
@@ -1957,21 +2020,15 @@ fn collect_interactions_all_cell_types_from_workspace(
                     .map(|coef| {
                         collect_rows_for_cell_type_indices(coef, &ws.target_gene, ct_idx, mode)
                     })
-                    .reduce(
-                        Vec::new,
-                        |mut acc, mut chunk| {
-                            acc.append(&mut chunk);
-                            acc
-                        },
-                    )
+                    .reduce(Vec::new, |mut acc, mut chunk| {
+                        acc.append(&mut chunk);
+                        acc
+                    })
             })
-            .reduce(
-                Vec::new,
-                |mut acc, mut chunk| {
-                    acc.append(&mut chunk);
-                    acc
-                },
-            ),
+            .reduce(Vec::new, |mut acc, mut chunk| {
+                acc.append(&mut chunk);
+                acc
+            }),
     }
 }
 
@@ -1985,13 +2042,10 @@ fn collect_interactions_all_cell_types_full_from_workspace(
             .map(|coef| {
                 collect_rows_full_for_cell_type_indices(coef, &ws.target_gene, ct_idx, None)
             })
-            .reduce(
-                Vec::new,
-                |mut acc, mut chunk| {
-                    acc.append(&mut chunk);
-                    acc
-                },
-            ),
+            .reduce(Vec::new, |mut acc, mut chunk| {
+                acc.append(&mut chunk);
+                acc
+            }),
         InteractionGrouping::ClusterPartitions(parts) => parts
             .labels
             .par_iter()
@@ -2007,21 +2061,15 @@ fn collect_interactions_all_cell_types_full_from_workspace(
                             Some(lab.as_str()),
                         )
                     })
-                    .reduce(
-                        Vec::new,
-                        |mut acc, mut chunk| {
-                            acc.append(&mut chunk);
-                            acc
-                        },
-                    )
+                    .reduce(Vec::new, |mut acc, mut chunk| {
+                        acc.append(&mut chunk);
+                        acc
+                    })
             })
-            .reduce(
-                Vec::new,
-                |mut acc, mut chunk| {
-                    acc.append(&mut chunk);
-                    acc
-                },
-            ),
+            .reduce(Vec::new, |mut acc, mut chunk| {
+                acc.append(&mut chunk);
+                acc
+            }),
     }
 }
 
@@ -2074,7 +2122,10 @@ fn collect_interactions_mask_full_from_workspace(
                 })
             })
             .collect(),
-        MaskInteractionGrouping::ClusterPartitions { labels, masked_rows } => labels
+        MaskInteractionGrouping::ClusterPartitions {
+            labels,
+            masked_rows,
+        } => labels
             .par_iter()
             .zip(masked_rows.par_iter())
             .flat_map(|(lab, rows)| {
@@ -2179,7 +2230,9 @@ fn aggregate_mapped_column(
             let mut v = f64::INFINITY;
             for &r in feather_rows {
                 let x = *col_data.get(r).unwrap_or(&0.0);
-                if x < v { v = x; }
+                if x < v {
+                    v = x;
+                }
             }
             Some(v)
         }
@@ -2187,7 +2240,9 @@ fn aggregate_mapped_column(
             let mut v = f64::NEG_INFINITY;
             for &r in feather_rows {
                 let x = *col_data.get(r).unwrap_or(&0.0);
-                if x > v { v = x; }
+                if x > v {
+                    v = x;
+                }
             }
             Some(v)
         }
@@ -2196,18 +2251,32 @@ fn aggregate_mapped_column(
             let mut cnt = 0usize;
             for &r in feather_rows {
                 let x = *col_data.get(r).unwrap_or(&0.0);
-                if x > 0.0 { sum += x; cnt += 1; }
+                if x > 0.0 {
+                    sum += x;
+                    cnt += 1;
+                }
             }
-            if cnt == 0 { None } else { Some(sum / cnt as f64) }
+            if cnt == 0 {
+                None
+            } else {
+                Some(sum / cnt as f64)
+            }
         }
         BetadataCollectAggregate::Negative => {
             let mut sum = 0.0f64;
             let mut cnt = 0usize;
             for &r in feather_rows {
                 let x = *col_data.get(r).unwrap_or(&0.0);
-                if x < 0.0 { sum += x; cnt += 1; }
+                if x < 0.0 {
+                    sum += x;
+                    cnt += 1;
+                }
             }
-            if cnt == 0 { None } else { Some(sum / cnt as f64) }
+            if cnt == 0 {
+                None
+            } else {
+                Some(sum / cnt as f64)
+            }
         }
     }
 }
@@ -2233,7 +2302,9 @@ pub fn betadata_collect_interactions_all_cell_types_one_gene(
         cell_type_labels,
         unique_cell_types,
     )?;
-    Ok(collect_interactions_all_cell_types_from_workspace(&ws, mode))
+    Ok(collect_interactions_all_cell_types_from_workspace(
+        &ws, mode,
+    ))
 }
 
 /// Like [`betadata_collect_interactions_all_cell_types_one_gene`], but emits mean/min/max/sum/positive/negative columns.
@@ -2291,7 +2362,10 @@ fn betadata_collect_interactions_all_cell_types_full_paths(
     }
 
     let unique_cell_types = unique_sorted_cell_types(cell_type_labels);
-    let unique_arcs: Vec<Arc<str>> = unique_cell_types.iter().map(|s| Arc::from(s.as_str())).collect();
+    let unique_arcs: Vec<Arc<str>> = unique_cell_types
+        .iter()
+        .map(|s| Arc::from(s.as_str()))
+        .collect();
     let unique_arcs = Arc::new(unique_arcs);
     let obs_names = Arc::new(obs_names.to_vec());
     let cluster_keys = Arc::new(cluster_keys.to_vec());
@@ -2425,7 +2499,10 @@ pub fn betadata_collect_interactions_all_cell_types(
         !unique_cell_types.is_empty(),
         "no distinct cell types in labels — check obs annotation column"
     );
-    let unique_arcs: Vec<Arc<str>> = unique_cell_types.iter().map(|s| Arc::from(s.as_str())).collect();
+    let unique_arcs: Vec<Arc<str>> = unique_cell_types
+        .iter()
+        .map(|s| Arc::from(s.as_str()))
+        .collect();
     let unique_arcs = Arc::new(unique_arcs);
     let cell_type_labels_arc = Arc::new(cell_type_labels.to_vec());
 
@@ -2502,10 +2579,7 @@ pub fn betadata_collect_interactions_all_cell_types(
 }
 
 fn optional_f64_series(name: &str, values: &[Option<f64>]) -> Column {
-    let v: Vec<Option<f64>> = values
-        .iter()
-        .map(|x| x.filter(|v| v.is_finite()))
-        .collect();
+    let v: Vec<Option<f64>> = values.iter().map(|x| x.filter(|v| v.is_finite())).collect();
     Series::new(name.into(), v).into()
 }
 
@@ -2556,7 +2630,10 @@ pub fn write_collected_interactions_full_feather(
 }
 
 /// Write [`CollectedInteractionRow`] as Feather-compatible Arrow IPC (LZ4).
-pub fn write_collected_interactions_feather(path: &str, rows: &[CollectedInteractionRow]) -> Result<()> {
+pub fn write_collected_interactions_feather(
+    path: &str,
+    rows: &[CollectedInteractionRow],
+) -> Result<()> {
     let interaction: Vec<String> = rows.iter().map(|r| r.interaction.clone()).collect();
     let target_gene: Vec<String> = rows.iter().map(|r| r.target_gene.clone()).collect();
     let beta: Vec<f64> = rows.iter().map(|r| r.beta).collect();
@@ -2948,10 +3025,8 @@ mod collect_interactions_all_cell_types_tests {
 
     #[test]
     fn one_gene_cluster_keyed_mean_per_cell_type() {
-        let dir = std::env::temp_dir().join(format!(
-            "betadata_collect_all_ct_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("betadata_collect_all_ct_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("TG_betadata.feather");
         let cols = vec!["beta0".into(), "beta_MOD".into()];
@@ -2998,10 +3073,8 @@ mod collect_interactions_all_cell_types_tests {
 
     #[test]
     fn full_collect_per_cluster_obs_partition() {
-        let dir = std::env::temp_dir().join(format!(
-            "betadata_collect_cluster_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("betadata_collect_cluster_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("TG_betadata.feather");
         let cols = vec!["beta0".into(), "beta_MOD".into()];
@@ -3150,10 +3223,8 @@ mod collect_interactions_all_cell_types_tests {
 
     #[test]
     fn materialize_coef_columns_aligns_with_feather_row_indices() {
-        let dir = std::env::temp_dir().join(format!(
-            "betadata_collect_nulls_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("betadata_collect_nulls_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("TG_betadata.feather");
         let cols = vec!["beta0".into(), "beta_MOD".into()];
@@ -3175,7 +3246,10 @@ mod collect_interactions_all_cell_types_tests {
             .collect();
         let label_idx = betadata_feather_label_column_index(&all_names);
         let coefs = materialize_coef_columns(&df, &all_names, label_idx).unwrap();
-        let beta_mod = coefs.iter().find(|c| c.name.as_ref() == "beta_MOD").unwrap();
+        let beta_mod = coefs
+            .iter()
+            .find(|c| c.name.as_ref() == "beta_MOD")
+            .unwrap();
         assert_eq!(beta_mod.values.len(), df.height());
         assert!((beta_mod.values[0] - 10.0).abs() < 1e-9);
         assert!((beta_mod.values[1] - 30.0).abs() < 1e-9);

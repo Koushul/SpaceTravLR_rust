@@ -51,6 +51,14 @@ spacetravlr collect-interactions \
 
 <!-- Learn more about [how SpaceTravLR works](math.md), other [installations](install.md) details and CLI [usage](usage.md). -->
 
+#### Point an AI agent at me
+
+SpaceTravLR publishes an [`llms.txt`](llms.txt) index and a self-contained [`llms-full.txt`](llms-full.txt) reference following the [llmstxt.org](https://llmstxt.org/) convention. Give either URL to Claude, Cursor, ChatGPT, or any coding agent and it will know the full capability surface, every CLI flag, the config schema, and the output formats.
+
+```
+https://spacetravlr-rust.readthedocs.io/en/latest/llms-full.txt
+```
+
 
 ## Training time estimate {#training-time-estimate}
 

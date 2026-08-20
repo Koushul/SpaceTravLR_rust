@@ -972,10 +972,7 @@ mod tests {
         clip_simulated_delta_in_place(
             &gene_mtx,
             &mut delta,
-            ExpressionBounds {
-                min: 0.0,
-                max: 8.0,
-            },
+            ExpressionBounds { min: 0.0, max: 8.0 },
         );
         assert!((delta[[0, 0]] - 0.0).abs() < 1e-12);
         assert!((delta[[0, 1]] - 3.0).abs() < 1e-12);

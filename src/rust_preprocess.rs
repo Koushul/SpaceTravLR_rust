@@ -358,7 +358,10 @@ fn dedupe_var_names_scanpy_style(names: Vec<String>) -> Vec<String> {
 
 /// When `var_names` look like `"0"`…`"n"` but symbols live in `var` (e.g. `feature_name`), return
 /// deduplicated names for the AnnData variable index.
-fn restore_var_names_if_placeholder(names: &[String], df: &DataFrame) -> Result<Option<Vec<String>>> {
+fn restore_var_names_if_placeholder(
+    names: &[String],
+    df: &DataFrame,
+) -> Result<Option<Vec<String>>> {
     const MIN_PH: f64 = 0.9;
     if var_names_placeholder_ratio(names) < MIN_PH {
         return Ok(None);
@@ -807,6 +810,49 @@ fn spectral_init_2d(graph: &FuzzyGraph, n_components: usize, seed: u64) -> Array
         }
     }
     init
+}
+
+/// Build a Scanpy-like fuzzy kNN graph on dense PCA / embedding rows (no UMAP optimization).
+pub fn fuzzy_graph_from_pca(
+    pca: &ndarray::Array2<f64>,
+    n_components: usize,
+    n_neighbors: usize,
+    ef_construction: usize,
+) -> Result<FuzzyGraph> {
+    let n = pca.nrows();
+    let dim = n_components.min(pca.ncols());
+    anyhow::ensure!(n > 1, "need at least 2 cells for a neighborhood graph");
+    anyhow::ensure!(dim >= 1, "need at least 1 PCA component");
+    let knn_neighbors = n_neighbors.min(n);
+    let points = pca_to_points_f32(pca, dim);
+    let mut knn_log = Vec::new();
+    let (knn_idx, knn_dist) =
+        knn_indices_dists(points, knn_neighbors, ef_construction, &mut knn_log);
+
+    let mut data_vec = Vec::with_capacity(n * dim);
+    for row in pca.outer_iter() {
+        for j in 0..dim {
+            data_vec.push(*row.get(j).unwrap_or(&0.0) as f32);
+        }
+    }
+    let data = Array2Umap::from_shape_vec((n, dim), data_vec)
+        .map_err(|e| anyhow!("fuzzy-graph data shape: {e}"))?;
+    let config = UmapConfig {
+        n_components: 2,
+        manifold: ManifoldParams::default(),
+        graph: GraphParams {
+            n_neighbors: knn_neighbors,
+            symmetrize: true,
+            ..Default::default()
+        },
+        optimization: OptimizationParams {
+            n_epochs: Some(0),
+            ..Default::default()
+        },
+    };
+    let umap = Umap::new(config);
+    let manifold = umap.learn_manifold(data.view(), knn_idx.view(), knn_dist.view());
+    Ok(manifold.graph().clone())
 }
 
 pub fn run_umap_on_pca(
@@ -1761,12 +1807,8 @@ pub fn umap_lab_run_magic_imputed_leiden(
     out_h5ad_path: &Path,
 ) -> Result<()> {
     prepare_h5ad_path_for_anndata_memory_load(h5ad_path);
-    let adata = load_h5ad_fast(h5ad_path).map_err(|e| {
-        anyhow!(
-            "loading .h5ad for MAGIC failed. Caused by: {:#}",
-            e
-        )
-    })?;
+    let adata = load_h5ad_fast(h5ad_path)
+        .map_err(|e| anyhow!("loading .h5ad for MAGIC failed. Caused by: {:#}", e))?;
     maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     anyhow::ensure!(
         leiden_labels.len() == adata.n_obs(),
@@ -1778,7 +1820,13 @@ pub fn umap_lab_run_magic_imputed_leiden(
     umap_lab_ensure_normalized_count_for_magic(&adata)?;
     let _ = adata.layers().remove_array("imputed_count");
     let mut log = Vec::new();
-    add_magic_imputed_count(&adata, graph, leiden_labels, RustPreprocessParams::default().magic_t, &mut log)?;
+    add_magic_imputed_count(
+        &adata,
+        graph,
+        leiden_labels,
+        RustPreprocessParams::default().magic_t,
+        &mut log,
+    )?;
     write_adata_h5ad(&adata, out_h5ad_path)?;
     Ok(())
 }
@@ -1893,7 +1941,11 @@ fn umap_lab_h5_dense_layer_column_f32(
         .dataset(layer)
         .with_context(|| format!("layers/{layer} dataset"))?;
     let sh = ds.shape();
-    anyhow::ensure!(sh.len() == 2, "layer {layer}: expected 2D dataset, got shape {:?}", sh);
+    anyhow::ensure!(
+        sh.len() == 2,
+        "layer {layer}: expected 2D dataset, got shape {:?}",
+        sh
+    );
     anyhow::ensure!(
         sh[0] == n_obs && sh[1] == n_vars,
         "layer {layer} shape {:?} does not match obs×var {}×{}",
@@ -1953,7 +2005,10 @@ pub fn umap_lab_gene_expression_from_h5ad_layer(
     if f.link_exists("layers") {
         let layers_g = f.group("layers")?;
         if layers_g.link_exists(layer) {
-            match layers_g.loc_type_by_name(layer).context("layers entry type")? {
+            match layers_g
+                .loc_type_by_name(layer)
+                .context("layers entry type")?
+            {
                 LocationType::Dataset => {
                     if let Ok(colv) =
                         umap_lab_h5_dense_layer_column_f32(path, layer, idx, n_obs, n_vars)
@@ -2016,11 +2071,14 @@ pub fn umap_lab_gene_expression_from_h5ad_source(
             umap_lab_gene_expression_from_h5ad_layer(p, "normalized_count", gene_query)
         }
         "imputed_count" => {
-            let p = magic_artifact
-                .ok_or_else(|| anyhow!("imputed_count requires MAGIC; run cluster-wise MAGIC first"))?;
+            let p = magic_artifact.ok_or_else(|| {
+                anyhow!("imputed_count requires MAGIC; run cluster-wise MAGIC first")
+            })?;
             umap_lab_gene_expression_from_h5ad_layer(p, "imputed_count", gene_query)
         }
-        _ => bail!("unknown gene expression source {s:?}; expected x, normalized_count, or imputed_count"),
+        _ => bail!(
+            "unknown gene expression source {s:?}; expected x, normalized_count, or imputed_count"
+        ),
     }
 }
 
@@ -2311,10 +2369,7 @@ fn mark_all_var_highly_variable(adata: &IMAnnData) -> Result<()> {
         var.remove_column_from_df("highly_variable")?;
     }
     let n = adata.n_vars();
-    var.attach_column_to_df(Series::new(
-        "highly_variable".into(),
-        vec![true; n],
-    ))?;
+    var.attach_column_to_df(Series::new("highly_variable".into(), vec![true; n]))?;
     Ok(())
 }
 
@@ -2665,11 +2720,8 @@ fn sync_labels_after_embedding(
     if write_leiden || (run_magic && !had_cell_type && !had_leiden) {
         let t = Instant::now();
         eprintln!(">>> leiden-rs");
-        let labels = leiden_labels_from_graph(
-            graph,
-            params.leiden_resolution,
-            params.leiden_max_iter,
-        );
+        let labels =
+            leiden_labels_from_graph(graph, params.leiden_resolution, params.leiden_max_iter);
         eprintln!("<<< leiden-rs: {:.2} s", t.elapsed().as_secs_f64());
         log.push(("leiden-rs".to_string(), t.elapsed().as_secs_f64()));
 
@@ -2954,7 +3006,7 @@ pub fn rust_preprocess_h5ad_to_memory(
                 &Direction::ROW,
                 None,
             )
-                .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
+            .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
             let norm_data = adata.x().get_data().context("x after normalize")?;
             layer_replace_if_present(&adata, "normalized_count", norm_data)?;
             eprintln!("<<< normalize_total: {:.2} s", t.elapsed().as_secs_f64());
@@ -2990,9 +3042,7 @@ pub fn rust_preprocess_h5ad_to_memory(
                 .map(|name| !name.to_lowercase().starts_with("mt"))
                 .collect()
         } else {
-            let hvg_target = params
-                .n_top_hvg
-                .min(n_total.saturating_sub(50).max(1));
+            let hvg_target = params.n_top_hvg.min(n_total.saturating_sub(50).max(1));
             let t = Instant::now();
             eprintln!(">>> highly_variable_genes({hvg_target})");
             compute_highly_variable_genes(
@@ -3036,7 +3086,10 @@ pub fn rust_preprocess_h5ad_to_memory(
             let gene_idx = mask_to_indices(&combined_mask);
             let obs_idx: Vec<usize> = (0..adata.n_obs()).collect();
             adata = adata
-                .subset(&[&SelectInfoElem::from(obs_idx), &SelectInfoElem::from(gene_idx)])
+                .subset(&[
+                    &SelectInfoElem::from(obs_idx),
+                    &SelectInfoElem::from(gene_idx),
+                ])
                 .map_err(|e| anyhow!("HVG gene subset: {e:?}"))?;
             eprintln!(
                 "<<< subset genes: {:.2} s (shape now {} × {})",
@@ -3119,13 +3172,7 @@ pub fn rust_preprocess_h5ad_to_memory(
             &mut log,
         )?;
         if steps.run_magic_impute {
-            add_magic_imputed_count(
-                &adata,
-                &fuzzy_graph,
-                &labels,
-                params.magic_t,
-                &mut log,
-            )?;
+            add_magic_imputed_count(&adata, &fuzzy_graph, &labels, params.magic_t, &mut log)?;
         }
     }
 
@@ -3270,9 +3317,11 @@ mod preprocess_tests {
         let names = vec!["A".to_string(), "B".to_string()];
         let s = Series::new("feature_name".into(), vec!["x", "y"]);
         let df = DataFrame::new(vec![s.into()]).unwrap();
-        assert!(restore_var_names_if_placeholder(&names, &df)
-            .unwrap()
-            .is_none());
+        assert!(
+            restore_var_names_if_placeholder(&names, &df)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

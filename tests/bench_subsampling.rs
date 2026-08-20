@@ -7,7 +7,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use spacetravlr::config::{CnnConfig, CnnOutputActivation};
-use spacetravlr::estimator::{train_cluster_cnn_epochs, TrainClusterCnnEpochsInput};
+use spacetravlr::estimator::{TrainClusterCnnEpochsInput, train_cluster_cnn_epochs};
 use spacetravlr::lasso::{
     ClusteredGroupLasso, GroupLassoParams, largest_eigenvalue_symmetric_power_iter,
 };

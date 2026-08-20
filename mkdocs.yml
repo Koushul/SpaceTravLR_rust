@@ -47,6 +47,9 @@ plugins:
   - mkdocs-jupyter:
       execute: false
       include_source: true
+      ignore: ["**/.ipynb_checkpoints/*"]
+      # Do not treat analysis scripts or other .py under docs as notebooks.
+      include: ["**/*.ipynb"]
 
 markdown_extensions:
   - attr_list

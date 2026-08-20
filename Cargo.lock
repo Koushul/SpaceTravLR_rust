@@ -8271,7 +8271,7 @@ checksum = "19f58d7b0190c7f12df7e8be6b79767a0836059159811b869d5ab55721fe14d0"
 
 [[package]]
 name = "spacetravlr"
-version = "3.3.1"
+version = "3.5.1"
 dependencies = [
  "anndata",
  "anndata-hdf5",
@@ -8288,6 +8288,8 @@ dependencies = [
  "clap",
  "colored 2.2.0",
  "crossterm 0.29.0",
+ "csv",
+ "ethnum",
  "flate2",
  "foyer",
  "fs4",

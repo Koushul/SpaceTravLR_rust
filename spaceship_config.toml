@@ -10,8 +10,10 @@
 layer           = "imputed_count"
 # obs column holding integer cluster labels
 cluster_annot   = "cell_type"
-# Optional: split training by this condition
+# Optional: split training by this condition (fully independent lasso+CNN per value)
 # condition      = "batch"
+# Independent spatial samples (slides). Requires [training].pool_lasso.
+# sample         = "library_id"
 
 [preprocess]
 # QC (Scanpy filter_cells / filter_genes)
@@ -169,6 +171,8 @@ score_threshold = 0.1
 # Optional target subset (CLI: --genes / --max-genes). Persisted in spacetravlr_run_repro.toml for --join-output-dir.
 # genes = ["GENE1", "GENE2"]
 # max_genes = 500
+# Fit one Lasso on concatenated samples from [data].sample (joint modulator scaling), then CNN per sample.
+# pool_lasso = true
 
 
 

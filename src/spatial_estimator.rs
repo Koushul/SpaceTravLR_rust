@@ -1,13 +1,14 @@
 use crate::betadata::{
     build_cluster_id_to_betadata_cluster_key_map, obs_series_row_str, write_betadata_feather,
 };
+use crate::condition_split::prepare_sample_splits_from_obs;
 use crate::config::{
     CnnConfig, CnnTrainingMode, ExecutionConfig, LassoConfig, ModelExportConfig,
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, expand_user_path, mix_execution_random_seed,
 };
 use crate::estimator::{
-    CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrFitInputs, CnnEpochHudSlot,
-    PredictBetasInput, finite_or_zero_f64,
+    CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs,
+    CnnEpochHudSlot, PredictBetasInput, finite_or_zero_f64,
 };
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{calculate_weighted_ligands, calculate_weighted_ligands_grid};
@@ -15,6 +16,7 @@ use crate::modulator_scale::{
     apply_modulator_scales_inplace, scale_columns_no_center, unscale_betadata_columns_inplace,
 };
 use crate::run_summary_html::{RunSummaryParams, write_run_summary_html};
+use crate::sample_pool::{concat_usize, concat_vec1, vstack_rows};
 use crate::training_hud::{
     TrainingHud, log_line, pipeline_step_begin, pipeline_step_end, print_training_outcome_banner,
 };
@@ -27,7 +29,7 @@ use burn::tensor::backend::AutodiffBackend;
 use fs4::fs_std::FileExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
-use ndarray::{Array1, Array2, Array4, s};
+use ndarray::{Array1, Array2, Array4, Axis, s};
 use ndarray_npy::NpzWriter;
 use polars::datatypes::DataType;
 use polars::io::ipc::IpcCompression;
@@ -53,6 +55,99 @@ pub const GENE_PERFORMANCE_FEATHER_NAME: &str = "spacetravlr_gene_performance.fe
 
 pub fn gene_performance_feather_path(training_dir: &Path) -> PathBuf {
     training_dir.join(GENE_PERFORMANCE_FEATHER_NAME)
+}
+
+/// Parent-dir marker written after every sample has a feather / orphan / tf_ablated.
+/// Locks live on the parent; sample feathers live under `conditions/<sample>/` (or
+/// `samples/<sample>/`), so resume and the TUI must not rely on parent `*_betadata.feather`.
+const POOL_LASSO_GENE_DONE_SUFFIX: &str = ".done";
+
+fn gene_terminal_artifact_in_dir(dir: &Path, gene: &str) -> bool {
+    dir.join(format!("{gene}_betadata.feather")).is_file()
+        || dir.join(format!("{gene}.orphan")).is_file()
+        || dir.join(format!("{gene}.tf_ablated")).is_file()
+}
+
+fn pool_lasso_parent_done_marker(training_dir: &str, gene: &str) -> PathBuf {
+    Path::new(training_dir).join(format!("{gene}{POOL_LASSO_GENE_DONE_SUFFIX}"))
+}
+
+fn pool_lasso_gene_already_done(training_dir: &str, gene: &str, sample_dirs: &[PathBuf]) -> bool {
+    let parent = Path::new(training_dir);
+    if parent
+        .join(format!("{gene}{POOL_LASSO_GENE_DONE_SUFFIX}"))
+        .is_file()
+        || parent.join(format!("{gene}.orphan")).is_file()
+        || parent.join(format!("{gene}.tf_ablated")).is_file()
+    {
+        return true;
+    }
+    if sample_dirs.is_empty() {
+        return false;
+    }
+    sample_dirs
+        .iter()
+        .all(|d| gene_terminal_artifact_in_dir(d, gene))
+}
+
+fn write_pool_lasso_gene_done_marker(training_dir: &str, gene: &str) {
+    let _ = File::create(pool_lasso_parent_done_marker(training_dir, gene));
+}
+
+fn backfill_pool_lasso_done_marker(training_dir: &str, gene: &str, sample_dirs: &[PathBuf]) {
+    if pool_lasso_gene_already_done(training_dir, gene, sample_dirs) {
+        let marker = pool_lasso_parent_done_marker(training_dir, gene);
+        if !marker.is_file()
+            && !Path::new(training_dir).join(format!("{gene}.orphan")).is_file()
+            && !Path::new(training_dir)
+                .join(format!("{gene}.tf_ablated"))
+                .is_file()
+        {
+            let _ = File::create(marker);
+        }
+    }
+}
+
+fn record_mean_r2_from_summaries(
+    gene: &str,
+    summaries: &[crate::estimator::ClusterTrainingSummary],
+    accum: &MeanLassoR2Accum,
+    lasso_from: &[crate::estimator::ClusterTrainingSummary],
+) {
+    if let Some(&idx) = accum.gene_to_idx.get(gene) {
+        let mean_r2: f64 = {
+            let mut sum = 0.0_f64;
+            let mut n_fin = 0usize;
+            for v in lasso_from.iter().map(|s| s.lasso_r2) {
+                if v.is_finite() {
+                    sum += v;
+                    n_fin += 1;
+                }
+            }
+            if n_fin == 0 {
+                f64::NAN
+            } else {
+                sum / n_fin as f64
+            }
+        };
+        accum.scores[idx].store(mean_r2.to_bits(), Ordering::Release);
+        if let Some(ref cnn_scores) = accum.mean_cnn_r2_scores {
+            let mut sum_cnn = 0.0_f64;
+            let mut n_cnn = 0usize;
+            for s in summaries {
+                if s.cnn_r2.is_finite() {
+                    sum_cnn += s.cnn_r2;
+                    n_cnn += 1;
+                }
+            }
+            let mean_cnn = if n_cnn > 0 {
+                sum_cnn / n_cnn as f64
+            } else {
+                f64::NAN
+            };
+            cnn_scores[idx].store(mean_cnn.to_bits(), Ordering::Release);
+        }
+    }
 }
 
 /// `use_tf_modulators` is on and every fitted TF coefficient column is zero (column indices
@@ -160,6 +255,241 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
         col_names,
         &mat,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_pooled_sample_gene<AB: AutodiffBackend>(
+    estimator: &mut SpatialCellularProgramsEstimator<AB, H5>,
+    gene: &str,
+    training_dir: &str,
+    xy: &Array2<f64>,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    device: &AB::Device,
+    cached_spatial: &CachedSpatialData,
+    obs_names: &[String],
+    cluster_betadata_row_keys: &HashMap<usize, String>,
+    score_threshold: f64,
+    export_per_cell: bool,
+    unscale_betas_on_export: bool,
+    cnn: &CnnConfig,
+    model_export: &ModelExportConfig,
+    learning_rate: f64,
+    epochs: usize,
+    n_iter: usize,
+    tol: f64,
+) -> (bool, bool, Option<usize>) {
+    let n_mods = estimator.modulators_genes.len();
+    let mut wrote = false;
+    let mut orphan_zero_mod_betas = false;
+    let Some(est_inner) = estimator.estimator.as_mut() else {
+        return (false, false, None);
+    };
+    let mut bad_lasso_r2_clusters: HashSet<usize> = HashSet::new();
+    let mut bad_betadata_clusters: HashSet<usize> = HashSet::new();
+    for s in &mut est_inner.cluster_training_summaries {
+        if !s.lasso_r2.is_finite() || s.lasso_r2 < score_threshold {
+            bad_lasso_r2_clusters.insert(s.cluster_id);
+            bad_betadata_clusters.insert(s.cluster_id);
+            s.lasso_r2 = 0.0;
+        }
+    }
+    for &cid in &bad_lasso_r2_clusters {
+        est_inner.r2_scores.insert(cid, 0.0);
+        est_inner.lasso_intercepts.insert(cid, 0.0);
+        if let Some(coef) = est_inner.lasso_coefficients.get_mut(&cid) {
+            coef.fill(0.0);
+        }
+    }
+    let mut skip_cnn_weight_export_clusters = bad_lasso_r2_clusters.clone();
+    if export_per_cell {
+        for s in &est_inner.cluster_training_summaries {
+            if est_inner.models.contains_key(&s.cluster_id)
+                && (!s.cnn_r2.is_finite() || s.cnn_r2 < score_threshold)
+            {
+                skip_cnn_weight_export_clusters.insert(s.cluster_id);
+            }
+        }
+    }
+    let _ = std::fs::create_dir_all(format!("{training_dir}/log"));
+    let betadata_path = format!("{}/{}_betadata.feather", training_dir, gene);
+    let col_names: Vec<String> = std::iter::once("beta0".to_string())
+        .chain(
+            estimator
+                .modulators_genes
+                .iter()
+                .map(|m| format!("beta_{}", m)),
+        )
+        .collect();
+
+    let n_betadata_beta_columns;
+    if export_per_cell {
+        let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
+        let mut all_betas = est_inner.predict_betas(PredictBetasInput {
+            x: &x_mock,
+            xy,
+            clusters,
+            num_clusters,
+            device,
+            cached_spatial: Some(cached_spatial),
+            inference_batch_size: cnn.cnn_inference_batch_size,
+        });
+        if !bad_betadata_clusters.is_empty() {
+            for i in 0..all_betas.nrows() {
+                if bad_betadata_clusters.contains(&clusters[i]) {
+                    all_betas.row_mut(i).fill(0.0);
+                }
+            }
+        }
+        if unscale_betas_on_export {
+            if let Some(ref scales) = estimator.modulator_scales {
+                unscale_betadata_columns_inplace(&mut all_betas, scales);
+            }
+        }
+        let keep: Vec<usize> = (0..all_betas.ncols())
+            .filter(|&j| {
+                all_betas
+                    .column(j)
+                    .iter()
+                    .any(|&v| finite_or_zero_f64(v) != 0.0)
+            })
+            .collect();
+        n_betadata_beta_columns = Some(keep.iter().filter(|&&j| j >= 1).count());
+        let n_tf = estimator.regulators.len();
+        let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
+        let all_tf_betas_zero = per_cell_all_tf_beta_columns_zero(&all_betas, n_tf);
+        if !has_any_mod_beta || all_tf_betas_zero {
+            let _ = File::create(format!("{}/{}.orphan", training_dir, gene));
+            orphan_zero_mod_betas = true;
+        } else {
+            let n_rows = obs_names.len();
+            let n_keep = keep.len();
+            let mut mat = Array2::<f64>::zeros((n_rows, n_keep));
+            for (new_j, &j) in keep.iter().enumerate() {
+                for i in 0..n_rows {
+                    mat[[i, new_j]] = finite_or_zero_f64(all_betas[[i, j]]);
+                }
+            }
+            let data_cols: Vec<String> = keep.iter().map(|&j| col_names[j].clone()).collect();
+            if write_betadata_feather(&betadata_path, "CellID", obs_names, &data_cols, &mat).is_ok()
+            {
+                wrote = true;
+                let _ = write_lasso_coefs_feather_for_gene(
+                    Path::new(training_dir),
+                    gene,
+                    est_inner,
+                    estimator.modulator_scales.as_ref(),
+                    &col_names,
+                    n_mods,
+                    &bad_betadata_clusters,
+                    cluster_betadata_row_keys,
+                    unscale_betas_on_export,
+                );
+            }
+        }
+    } else {
+        let mut cluster_ids: Vec<usize> = cluster_betadata_row_keys.keys().copied().collect();
+        cluster_ids.sort();
+        let rows: Vec<Vec<f64>> = cluster_ids
+            .iter()
+            .map(|&c_id| {
+                let zero_row = || vec![0.0; 1 + n_mods];
+                if bad_betadata_clusters.contains(&c_id) {
+                    return zero_row();
+                }
+                let Some(coefs) = est_inner.lasso_coefficients.get(&c_id) else {
+                    return zero_row();
+                };
+                let intercept = finite_or_zero_f64(
+                    est_inner
+                        .lasso_intercepts
+                        .get(&c_id)
+                        .copied()
+                        .unwrap_or(0.0),
+                );
+                let mut row = Vec::with_capacity(1 + n_mods);
+                row.push(intercept);
+                for j in 0..coefs.nrows() {
+                    let mut b = finite_or_zero_f64(coefs[[j, 0]]);
+                    if unscale_betas_on_export {
+                        if let Some(ref s) = estimator.modulator_scales {
+                            if j < s.len() {
+                                let sj = s[j];
+                                if sj != 1.0 {
+                                    b /= sj;
+                                }
+                            }
+                        }
+                    }
+                    row.push(b);
+                }
+                while row.len() < 1 + n_mods {
+                    row.push(0.0);
+                }
+                row
+            })
+            .collect();
+        let n_cols = 1 + n_mods;
+        let keep: Vec<usize> = (0..n_cols)
+            .filter(|&j| rows.iter().any(|r| r[j] != 0.0))
+            .collect();
+        n_betadata_beta_columns = Some(keep.iter().filter(|&&j| j >= 1).count());
+        let n_tf = estimator.regulators.len();
+        let has_any_mod_beta = keep.iter().any(|&j| j >= 1);
+        let all_tf_betas_zero = cluster_rows_all_tf_coef_columns_zero(&rows, n_tf);
+        if !has_any_mod_beta || all_tf_betas_zero {
+            let _ = File::create(format!("{}/{}.orphan", training_dir, gene));
+            orphan_zero_mod_betas = true;
+        } else {
+            let n_rows = rows.len();
+            let n_keep = keep.len();
+            let mut mat = Array2::<f64>::zeros((n_rows, n_keep));
+            for (i, row_vals) in rows.iter().enumerate() {
+                for (new_j, &j) in keep.iter().enumerate() {
+                    mat[[i, new_j]] = row_vals[j];
+                }
+            }
+            let ids: Vec<String> = cluster_ids
+                .iter()
+                .map(|&c| {
+                    cluster_betadata_row_keys
+                        .get(&c)
+                        .cloned()
+                        .unwrap_or_else(|| c.to_string())
+                })
+                .collect();
+            let data_cols: Vec<String> = keep.iter().map(|&j| col_names[j].clone()).collect();
+            if write_betadata_feather(&betadata_path, "Cluster", &ids, &data_cols, &mat).is_ok() {
+                wrote = true;
+            }
+        }
+    }
+
+    if wrote && export_per_cell && model_export.save_cnn_weights {
+        let _ = export_cnn_models_npz(
+            est_inner,
+            gene,
+            training_dir,
+            model_export,
+            Some(&skip_cnn_weight_export_clusters),
+        );
+    }
+    let safe_gene = gene.replace(['/', '\\'], "_");
+    let log_path = format!("{}/log/{}.log", training_dir, safe_gene);
+    let _ = crate::training_log::write_gene_training_log(
+        crate::training_log::WriteGeneTrainingLogArgs {
+            log_path: std::path::Path::new(&log_path),
+            gene,
+            seed_only: !export_per_cell,
+            per_cell_cnn_export: export_per_cell,
+            cnn_epochs_config: epochs,
+            learning_rate,
+            lasso_n_iter_max: n_iter,
+            lasso_tol: tol,
+            summaries: &est_inner.cluster_training_summaries,
+        },
+    );
+    (wrote, orphan_zero_mod_betas, n_betadata_beta_columns)
 }
 
 /// Remove `*.lock` files in `dir` whose modification time is at least `stale_secs` old.
@@ -2403,6 +2733,17 @@ pub fn materialize_canonical_training_adata(
     Ok(())
 }
 
+struct PooledSampleFit {
+    label: String,
+    output_dir: PathBuf,
+    xy: Array2<f64>,
+    clusters: Array1<usize>,
+    obs_names: Vec<String>,
+    cached_spatial: CachedSpatialData,
+    x_unscaled: Array2<f64>,
+    y: Array1<f64>,
+}
+
 pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub adata: Arc<AnnData<AnB>>,
     pub target_gene: String,
@@ -3127,22 +3468,70 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             };
 
             let t_sp = pipeline_step_begin(&hud, "precompute shared spatial feature tensors");
-            let cached_spatial = Arc::new(CachedSpatialData {
-                spatial_features: crate::estimator::create_spatial_features(
-                    xy.as_ref(),
-                    clusters.as_ref(),
-                    num_clusters,
-                    cnn.spatial_feature_radius,
-                ),
-                spatial_maps: crate::estimator::xyc2spatial_fast(
-                    xy.as_ref(),
-                    clusters.as_ref(),
-                    num_clusters,
-                    spatial_dim,
-                    spatial_dim,
-                    cnn.ego_center_spatial_maps,
-                ),
-            });
+            let pool_lasso = spaceship_config.training.pool_lasso;
+            let sample_plans: Option<Arc<Vec<crate::condition_split::ConditionSplitPlan>>> =
+                if pool_lasso {
+                    let col = spaceship_config
+                        .data
+                        .sample
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("pool_lasso requires [data].sample"))?;
+                    let nested = obs_row_subset.is_some();
+                    let plans = prepare_sample_splits_from_obs(
+                        &obs_df,
+                        training_dir,
+                        col,
+                        join_training,
+                        nested,
+                    )?;
+                    log_line(
+                        &hud,
+                        format!(
+                            "pool-lasso: {} samples from obs.{} → {}",
+                            plans.len(),
+                            col,
+                            if nested {
+                                "samples/<name>/"
+                            } else {
+                                "conditions/<name>/"
+                            }
+                        ),
+                    );
+                    if let Some(ref h) = hud {
+                        if let Ok(mut g) = h.lock() {
+                            g.set_pool_lasso_samples(
+                                plans.iter().map(|p| p.label.clone()).collect(),
+                            );
+                        }
+                    }
+                    Some(Arc::new(plans))
+                } else {
+                    None
+                };
+            let cached_spatial: Option<Arc<CachedSpatialData>> = if pool_lasso {
+                log_line(
+                    &hud,
+                    "spatial cache: deferred (per-sample under pool-lasso)".to_string(),
+                );
+                None
+            } else {
+                Some(Arc::new(CachedSpatialData {
+                    spatial_features: crate::estimator::create_spatial_features(
+                        xy.as_ref(),
+                        clusters.as_ref(),
+                        num_clusters,
+                        cnn.spatial_feature_radius,
+                    ),
+                    spatial_maps: crate::estimator::xyc2spatial_fast(
+                        xy.as_ref(),
+                        clusters.as_ref(),
+                        num_clusters,
+                        spatial_dim,
+                        spatial_dim,
+                        cnn.ego_center_spatial_maps,
+                    ),
+                }))
+            };
             pipeline_step_end(&hud, "precompute shared spatial feature tensors", t_sp);
 
             let gene_mean_arc: Option<Arc<HashMap<String, f64>>> = if max_ligands
@@ -3314,6 +3703,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let adata_path = worker_adata_path.clone();
                 let training_dir = training_dir.to_string();
                 let cached_spatial = cached_spatial.clone();
+                let sample_plans = sample_plans.clone();
                 let obs_subset = obs_row_subset_for_workers.clone();
 
                 let gene_mean_arc = gene_mean_arc.clone();
@@ -3372,11 +3762,30 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 format!("{}/{}.tf_ablated", training_dir, gene);
                             let lock_path = format!("{}/{}.lock", training_dir, gene);
 
-                            // Skip already-done
-                            if std::path::Path::new(&feather_path).exists()
-                                || std::path::Path::new(&orphan_path).exists()
-                                || std::path::Path::new(&tf_ablated_path).exists()
-                            {
+                            let sample_dirs: Vec<PathBuf> = sample_plans
+                                .as_ref()
+                                .map(|p| p.iter().map(|s| s.output_dir.clone()).collect())
+                                .unwrap_or_default();
+                            let already_done = if sample_plans.is_some() {
+                                pool_lasso_gene_already_done(
+                                    &training_dir,
+                                    &gene,
+                                    &sample_dirs,
+                                )
+                            } else {
+                                std::path::Path::new(&feather_path).exists()
+                                    || std::path::Path::new(&orphan_path).exists()
+                                    || std::path::Path::new(&tf_ablated_path).exists()
+                            };
+
+                            if already_done {
+                                if sample_plans.is_some() {
+                                    backfill_pool_lasso_done_marker(
+                                        &training_dir,
+                                        &gene,
+                                        &sample_dirs,
+                                    );
+                                }
                                 if let Some(ref h) = hud {
                                     if let Ok(mut g) = h.lock() {
                                         g.genes_skipped += 1;
@@ -3551,6 +3960,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     && estimator.gene_excluded_tf_modulators_ablation
                                 {
                                     let _ = fs::File::create(&tf_ablated_path);
+                                    for d in &sample_dirs {
+                                        let _ = fs::File::create(d.join(format!("{gene}.tf_ablated")));
+                                    }
                                     if let Some(ref h) = hud {
                                         if let Ok(mut g) = h.lock() {
                                             g.genes_tf_ablated += 1;
@@ -3564,6 +3976,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     );
                                 } else {
                                     let _ = fs::File::create(&orphan_path);
+                                    for d in &sample_dirs {
+                                        let _ = fs::File::create(d.join(format!("{gene}.orphan")));
+                                    }
                                     if let Some(ref h) = hud {
                                         if let Ok(mut g) = h.lock() {
                                             g.genes_orphan += 1;
@@ -3609,6 +4024,314 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             } else {
                                 None
                             };
+                            let export_per_cell = matches!(cnn_mode_w, CnnTrainingMode::Full);
+                            if let Some(ref plans) = sample_plans {
+                                let n_samp = plans.len();
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        g.set_gene_status(
+                                            &gene,
+                                            format!("pooled lasso · {n_samp} samples | {n_mods} mods"),
+                                        );
+                                    }
+                                }
+                                let pooled = estimator.run_pooled_lasso_samples(
+                                    plans.as_slice(),
+                                    &xy,
+                                    &clusters,
+                                    obs_names.as_ref(),
+                                    obs_subset.as_ref(),
+                                    num_clusters,
+                                    epochs,
+                                    learning_rate,
+                                    score_threshold,
+                                    l1_reg,
+                                    group_reg,
+                                    n_iter,
+                                    tol,
+                                    scale_modulators_w,
+                                    parallel_lasso_clusters_w,
+                                    gram_override_w,
+                                    &cnn_w,
+                                    &device,
+                                    random_seed_w,
+                                    worker_run_full_cnn,
+                                    cnn_epoch_slot_fit.clone(),
+                                    on_lasso_progress,
+                                );
+                                match pooled {
+                                    Ok(slices) => {
+                                        let pooled_summaries = estimator
+                                            .estimator
+                                            .as_ref()
+                                            .map(|e| e.cluster_training_summaries.clone())
+                                            .unwrap_or_default();
+                                        let pooled_coefs = estimator
+                                            .estimator
+                                            .as_ref()
+                                            .map(|e| e.lasso_coefficients.clone())
+                                            .unwrap_or_default();
+                                        let pooled_intercepts = estimator
+                                            .estimator
+                                            .as_ref()
+                                            .map(|e| e.lasso_intercepts.clone())
+                                            .unwrap_or_default();
+                                        let mut any_wrote = false;
+                                        let mut any_orphan = false;
+                                        let mut cnn_summaries_acc: Vec<
+                                            crate::estimator::ClusterTrainingSummary,
+                                        > = Vec::new();
+                                        let n_samp = slices.len();
+                                        for (si, slice) in slices.iter().enumerate() {
+                                            if let Some(ref h) = hud {
+                                                if let Ok(mut g) = h.lock() {
+                                                    g.set_gene_pool_sample(
+                                                        &gene,
+                                                        si + 1,
+                                                        n_samp,
+                                                        &slice.label,
+                                                    );
+                                                    g.set_gene_status(
+                                                        &gene,
+                                                        format!(
+                                                            "sample {}/{} {} | {n_mods} mods",
+                                                            si + 1,
+                                                            n_samp,
+                                                            slice.label
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                            if gene_terminal_artifact_in_dir(&slice.output_dir, &gene)
+                                            {
+                                                if slice
+                                                    .output_dir
+                                                    .join(format!("{gene}_betadata.feather"))
+                                                    .is_file()
+                                                {
+                                                    any_wrote = true;
+                                                } else {
+                                                    any_orphan = true;
+                                                }
+                                                continue;
+                                            }
+                                            if let Some(est) = estimator.estimator.as_mut() {
+                                                est.lasso_coefficients = pooled_coefs.clone();
+                                                est.lasso_intercepts = pooled_intercepts.clone();
+                                            }
+                                            let mut x_s = slice.x_unscaled.clone();
+                                            if let Some(ref scales) = estimator.modulator_scales {
+                                                apply_modulator_scales_inplace(&mut x_s, scales);
+                                            }
+                                            if let Some(est) = estimator.estimator.as_mut() {
+                                                let sample_r2 =
+                                                    ClusteredGCNNWR::<AB>::lasso_r2_per_cluster_on_rows(
+                                                        &x_s,
+                                                        &slice.y,
+                                                        &slice.clusters,
+                                                        &pooled_coefs,
+                                                        &pooled_intercepts,
+                                                    );
+                                                est.cluster_training_summaries =
+                                                    pooled_summaries.clone();
+                                                for s in &mut est.cluster_training_summaries {
+                                                    s.n_cells = slice
+                                                        .clusters
+                                                        .iter()
+                                                        .filter(|&&c| c == s.cluster_id)
+                                                        .count();
+                                                    if let Some(&r) = sample_r2.get(&s.cluster_id)
+                                                    {
+                                                        s.lasso_r2 = r;
+                                                    }
+                                                }
+                                                if worker_run_full_cnn {
+                                                    if let Some(ref slot) = cnn_epoch_slot_fit {
+                                                        slot.reconfigure(epochs);
+                                                    }
+                                                    est.reinit_models_from_lasso_anchors(
+                                                        num_clusters,
+                                                        &device,
+                                                        &cnn_w,
+                                                    );
+                                                    let gene_cnn = gene.clone();
+                                                    let hud_cnn = hud.clone();
+                                                    est.fit_cnn_refinement(
+                                                        ClusteredGcnNwrCnnRefineInputs {
+                                                            x: &x_s,
+                                                            y: &slice.y,
+                                                            xy: &slice.xy,
+                                                            clusters: &slice.clusters,
+                                                            num_clusters,
+                                                            device: &device,
+                                                            epochs,
+                                                            learning_rate,
+                                                            cnn: &cnn_w,
+                                                            cached_spatial: Some(
+                                                                &slice.cached_spatial,
+                                                            ),
+                                                            cnn_epoch_slot: cnn_epoch_slot_fit
+                                                                .clone(),
+                                                            random_seed: random_seed_w,
+                                                        },
+                                                        |done, total| {
+                                                            if let Some(hh) = hud_cnn.as_ref() {
+                                                                if let Ok(mut g) = hh.lock() {
+                                                                    g.set_gene_lasso_cluster_progress(
+                                                                        &gene_cnn, done, total,
+                                                                    );
+                                                                }
+                                                            }
+                                                        },
+                                                    );
+                                                }
+                                                let sample_cnn: Vec<_> =
+                                                    est.cluster_training_summaries.to_vec();
+                                                est.cluster_training_summaries =
+                                                    pooled_summaries.clone();
+                                                for s in &mut est.cluster_training_summaries {
+                                                    if let Some(sc) = sample_cnn
+                                                        .iter()
+                                                        .find(|x| x.cluster_id == s.cluster_id)
+                                                    {
+                                                        s.cnn_r2 = sc.cnn_r2;
+                                                        s.cnn_train_mse_epochs =
+                                                            sc.cnn_train_mse_epochs.clone();
+                                                        s.n_cells = sc.n_cells;
+                                                    }
+                                                }
+                                                cnn_summaries_acc.extend(sample_cnn);
+                                                est.lasso_coefficients = pooled_coefs.clone();
+                                                est.lasso_intercepts = pooled_intercepts.clone();
+                                            }
+                                            let sample_dir = slice
+                                                .output_dir
+                                                .to_str()
+                                                .unwrap_or_default();
+                                            let (wrote, orphan, ncols) = export_pooled_sample_gene(
+                                                &mut estimator,
+                                                &gene,
+                                                sample_dir,
+                                                &slice.xy,
+                                                &slice.clusters,
+                                                num_clusters,
+                                                &device,
+                                                &slice.cached_spatial,
+                                                &slice.obs_names,
+                                                cluster_betadata_row_keys.as_ref(),
+                                                score_threshold,
+                                                export_per_cell,
+                                                unscale_betas_on_export_w,
+                                                &cnn_w,
+                                                &model_export_w,
+                                                learning_rate,
+                                                epochs,
+                                                n_iter,
+                                                tol,
+                                            );
+                                            any_wrote |= wrote;
+                                            any_orphan |= orphan;
+                                            if verbose_w {
+                                                eprintln!(
+                                                    "[verbose] pool-lasso gene={} sample={} wrote={} orphan={} ncols={:?}",
+                                                    gene, slice.label, wrote, orphan, ncols
+                                                );
+                                            }
+                                        }
+                                        if any_wrote
+                                            || slices.iter().all(|s| {
+                                                gene_terminal_artifact_in_dir(&s.output_dir, &gene)
+                                            })
+                                        {
+                                            write_pool_lasso_gene_done_marker(&training_dir, &gene);
+                                        }
+                                        if any_wrote {
+                                            if let Some(ref h) = hud {
+                                                if let Ok(mut g) = h.lock() {
+                                                    g.genes_done += 1;
+                                                    if !cnn_summaries_acc.is_empty() {
+                                                        g.record_training_metrics(
+                                                            &gene,
+                                                            &cnn_summaries_acc,
+                                                            None,
+                                                            Some((
+                                                                cnn_w.drop_cnn_if_insample_worse_than_lasso,
+                                                                cnn_w.cnn_vs_lasso_arbitration_margin,
+                                                            )),
+                                                        );
+                                                    } else if !pooled_summaries.is_empty() {
+                                                        g.record_training_metrics(
+                                                            &gene,
+                                                            &pooled_summaries,
+                                                            None,
+                                                            None,
+                                                        );
+                                                    }
+                                                }
+                                                log_line(
+                                                    &hud,
+                                                    format!("ok {} ({} samples)", gene, slices.len()),
+                                                );
+                                            }
+                                        } else if any_orphan {
+                                            let _ = fs::File::create(&orphan_path);
+                                            if let Some(ref h) = hud {
+                                                if let Ok(mut g) = h.lock() {
+                                                    g.genes_orphan += 1;
+                                                }
+                                            }
+                                            log_line(&hud, format!("orphan pool {}", gene));
+                                        } else {
+                                            if let Some(ref h) = hud {
+                                                if let Ok(mut g) = h.lock() {
+                                                    g.genes_failed += 1;
+                                                }
+                                                log_line(&hud, format!("fail {}", gene));
+                                            }
+                                        }
+                                        record_mean_r2_from_summaries(
+                                            &gene,
+                                            &cnn_summaries_acc,
+                                            &mean_r2_accum_w,
+                                            &pooled_summaries,
+                                        );
+                                        if let Some(ref h) = hud {
+                                            if let Ok(mut g) = h.lock() {
+                                                g.clear_gene_lasso_cluster_progress(&gene);
+                                                g.clear_gene_cnn_epoch_slot(&gene);
+                                                if any_wrote {
+                                                    g.record_gene_export_mode(export_per_cell);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log_line(
+                                            &hud,
+                                            format!("fail pool {}: {}", gene, e),
+                                        );
+                                        if let Some(ref h) = hud {
+                                            if let Ok(mut g) = h.lock() {
+                                                g.genes_failed += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(ref h) = hud {
+                                    if let Ok(mut g) = h.lock() {
+                                        g.record_gene_time(
+                                            &gene,
+                                            gene_start.elapsed().as_secs_f64(),
+                                        );
+                                        g.remove_gene(&gene);
+                                        g.genes_rounds += 1;
+                                    }
+                                }
+                                if let Some(ref p) = pb {
+                                    p.inc(1);
+                                }
+                                continue;
+                            }
                             let fit_ok = estimator
                                 .fit_with_cache(
                                     &xy,
@@ -3627,7 +4350,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     "lasso",
                                     &cnn_w,
                                     &device,
-                                    Some(cached_spatial.as_ref()),
+                                    cached_spatial.as_deref(),
                                     cnn_epoch_slot_fit,
                                     random_seed_w,
                                     on_lasso_progress,
@@ -3746,7 +4469,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 clusters: &clusters,
                                                 num_clusters,
                                                 device: &device,
-                                                cached_spatial: Some(cached_spatial.as_ref()),
+                                                cached_spatial: cached_spatial.as_deref(),
                                                 inference_batch_size: cnn_w.cnn_inference_batch_size,
                                             },
                                         );
@@ -4054,7 +4777,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             &xy,
                                             &clusters,
                                             num_clusters,
-                                            Some(cached_spatial.as_ref()),
+                                            cached_spatial.as_deref(),
                                             &device,
                                         ) {
                                             Ok(Some(path)) => {
@@ -4081,7 +4804,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 &xy,
                                                 &clusters,
                                                 num_clusters,
-                                                Some(cached_spatial.as_ref()),
+                                                cached_spatial.as_deref(),
                                                 obs_names.as_ref(),
                                                 scale_modulators_w,
                                                 unscale_betas_on_export_w,
@@ -4570,6 +5293,199 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn run_pooled_lasso_samples<F: FnMut(usize, usize) + Send>(
+        &mut self,
+        plans: &[crate::condition_split::ConditionSplitPlan],
+        xy_all: &Array2<f64>,
+        clusters_all: &Array1<usize>,
+        obs_names_all: &[String],
+        orig_obs_subset: Option<&Arc<[usize]>>,
+        num_clusters: usize,
+        epochs: usize,
+        learning_rate: f64,
+        score_threshold: f64,
+        l1_reg: f64,
+        group_reg: f64,
+        n_iter: usize,
+        tol: f64,
+        scale_modulators: bool,
+        parallel_lasso_clusters: bool,
+        gram_override: Option<bool>,
+        cnn: &CnnConfig,
+        device: &AB::Device,
+        random_seed: u64,
+        _run_full_cnn: bool,
+        _cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
+        lasso_progress: F,
+    ) -> anyhow::Result<Vec<PooledSampleFit>> {
+        let orig_subset = self.obs_row_subset.clone();
+        let mut slices: Vec<PooledSampleFit> = Vec::with_capacity(plans.len());
+        let mut x_parts: Vec<Array2<f64>> = Vec::with_capacity(plans.len());
+        let mut y_parts: Vec<Array1<f64>> = Vec::with_capacity(plans.len());
+        let mut c_parts: Vec<Array1<usize>> = Vec::with_capacity(plans.len());
+
+        for plan in plans {
+            let local = &plan.obs_indices;
+            anyhow::ensure!(!local.is_empty(), "sample {:?} has no cells", plan.label);
+            let sample_xy = xy_all.select(Axis(0), local);
+            let sample_clusters = clusters_all.select(Axis(0), local);
+            let sample_names: Vec<String> =
+                local.iter().map(|&i| obs_names_all[i].clone()).collect();
+            let global_rows: Vec<usize> = match orig_obs_subset {
+                Some(rows) => local.iter().map(|&i| rows[i]).collect(),
+                None => local.clone(),
+            };
+            self.obs_row_subset = Some(Arc::from(global_rows.into_boxed_slice()));
+            let (x, y) = self.build_x_modulators_and_target_y(&sample_xy)?;
+            let cached_spatial = CachedSpatialData {
+                spatial_features: crate::estimator::create_spatial_features(
+                    &sample_xy,
+                    &sample_clusters,
+                    num_clusters,
+                    cnn.spatial_feature_radius,
+                ),
+                spatial_maps: crate::estimator::xyc2spatial_fast(
+                    &sample_xy,
+                    &sample_clusters,
+                    num_clusters,
+                    self.spatial_dim,
+                    self.spatial_dim,
+                    cnn.ego_center_spatial_maps,
+                ),
+            };
+            x_parts.push(x.clone());
+            y_parts.push(y.clone());
+            c_parts.push(sample_clusters.clone());
+            slices.push(PooledSampleFit {
+                label: plan.label.clone(),
+                output_dir: plan.output_dir.clone(),
+                xy: sample_xy,
+                clusters: sample_clusters,
+                obs_names: sample_names,
+                cached_spatial,
+                x_unscaled: x,
+                y,
+            });
+        }
+        self.obs_row_subset = orig_subset;
+
+        let mut x_pool = vstack_rows(&x_parts)?;
+        let y_pool = concat_vec1(&y_parts)?;
+        let clusters_pool = concat_usize(&c_parts)?;
+        if scale_modulators {
+            let scales = scale_columns_no_center(&mut x_pool);
+            self.modulator_scales = Some(scales);
+        } else {
+            self.modulator_scales = None;
+        }
+
+        let dummy_xy = Array2::<f64>::zeros((x_pool.nrows(), 2));
+        let was_seed = self.seed_only;
+        self.seed_only = true;
+        self.fit_prepared_design(
+            &x_pool,
+            &y_pool,
+            &dummy_xy,
+            &clusters_pool,
+            num_clusters,
+            epochs,
+            learning_rate,
+            score_threshold,
+            l1_reg,
+            group_reg,
+            n_iter,
+            tol,
+            parallel_lasso_clusters,
+            gram_override,
+            cnn,
+            device,
+            None,
+            None,
+            random_seed,
+            lasso_progress,
+        )?;
+        self.seed_only = was_seed;
+        Ok(slices)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fit_prepared_design<F: FnMut(usize, usize) + Send>(
+        &mut self,
+        x_modulators: &Array2<f64>,
+        target_expr: &Array1<f64>,
+        xy: &Array2<f64>,
+        clusters: &Array1<usize>,
+        num_clusters: usize,
+        epochs: usize,
+        learning_rate: f64,
+        score_threshold: f64,
+        l1_reg: f64,
+        group_reg: f64,
+        n_iter: usize,
+        tol: f64,
+        parallel_lasso_clusters: bool,
+        gram_override: Option<bool>,
+        cnn: &CnnConfig,
+        device: &AB::Device,
+        cached_spatial: Option<&CachedSpatialData>,
+        cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
+        random_seed: u64,
+        lasso_progress: F,
+    ) -> anyhow::Result<()> {
+        if self.estimator.is_none() {
+            let mut groups: Vec<i64> = vec![0; self.regulators.len()];
+            groups.extend(std::iter::repeat_n(1i64, self.lr_pairs.len()));
+            groups.extend(std::iter::repeat_n(2i64, self.tfl_pairs.len()));
+            groups.extend(std::iter::repeat_n(3i64, self.extra_modulators.len()));
+
+            let params = GroupLassoParams {
+                l1_reg,
+                group_reg,
+                groups,
+                n_iter,
+                tol,
+                gram_override,
+                seed: mix_execution_random_seed(random_seed, &self.target_gene),
+                ..Default::default()
+            };
+            let mut est = ClusteredGCNNWR::new(
+                params,
+                self.spatial_dim,
+                cnn.spatial_feature_radius,
+                cnn.ego_center_spatial_maps,
+                cnn.multi_channel_spatial_maps,
+            );
+            est.group_reg_vec = self.group_reg_vec.clone();
+            est.regulator_masks_by_cluster = self.regulator_masks_by_cluster.clone();
+            self.estimator = Some(est);
+        }
+
+        if let Some(est) = &mut self.estimator {
+            est.fit(
+                ClusteredGcnNwrFitInputs {
+                    x: x_modulators,
+                    y: target_expr,
+                    xy,
+                    clusters,
+                    num_clusters,
+                    device,
+                    epochs,
+                    learning_rate,
+                    score_threshold,
+                    seed_only: self.seed_only,
+                    cnn,
+                    cached_spatial,
+                    cnn_epoch_slot,
+                    parallel_lasso_clusters,
+                    random_seed,
+                },
+                lasso_progress,
+            );
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn fit(
         &mut self,
         epochs: usize,
@@ -4659,7 +5575,10 @@ mod obsm_spatial_read_tests {
     use std::path::PathBuf;
 
     fn temp_h5ad(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("spacetravlr_obsm_{name}_{}.h5ad", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "spacetravlr_obsm_{name}_{}.h5ad",
+            std::process::id()
+        ))
     }
 
     fn write_minimal_h5ad(path: &PathBuf, spatial: Array2<i32>) {
@@ -5343,5 +6262,143 @@ mod mean_lasso_r2_patch_tests {
             "patch_var_orphan_markers_force_zero_under_flock failed after {MAX_ATTEMPTS} attempts: {:?}",
             last_err
         );
+    }
+}
+
+#[cfg(test)]
+mod pool_lasso_done_marker_tests {
+    use super::{
+        backfill_pool_lasso_done_marker, gene_terminal_artifact_in_dir, pool_lasso_gene_already_done,
+        write_pool_lasso_gene_done_marker,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "spacetravlr_pool_done_{name}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn already_done_false_when_no_artifacts() {
+        let root = temp_root("empty");
+        let s1 = root.join("conditions").join("s1");
+        let s2 = root.join("conditions").join("s2");
+        fs::create_dir_all(&s1).unwrap();
+        fs::create_dir_all(&s2).unwrap();
+        assert!(!pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "GATA4",
+            &[s1, s2]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn already_done_requires_every_sample() {
+        let root = temp_root("partial");
+        let s1 = root.join("conditions").join("s1");
+        let s2 = root.join("conditions").join("s2");
+        fs::create_dir_all(&s1).unwrap();
+        fs::create_dir_all(&s2).unwrap();
+        fs::write(s1.join("GATA4_betadata.feather"), b"x").unwrap();
+        assert!(!pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "GATA4",
+            &[s1.clone(), s2.clone()]
+        ));
+        fs::write(s2.join("GATA4.orphan"), b"").unwrap();
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "GATA4",
+            &[s1, s2]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parent_done_marker_short_circuits_sample_scan() {
+        let root = temp_root("marker");
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        write_pool_lasso_gene_done_marker(root.to_str().unwrap(), "Tnf");
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "Tnf",
+            &[s1]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backfill_writes_parent_marker_when_samples_complete() {
+        let root = temp_root("backfill");
+        let s1 = root.join("conditions").join("s1");
+        let s2 = root.join("conditions").join("s2");
+        fs::create_dir_all(&s1).unwrap();
+        fs::create_dir_all(&s2).unwrap();
+        fs::write(s1.join("AICDA_betadata.feather"), b"x").unwrap();
+        fs::write(s2.join("AICDA_betadata.feather"), b"x").unwrap();
+        let dirs = vec![s1.clone(), s2.clone()];
+        backfill_pool_lasso_done_marker(root.to_str().unwrap(), "AICDA", &dirs);
+        assert!(root.join("AICDA.done").is_file());
+        assert!(gene_terminal_artifact_in_dir(&s1, "AICDA"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parent_orphan_or_tf_ablated_counts_as_done() {
+        let root = temp_root("parent_term");
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        let dirs = vec![s1];
+        fs::write(root.join("FOO.orphan"), b"").unwrap();
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "FOO",
+            &dirs
+        ));
+        fs::remove_file(root.join("FOO.orphan")).unwrap();
+        fs::write(root.join("FOO.tf_ablated"), b"").unwrap();
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "FOO",
+            &dirs
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_sample_dirs_only_done_with_parent_marker() {
+        let root = temp_root("empty_dirs");
+        assert!(!pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "BAR",
+            &[]
+        ));
+        write_pool_lasso_gene_done_marker(root.to_str().unwrap(), "BAR");
+        assert!(pool_lasso_gene_already_done(
+            root.to_str().unwrap(),
+            "BAR",
+            &[]
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backfill_skips_when_parent_already_orphaned() {
+        let root = temp_root("no_backfill_orphan");
+        let s1 = root.join("conditions").join("s1");
+        fs::create_dir_all(&s1).unwrap();
+        fs::write(s1.join("X_betadata.feather"), b"x").unwrap();
+        fs::write(root.join("X.orphan"), b"").unwrap();
+        backfill_pool_lasso_done_marker(root.to_str().unwrap(), "X", &[s1]);
+        assert!(!root.join("X.done").is_file());
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -57,8 +57,7 @@ fn download_grn_parquet_url(filename: &str, dest: &Path) -> Result<()> {
         let url = format!("https://raw.githubusercontent.com/{repo}/{ref_name}/data/{filename}");
         match download_url_to_path(&url, &part) {
             Ok(()) if grn_parquet_ready(&part) => {
-                fs::rename(&part, dest)
-                    .with_context(|| format!("install {}", dest.display()))?;
+                fs::rename(&part, dest).with_context(|| format!("install {}", dest.display()))?;
                 return Ok(());
             }
             Ok(()) => {
@@ -100,8 +99,7 @@ pub fn run_network_data_dir(output_dir: &Path) -> PathBuf {
 /// (same files as `scripts/install.sh` → `data/`). Skips files that already look valid.
 pub fn ensure_grn_network_parquets(output_dir: &Path) -> Result<PathBuf> {
     let dir = run_network_data_dir(output_dir);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     for filename in GRN_NETWORK_PARQUETS {
         let dest = dir.join(filename);
         if grn_parquet_ready(&dest) {
@@ -111,12 +109,8 @@ pub fn ensure_grn_network_parquets(output_dir: &Path) -> Result<PathBuf> {
             "spacetravlr: downloading {filename} into {} …",
             dir.display()
         );
-        download_grn_parquet_url(filename, &dest).with_context(|| {
-            format!(
-                "download GRN parquet {filename} into {}",
-                dir.display()
-            )
-        })?;
+        download_grn_parquet_url(filename, &dest)
+            .with_context(|| format!("download GRN parquet {filename} into {}", dir.display()))?;
     }
     Ok(dir)
 }
@@ -130,7 +124,10 @@ pub fn resolve_or_fetch_network_data_dir(
 ) -> Result<Option<String>> {
     let filename = format!("{species}_network.parquet");
 
-    if let Some(d) = config_network_data_dir.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(d) = config_network_data_dir
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let expanded = expand_user_path(d);
         if grn_parquet_exists(&Path::new(&expanded).join(&filename)) {
             return Ok(Some(expanded));
@@ -1193,9 +1190,10 @@ mod tests {
         );
         let out = dir.join("run_out");
         fs::create_dir_all(&out).unwrap();
-        let resolved = resolve_or_fetch_network_data_dir("mouse", &out, Some(dir.to_str().unwrap()))
-            .unwrap()
-            .expect("explicit config dir");
+        let resolved =
+            resolve_or_fetch_network_data_dir("mouse", &out, Some(dir.to_str().unwrap()))
+                .unwrap()
+                .expect("explicit config dir");
         assert_eq!(Path::new(&resolved), dir);
         let _ = fs::remove_dir_all(&dir);
     }

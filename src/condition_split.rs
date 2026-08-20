@@ -42,7 +42,7 @@ pub fn scan_condition_status(output_root: &str) -> anyhow::Result<Vec<ConditionD
     for entry in entries {
         let dir_name = entry.file_name().to_string_lossy().into_owned();
         let dir_path = entry.path();
-        let label = fs::read_to_string(dir_path.join("condition_label.txt"))
+        let label = fs::read_to_string(dir_path.join(CONDITION_LABEL_FILENAME))
             .unwrap_or_else(|_| dir_name.clone())
             .trim()
             .to_string();
@@ -83,6 +83,13 @@ pub fn scan_condition_status(output_root: &str) -> anyhow::Result<Vec<ConditionD
 /// Parent directory under the run output root for per-condition training (betadata, logs, models).
 pub const CONDITION_RUNS_SUBDIR: &str = "conditions";
 
+/// Nested per-sample dirs when `[data].condition` and `[training].pool_lasso` are both set:
+/// `conditions/<condition>/samples/<sample>/`.
+pub const SAMPLE_RUNS_SUBDIR: &str = "samples";
+
+pub const CONDITION_LABEL_FILENAME: &str = "condition_label.txt";
+pub const SAMPLE_LABEL_FILENAME: &str = "sample_label.txt";
+
 /// Normalizes a condition label the same way as when writing `condition_label.txt`.
 pub fn normalize_condition_label(s: &str) -> String {
     s.replace(['\n', '\r'], " ").trim().to_string()
@@ -105,7 +112,7 @@ pub fn find_condition_dir_matching_label(output_root: &str, label: &str) -> Opti
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| {
             let p = e.path();
-            let txt = p.join("condition_label.txt");
+            let txt = p.join(CONDITION_LABEL_FILENAME);
             if !txt.is_file() {
                 return None;
             }
@@ -181,19 +188,12 @@ pub fn resolve_condition_dir_names(labels: &[String]) -> Vec<String> {
     out
 }
 
-/// When `reuse_existing_condition_dirs` is true (e.g. `--join-output-dir`), each split's output
-/// directory is an existing `conditions/<subdir>/` with a matching `condition_label.txt` if one
-/// exists; otherwise the canonical sanitized name is used. This keeps betadata and locks on the
-/// same paths as the leader run.
-pub fn prepare_condition_splits(
-    adata_path: &str,
-    output_root: &str,
-    condition_column: &str,
-    reuse_existing_condition_dirs: bool,
-) -> anyhow::Result<Vec<ConditionSplitPlan>> {
-    let adata = AnnData::<H5>::open(H5::open(adata_path)?)?;
-    let obs = adata.read_obs()?;
-    let condition_series = obs.column(condition_column).with_context(|| {
+/// Group row indices by a string-like `obs` column. Empty / missing values become `"_na"`.
+pub fn group_obs_column_indices(
+    obs: &polars::prelude::DataFrame,
+    column: &str,
+) -> anyhow::Result<BTreeMap<String, Vec<usize>>> {
+    let series_col = obs.column(column).with_context(|| {
         let names: Vec<String> = obs
             .get_column_names()
             .iter()
@@ -201,12 +201,11 @@ pub fn prepare_condition_splits(
             .take(25)
             .collect();
         format!(
-            "obs column {:?} not found (needed for --condition split). First obs columns: {:?}.",
-            condition_column, names
+            "obs column {:?} not found. First obs columns: {:?}.",
+            column, names
         )
     })?;
-
-    let series = condition_series.as_materialized_series();
+    let series = series_col.as_materialized_series();
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for idx in 0..series.len() {
         let raw = obs_series_row_str(series, idx).unwrap_or_default();
@@ -218,12 +217,155 @@ pub fn prepare_condition_splits(
         groups.entry(label).or_default().push(idx);
     }
     if groups.is_empty() {
-        anyhow::bail!(
-            "obs column {:?} has no values; cannot split training by condition.",
-            condition_column
-        );
+        anyhow::bail!("obs column {:?} has no values.", column);
     }
+    Ok(groups)
+}
 
+/// When `reuse_existing_condition_dirs` is true (e.g. `--join-output-dir`), each split's output
+/// directory is an existing `conditions/<subdir>/` with a matching `condition_label.txt` if one
+/// exists; otherwise the canonical sanitized name is used. This keeps betadata and locks on the
+/// same paths as the leader run.
+pub fn prepare_condition_splits(
+    adata_path: &str,
+    output_root: &str,
+    condition_column: &str,
+    reuse_existing_condition_dirs: bool,
+) -> anyhow::Result<Vec<ConditionSplitPlan>> {
+    prepare_obs_splits(
+        adata_path,
+        output_root,
+        condition_column,
+        reuse_existing_condition_dirs,
+        CONDITION_RUNS_SUBDIR,
+        CONDITION_LABEL_FILENAME,
+        "condition",
+    )
+}
+
+/// Sample splits under `output_root/conditions/<sample>/` (standalone pool-lasso) or
+/// `output_root/samples/<sample>/` (nested under a condition directory).
+pub fn prepare_sample_splits(
+    adata_path: &str,
+    output_root: &str,
+    sample_column: &str,
+    reuse_existing: bool,
+    nested_under_condition: bool,
+) -> anyhow::Result<Vec<ConditionSplitPlan>> {
+    if nested_under_condition {
+        prepare_obs_splits(
+            adata_path,
+            output_root,
+            sample_column,
+            reuse_existing,
+            SAMPLE_RUNS_SUBDIR,
+            SAMPLE_LABEL_FILENAME,
+            "sample",
+        )
+    } else {
+        prepare_obs_splits(
+            adata_path,
+            output_root,
+            sample_column,
+            reuse_existing,
+            CONDITION_RUNS_SUBDIR,
+            CONDITION_LABEL_FILENAME,
+            "sample",
+        )
+    }
+}
+
+/// Build split dirs from an already-subsetted `obs` table (local row indices).
+pub fn prepare_sample_splits_from_obs(
+    obs: &polars::prelude::DataFrame,
+    output_root: &str,
+    sample_column: &str,
+    reuse_existing: bool,
+    nested_under_condition: bool,
+) -> anyhow::Result<Vec<ConditionSplitPlan>> {
+    let groups = group_obs_column_indices(obs, sample_column)?;
+    let (subdir, label_file) = if nested_under_condition {
+        (SAMPLE_RUNS_SUBDIR, SAMPLE_LABEL_FILENAME)
+    } else {
+        (CONDITION_RUNS_SUBDIR, CONDITION_LABEL_FILENAME)
+    };
+    write_split_plans(
+        groups,
+        output_root,
+        reuse_existing,
+        subdir,
+        label_file,
+        "sample",
+    )
+}
+
+fn prepare_obs_splits(
+    adata_path: &str,
+    output_root: &str,
+    column: &str,
+    reuse_existing: bool,
+    runs_subdir: &str,
+    label_filename: &str,
+    kind: &str,
+) -> anyhow::Result<Vec<ConditionSplitPlan>> {
+    let adata = AnnData::<H5>::open(H5::open(adata_path)?)?;
+    let obs = adata.read_obs()?;
+    let groups = group_obs_column_indices(&obs, column)
+        .with_context(|| format!("needed for {kind} split on obs column {column:?}"))?;
+    write_split_plans(
+        groups,
+        output_root,
+        reuse_existing,
+        runs_subdir,
+        label_filename,
+        kind,
+    )
+}
+
+fn find_split_dir_matching_label(
+    output_root: &str,
+    runs_subdir: &str,
+    label_filename: &str,
+    label: &str,
+) -> Option<PathBuf> {
+    let root = Path::new(output_root).join(runs_subdir);
+    if !root.is_dir() {
+        return None;
+    }
+    let want = normalize_condition_label(label);
+    if want.is_empty() {
+        return None;
+    }
+    let mut matches: Vec<PathBuf> = fs::read_dir(&root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let p = e.path();
+            let txt = p.join(label_filename);
+            if !txt.is_file() {
+                return None;
+            }
+            let disk = fs::read_to_string(&txt).ok()?;
+            if normalize_condition_label(disk.trim()) == want {
+                Some(p)
+            } else {
+                None
+            }
+        })
+        .collect();
+    matches.sort();
+    matches.into_iter().next()
+}
+
+fn write_split_plans(
+    groups: BTreeMap<String, Vec<usize>>,
+    output_root: &str,
+    reuse_existing: bool,
+    runs_subdir: &str,
+    label_filename: &str,
+    kind: &str,
+) -> anyhow::Result<Vec<ConditionSplitPlan>> {
     fs::create_dir_all(output_root)?;
     let labels: Vec<String> = groups.keys().cloned().collect();
     let dir_names = resolve_condition_dir_names(&labels);
@@ -231,26 +373,26 @@ pub fn prepare_condition_splits(
 
     for ((label, indices), dir_name) in groups.into_iter().zip(dir_names.into_iter()) {
         if indices.is_empty() {
-            anyhow::bail!("condition group {:?} has zero rows; cannot train.", label);
+            anyhow::bail!("{kind} group {label:?} has zero rows; cannot train.");
         }
         let n_obs = indices.len();
-        let canonical_dir = Path::new(output_root)
-            .join(CONDITION_RUNS_SUBDIR)
-            .join(&dir_name);
-        let split_output_dir = if reuse_existing_condition_dirs {
-            find_condition_dir_matching_label(output_root, &label).unwrap_or(canonical_dir)
+        let canonical_dir = Path::new(output_root).join(runs_subdir).join(&dir_name);
+        let split_output_dir = if reuse_existing {
+            find_split_dir_matching_label(output_root, runs_subdir, label_filename, &label)
+                .unwrap_or(canonical_dir)
         } else {
             canonical_dir
         };
         fs::create_dir_all(&split_output_dir)?;
-        let label_path = split_output_dir.join("condition_label.txt");
+        let label_path = split_output_dir.join(label_filename);
         let label_one_line = label.replace(['\n', '\r'], " ");
-        if reuse_existing_condition_dirs && label_path.is_file() {
+        if reuse_existing && label_path.is_file() {
             let on_disk = fs::read_to_string(&label_path).unwrap_or_default();
             if normalize_condition_label(on_disk.trim()) != normalize_condition_label(&label) {
                 anyhow::bail!(
-                    "reuse dirs: {} exists but condition_label.txt ({:?}) does not match group label {:?}",
+                    "reuse dirs: {} exists but {} ({:?}) does not match group label {:?}",
                     label_path.display(),
+                    label_filename,
                     on_disk.trim(),
                     label
                 );
