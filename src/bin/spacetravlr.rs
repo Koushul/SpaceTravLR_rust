@@ -70,6 +70,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Subcommand collect-interactions builds a multi–cell-type interaction database from *_betadata.feather files.
 • Subcommand get-microniches discovers spatial microniches from trained β feathers (spatial β filter → PCA → Leiden; silhouette-optimized resolution by default).
 • Subcommand gui runs `npm run build` in web/umap_lab, then starts the UMAP lab server and prints the URL.
+• Subcommand banksy runs BANKSY spatial clustering on an AnnData .h5ad (requires `uv` on PATH).
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
@@ -176,6 +177,8 @@ enum Commands {
     GetMicroniches(GetMicronichesCli),
     /// UMAP lab: build the web UI, start the API + static server, print the URL.
     Gui(GuiCli),
+    /// Run BANKSY spatial clustering on an AnnData .h5ad (isolated uv + pybanksy).
+    Banksy(BanksyCli),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -380,6 +383,65 @@ struct GuiCli {
         help = "Passed through to umap_lab --static-dir (default: web/umap_lab/dist)"
     )]
     static_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct BanksyCli {
+    #[arg(long, value_name = "PATH", help = "Input AnnData .h5ad")]
+    h5ad: PathBuf,
+    #[arg(
+        short = 'o',
+        long,
+        value_name = "PATH",
+        help = "Output .h5ad (default: <input_stem>_banksy.h5ad)"
+    )]
+    output: Option<PathBuf>,
+    #[arg(long, default_value_t = 0.2, help = "Neighbourhood contribution λ")]
+    lambda: f64,
+    #[arg(long, default_value_t = 15, help = "Spatial neighbours k_geom")]
+    num_neighbours: u32,
+    #[arg(
+        long,
+        default_value = "scaled_gaussian",
+        help = "Neighbour weight decay: scaled_gaussian|uniform|reciprocal|ranked"
+    )]
+    nbr_weight_decay: String,
+    #[arg(long, default_value_t = 1, help = "Maximum azimuthal Gabor filter order")]
+    max_m: u32,
+    #[arg(long, default_value_t = 0.6, help = "Leiden resolution")]
+    resolution: f64,
+    #[arg(long, default_value_t = 50, help = "Expression-space neighbours for Leiden")]
+    num_nn: u32,
+    #[arg(long, default_value_t = 20, help = "PCA dimensions on the BANKSY matrix")]
+    pca_dims: u32,
+    #[arg(long, default_value_t = 1234, help = "Random seed for Leiden partitioning")]
+    partition_seed: u32,
+    #[arg(
+        long,
+        default_value_t = -1,
+        help = "Leiden iterations (-1 = library default)"
+    )]
+    num_iterations: i32,
+    #[arg(
+        long,
+        default_value = "spatial",
+        help = "obsm key for spatial coordinates"
+    )]
+    coord_key: String,
+    #[arg(long, help = "obs column for x when obsm is missing")]
+    x_col: Option<String>,
+    #[arg(long, help = "obs column for y when obsm is missing")]
+    y_col: Option<String>,
+    #[arg(
+        long,
+        default_value = "banksy_cluster",
+        help = "obs column name for cluster labels"
+    )]
+    cluster_key: String,
+    #[arg(long, help = "Skip normalize/log1p/scale preprocessing")]
+    no_preprocess: bool,
+    #[arg(short = 'v', long, help = "Verbose logging")]
+    verbose: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1912,6 +1974,41 @@ fn run_get_microniches(gm: &GetMicronichesCli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_banksy(b: &BanksyCli) -> anyhow::Result<()> {
+    let h5ad = PathBuf::from(expand_user_path(b.h5ad.to_string_lossy().as_ref()));
+    if !h5ad.is_file() {
+        anyhow::bail!("--h5ad: not a file: {}", h5ad.display());
+    }
+    let output = b
+        .output
+        .as_ref()
+        .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
+    eprintln!(
+        "spacetravlr: banksy via uv on {}",
+        h5ad.display()
+    );
+    spacetravlr::banksy_cluster::run_banksy(spacetravlr::banksy_cluster::BanksyParams {
+        h5ad: h5ad.as_path(),
+        output: output.as_deref(),
+        lambda: b.lambda,
+        num_neighbours: b.num_neighbours,
+        nbr_weight_decay: &b.nbr_weight_decay,
+        max_m: b.max_m,
+        resolution: b.resolution,
+        num_nn: b.num_nn,
+        pca_dims: b.pca_dims,
+        partition_seed: b.partition_seed,
+        num_iterations: b.num_iterations,
+        coord_key: &b.coord_key,
+        x_col: b.x_col.as_deref(),
+        y_col: b.y_col.as_deref(),
+        cluster_key: &b.cluster_key,
+        preprocess: !b.no_preprocess,
+        verbose: b.verbose,
+    })?;
+    Ok(())
+}
+
 #[cfg(feature = "tui")]
 fn run_demo_mode(cli: &Cli) -> anyhow::Result<()> {
     if cli.plain {
@@ -2943,6 +3040,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
         Some(Commands::GetMicroniches(gm)) => return run_get_microniches(gm),
         Some(Commands::Gui(g)) => return run_spacetravlr_gui(g),
+        Some(Commands::Banksy(b)) => return run_banksy(b),
         None => {}
     }
 
