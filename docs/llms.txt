@@ -24,6 +24,7 @@ Key facts an agent should know before answering questions or running commands:
 - [Parameters](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/params.md): Every `spaceship_config.toml` key across `[data]`, `[spatial]`, `[grn]`, `[lasso]`, `[training]`, `[cnn]`, `[execution]`, `[perturbation]`, and `[model_export]`, with guidance on what happens when you turn each one up or down.
 - [How it works](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/math.md): The math and Rust implementation — Gaussian received-ligand fields, sparse group lasso via FISTA, CNN-derived spatially varying coefficients, and chain-rule perturbation propagation.
 - [Output files](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/output.md): Catalog of every artifact — run directory layout, `{gene}_betadata.feather` schema, `spacetravlr_run_repro.toml`, per-gene logs, lock/orphan markers, CNN weight exports, and perturbation feathers.
+- [FAQ](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/faq.md): Common questions — install, input requirements, cluster training, perturbation, troubleshooting, and comparisons to other tools.
 
 ## Tutorials
 

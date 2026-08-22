@@ -328,3 +328,20 @@
   padding-bottom: 0;
   margin-bottom: 0.45em;
 }
+
+.md-typeset .st-threeui-tree {
+  margin: 1.25em 0 0.5em;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 480px;
+}
+
+.md-typeset .st-threeui-tree iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  min-height: 420px;
+  max-height: 560px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+}

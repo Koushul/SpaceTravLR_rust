@@ -3,6 +3,29 @@
 ![](assets/overview.png)
 SpaceTravLR infers how single or combinatorial genetic perturbations rewire signals across the tissue neighbourhood, by propagating effects through underlying spatially resolved molecular networks, thereby modelling how perturbations can reshape both the targeted cell and its surroundings.
 
+<div class="st-threeui-tree" markdown="0">
+  <iframe
+    title="Sylva tree"
+    src="threeui/sylva-tree-scene.html"
+    loading="eager"
+    tabindex="-1"
+    style="background: transparent"
+  ></iframe>
+</div>
+<script>
+(function () {
+  var frame = document.querySelector(".st-threeui-tree iframe");
+  if (!frame || !("IntersectionObserver" in window)) return;
+  var io = new IntersectionObserver(function (entries) {
+    try {
+      var win = frame.contentWindow;
+      if (win) win.__sylvaVisible = !!(entries[0] && entries[0].isIntersecting);
+    } catch (err) {}
+  }, { threshold: 0.08, rootMargin: "80px" });
+  io.observe(frame);
+})();
+</script>
+
 
 
 # I want to 🧞️
