@@ -65,7 +65,7 @@
     The `spacetravlr` binary will run on any CPU but training the CNN would be very slow. We thus highly recommend using a GPU. SpaceTravLR will automatically detect, configure and use available GPUs. TPUs aren't officially supported yet. Since we use WebGPU, training is driver agnostic.
 
 ??? question "Do I need to impute my data?"
-    No, but we highly recommend at least smoothing your data for generating the quiver plots. By default, SpaceTravLR uses a custom Rust implemnetation of [MAGIC](https://github.com/krishnaswamylab/MAGIC), but feel free to try different methods.
+    No, but we highly recommend at least smoothing your data for generating the quiver plots. By default, SpaceTravLR uses a custom Rust implementation of [MAGIC](https://github.com/krishnaswamylab/MAGIC), but feel free to try different methods.
 
 ??? question "Can I perturb genes beyond transcription factors, ligands or receptors?"
     Yes. `spacetravlr-perturb` can simulate knockout or overexpression of **any gene**.
@@ -78,7 +78,7 @@
     ```
 
 ??? question "Is there a Python version?"
-    - The orignial Python implementation is available at https://github.com/jishnu-lab/SpaceTravLR. However, we do not plan on maintaining or updating that repo and thus highly recommend using the Rust implementation instead.
+    The orignial Python implementation is available at [https://github.com/jishnu-lab/SpaceTravLR](https://github.com/jishnu-lab/SpaceTravLR). **However, we do not plan on maintaining or updating that repo and thus highly recommend using the Rust implementation instead.**
 
 
 

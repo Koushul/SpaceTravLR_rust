@@ -837,7 +837,7 @@ body{position:relative!important;background:transparent!important}
   var FAR_N  = { w:  780, left: -110, top: 600, aspect: 1600 /  757, z: -260 };
 
   var renderer, scene, camera;
-  var nearGroup, farGroup, motes, shadowMesh, glowMesh;
+  var nearGroup, farGroup, motes, shadowMesh;
   var W = 1, H = 1, DIST = 1400;
   var poleTex = null;
   var scanning = false, scanT = 0, scanMax = 3000, scanArmed = true;
@@ -2517,15 +2517,6 @@ body{position:relative!important;background:transparent!important}
     shadowMesh.position.z = -70;
     scene.add(shadowMesh);
 
-    glowMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      map: radialTexture(256, [[0, 'rgba(226,236,212,0.30)'], [0.42, 'rgba(214,226,200,0.10)'], [1, 'rgba(214,226,200,0)']]),
-      transparent: true, depthWrite: false, depthTest: false,
-      blending: THREE.AdditiveBlending
-    }));
-    glowMesh.renderOrder = -1;
-    glowMesh.position.z = -320;
-    scene.add(glowMesh);
-
     /* ---- drifting pollen --------------------------------------------
        Enough of it to read as air rather than as a handful of sprites, which
        means the drift has to leave the CPU: every mote is animated from
@@ -3616,9 +3607,6 @@ body{position:relative!important;background:transparent!important}
 
     shadowMesh.scale.set(aw * 1.02, ah * 0.72, 1);
     shadowMesh.position.set(cx, cy - ah * 0.40, -70);
-
-    glowMesh.scale.set(aw * 1.15, ah * 1.5, 1);
-    glowMesh.position.set(cx - aw * 0.06, cy - ah * 0.18, -320);
 
     /* mimic three's own sizeAttenuation: gl_PointSize = size * (scale / -z)
        with scale = half the drawing buffer height */

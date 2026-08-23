@@ -128,7 +128,7 @@ spacetravlr collect-interactions \
 Here we generate functional microniches from the feather files by applying the Leiden algorithm to the learned beta coefficients directly.
 
 ```bash
-spacetravlr spacetravlr get-microniches \
+spacetravlr get-microniches \
   --run-toml /path/to/outputdir/spacetravlr_run_repro.toml 
 ```
 
