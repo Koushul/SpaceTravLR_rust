@@ -150,6 +150,7 @@ pub mod banksy_cluster;
 pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
+pub mod ligand_field;
 pub mod celloracle;
 pub mod condition_split;
 pub mod config;

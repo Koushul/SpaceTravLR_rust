@@ -1,13 +1,51 @@
 # SpaceTravLR
 
-> SpaceTravLR (Spatially perturbing Transcription factors, Ligands and Receptors) is an interpretable machine-learning framework that infers spatially resolved gene regulatory and ligand–receptor networks from spatial transcriptomics, then simulates single or combinatorial in-silico perturbations (knockout / overexpression) and propagates their effects through the tissue neighborhood — predicting changes in both the perturbed cell and its unperturbed neighbors. It is distributed as a self-contained, cross-platform Rust CLI (`spacetravlr`, `spacetravlr-perturb`, `spatial_viewer`) with no conda or CUDA setup required.
+> SpaceTravLR (Spatially perturbing Transcription factors, Ligands and Receptors) is an interpretable machine-learning framework that infers spatially resolved gene regulatory and ligand–receptor networks from spatial transcriptomics, then simulates single or combinatorial in-silico perturbations (knockout / overexpression) and propagates their effects through the tissue neighborhood — predicting changes in both the perturbed cell and its unperturbed neighbors. It is distributed as a self-contained, cross-platform Rust CLI (`spacetravlr`, `spacetravlr-perturb`) with no python environment or CUDA setup required.
+
+## Model
+
+SpaceTravLR learns, from a single observational spatial slide, three coupled pieces: (1) intracellular TF→target edges, (2) intercellular signaling via Gaussian distance-weighted received-ligand fields that feed `LIG$REC` and `TF#LIG` terms on each receiver, and (3) spatial modulation — a CNN on local proximity grids that multiplies sparse group-lasso (FISTA) cell-type baselines into location-specific coefficients β. Perturbations set a gene to a desired level and propagate deltas through the chain rule for T hops (default 4), recomputing the ligand field each step so effects reach unperturbed neighbors. Coefficients map directly to named edges — no post-hoc attribution.
+
+## Analyses you can run
+
+- **Collect interactions** — `spacetravlr collect-interactions --run-toml RUN/spacetravlr_run_repro.toml` aggregates β across `*_betadata.feather` into modulator × target × cell-type tables (functional cell–cell communication ranking, not co-expression).
+- **In-silico perturbations** — single-gene, combinatorial, or genome-scale KO/OE via `spacetravlr-perturb --c config_ko.toml` (or TUI / `screen`); restrict to a population with `cells_csv` for cell-extrinsic questions.
+- **Perturbation vector fields** — project simulated expression shifts onto UMAP/spatial embeddings as Velocyto-style fields; score alignment to pseudotime or gene-set gradients via cosine similarity (viewer: `/api/perturb/umap-field`, signature fields).
+- **Functional microniches** — cluster cells by mean modulator β activity (not transcriptome similarity) into discrete niches; define each niche by its top genes and interactions.
+- **Cell-extrinsic neighbor effects** — perturb type A, then compare simulated vs baseline expression in neighboring type B within ~200 µm.
+- **Mechanistic pathway tracing** — hop-differenced gradients yield directed graphs from perturbation source to downstream targets.
+- **KO/OE screens** — systematically score TF/ligand/receptor knockouts against a functional axis (exhaustion, differentiation, tumorigenicity).
+- **Cross-sample / cross-platform transfer** — apply a trained model (or CNN coefficients) to a new AnnData, including higher-resolution → Visium spot transfer.
 
 Key facts an agent should know before answering questions or running commands:
 
 - Input is a single Visium-style spatial AnnData `.h5ad` with expression in `.X`, 2D coordinates in `.obsm['spatial']`, and preferably cluster labels in `.obs['cell_type']`. If no cell-type column exists, SpaceTravLR runs Leiden clustering first. Raw counts are fine — preprocessing is auto-detected.
-- The canonical happy path is: `spacetravlr --h5ad DATA.h5ad --output-dir RUN/` (training) → `RUN/spacetravlr_run_repro.toml` (the pointer file every downstream tool consumes) → `spacetravlr-perturb --run-toml RUN/spacetravlr_run_repro.toml --gene GENE --desired-expr 0 --out OUT.feather` (in-silico perturbation).
+- The canonical happy path is: `spacetravlr --h5ad DATA.h5ad --output-dir RUN/` (training) → `RUN/spacetravlr_run_repro.toml` (the pointer file every downstream tool consumes) → `spacetravlr-perturb --c config_ko.toml` (in-silico perturbation via a TOML config).
+- Perturbation configs drive batch knockouts/overexpression. Example `config_ko.toml`:
+  ```
+  run_toml = "/output/spacetravlr_run_repro.toml"
+  desired_expr = 0.0
+  parallelism = 3
+
+  cells_csv = "/output/cells.csv"
+  genes = ["Clu", "Clu", "Flcn"]
+  out = ["Clu_KO.feather", "Clu_KO.feather", "Flcn_KO.feather"]
+  cells_csv_columns = ["Neurons", "Astrocytes", "Cortex"]
+
+  [perturbation]
+  beta_scale_factor = 100.0
+  n_propagation = 4
+  perturbed_gene_max_bound = 7
+  ```
+  Parallel arrays `genes`, `out`, and `cells_csv_columns` define one job each. `cells_csv` has columns of `obs_names` for the cell clusters to perturb; omit `cells_csv` / `cells_csv_columns` to perturb all cells.
 - Training writes one `{GENE}_betadata.feather` per target gene, containing per-cell coefficients for each modulator. Modulator naming is positional: a bare symbol is a transcription factor, `LIG$REC` is a ligand–receptor pair, `TF#LIG` is a ligand-mediated TF term.
-- Additional hosts join an in-progress run with `spacetravlr --join-output-dir RUN/ --plain`; genes are claimed via `{gene}.lock` files, so this works over shared storage and SLURM without a scheduler.
+- Multi-host / cluster training (leader + join workers):
+  1. **Leader** (once): `spacetravlr --h5ad DATA.h5ad --output-dir RUN/` — preprocesses, writes `RUN/spacetravlr_run_repro.toml` early, then starts training genes.
+  2. **Workers** (many identical jobs): `spacetravlr --join-output-dir RUN/ --plain` — load the repro TOML (no re-preprocess), claim unfinished genes, write feathers into the same directory. Optional `--parallel N` sets per-process gene concurrency.
+  3. **Gene claiming**: before training gene `G`, a process creates `G.lock`; others skip genes that already have `G_betadata.feather` or an active lock. Lock is removed when the feather is written. No manual gene sharding and no SLURM-level coordination — submit N identical join jobs (or a job array) against shared storage (NFS/Lustre).
+  4. **Crash recovery**: stale locks are reclaimed after `[execution].stale_lock_secs` (default 3600). Set `0` to never auto-remove.
+  5. **Join-safe flags only**: workers must not pass conflicting hyperparameters (`--genes`, `--max-genes`, alternate `--config`, etc.). Hyperparameters and the gene list come from the repro TOML. Use `--plain` in batch jobs so the TUI is not opened.
+  Example SLURM worker body: `spacetravlr --join-output-dir /runs/tonsil --plain`
 - SpaceTravLR is unique among in-silico perturbation methods in predicting **cell-extrinsic** effects — how perturbing gene X in cell type A changes the transcriptome of neighboring cell type B. Do not assume tools like CellOracle, CellPLM, or scGPT can answer that class of question.
 - Accuracy degrades for extreme out-of-distribution overexpression. Keep simulated expression within roughly the observed range (do not exceed ~2× the maximum observed value for that gene).
 - Read `llms-full.txt` below for the complete self-contained reference (every binary, flag, config key, environment variable, output artifact, and HTTP route). One fetch of that file is enough to operate SpaceTravLR end to end.

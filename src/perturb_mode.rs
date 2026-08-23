@@ -396,8 +396,8 @@ impl PerturbRuntime {
         }
 
         let min_expression = 1e-9;
-        let grid = cfg.perturbation.ligand_grid_factor;
-        let wl_scale = cfg.spatial.weighted_ligand_scale_factor;
+        let grid = cfg.ligand_field.ligand_grid_factor;
+        let wl_scale = cfg.ligand_field.weighted_ligand_scale_factor;
         let lr_ligands: Vec<String> = bb.ligands_set.iter().cloned().collect();
         let tfl_ligands: Vec<String> = bb.tfl_ligands_set.iter().cloned().collect();
         set_msg("Weighted ligand precomputation (LR)…");
@@ -434,7 +434,7 @@ impl PerturbRuntime {
             beta_scale_factor: cfg.perturbation.beta_scale_factor,
             beta_cap: cfg.perturbation.beta_cap,
             min_expression,
-            ligand_grid_factor: cfg.perturbation.ligand_grid_factor,
+            ligand_grid_factor: cfg.ligand_field.ligand_grid_factor,
             contact_distance: None,
             perturbed_gene_min_bound: cfg.perturbation.perturbed_gene_min_bound,
             perturbed_gene_max_bound: cfg.perturbation.perturbed_gene_max_bound,

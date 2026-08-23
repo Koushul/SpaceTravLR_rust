@@ -44,8 +44,6 @@ radius           = 300
 spatial_dim      = 48
 # Distance threshold for contact-based signaling
 contact_distance = 30
-# Linear scale on Gaussian weights in received-ligand aggregation
-weighted_ligand_scale_factor = 1.0
 
 [grn]
 # Optional: directory with mouse_network.parquet / human_network.parquet (overrides SPACETRAVLR_DATA_DIR).
@@ -65,6 +63,34 @@ use_tfl_modulators = true
 # extra_modulators_file = "path/to/extra_genes.txt"
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
+
+[ligand_field]
+# Received-ligand aggregation + communication-prob pair selection (when LR modulators are on).
+# mode: spatial (default, Gaussian; needs obsm spatial coords) | meanfield
+mode = "spatial"
+# pair_selection: prob (CellChat P) | expressed (all present LR pairs, ranked by mean L×R)
+pair_selection = "prob"
+# received_ligand_norm: global_n (legacy) | kernel_mass (fair meanfield↔spatial A/B)
+received_ligand_norm = "global_n"
+# Linear scale on Gaussian weights in received-ligand aggregation
+weighted_ligand_scale_factor = 1.0
+# Approximate received ligands via a spatial grid (spacing / radius). Omit for exact.
+# Ignored when received_ligand_norm = "kernel_mass" (exact pairwise).
+# ligand_grid_factor = 0.2
+# db_path = "data/cellchat_mouse.csv"
+kh = 0.5
+hill_coef = 1.0
+min_cells = 10
+population_size_weight = false
+# n_perm = 100  # label-shuffle p-values (0 = skip)
+n_perm = 0
+p_threshold = 0.05
+min_prob = 0.0
+replace_lr_pairs = true
+max_interactions = 200
+write_ligand_diagnostics = true
+# signaling_types = ["Secreted Signaling"]
+random_seed = 42
 
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)
@@ -126,6 +152,8 @@ scale_modulators = true
 # When scale_modulators is true, divide exported betas by column std (original expression units).
 # Set false to export scaled-space betas (CellOracle-style). Default true.
 unscale_betas_on_export = false
+# Also write {gene}_betadata_scaled.feather when unscale_betas_on_export is true.
+export_scaled_betas = true
 # Parallel in-sample group Lasso across clusters per gene (Rayon; independent of [execution].n_parallel).
 # Default false (sequential). Set true for faster Lasso when many clusters per gene.
 parallel_lasso_clusters = false
@@ -167,11 +195,6 @@ beta_scale_factor = 100.0
 # beta_cap        = 10.0
 # Number of signal propagation rounds
 n_propagation     = 4
-# Approximate received ligands using a spatial grid for faster perturbation.
-# Value is grid_spacing / radius (smaller = more accurate, larger = faster).
-#   0.5 → ~3% error, ~12x faster at 5000+ cells
-#   0.3 → ~1% error, ~6x faster
-# ligand_grid_factor = 0.2
 # cells_csv = "cell_scope.csv"
 # cells_csv_column = "my_cells"
 # Clip simulated expression after each propagation iteration (omit max for no upper bound)

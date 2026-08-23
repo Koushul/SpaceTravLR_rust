@@ -23,7 +23,17 @@
         <tr><td><code>radius</code></td><td><code>300</code></td></tr>
         <tr><td><code>spatial_dim</code></td><td><code>64</code></td></tr>
         <tr><td><code>contact_distance</code></td><td><code>30</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="st-config-section">
+    <h3 class="st-config-sec-h"><code>[ligand_field]</code></h3>
+    <table class="st-config-kv">
+      <tbody>
+        <tr><td><code>mode</code></td><td><code>spatial</code></td></tr>
         <tr><td><code>weighted_ligand_scale_factor</code></td><td><code>1.0</code></td></tr>
+        <tr class="st-config-opt"><td><code>ligand_grid_factor</code></td><td class="st-config-comment">optional fast approximate ligands</td></tr>
       </tbody>
     </table>
   </section>
@@ -122,7 +132,6 @@
         <tr><td><code>beta_scale_factor</code></td><td><code>100.0</code></td></tr>
         <tr class="st-config-opt"><td><code>beta_cap</code></td><td class="st-config-comment">optional clamp</td></tr>
         <tr><td><code>n_propagation</code></td><td><code>4</code></td></tr>
-        <tr class="st-config-opt"><td><code>ligand_grid_factor</code></td><td class="st-config-comment">optional fast approximate ligands</td></tr>
         <tr class="st-config-opt"><td><code>cells_csv</code></td><td class="st-config-comment">default perturb cell scope</td></tr>
       </tbody>
     </table>

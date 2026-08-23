@@ -177,6 +177,33 @@ enum Commands {
     GetMicroniches(GetMicronichesCli),
     /// UMAP lab: build the web UI, start the API + static server, print the URL.
     Gui(GuiCli),
+    /// Compute ligand-field communication probabilities and write a CSV (hybrid LR preview).
+    #[command(name = "ligand-field", alias = "cellchat")]
+    LigandField(LigandFieldCli),
+}
+
+#[derive(Parser, Debug, Clone)]
+struct LigandFieldCli {
+    #[arg(long, value_name = "PATH", help = "AnnData .h5ad")]
+    h5ad: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "spaceship_config.toml overlay for [ligand_field] / data keys"
+    )]
+    config: Option<PathBuf>,
+    #[arg(long, help = "obs column for groups (default: data.cluster_annot / cell_type)")]
+    cluster_key: Option<String>,
+    #[arg(long, help = "expression layer (default: data.layer)")]
+    layer: Option<String>,
+    #[arg(long, help = "human|mouse (default: infer from var_names)")]
+    species: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "output CSV (default: ./ligand_field_commun_prob.csv)"
+    )]
+    out: Option<PathBuf>,
     /// Run BANKSY spatial clustering on an AnnData .h5ad (isolated uv + pybanksy).
     Banksy(BanksyCli),
 }
@@ -723,7 +750,7 @@ struct Cli {
         long = "weighted-ligand-scale-factor",
         value_name = "F",
         help_heading = "Training",
-        help = "Scales Gaussian weights when aggregating received ligands — overrides [spatial].weighted_ligand_scale_factor"
+        help = "Scales Gaussian weights when aggregating received ligands — overrides [ligand_field].weighted_ligand_scale_factor"
     )]
     weighted_ligand_scale_factor: Option<f64>,
 
@@ -1508,7 +1535,7 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
         cfg.lasso.tol = v;
     }
     if let Some(v) = cli.weighted_ligand_scale_factor {
-        cfg.spatial.weighted_ligand_scale_factor = v;
+        cfg.ligand_field.weighted_ligand_scale_factor = v;
     }
     if let Some(v) = cli.spatial_dim {
         cfg.spatial.spatial_dim = v.max(1);
@@ -1804,6 +1831,107 @@ fn print_plain_preamble(
             "pool-lasso  obs.{col}  ·  joint Lasso, CNN per sample  ·  gene locks at parent dir"
         );
     }
+}
+
+fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
+    use anndata::{AnnDataOp, Backend};
+    use spacetravlr::spatial_estimator::{
+        clusters_array1_from_obs_column, prepare_ligand_field_plan,
+    };
+
+    let cfg = SpaceshipConfig::try_load_merged(
+        lf.config
+            .as_ref()
+            .or(cli.config.as_ref())
+            .map(|p| p.as_path()),
+    )?;
+
+    let adata_path = lf.h5ad.clone();
+    let layer = lf
+        .layer
+        .clone()
+        .unwrap_or_else(|| cfg.data.layer.clone());
+    let cluster_key = lf
+        .cluster_key
+        .clone()
+        .unwrap_or_else(|| cfg.data.cluster_annot.clone());
+    let out_dir = lf
+        .out
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let out_name = lf
+        .out
+        .as_ref()
+        .and_then(|p| p.file_name().map(|s| s.to_os_string()))
+        .unwrap_or_else(|| std::ffi::OsString::from("ligand_field_commun_prob.csv"));
+
+    let adata = anndata::AnnData::<anndata_hdf5::H5>::open(anndata_hdf5::H5::open(&adata_path)?)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let var_names = adata.var_names().into_vec();
+    let species = lf
+        .species
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let s = cfg.data.spatial_species.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .or_else(|| spacetravlr::network::infer_species(&var_names).map(|s| s.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("could not infer species; pass --species human|mouse"))?;
+
+    let obs = adata.read_obs()?;
+    let clusters = clusters_array1_from_obs_column(&obs, &cluster_key)?;
+    let labels =
+        spacetravlr::spatial_estimator::read_h5ad_obs_column_str(&adata_path, &cluster_key)?;
+    let num_clusters = clusters.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+    let mut name_of: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    for (i, lab) in labels.iter().enumerate() {
+        name_of.entry(clusters[i]).or_insert_with(|| lab.clone());
+    }
+    let group_names: Vec<String> = (0..num_clusters)
+        .map(|c| name_of.get(&c).cloned().unwrap_or_else(|| c.to_string()))
+        .collect();
+
+    let cfg_parent = lf
+        .config
+        .as_ref()
+        .or(cli.config.as_ref())
+        .and_then(|p| p.parent());
+
+    let plan = prepare_ligand_field_plan(
+        &adata,
+        &layer,
+        &clusters,
+        num_clusters,
+        &group_names,
+        None,
+        &species,
+        &cfg.ligand_field,
+        cfg_parent,
+        Some(&out_dir),
+        Some(cfg.spatial.radius),
+    )?;
+
+    let default_csv = out_dir.join("ligand_field_commun_prob.csv");
+    let desired = out_dir.join(&out_name);
+    if desired != default_csv && default_csv.is_file() {
+        std::fs::rename(&default_csv, &desired)?;
+    }
+    eprintln!(
+        "Ligand field: {} interactions (mode={:?}) → {}",
+        plan.interactions.len(),
+        plan.mode,
+        desired.display()
+    );
+    adata.close()?;
+    Ok(())
 }
 
 fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
@@ -3040,6 +3168,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::CollectInteractions(ci)) => return run_collect_interactions(ci),
         Some(Commands::GetMicroniches(gm)) => return run_get_microniches(gm),
         Some(Commands::Gui(g)) => return run_spacetravlr_gui(g),
+        Some(Commands::LigandField(lf)) => return run_ligand_field_cli(&cli, lf),
         Some(Commands::Banksy(b)) => return run_banksy(b),
         None => {}
     }
