@@ -180,6 +180,8 @@ enum Commands {
     /// Compute ligand-field communication probabilities and write a CSV (hybrid LR preview).
     #[command(name = "ligand-field", alias = "cellchat")]
     LigandField(LigandFieldCli),
+    /// Run BANKSY spatial clustering on an AnnData .h5ad (isolated uv + pybanksy).
+    Banksy(BanksyCli),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -204,8 +206,6 @@ struct LigandFieldCli {
         help = "output CSV (default: ./ligand_field_commun_prob.csv)"
     )]
     out: Option<PathBuf>,
-    /// Run BANKSY spatial clustering on an AnnData .h5ad (isolated uv + pybanksy).
-    Banksy(BanksyCli),
 }
 
 #[derive(Parser, Debug, Clone)]
