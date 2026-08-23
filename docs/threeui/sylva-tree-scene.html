@@ -35,12 +35,12 @@
 
   *,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
 
-  html{ background:#383b34; }
+  html{ background:transparent; }
   body{
     font-family:'Lexend',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     font-weight:300;
     color:var(--ink);
-    background:#383b34;
+    background:transparent;
     overflow-x:hidden;
     -webkit-font-smoothing:antialiased;
     -moz-osx-font-smoothing:grayscale;
@@ -53,13 +53,13 @@
     height:100svh;
     min-height:calc(880 * var(--u));
     overflow:hidden;
-    isolation:isolate;
+    isolation:auto;
     /* the reference screen reads a near-flat #4a4d44 corner to corner —
        all the modelling comes from the light pool the root sits in */
     background:
       radial-gradient(64% 52% at 27% 84%, rgba(232,238,222,.085) 0%, rgba(232,238,222,0) 72%),
       radial-gradient(70% 60% at 92% 8%,  rgba(24,28,20,.10) 0%, rgba(24,28,20,0) 68%),
-      #4a4d44;
+      transparent;
   }
   /* The floor of light the root stands in. Sampled off the reference: the
      background climbs from 73 luma at the nav to ~128 at y 850, brightest
@@ -142,7 +142,7 @@
       rgba(34,40,31,.74);
     box-shadow:0 calc(8 * var(--u)) calc(22 * var(--u)) rgba(10,14,8,.30),
                inset 0 1px rgba(255,255,255,.06);
-    isolation:isolate;
+    isolation:auto;
   }
   /* Anchored at the top so growth runs downward, out of the headline's way —
      a dock that grew from its centre would push into the nav's own row. */
@@ -382,7 +382,7 @@
   .card figure{
     position:absolute; left:calc(14 * var(--u)); right:calc(14 * var(--u));
     border-radius:calc(34 * var(--u)); overflow:hidden;
-    isolation:isolate; background:#263025;
+    isolation:auto; background:#263025;
   }
   .card--stove figure{ bottom:calc(14 * var(--u)); height:calc(158 * var(--u)); }
   .card--about figure{ top:calc(14 * var(--u)); height:calc(122 * var(--u)); }
@@ -657,17 +657,27 @@
   }
 </style>
 <style data-threeui-sylva-scene>
+@font-face{font-family:Nasalization;src:url("fonts/nasalization-rg.woff") format("woff");font-weight:400;font-style:normal;font-display:swap}
+html{color-scheme:light}
+html[data-scheme="slate"]{color-scheme:dark}
 html,body{width:100%!important;height:100%!important;min-height:0!important;margin:0!important;overflow:hidden!important;background:transparent!important}
-body{position:relative!important}
-.hero{position:relative!important;width:100%!important;height:100%!important;min-height:0!important;overflow:hidden!important;background:transparent!important}
+body{position:relative!important;background:transparent!important}
+.hero{position:relative!important;width:100%!important;height:100%!important;min-height:0!important;overflow:hidden!important;background:transparent!important;isolation:auto!important}
 .hero::after{display:none!important}
-.stage{position:absolute!important;inset:0!important;margin:0!important;width:100%!important;height:100%!important}
+.stage{position:absolute!important;inset:0!important;margin:0!important;width:100%!important;height:100%!important;background:transparent!important}
 #scene{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;pointer-events:auto!important;opacity:1!important;z-index:1!important;background:transparent!important;display:block!important}
 canvas#scene{background:transparent!important}
+.st-wordmark{position:absolute;left:50%;top:14%;z-index:20;margin:0;padding:0;border:0;display:flex;gap:.04em;font-family:Nasalization,"Helvetica Neue",Helvetica,Arial,sans-serif;font-weight:400;font-size:clamp(38px,8.2vw,84px);letter-spacing:.08em;line-height:1;white-space:nowrap;user-select:none;pointer-events:none;color:rgba(48,54,42,.55);transform:translate(-50%,-50%);animation:st-word-float 10s ease-in-out infinite}
+.st-wordmark span{display:inline-block;pointer-events:auto;cursor:default;transform:translateY(0) scale(1);transition:transform .28s cubic-bezier(.22,.61,.36,1),color .28s ease,text-shadow .28s ease}
+.st-wordmark span:hover,.st-wordmark span.is-hot{transform:translateY(-16px) scale(1.16);color:rgba(40,48,36,.78);text-shadow:0 10px 22px rgba(72,80,66,.18)}
+[data-scheme="slate"] .st-wordmark{color:rgba(236,232,248,.46)}
+[data-scheme="slate"] .st-wordmark span:hover,[data-scheme="slate"] .st-wordmark span.is-hot{color:rgba(244,240,255,.86);text-shadow:0 10px 24px rgba(12,10,20,.35)}
+@keyframes st-word-float{0%,100%{transform:translate(-50%,-50%) translateY(0)}50%{transform:translate(-50%,-50%) translateY(-10px)}}
+@media (prefers-reduced-motion:reduce){.st-wordmark{animation:none}.st-wordmark span,.st-wordmark span:hover{transition:none;transform:none}}
 </style></head>
 <body>
 
-<main class="hero is-ready" id="hero"><canvas id="scene" role="img" aria-label="Sylva Living Green"></canvas><div class="stage" id="stage" aria-hidden="true"></div></main>
+<main class="hero is-ready" id="hero"><canvas id="scene" role="img" aria-label="Sylva Living Green"></canvas><div class="stage" id="stage" aria-hidden="true"></div><div class="st-wordmark" aria-hidden="true"><span>S</span><span>p</span><span>a</span><span>c</span><span>e</span><span>T</span><span>r</span><span>a</span><span>v</span><span>L</span><span>R</span></div></main>
 
 <script>/**
  * @license
@@ -820,9 +830,9 @@ canvas#scene{background:transparent!important}
      Unchanged from the artwork build: the near root's box is the old
      moss-arch.png's box, the far one is moss-ridge.png's, so every landmark
      lands exactly where the layout was drawn around it. */
-  var ARCH   = { w: 1900, left: -180, top: 306, aspect: 2800 / 1377 };
+  var ARCH   = { w: 1480, left: 30, top: 280, aspect: 2800 / 1377 };
   var ARCH_N = { w: 1120, left: -290, top: 555, aspect: 2800 / 1377 };
-  var FAR    = { w: 1150, left:  -40, top: 320, aspect: 1600 /  757, z: -260 };
+  var FAR    = { w: 900, left:  85, top: 294, aspect: 1600 /  757, z: -260 };
   var FAR_N  = { w:  780, left: -110, top: 600, aspect: 1600 /  757, z: -260 };
 
   var renderer, scene, camera;
@@ -2408,8 +2418,8 @@ canvas#scene{background:transparent!important}
     var q = /[?&]blades=(\d+)/.exec(location.search);
     if (q) { BLADES_NEAR = +q[1]; BLADES_FAR = Math.round(+q[1] * 0.21); }
 
-    renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: false, premultipliedAlpha: false, powerPreference: 'high-performance', stencil: false });
-    renderer.setClearColor(0x000000, 0); canvas.style.background = 'transparent';
+    renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: false, premultipliedAlpha: true, powerPreference: 'high-performance', stencil: false });
+    renderer.setClearColor(0x000000, 0); renderer.setClearAlpha(0); canvas.style.background = 'transparent';
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.30;
@@ -3703,5 +3713,20 @@ canvas#scene{background:transparent!important}
   setTimeout(ready, 4000);
 })();
 </script>
-</body>
+<script>
+(function () {
+  var mark = document.querySelector(".st-wordmark");
+  if (!mark) return;
+  var letters = mark.querySelectorAll("span");
+  function clear() {
+    for (var i = 0; i < letters.length; i++) letters[i].classList.remove("is-hot");
+  }
+  window.addEventListener("pointermove", function (e) {
+    var hot = document.elementFromPoint(e.clientX, e.clientY);
+    clear();
+    if (hot && hot.parentNode === mark) hot.classList.add("is-hot");
+  }, { passive: true });
+  window.addEventListener("pointerleave", clear);
+})();
+</script></body>
 </html>
