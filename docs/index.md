@@ -1,7 +1,10 @@
 <!-- # <span style="font-size:2em;">SpaceTravLR</span> {: .st-brand } -->
 
-![](assets/overview.png)
-SpaceTravLR infers how single or combinatorial genetic perturbations rewire signals across the tissue neighbourhood, by propagating effects through underlying spatially resolved molecular networks, thereby modelling how perturbations can reshape both the targeted cell and its surroundings.
+SpaceTravLR is a computational framework for modeling how cells extend their transcriptome beyond their own cytoplasm. SpaceTravLR aims to push spatial analyses at single cell resolution from descriptive
+correlations toward functional mechanistic insights. 
+<div class="st-overview" markdown="0">
+--8<-- "docs/assets/overview.svg"
+</div>
 
 <div class="st-threeui-tree" markdown="0">
   <iframe
@@ -9,30 +12,66 @@ SpaceTravLR infers how single or combinatorial genetic perturbations rewire sign
     src="threeui/sylva-tree-scene.html"
     loading="eager"
     tabindex="-1"
-    style="background: transparent"
+    allowtransparency="true"
+    style="background: transparent; color-scheme: inherit"
   ></iframe>
 </div>
 <script>
 (function () {
   var frame = document.querySelector(".st-threeui-tree iframe");
-  if (!frame || !("IntersectionObserver" in window)) return;
-  var io = new IntersectionObserver(function (entries) {
+  if (!frame) return;
+  function sync() {
     try {
       var win = frame.contentWindow;
-      if (win) win.__sylvaVisible = !!(entries[0] && entries[0].isIntersecting);
+      var doc = frame.contentDocument;
+      var scheme = document.body.getAttribute("data-md-color-scheme") || "default";
+      var colorScheme = scheme === "slate" ? "dark" : "light";
+      if (win) win.__sylvaVisible = frame.getBoundingClientRect().height > 0;
+      frame.style.colorScheme = colorScheme;
+      if (doc && doc.documentElement) {
+        doc.documentElement.dataset.scheme = scheme;
+        doc.documentElement.style.colorScheme = colorScheme;
+        if (doc.body) doc.body.style.colorScheme = colorScheme;
+      }
     } catch (err) {}
-  }, { threshold: 0.08, rootMargin: "80px" });
-  io.observe(frame);
+  }
+  frame.addEventListener("load", sync);
+  if (window.MutationObserver) {
+    new MutationObserver(sync).observe(document.body, { attributes: true, attributeFilter: ["data-md-color-scheme"] });
+  }
+  if ("IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      try {
+        var win = frame.contentWindow;
+        if (win) win.__sylvaVisible = !!(entries[0] && entries[0].isIntersecting);
+      } catch (err) {}
+      sync();
+    }, { threshold: 0.08, rootMargin: "80px" });
+    io.observe(frame);
+  }
 })();
 </script>
 
+
+The integration of *in-silico* perturbation
+screening with spatial context allows us to infer how the combination of gene-gene
+interactions rewire signaling to define distinct cellular environments.
+
+
+
+<div class="st-betas" markdown="0">
+--8<-- "docs/assets/spatial_betas.svg"
+</div>
+
+We leverage spatial
+transcriptomics data to uncover functional microniches - tissue regions where local
+differences in the cellular microenvironment drive divergent cell fates or states.
 
 
 # I want to 🧞️
 
 <div id="st-i-want-to" class="st-i-want-to" markdown="0"></div>
 
-![](assets/spatial_betas.png)
 
 ## Quickstart
 #### Install me
@@ -74,7 +113,7 @@ spacetravlr collect-interactions \
 
 <!-- Learn more about [how SpaceTravLR works](math.md), other [installations](install.md) details and CLI [usage](usage.md). -->
 
-#### Point an AI agent at me
+#### Point an Ai agent at me
 
 SpaceTravLR publishes an [`llms.txt`](llms.txt) index and a self-contained [`llms-full.txt`](llms-full.txt) reference following the [llmstxt.org](https://llmstxt.org/) convention. Give either URL to Claude, Cursor, ChatGPT, or any coding agent and it will know the full capability surface, every CLI flag, the config schema, and the output formats.
 

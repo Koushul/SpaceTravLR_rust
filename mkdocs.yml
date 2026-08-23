@@ -139,3 +139,5 @@ nav:
       - Embryo (Mouse): examples/slideseqv2-embryo-mouse.md
     - Merfish:
       - Liver (Mouse): examples/merfish-liver-mouse.md
+
+  - FAQ: faq.md
