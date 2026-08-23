@@ -9,7 +9,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow.feather as feather
+import pyarrow as pa
+import pyarrow.ipc as ipc
 import scanpy as sc
 
 BETA_OUT = Path("/ix1/ylee/kor11/djishnu_kor11/tonsil_ablation/snrna_human_tonsil_2026-08-10")
@@ -34,7 +35,8 @@ def main() -> None:
     matrix = np.zeros((len(cell_ids), len(selected)), dtype=np.float32)
     for gene, rows in selected.groupby("gene", sort=False):
         path = BETA_OUT / f"{gene}_betadata.feather"
-        table = feather.read_table(path, columns=["CellID", *rows["feature"]])
+        with pa.memory_map(str(path), "r") as source:
+            table = ipc.open_file(source).read_all().select(["CellID", *rows["feature"]])
         ids = pd.Index(table["CellID"].to_pylist()).astype(str)
         locations = cell_index.get_indexer(ids)
         if (locations < 0).any() or len(ids) != len(cell_ids):
