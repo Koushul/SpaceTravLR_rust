@@ -20,13 +20,18 @@ correlations toward functional mechanistic insights.
 (function () {
   var frame = document.querySelector(".st-threeui-tree iframe");
   if (!frame) return;
-  function sync() {
+  function setVisible(on) {
+    try {
+      var win = frame.contentWindow;
+      if (win) win.__sylvaVisible = !!on;
+    } catch (err) {}
+  }
+  function syncScheme() {
     try {
       var win = frame.contentWindow;
       var doc = frame.contentDocument;
       var scheme = document.body.getAttribute("data-md-color-scheme") || "default";
       var colorScheme = scheme === "slate" ? "dark" : "light";
-      if (win) win.__sylvaVisible = frame.getBoundingClientRect().height > 0;
       frame.style.colorScheme = colorScheme;
       if (doc && doc.documentElement) {
         doc.documentElement.dataset.scheme = scheme;
@@ -35,17 +40,23 @@ correlations toward functional mechanistic insights.
       }
     } catch (err) {}
   }
-  frame.addEventListener("load", sync);
+  function inView() {
+    var r = frame.getBoundingClientRect();
+    return r.height > 0 && r.bottom > 0 && r.top < window.innerHeight;
+  }
+  frame.addEventListener("load", function () {
+    syncScheme();
+    setVisible(inView());
+  });
   if (window.MutationObserver) {
-    new MutationObserver(sync).observe(document.body, { attributes: true, attributeFilter: ["data-md-color-scheme"] });
+    new MutationObserver(syncScheme).observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-md-color-scheme"]
+    });
   }
   if ("IntersectionObserver" in window) {
     var io = new IntersectionObserver(function (entries) {
-      try {
-        var win = frame.contentWindow;
-        if (win) win.__sylvaVisible = !!(entries[0] && entries[0].isIntersecting);
-      } catch (err) {}
-      sync();
+      setVisible(!!(entries[0] && entries[0].isIntersecting));
     }, { threshold: 0.08, rootMargin: "80px" });
     io.observe(frame);
   }
@@ -106,8 +117,18 @@ spacetravlr --join-output-dir /path/to/outputdir --plain
 ```
 
 #### Analyze me
+
+Here we collect the regulatory landscape by looking at the learned gene-gene interactions across all feather files.
+
 ```bash
 spacetravlr collect-interactions \
+  --run-toml /path/to/outputdir/spacetravlr_run_repro.toml 
+```
+
+Here we generate functional microniches from the feather files by applying the Leiden algorithm to the learned beta coefficients directly.
+
+```bash
+spacetravlr spacetravlr get-microniches \
   --run-toml /path/to/outputdir/spacetravlr_run_repro.toml 
 ```
 

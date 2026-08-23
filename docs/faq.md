@@ -5,7 +5,8 @@
     SpaceTravLR predicts **cell-extrinsic** effects: how perturbing a gene in one cell type changes the transcriptome of neighboring, unperturbed cells. Most in-silico perturbation methods only model changes inside the perturbed cell.
 
 ??? question "What spatial transcriptomics platforms are supported?"
-    We have extensively tested SpaceTravLR using Slideseq, Slidetags, VisiumHD, XYZeq and Xenium.
+    We have extensively tested SpaceTravLR using [Slide-seqV2](https://www.nature.com/articles/s41587-020-0739-1), [Slide-tags](https://www.nature.com/articles/s41586-023-06837-4), [VisiumHD](https://www.nature.com/articles/s41588-025-02193-3), [XYZeqV2](https://surveygenomics.com/), [Xenium](https://www.nature.com/articles/s41467-023-43458-x) and [Atera](https://www.10xgenomics.com/platforms/atera).
+
 
 ??? question "What modalities are supported?"
     Currently, the model supports spatial scRNAseq by default. Paired spatial scATACseq can optionally be used to [generate](https://morris-lab.github.io/CellOracle.documentation/tutorials/atac.html) the base regulatory network. Spatial proteomics and other multiomics aren't officially supported yet.
