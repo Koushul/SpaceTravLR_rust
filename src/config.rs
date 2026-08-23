@@ -928,16 +928,14 @@ pub fn resolve_spaceship_config_toml_path() -> Option<PathBuf> {
     None
 }
 
-/// Resolve `malt_label_transfer.py` (MALT / `--map-labels`) under [`SPACETRAVLR_DATA_DIR_ENV`],
-/// `…/data/` next to the executable, then cwd — same layout as [`resolve_spaceship_config_toml_path`]
-/// and `scripts/install.sh`.
-pub fn resolve_malt_label_transfer_py_path() -> Option<PathBuf> {
-    const NAME: &str = "malt_label_transfer.py";
+/// Resolve a script under [`SPACETRAVLR_DATA_DIR_ENV`], `…/data/` next to the executable,
+/// then cwd — same layout as [`resolve_spaceship_config_toml_path`] and `scripts/install.sh`.
+fn resolve_data_dir_script(name: &str) -> Option<PathBuf> {
     const DATA_DIR_ENV: &str = "SPACETRAVLR_DATA_DIR";
     if let Ok(dir) = std::env::var(DATA_DIR_ENV) {
         let dir = dir.trim();
         if !dir.is_empty() {
-            let p = PathBuf::from(expand_user_path(dir)).join(NAME);
+            let p = PathBuf::from(expand_user_path(dir)).join(name);
             if p.is_file() {
                 return Some(p);
             }
@@ -946,20 +944,20 @@ pub fn resolve_malt_label_transfer_py_path() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             for rel in ["data", "../data"] {
-                let p = parent.join(rel).join(NAME);
+                let p = parent.join(rel).join(name);
                 if p.is_file() {
                     return Some(p);
                 }
             }
         }
     }
-    let data_cwd = Path::new("data").join(NAME);
+    let data_cwd = Path::new("data").join(name);
     if data_cwd.is_file() {
         return Some(data_cwd);
     }
     let mut dir = std::env::current_dir().unwrap_or_default();
     for _ in 0..10 {
-        let p = dir.join("data").join(NAME);
+        let p = dir.join("data").join(name);
         if p.is_file() {
             return Some(p);
         }
@@ -967,11 +965,23 @@ pub fn resolve_malt_label_transfer_py_path() -> Option<PathBuf> {
             break;
         }
     }
-    let cwd_rel = Path::new(NAME);
+    let cwd_rel = Path::new(name);
     if cwd_rel.is_file() {
         return Some(cwd_rel.to_path_buf());
     }
     None
+}
+
+/// Resolve `malt_label_transfer.py` (MALT / `--map-labels`) under [`SPACETRAVLR_DATA_DIR_ENV`],
+/// `…/data/` next to the executable, then cwd — same layout as [`resolve_spaceship_config_toml_path`]
+/// and `scripts/install.sh`.
+pub fn resolve_malt_label_transfer_py_path() -> Option<PathBuf> {
+    resolve_data_dir_script("malt_label_transfer.py")
+}
+
+/// Resolve `banksy_cluster.py` (`spacetravlr banksy`) under the same search paths as MALT.
+pub fn resolve_banksy_cluster_py_path() -> Option<PathBuf> {
+    resolve_data_dir_script("banksy_cluster.py")
 }
 
 /// Strip a `file:` / `file://` URL prefix so pasted Finder / browser paths open correctly.
