@@ -10,7 +10,7 @@ use crate::ligand::{
     WeightedLigandReduce, calculate_weighted_ligands, calculate_weighted_ligands_grid,
     calculate_weighted_ligands_with_cutoff_reduce,
 };
-use crate::network::SPACETRAVLR_DATA_DIR_ENV;
+use crate::network::{SPACETRAVLR_DATA_DIR_ENV, download_github_raw_data_file, run_network_data_dir};
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Axis};
 use rand::rngs::StdRng;
@@ -21,6 +21,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const CELLCHAT_CSV_MIN_BYTES: u64 = 10_000;
 
 /// How received ligand is aggregated for LR columns.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -348,12 +350,45 @@ pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
     Ok(out) // keep multi-subunit complexes intact for CellChat-style P
 }
 
+fn cellchat_filename(species: &str) -> String {
+    format!("cellchat_{species}.csv")
+}
+
+fn try_cellchat_file(cand: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
+    tried.push(cand.display().to_string());
+    cand.is_file().then_some(cand)
+}
+
+fn try_cellchat_in_dir(dir: &Path, filename: &str, tried: &mut Vec<String>) -> Option<PathBuf> {
+    try_cellchat_file(dir.join(filename), tried)
+        .or_else(|| try_cellchat_file(dir.join("data").join(filename), tried))
+}
+
+fn cellchat_download_dir(output_dir: Option<&Path>) -> PathBuf {
+    if let Some(out) = output_dir {
+        return run_network_data_dir(out);
+    }
+    if let Ok(dir) = std::env::var(SPACETRAVLR_DATA_DIR_ENV) {
+        let dir = expand_user_path(dir.trim());
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            return parent.join("data");
+        }
+    }
+    PathBuf::from("data")
+}
+
 /// Resolve `cellchat_{species}.csv` from config path, env, or `data/` search.
 pub fn resolve_cellchat_db_path(
     species: &str,
     config_db_path: Option<&str>,
     config_file_parent: Option<&Path>,
 ) -> Result<PathBuf> {
+    let filename = cellchat_filename(species);
     let mut tried = Vec::new();
     if let Some(raw) = config_db_path.map(str::trim).filter(|s| !s.is_empty()) {
         let exp = expand_user_path(raw);
@@ -365,28 +400,28 @@ pub fn resolve_cellchat_db_path(
         } else {
             pb
         };
-        tried.push(cand.display().to_string());
-        if cand.is_file() {
-            return Ok(cand);
+        if let Some(p) = try_cellchat_file(cand.clone(), &mut tried) {
+            return Ok(p);
+        }
+        if cand.is_dir() {
+            if let Some(p) = try_cellchat_in_dir(&cand, &filename, &mut tried) {
+                return Ok(p);
+            }
         }
     }
 
-    let filename = format!("cellchat_{species}.csv");
     if let Ok(dir) = std::env::var(SPACETRAVLR_DATA_DIR_ENV) {
-        let cand = PathBuf::from(expand_user_path(dir.trim())).join(&filename);
-        tried.push(cand.display().to_string());
-        if cand.is_file() {
-            return Ok(cand);
+        let base = PathBuf::from(expand_user_path(dir.trim()));
+        if let Some(p) = try_cellchat_in_dir(&base, &filename, &mut tried) {
+            return Ok(p);
         }
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             for rel in ["data", "../data"] {
-                let cand = parent.join(rel).join(&filename);
-                tried.push(cand.display().to_string());
-                if cand.is_file() {
-                    return Ok(cand);
+                if let Some(p) = try_cellchat_file(parent.join(rel).join(&filename), &mut tried) {
+                    return Ok(p);
                 }
             }
         }
@@ -394,10 +429,8 @@ pub fn resolve_cellchat_db_path(
 
     let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     for _ in 0..8 {
-        let cand = dir.join("data").join(&filename);
-        tried.push(cand.display().to_string());
-        if cand.is_file() {
-            return Ok(cand);
+        if let Some(p) = try_cellchat_file(dir.join("data").join(&filename), &mut tried) {
+            return Ok(p);
         }
         if !dir.pop() {
             break;
@@ -408,6 +441,46 @@ pub fn resolve_cellchat_db_path(
         "Could not find CellChatDB {filename:?}. Set [ligand_field].db_path or {SPACETRAVLR_DATA_DIR_ENV}. Tried:\n  {}",
         tried.join("\n  ")
     )
+}
+
+/// Search existing locations, then download `cellchat_{species}.csv` from GitHub into
+/// `{output_dir}/network/` (same dir as auto-fetched GRN parquets) when missing.
+pub fn resolve_or_fetch_cellchat_db_path(
+    species: &str,
+    config_db_path: Option<&str>,
+    config_file_parent: Option<&Path>,
+    output_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Ok(p) = resolve_cellchat_db_path(species, config_db_path, config_file_parent) {
+        return Ok(p);
+    }
+
+    let filename = cellchat_filename(species);
+    if let Some(out) = output_dir {
+        let run_net = run_network_data_dir(out);
+        let cand = run_net.join(&filename);
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+
+    let dest_dir = cellchat_download_dir(output_dir);
+    let dest = dest_dir.join(&filename);
+    if dest.is_file() {
+        return Ok(dest);
+    }
+
+    eprintln!(
+        "spacetravlr: CellChatDB {filename:?} not found; downloading into {} …",
+        dest_dir.display()
+    );
+    download_github_raw_data_file(&filename, &dest, CELLCHAT_CSV_MIN_BYTES).with_context(|| {
+        format!(
+            "download CellChatDB {filename} into {}. Set [ligand_field].db_path or {SPACETRAVLR_DATA_DIR_ENV}.",
+            dest_dir.display()
+        )
+    })?;
+    Ok(dest)
 }
 
 #[derive(Debug, Clone)]
@@ -1470,6 +1543,49 @@ mod tests {
         assert!(units.iter().any(|u| u.pair_name == "A$R2"));
         assert!(units.iter().any(|u| u.pair_name == "B$R1"));
         assert!(units.iter().any(|u| u.pair_name == "B$R2"));
+    }
+
+    #[test]
+    fn resolve_cellchat_uses_explicit_file_path() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/cellchat_mouse.csv");
+        let p = resolve_cellchat_db_path("mouse", Some(root.to_str().unwrap()), None).unwrap();
+        assert_eq!(p, root);
+    }
+
+    #[test]
+    fn resolve_cellchat_treats_dir_as_data_root() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let p = resolve_cellchat_db_path("mouse", Some(dir.to_str().unwrap()), None).unwrap();
+        assert_eq!(p, dir.join("data/cellchat_mouse.csv"));
+    }
+
+    #[test]
+    fn cellchat_download_dir_is_run_network() {
+        assert_eq!(
+            cellchat_download_dir(Some(Path::new("/tmp/spacetravlr_run"))),
+            Path::new("/tmp/spacetravlr_run/network")
+        );
+    }
+
+    #[test]
+    fn resolve_or_fetch_uses_existing_run_network_csv() {
+        let out = std::env::temp_dir().join(format!(
+            "st_cellchat_fetch_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run_net = run_network_data_dir(&out);
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&run_net).unwrap();
+        let dest = run_net.join("cellchat_axolotl.csv");
+        std::fs::write(&dest, "ligand,receptor,pathway,signaling\nA,B,P,Secreted Signaling\n")
+            .unwrap();
+        let p = resolve_or_fetch_cellchat_db_path("axolotl", None, None, Some(&out)).unwrap();
+        assert_eq!(p, dest);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

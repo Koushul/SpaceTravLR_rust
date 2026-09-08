@@ -1,7 +1,7 @@
 //! Opt-in self-update: only used when the user runs `spacetravlr --update`.
 //! Naming matches `scripts/install.sh` (see `GITHUB_REPO`, `tarball_name`, `prebuilt_tarball_target`, raw `data/` + `scripts/malt_label_transfer.py` sync).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use semver::Version;
 use serde::Deserialize;
@@ -254,6 +254,47 @@ fn sync_malt_label_transfer_py(install_dir: &Path, version_tag: &str) {
     }
 }
 
+/// Writes `install_dir/data/cellchat_{human,mouse}.csv` from raw GitHub, matching `install.sh`.
+fn sync_cellchat_csvs(install_dir: &Path, version_tag: &str) {
+    let repo = github_repo_slug();
+    let data_dir = install_dir.join("data");
+    let tag = version_tag.trim();
+    for filename in ["cellchat_human.csv", "cellchat_mouse.csv"] {
+        let dest = data_dir.join(filename);
+        let part = data_dir.join(format!("{filename}.part"));
+        let res = (|| -> Result<()> {
+            fs::create_dir_all(&data_dir)
+                .with_context(|| format!("mkdir {}", data_dir.display()))?;
+            let mut last_err: Option<anyhow::Error> = None;
+            for ref_name in [tag, "main"] {
+                let url =
+                    format!("https://raw.githubusercontent.com/{repo}/{ref_name}/data/{filename}");
+                if part.exists() {
+                    fs::remove_file(&part).ok();
+                }
+                match download_to_path(&url, &part) {
+                    Ok(()) => {
+                        fs::rename(&part, &dest)
+                            .with_context(|| format!("install {}", dest.display()))?;
+                        eprintln!("Updated {}", dest.display());
+                        return Ok(());
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no download attempts")))
+        })();
+
+        if let Err(e) = res {
+            eprintln!(
+                "Warning: could not refresh {filename} (tried tag {version_tag:?} and main): {e}\n\
+                 Copy data/{filename} into {} or re-run install.sh.",
+                data_dir.display()
+            );
+        }
+    }
+}
+
 /// Writes `install_dir/data/spaceship_config.toml` from raw GitHub, matching `install_spaceship_config_toml` in `scripts/install.sh` (release tag, then `main`).
 fn sync_spaceship_config_toml(install_dir: &Path, version_tag: &str) {
     let repo = github_repo_slug();
@@ -417,6 +458,7 @@ pub fn run(update_version: Option<&str>) -> Result<()> {
 
     sync_spaceship_config_toml(&install_dir, remote_tag);
     sync_malt_label_transfer_py(&install_dir, remote_tag);
+    sync_cellchat_csvs(&install_dir, remote_tag);
 
     fs::remove_dir_all(&tmp_root).ok();
 

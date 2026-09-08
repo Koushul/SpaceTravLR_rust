@@ -66,7 +66,7 @@ Used whenever LR modulators are on (`use_lr_modulators` / `train_modulators` inc
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
-| `db_path` |  | Path to `cellchat_{species}.csv`. | Custom curated DB. | Auto-resolve from `data/` / `SPACETRAVLR_DATA_DIR`. |
+| `db_path` |  | Path to `cellchat_{species}.csv`. Missing files auto-download into `{output_dir}/network/` (same as GRN parquets). | Custom curated DB. | Auto-resolve from `data/` / `SPACETRAVLR_DATA_DIR`, then GitHub raw. |
 | `mode` | `spatial` | Received-ligand aggregator (`lr_mode` alias). | `meanfield` = global mean \(L\times R\). | `spatial` = Gaussian \(\widetilde{L}R\) (needs `obsm` spatial coords). |
 | `pair_selection` | `prob` | How LR pairs are chosen before Lasso. | `expressed` = all present pairs ranked by mean \(L\times R\`. | `prob` = CellChat \(P\) rank/filter. |
 | `received_ligand_norm` | `global_n` | How spatial weights reduce to \(\widetilde L\). | `kernel_mass` = \(Σ w L/Σ w\) (fair vs meanfield). | `global_n` = legacy `(1/N)Σ w L`. |

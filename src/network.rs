@@ -23,14 +23,15 @@ fn push_tried(tried: &mut Vec<String>, p: &Path) {
 
 fn try_file_path(path: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
     push_tried(tried, &path);
-    if path.is_file() { Some(path) } else { None }
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn grn_parquet_ready(path: &Path) -> bool {
-    path.is_file()
-        && fs::metadata(path)
-            .map(|m| m.len() >= GRN_PARQUET_MIN_BYTES)
-            .unwrap_or(false)
+    downloaded_file_ready(path, GRN_PARQUET_MIN_BYTES)
 }
 
 fn grn_parquet_exists(path: &Path) -> bool {
@@ -45,7 +46,22 @@ fn github_repo_slug() -> String {
         .unwrap_or_else(|| DEFAULT_GITHUB_REPO.to_string())
 }
 
-fn download_grn_parquet_url(filename: &str, dest: &Path) -> Result<()> {
+fn downloaded_file_ready(path: &Path, min_bytes: u64) -> bool {
+    path.is_file()
+        && fs::metadata(path)
+            .map(|m| m.len() >= min_bytes)
+            .unwrap_or(false)
+}
+
+/// Fetch `data/{filename}` from GitHub raw (release tag, then `main`) into `dest`.
+pub(crate) fn download_github_raw_data_file(
+    filename: &str,
+    dest: &Path,
+    min_bytes: u64,
+) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
     let repo = github_repo_slug();
     let version_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     let part = dest.with_extension("part");
@@ -56,14 +72,14 @@ fn download_grn_parquet_url(filename: &str, dest: &Path) -> Result<()> {
     for ref_name in [version_tag.as_str(), "main"] {
         let url = format!("https://raw.githubusercontent.com/{repo}/{ref_name}/data/{filename}");
         match download_url_to_path(&url, &part) {
-            Ok(()) if grn_parquet_ready(&part) => {
+            Ok(()) if downloaded_file_ready(&part, min_bytes) => {
                 fs::rename(&part, dest).with_context(|| format!("install {}", dest.display()))?;
                 return Ok(());
             }
             Ok(()) => {
                 fs::remove_file(&part).ok();
                 last_err = Some(anyhow::anyhow!(
-                    "downloaded {filename} from {url} was too small (< {GRN_PARQUET_MIN_BYTES} bytes)"
+                    "downloaded {filename} from {url} was too small (< {min_bytes} bytes)"
                 ));
             }
             Err(e) => {
@@ -73,6 +89,10 @@ fn download_grn_parquet_url(filename: &str, dest: &Path) -> Result<()> {
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no download attempts for {filename}")))
+}
+
+fn download_grn_parquet_url(filename: &str, dest: &Path) -> Result<()> {
+    download_github_raw_data_file(filename, dest, GRN_PARQUET_MIN_BYTES)
 }
 
 fn download_url_to_path(url: &str, path: &Path) -> Result<()> {
@@ -85,7 +105,7 @@ fn download_url_to_path(url: &str, path: &Path) -> Result<()> {
         return Ok(());
     }
     Err(anyhow::anyhow!(
-        "curl failed for {url} (exit {:?}); install curl or copy GRN parquets manually",
+        "curl failed for {url} (exit {:?}); install curl or copy the data file manually",
         st.code()
     ))
 }

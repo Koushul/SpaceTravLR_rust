@@ -493,3 +493,57 @@
   background: transparent;
   color-scheme: inherit;
 }
+
+.md-typeset .st-threeui-exploded {
+  margin: 1.15em 0 1.5em;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--md-default-fg-color) 12%, transparent);
+  background: #191724;
+  box-shadow: 0 18px 44px color-mix(in srgb, #191724 22%, transparent);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 560px;
+}
+
+[data-md-color-scheme="default"] .md-typeset .st-threeui-exploded {
+  background: #faf4ed;
+  box-shadow: 0 16px 40px color-mix(in srgb, #575279 10%, transparent);
+}
+
+.md-typeset .st-threeui-exploded iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 11;
+  min-height: 420px;
+  max-height: 760px;
+  border: 0;
+  background: transparent;
+  color-scheme: inherit;
+}
+
+.md-typeset .st-threeui-celllab {
+  margin: 1.15em 0 1.5em;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--md-default-fg-color) 12%, transparent);
+  background: #191724;
+  box-shadow: 0 18px 44px color-mix(in srgb, #191724 22%, transparent);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 620px;
+}
+
+[data-md-color-scheme="default"] .md-typeset .st-threeui-celllab {
+  background: #faf4ed;
+  box-shadow: 0 16px 40px color-mix(in srgb, #575279 10%, transparent);
+}
+
+.md-typeset .st-threeui-celllab iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 12;
+  min-height: 520px;
+  max-height: 820px;
+  border: 0;
+  background: transparent;
+  color-scheme: inherit;
+}

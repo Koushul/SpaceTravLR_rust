@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 # SpaceTravLR CLI installer — keep tarball names in sync with src/self_update.rs
 # (GITHUB_REPO, tarball_name, LINUX_GNU_*, prebuilt_tarball_target).
-# After binaries: downloads human_network.parquet + mouse_network.parquet + spaceship_config.toml
-# + scripts/malt_label_transfer.py (as data/malt_label_transfer.py) into INSTALL_DIR/data/ from
-# raw.githubusercontent.com (release tag, then main).
+# After binaries: downloads human_network.parquet + mouse_network.parquet + cellchat_{human,mouse}.csv
+# + spaceship_config.toml + scripts/malt_label_transfer.py (as data/malt_label_transfer.py) into
+# INSTALL_DIR/data/ from raw.githubusercontent.com (release tag, then main).
 # curl -fsSL …/install.sh | sh
 set -e
 
@@ -382,6 +382,30 @@ install_grn_data() {
         progress_line 93 "malt_label_transfer.py at ${DATA_DIR}/"
     fi
 
+    progress_line 94 "Downloading CellChatDB (cellchat_human.csv, cellchat_mouse.csv) from GitHub…"
+    for f in cellchat_human.csv cellchat_mouse.csv; do
+        _dest="${DATA_DIR}/${f}"
+        if [ -f "$_dest" ]; then
+            _sz=$(wc -c < "$_dest" 2>/dev/null | tr -d '[:space:]' || echo 0)
+            if [ "${INSTALL_REFRESH_GRN_DATA:-0}" != "1" ] && [ "${_sz:-0}" -gt 10000 ] 2>/dev/null; then
+                continue
+            fi
+        fi
+        _ok=0
+        for ref in "$VERSION" main; do
+            _url="https://raw.githubusercontent.com/${REPO}/${ref}/data/${f}"
+            if curl -fsSL "$_url" -o "${_dest}.part" 2>/dev/null; then
+                mv "${_dest}.part" "$_dest"
+                _ok=1
+                break
+            fi
+            rm -f "${_dest}.part"
+        done
+        if [ "$_ok" != "1" ]; then
+            warn "Could not download ${f} from GitHub (tried tag ${VERSION} and main). Copy into ${DATA_DIR}/ manually or set SPACETRAVLR_DATA_DIR."
+        fi
+    done
+
     if [ "${INSTALL_SKIP_GRN_DATA:-0}" = "1" ]; then
         progress_line 95 "Skipping GRN parquet download (INSTALL_SKIP_GRN_DATA=1)"
         [ "$QUIET" -eq 0 ] && info "  Skipping human_network.parquet / mouse_network.parquet (set SPACETRAVLR_DATA_DIR or copy data/ yourself)"
@@ -389,7 +413,7 @@ install_grn_data() {
         return 0
     fi
 
-    progress_line 94 "Downloading GRN parquet (human_network, mouse_network) from GitHub…"
+    progress_line 95 "Downloading GRN parquet (human_network, mouse_network) from GitHub…"
     _failed=0
     for f in human_network.parquet mouse_network.parquet; do
         _dest="${DATA_DIR}/${f}"
@@ -416,7 +440,7 @@ install_grn_data() {
     done
 
     if [ "$_failed" -eq 0 ]; then
-        progress_line 97 "Bundle ready at ${DATA_DIR} (GRN parquets + spaceship_config.toml + malt_label_transfer.py next to the binary)"
+        progress_line 97 "Bundle ready at ${DATA_DIR} (GRN parquets + CellChatDB CSVs + spaceship_config.toml + malt_label_transfer.py next to the binary)"
     else
         progress_line 97 "Install finished (GRN files incomplete — see warning above)"
     fi
@@ -463,7 +487,7 @@ dry_run() {
     progress_line 100 "Dry run"
     printf '  REPO=%s\n  VERSION=%s\n  TARGET=%s\n  TAR=%s\n  INSTALL_DIR=%s\n' \
         "$REPO" "$VERSION" "$TARGET" "$(tarball_basename)" "$INSTALL_DIR"
-    printf '  Bundle → %s/data/ (spaceship_config.toml + malt_label_transfer.py + human_network.parquet + mouse_network.parquet from GitHub raw, tag then main)\n' \
+    printf '  Bundle → %s/data/ (spaceship_config.toml + malt_label_transfer.py + human_network.parquet + mouse_network.parquet + cellchat_human.csv + cellchat_mouse.csv from GitHub raw, tag then main)\n' \
         "$INSTALL_DIR"
     info "Unset INSTALL_DRY_RUN to install."
 }

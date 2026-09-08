@@ -696,10 +696,11 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
         )?;
     }
 
-    let db_path = crate::ligand_field::resolve_cellchat_db_path(
+    let db_path = crate::ligand_field::resolve_or_fetch_cellchat_db_path(
         species,
         cfg.db_path.as_deref(),
         config_file_parent,
+        output_dir,
     )?;
     let db = crate::ligand_field::load_cellchat_db(&db_path)?;
     let var_names = adata.var_names().into_vec();
