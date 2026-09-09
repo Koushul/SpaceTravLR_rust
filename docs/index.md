@@ -6,7 +6,7 @@ correlations toward functional mechanistic insights.
 --8<-- "docs/assets/overview.svg"
 </div>
 
-<div class="st-threeui-tree" markdown="0">
+<!-- <div class="st-threeui-tree" markdown="0">
   <iframe
     title="Sylva tree"
     src="threeui/sylva-tree-scene.html"
@@ -61,7 +61,7 @@ correlations toward functional mechanistic insights.
     io.observe(frame);
   }
 })();
-</script>
+</script> -->
 
 
 The integration of *in-silico* perturbation
