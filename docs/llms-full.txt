@@ -218,14 +218,15 @@ Add `--plain` for line-oriented logs instead of the full-screen dashboard — **
 | `--manifest PATH` | — | Optional JSON manifest from training |
 | `--betadata-pattern STR` | `*_betadata.feather` | Glob for counting betadata files |
 
-**`spacetravlr collect-interactions`** — scan `*_betadata.feather` under a run and aggregate β per modulator × target × cell type.
+**`spacetravlr collect-interactions`** — scan `*_betadata.feather` under a run and aggregate β per modulator × target × cell type. Pool-lasso runs collect each sample independently (parallel over all sample×gene feathers) and add a `sample` column.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--run-toml PATH` | required | `spacetravlr_run_repro.toml` from a finished run |
 | `--annot STR` | `cell_type` | obs column for cell-type grouping |
-| `--cluster-col STR` | — | Additional per-cluster aggregation |
+| `--cluster-col STR` | — | Additional per-cluster aggregation (inner partition on pool-lasso samples) |
 | `--aggregate STR` | `mean` | `mean` \| `min` \| `max` \| `sum` \| `positive` \| `negative` |
+| `--across-samples` | off | Pool-lasso only: append cell-weighted rows with `sample="_all"` |
 | `--out PATH` | `<output_dir>/plucked_feathers.feather` | Output feather |
 
 **`spacetravlr gui`** — build the UMAP lab web UI, start the API and static server, print the URL. Flags: `--bind` (`127.0.0.1`), `--port` (`8765`), `--skip-npm`, `--static-dir` (`web/umap_lab/dist`).
@@ -569,7 +570,7 @@ Modulator naming convention: a plain gene symbol is a transcription factor; `LIG
 
 ### `collect-interactions` output
 
-`plucked_feathers.feather` by default, with columns `interaction`, `target_gene`, `beta`, `interaction_type` (`tf` | `ligand-receptor` | `ligand-tf`), and `cell_type`.
+`plucked_feathers.feather` by default, with columns `interaction`, `target_gene`, `beta`, `interaction_type` (`tf` | `ligand-receptor` | `ligand-tf` | `tetraspanin`), and `cell_type`. Pool-lasso runs add `sample` (and `condition` when nested); `--across-samples` adds `sample="_all"` rows that are cell-weighted across slides.
 
 ### Perturbation output
 

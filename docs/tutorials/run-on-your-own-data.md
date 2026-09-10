@@ -173,9 +173,11 @@ spacetravlr collect-interactions \
 Defaults:
 
 - Reads `*_betadata.feather` from the run’s output directory (from the repro TOML).
+- For **pool-lasso** runs, reads each sample subdirectory instead, aggregates that slide’s cells only, and adds a `sample` column.
 - Groups by `--annot` (default `cell_type`).
 - Aggregates with `--aggregate mean` (also `min`, `max`, `sum`, `positive`, `negative`).
 - Writes `plucked_feathers.feather` next to the repro TOML unless you set `--out`.
+- `--across-samples` (pool-lasso only) appends cell-weighted rows with `sample="_all"`.
 
 **Per-cluster breakdown** (e.g. Leiden or sample id in `obs`):
 

@@ -60,7 +60,7 @@ Primary training product: learned coefficients for predicting target gene **`GEN
 |--------|---------|
 | **`Cluster`** or **`CellID`** | Row key. **Seed-only** (`[training].mode = seed`): one row per cluster label from `[data].cluster_annot`. **Full / CNN** (`mode = full`): one row per cell (`obs_names`). |
 | **`beta0`** | Intercept. |
-| **`beta_<name>`** | Coefficient for modulator `<name>`. Naming follows the GRN: plain symbol = TF; **`LIG$REC`** = ligand–receptor; **`TF#LIG`** = TF–ligand (NicheNet-style). |
+| **`beta_<name>`** | Coefficient for modulator `<name>`. Naming follows the GRN: plain symbol = TF; **`LIG$REC`** = ligand–receptor; **`TF#LIG`** = TF–ligand (NicheNet-style); **`A&B`** = same-cell tetraspanin product. |
 
 Feather files use Arrow IPC with LZ4 compression. The spatial viewer and perturbation tools join rows to AnnData cells via **`Cluster`** (cluster id / `cell_type` name) or **`CellID`** (per-cell export).
 
@@ -120,7 +120,9 @@ spacetravlr collect-interactions \
   --out output_dir/plucked_feathers.feather   # default if --out omitted
 ```
 
-Default output: **`plucked_feathers.feather`** in the run directory. Columns include **`interaction`**, **`target_gene`**, **`beta`**, **`interaction_type`** (`tf` | `ligand-receptor` | `ligand-tf`), and **`cell_type`** (from `--annot`, default `cell_type`).
+Default output: **`plucked_feathers.feather`** in the run directory. Columns include **`interaction`**, **`target_gene`**, **`beta`**, **`interaction_type`** (`tf` | `ligand-receptor` | `ligand-tf` | `tetraspanin`), and **`cell_type`** (from `--annot`, default `cell_type`).
+
+**Pool-lasso runs** (`[training].pool_lasso`): feathers are read from each `conditions/<sample>/` (or `conditions/<condition>/samples/<sample>/`) directory. Each slide is aggregated on **that slide’s cells only**, then stacked. Extra columns: **`sample`** (label file, not the folder name) and **`condition`** when both splits were used. `--across-samples` appends cell-weighted rows with `sample="_all"`.
 
 ---
 

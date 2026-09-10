@@ -52,6 +52,9 @@ fn make_test_betaframe() -> BetaFrame {
         tfl_betas: array![[0.1], [0.4]],
         tfl_ligands: vec!["C".to_string()],
         tfl_regulators: vec!["A".to_string()],
+        cis_betas: Array2::zeros((2, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     })
 }
 
@@ -338,6 +341,9 @@ fn splash_empty_modulators_does_not_panic() {
         tfl_betas: Array2::zeros((1, 0)),
         tfl_ligands: vec![],
         tfl_regulators: vec![],
+        cis_betas: Array2::zeros((1, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     });
     let empty = GeneMatrix::new(Array2::zeros((1, 0)), vec![]);
     let gex = GeneMatrix::new(array![[1.0]], vec!["X".to_string()]);
@@ -360,6 +366,9 @@ fn test_betaframe_tf_only() {
         tfl_betas: Array2::zeros((2, 0)),
         tfl_ligands: vec![],
         tfl_regulators: vec![],
+        cis_betas: Array2::zeros((2, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     });
 
     let empty = GeneMatrix::new(Array2::zeros((2, 0)), vec![]);
@@ -376,6 +385,69 @@ fn test_betaframe_tf_only() {
     let y = result.col("beta_Y").unwrap();
     assert!((y[0] - 2.0).abs() < 1e-10);
     assert!((y[1] - 4.0).abs() < 1e-10);
+}
+
+#[test]
+fn splash_cis_product_jacobian() {
+    let bf = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "TGT".to_string(),
+        row_labels: vec!["0".to_string(), "1".to_string()],
+        intercepts: array![0.0, 0.0],
+        tf_betas: Array2::zeros((2, 0)),
+        tfs: vec![],
+        lr_betas: Array2::zeros((2, 0)),
+        ligands: vec![],
+        receptors: vec![],
+        tfl_betas: Array2::zeros((2, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+        cis_betas: array![[0.5], [0.2]],
+        cis_left: vec!["CD9".to_string()],
+        cis_right: vec!["CD81".to_string()],
+    });
+    let empty = GeneMatrix::new(Array2::zeros((2, 0)), vec![]);
+    let gex = GeneMatrix::new(
+        array![[2.0, 3.0], [4.0, 1.0]],
+        vec!["CD9".into(), "CD81".into()],
+    );
+    let s1 = bf.splash(&empty, &empty, &gex, 1.0, None);
+    let s2 = bf.splash(&empty, &empty, &gex, 2.0, None);
+    let eps = 1e-10;
+    let cd9 = s1.col("beta_CD9").unwrap();
+    let cd81 = s1.col("beta_CD81").unwrap();
+    assert!((cd9[0] - 1.5).abs() < eps);
+    assert!((cd81[0] - 1.0).abs() < eps);
+    assert!((cd9[1] - 0.2).abs() < eps);
+    assert!((cd81[1] - 0.8).abs() < eps);
+    let cd9_s = s2.col("beta_CD9").unwrap();
+    let cd81_s = s2.col("beta_CD81").unwrap();
+    assert!((cd9_s[0] - cd9[0]).abs() < eps);
+    assert!((cd81_s[0] - cd81[0]).abs() < eps);
+}
+
+#[test]
+fn splash_cis_homophilic_doubles_partial() {
+    let bf = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "TGT".to_string(),
+        row_labels: vec!["0".to_string()],
+        intercepts: array![0.0],
+        tf_betas: Array2::zeros((1, 0)),
+        tfs: vec![],
+        lr_betas: Array2::zeros((1, 0)),
+        ligands: vec![],
+        receptors: vec![],
+        tfl_betas: Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+        cis_betas: array![[0.5]],
+        cis_left: vec!["A".to_string()],
+        cis_right: vec!["A".to_string()],
+    });
+    let empty = GeneMatrix::new(Array2::zeros((1, 0)), vec![]);
+    let gex = GeneMatrix::new(array![[3.0]], vec!["A".into()]);
+    let result = bf.splash(&empty, &empty, &gex, 1.0, None);
+    let a = result.col("beta_A").unwrap();
+    assert!((a[0] - 3.0).abs() < 1e-10);
 }
 
 #[test]

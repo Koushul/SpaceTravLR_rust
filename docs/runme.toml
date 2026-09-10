@@ -65,6 +65,7 @@ use_tfl_modulators = true
 # extra_lr_file = "path/to/extra_lr.txt"
 # extra_contact_lr = ["CADM1$CADM1"]
 # extra_contact_lr_file = "path/to/extra_contact_lr.txt"
+# tetraspanin_pairs = ["CD9&CD81"]
 
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)

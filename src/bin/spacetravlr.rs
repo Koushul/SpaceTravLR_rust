@@ -28,9 +28,10 @@ use spacetravlr::training_tui::{
     TrainingDashboardExit, run_dataset_paths_prompt, run_training_dashboard,
 };
 use spacetravlr::{
-    BetadataCollectAggregate, MicronichesParams, RunSummaryParams,
+    BetadataCollectAggregate, MicronichesParams, PooledCollectSample, RunSummaryParams,
     betadata_collect_interactions_all_cell_types,
-    betadata_collect_interactions_all_cell_types_full, load_obs_column_for_collect_interactions,
+    betadata_collect_interactions_all_cell_types_full, betadata_collect_interactions_pooled,
+    betadata_collect_interactions_pooled_full, load_obs_column_for_collect_interactions,
     load_obs_for_collect_interactions, run_microniches, write_collected_interactions_feather,
     write_collected_interactions_full_feather, write_run_summary_html,
 };
@@ -172,6 +173,7 @@ enum Commands {
     /// Generate spacetravlr_run_summary.html (AnnData summary, config, optional manifest).
     RunSummary(RunSummaryCli),
     /// Scan *_betadata.feather under a run directory; aggregate β per modulator × target × cell type.
+    /// Pool-lasso runs collect each sample independently and add a sample column.
     CollectInteractions(CollectInteractionsCli),
     /// Discover spatial microniches from trained SpaceTravLR βs (filter → PCA → Leiden).
     GetMicroniches(GetMicronichesCli),
@@ -287,6 +289,11 @@ struct CollectInteractionsCli {
         help = "Output .feather path (default: <[execution].output_dir>/plucked_feathers.feather)"
     )]
     out: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "After per-sample rows, append cell-weighted rows with sample=\"_all\" (pool-lasso runs only)"
+    )]
+    across_samples: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -2063,10 +2070,132 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?;
 
-    if let Some(ref cluster_col) = ci.cluster_col {
-        let col = cluster_col.trim();
-        anyhow::ensure!(!col.is_empty(), "--cluster-col must be non-empty");
-        let cluster_obs = load_obs_column_for_collect_interactions(ci.run_toml.as_path(), col)?;
+    let cluster_col_trimmed = ci
+        .cluster_col
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if ci
+        .cluster_col
+        .as_deref()
+        .is_some_and(|s| s.trim().is_empty())
+    {
+        anyhow::bail!("--cluster-col must be non-empty");
+    }
+
+    let pooled_samples = if cfg.training.pool_lasso {
+        let sample_col = cfg
+            .data
+            .sample
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("pool_lasso run TOML is missing [data].sample"))?;
+        let sample_labels =
+            load_obs_column_for_collect_interactions(ci.run_toml.as_path(), sample_col)?;
+        let cond_labels = match cfg
+            .data
+            .condition
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(col) => Some(load_obs_column_for_collect_interactions(
+                ci.run_toml.as_path(),
+                col,
+            )?),
+            None => None,
+        };
+        let plans = spacetravlr::condition_split::discover_pool_lasso_collect_plans(
+            &run_output_dir,
+            &sample_labels,
+            cond_labels.as_deref(),
+        )?;
+        Some(
+            plans
+                .into_iter()
+                .map(|p| PooledCollectSample {
+                    sample: p.sample,
+                    condition: p.condition,
+                    output_dir: p.output_dir,
+                    obs_indices: p.obs_indices,
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        if ci.across_samples {
+            anyhow::bail!("--across-samples is only valid for pool-lasso runs");
+        }
+        None
+    };
+
+    let skip_inner_cluster = cluster_col_trimmed.is_some_and(|col| {
+        cfg.training.pool_lasso
+            && cfg
+                .data
+                .sample
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| s == col)
+    });
+    let cluster_obs = if let Some(col) = cluster_col_trimmed {
+        if skip_inner_cluster {
+            None
+        } else {
+            Some(load_obs_column_for_collect_interactions(
+                ci.run_toml.as_path(),
+                col,
+            )?)
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref samples) = pooled_samples {
+        if cluster_obs.is_some() {
+            let rows = betadata_collect_interactions_pooled_full(
+                samples,
+                &ctx.obs_names,
+                &ctx.cluster_keys,
+                &ctx.cell_type_labels,
+                cluster_obs.as_deref(),
+                ci.across_samples,
+            )?;
+            write_collected_interactions_full_feather(out_s, &rows)?;
+            eprintln!(
+                "Wrote {} rows (pool-lasso, column {:?}) to {}",
+                rows.len(),
+                cluster_col_trimmed.unwrap(),
+                out_path.display()
+            );
+            return Ok(());
+        }
+        let mode = BetadataCollectAggregate::parse(ci.aggregate.trim()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "aggregate must be mean|min|max|sum|positive|negative (got {:?})",
+                ci.aggregate
+            )
+        })?;
+        let rows = betadata_collect_interactions_pooled(
+            samples,
+            &ctx.obs_names,
+            &ctx.cluster_keys,
+            &ctx.cell_type_labels,
+            mode,
+            None,
+            ci.across_samples,
+        )?;
+        write_collected_interactions_feather(out_s, &rows)?;
+        eprintln!(
+            "Wrote {} rows (pool-lasso) to {}",
+            rows.len(),
+            out_path.display()
+        );
+        return Ok(());
+    }
+
+    if let Some(col) = cluster_col_trimmed {
+        let cluster_obs = cluster_obs.expect("cluster_obs loaded");
         let rows = betadata_collect_interactions_all_cell_types_full(
             dir_s,
             &ctx.obs_names,

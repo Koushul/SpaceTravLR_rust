@@ -53,6 +53,9 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
         tfl_betas: ndarray::Array2::zeros((1, 0)),
         tfl_ligands: vec![],
         tfl_regulators: vec![], // no TFL
+        cis_betas: ndarray::Array2::zeros((1, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     });
 
     // E = f(A_tf, D_tf) → both A and D are TFs for E (creates cascade)
@@ -68,6 +71,9 @@ fn make_synthetic_betabase(n_cells: usize) -> (Betabase, Vec<String>, HashMap<St
         tfl_betas: ndarray::Array2::zeros((1, 0)),
         tfl_ligands: vec![],
         tfl_regulators: vec![],
+        cis_betas: ndarray::Array2::zeros((1, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     });
 
     // Expand to cells (all cells = cluster 0)
@@ -550,6 +556,9 @@ fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
         tfl_betas: ndarray::Array2::zeros((1, 0)),
         tfl_ligands: vec![],
         tfl_regulators: vec![],
+        cis_betas: ndarray::Array2::zeros((1, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     });
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
@@ -1657,6 +1666,9 @@ fn two_cell_tf_lr_perturb_bundle() -> (
         tfl_betas: ndarray::Array2::zeros((1, 0)),
         tfl_ligands: vec![],
         tfl_regulators: vec![],
+        cis_betas: ndarray::Array2::zeros((1, 0)),
+        cis_left: vec![],
+        cis_right: vec![],
     });
 
     let obs_names = vec!["cell_0".to_string(), "cell_1".to_string()];
@@ -1935,4 +1947,106 @@ fn perturb_spatial_knobs_change_simulated() {
         g_diff > 1e-6,
         "ligand_grid_factor should change recomputed weighted ligands during propagation (L2 diff = {g_diff:e})"
     );
+}
+
+#[test]
+fn perturb_cis_tetraspanin_ko_independent_of_received_ligands() {
+    let n_cells = 8usize;
+    let gene_names: Vec<String> = vec!["A", "B", "D"].into_iter().map(String::from).collect();
+    let gene2index: HashMap<String, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.clone(), i))
+        .collect();
+    let rows = vec!["0".to_string()];
+    let mut bf_d = BetaFrame::from_parts(BetaFrameFromParts {
+        gene_name: "D".into(),
+        row_labels: rows.clone(),
+        intercepts: array![0.0],
+        tf_betas: Array2::zeros((1, 0)),
+        tfs: vec![],
+        lr_betas: Array2::zeros((1, 0)),
+        ligands: vec![],
+        receptors: vec![],
+        tfl_betas: Array2::zeros((1, 0)),
+        tfl_ligands: vec![],
+        tfl_regulators: vec![],
+        cis_betas: array![[0.4]],
+        cis_left: vec!["A".into()],
+        cis_right: vec!["B".into()],
+    });
+    let obs: Vec<String> = (0..n_cells).map(|i| format!("cell_{i}")).collect();
+    let cluster_keys: Vec<String> = vec!["0".to_string(); n_cells];
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&rows, &obs, &cluster_keys).0);
+    bf_d.expand_to_cells(Arc::new(obs), mapping);
+    bf_d.modulator_gene_indices = Some(
+        bf_d.modulator_genes
+            .iter()
+            .map(|g| {
+                let plain = g.strip_prefix("beta_").unwrap_or(g);
+                *gene2index.get(plain).unwrap()
+            })
+            .collect(),
+    );
+    let mut data = HashMap::new();
+    data.insert("D".to_string(), bf_d);
+    let bb = Betabase {
+        data,
+        ligands_set: HashSet::new(),
+        receptors_set: HashSet::new(),
+        tfl_ligands_set: HashSet::new(),
+        tfs_set: HashSet::new(),
+    };
+
+    let gene_mtx = Array2::from_elem((n_cells, 3), 1.0);
+    let xy = Array2::from_shape_fn((n_cells, 2), |(i, d)| {
+        if d == 0 {
+            (i % 4) as f64
+        } else {
+            (i / 4) as f64
+        }
+    });
+    let rw_a = GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), vec![]);
+    let rw_b = GeneMatrix::new(
+        Array2::<f32>::from_elem((n_cells, 1), 9.0),
+        vec!["LIG".into()],
+    );
+    let rw_tfl = GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), vec![]);
+    let lr_radii = HashMap::new();
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
+    let targets = vec![("A".to_string(), 0.0)];
+    let r1 = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_a,
+        rw_tfligands_init: &rw_tfl,
+        targets: &targets,
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+    let r2 = perturb(PerturbInputs {
+        bb: &bb,
+        gene_mtx: &gene_mtx,
+        gene_names: &gene_names,
+        xy: &xy,
+        rw_ligands_init: &rw_b,
+        rw_tfligands_init: &rw_tfl,
+        targets: &targets,
+        config: &config,
+        lr_radii: &lr_radii,
+    });
+
+    for i in 0..n_cells {
+        assert_eq!(r1.simulated[[i, 0]], 0.0);
+        assert!((r1.simulated[[i, 2]] - r2.simulated[[i, 2]]).abs() < 1e-9);
+        assert!(
+            (r1.simulated[[i, 2]] - gene_mtx[[i, 2]]).abs() > 1e-9,
+            "D should change when cis partner A is knocked out"
+        );
+    }
 }

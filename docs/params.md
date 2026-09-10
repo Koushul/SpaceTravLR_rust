@@ -54,10 +54,11 @@ Each target gene is predicted from modulator groups: **TFs**, **ligand–recepto
 | `use_tf_modulators` | `true` | Include TF targets from priors. | — | Set `false` or use `train_modulators = "lr"` for LR-only ablation. |
 | `use_lr_modulators` | `true` | Include `LIG$REC` columns. | — | Disable for intracellular-only models. |
 | `use_tfl_modulators` | `true` | Include `TF#LIG` columns. | — | Disable to drop ligand-mediated TF terms. |
-| `train_modulators` |  | Shorthand: `"tf,lr,tfl"` replaces the three `use_*` flags. | Combine only the families you need for an ablation. | Must leave at least one family enabled. |
+| `train_modulators` |  | Shorthand: `"tf,lr,tfl"` replaces the three `use_*` flags. | Combine only the families you need for an ablation. | Must leave at least one of TF/LR/TFL enabled, unless `tetraspanin_pairs` is set. |
 | `extra_modulators` / `extra_modulators_file` |  | Add raw-expression predictors (fourth Lasso group). | Force inclusion of known covariates (e.g. ambient RNA proxies). | — |
 | `extra_lr` / `extra_lr_file` |  | Add secreted `LIG$REC` pairs beyond the database screen (Gaussian σ = `[spatial].radius`). | Hypothesis-driven paracrine pairs (e.g. `CXCL13$CXCR5`). | — |
 | `extra_contact_lr` / `extra_contact_lr_file` |  | Add juxtacrine `LIG$REC` pairs (Gaussian σ = `[spatial].contact_distance`). If a pair is in both lists, contact wins. | Cadherins / Notch-style contact pairs (e.g. `CADM1$CADM1`). | — |
+| `tetraspanin_pairs` | `[]` | Same-cell products `A&B` (fifth Lasso group). Canonicalized by sorting symbols (`CD81&CD9` → `CD9&CD81`). Skipped if either gene is the training target or missing from `var`. Not a ligand field. | Cis tetraspanin web terms (e.g. `CD9&CD81`). | Leave empty (default). |
 
 ---
 

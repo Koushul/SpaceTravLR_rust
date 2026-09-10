@@ -1,5 +1,6 @@
-//! User-supplied LR pairs (`extra_lr`, `extra_contact_lr`) and extra modulator genes
-//! (fourth Lasso group). Merge after DB LR selection; filter extras against an occupied gene set.
+//! User-supplied LR pairs (`extra_lr`, `extra_contact_lr`), extra modulator genes
+//! (fourth Lasso group), and cis tetraspanin products (`tetraspanin_pairs`, fifth group).
+//! Merge after DB LR selection; filter extras against an occupied gene set.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -247,11 +248,65 @@ pub fn filter_extra_modulators(
     out
 }
 
+pub fn canonical_tetraspanin_pair(a: &str, b: &str) -> (String, String) {
+    if (a.len(), a) <= (b.len(), b) {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
+}
+
+pub fn canonical_tetraspanin_key(a: &str, b: &str) -> String {
+    let (l, r) = canonical_tetraspanin_pair(a, b);
+    format!("{l}&{r}")
+}
+
+/// Parse `A&B` (first `&` only). Symbols are sorted so `CD81&CD9` == `CD9&CD81`.
+pub fn parse_tetraspanin_token(token: &str) -> Option<(String, String)> {
+    let t = token.trim();
+    if t.is_empty() || t.starts_with('#') {
+        return None;
+    }
+    let pos = t.find('&')?;
+    let a = t[..pos].trim();
+    let b = t[pos + 1..].trim();
+    if a.is_empty() || b.is_empty() || b.contains('&') {
+        return None;
+    }
+    Some(canonical_tetraspanin_pair(a, b))
+}
+
+/// Append cis tetraspanin products. Skip if either gene is the target or missing from `var_set`.
+pub fn merge_tetraspanin_pairs_into(
+    out_pairs: &mut Vec<String>,
+    requested: &[(String, String)],
+    target_gene: &str,
+    var_set: &HashSet<String>,
+) -> usize {
+    let mut seen: HashSet<String> = out_pairs.iter().cloned().collect();
+    let mut n = 0usize;
+    for (a, b) in requested {
+        if a == target_gene || b == target_gene {
+            continue;
+        }
+        if !var_set.contains(a) || !var_set.contains(b) {
+            continue;
+        }
+        let pair = canonical_tetraspanin_key(a, b);
+        if seen.insert(pair.clone()) {
+            out_pairs.push(pair);
+            n += 1;
+        }
+    }
+    n
+}
+
 pub fn verify_modulator_invariants(
     target_gene: &str,
     regulators: &[String],
     lr_pairs: &[String],
     extra_modulators: &[String],
+    tetraspanin_pairs: &[String],
 ) -> anyhow::Result<()> {
     if regulators.iter().any(|g| g == target_gene) {
         anyhow::bail!(
@@ -277,6 +332,19 @@ pub fn verify_modulator_invariants(
             "extra_modulators invariant violated: target {:?} must not be listed as an extra modulator",
             target_gene
         );
+    }
+    for pair in tetraspanin_pairs {
+        let parts: Vec<&str> = pair.splitn(2, '&').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        if parts[0] == target_gene || parts[1] == target_gene {
+            anyhow::bail!(
+                "tetraspanin invariant violated: target {:?} must not appear in pair {:?}",
+                target_gene,
+                pair
+            );
+        }
     }
     Ok(())
 }
@@ -344,7 +412,42 @@ mod tests {
 
     #[test]
     fn invariants_reject_target_in_lr() {
-        let e = verify_modulator_invariants("TG", &[], &["X$TG".into()], &[]);
+        let e = verify_modulator_invariants("TG", &[], &["X$TG".into()], &[], &[]);
+        assert!(e.is_err());
+    }
+
+    #[test]
+    fn parse_tetraspanin_ampersand_canonicalizes() {
+        assert_eq!(
+            parse_tetraspanin_token("CD81&CD9"),
+            Some(("CD9".into(), "CD81".into()))
+        );
+        assert_eq!(
+            parse_tetraspanin_token("CD9&CD9"),
+            Some(("CD9".into(), "CD9".into()))
+        );
+        assert!(parse_tetraspanin_token("CD9$CD81").is_none());
+        assert!(parse_tetraspanin_token("CD9&CD81&CD151").is_none());
+    }
+
+    #[test]
+    fn merge_tetraspanin_skips_target_missing_and_dup() {
+        let mut p = Vec::new();
+        let var: HashSet<_> = ["CD9", "CD81", "T"].into_iter().map(String::from).collect();
+        let pairs = vec![
+            ("CD81".into(), "CD9".into()),
+            ("CD9".into(), "CD81".into()),
+            ("T".into(), "CD9".into()),
+            ("CD9".into(), "MISSING".into()),
+        ];
+        let n = merge_tetraspanin_pairs_into(&mut p, &pairs, "T", &var);
+        assert_eq!(n, 1);
+        assert_eq!(p, vec!["CD9&CD81"]);
+    }
+
+    #[test]
+    fn invariants_reject_target_in_tetraspanin() {
+        let e = verify_modulator_invariants("CD9", &[], &[], &[], &["CD81&CD9".into()]);
         assert!(e.is_err());
     }
 

@@ -17,7 +17,7 @@ fn screen_feather_name(gene: &str) -> String {
 }
 
 /// Union of TFs, LR ligands/receptors, TFL ligands, `[grn].extra_modulators`,
-/// and genes from `extra_lr` / `extra_contact_lr`.
+/// genes from `extra_lr` / `extra_contact_lr`, and both members of `tetraspanin_pairs`.
 pub fn collect_screen_genes(runtime: &PerturbRuntime) -> anyhow::Result<Vec<String>> {
     let bb = &runtime.bb;
     let mut genes: HashSet<String> = HashSet::new();
@@ -43,6 +43,10 @@ pub fn collect_screen_genes(runtime: &PerturbRuntime) -> anyhow::Result<Vec<Stri
     for (lig, rec) in extras.extra_contact_lr {
         genes.insert(lig);
         genes.insert(rec);
+    }
+    for (a, b) in extras.tetraspanin_pairs {
+        genes.insert(a);
+        genes.insert(b);
     }
 
     let var: HashSet<&str> = runtime.gene_names.iter().map(String::as_str).collect();
@@ -315,6 +319,21 @@ mod tests {
         rt.cfg.grn.extra_contact_lr = vec!["CADM1$CADM1".into()];
         let genes = collect_screen_genes(&rt).unwrap();
         assert_eq!(genes, vec!["CADM1", "L1", "R1", "TF1"]);
+    }
+
+    #[test]
+    fn collect_screen_genes_includes_tetraspanin_pairs() {
+        let mut rt = minimal_runtime(
+            &["TF1", "CD9", "CD81", "L1"],
+            &["TF1"],
+            &["L1"],
+            &[],
+            &[],
+            &[],
+        );
+        rt.cfg.grn.tetraspanin_pairs = vec!["CD81&CD9".into()];
+        let genes = collect_screen_genes(&rt).unwrap();
+        assert_eq!(genes, vec!["CD81", "CD9", "L1", "TF1"]);
     }
 
     #[test]

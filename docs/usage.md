@@ -118,6 +118,8 @@ spacetravlr collect-interactions \
   --run-toml /path/run/spacetravlr_run_repro.toml
 ```
 
+Pool-lasso training writes per-sample feathers; this command detects that from the repro TOML, collects each slide independently, and writes a `sample` column. Optional `--across-samples` appends cell-weighted `_all` rows.
+
 
 # Extras
 

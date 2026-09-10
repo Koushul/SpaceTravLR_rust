@@ -2773,6 +2773,9 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub extra_modulators: Vec<String>,
     extra_lr_pairs: Vec<(String, String)>,
     extra_contact_lr_pairs: Vec<(String, String)>,
+    /// Canonical `A&B` same-cell tetraspanin products (fifth Lasso group).
+    pub tetraspanin_pairs: Vec<String>,
+    extra_tetraspanin_pairs: Vec<(String, String)>,
     /// `LIG$REC` keys whose received-ligand field uses `[spatial].contact_distance`.
     contact_lr_pairs: HashSet<String>,
     pub modulators_genes: Vec<String>,
@@ -2819,6 +2822,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         extra_lr_pairs: &[(String, String)],
         extra_contact_lr_pairs: &[(String, String)],
         extra_modulator_candidates: &[String],
+        extra_tetraspanin_pairs: &[(String, String)],
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
 
@@ -2959,17 +2963,27 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             &var_set,
         );
 
+        let mut tetraspanin_pairs = Vec::new();
+        crate::grn_extra::merge_tetraspanin_pairs_into(
+            &mut tetraspanin_pairs,
+            extra_tetraspanin_pairs,
+            &target_gene_str,
+            &var_set,
+        );
+
         crate::grn_extra::verify_modulator_invariants(
             &target_gene_str,
             &regulators,
             &lr_pairs,
             &extra_modulators_accepted,
+            &tetraspanin_pairs,
         )?;
 
         let mut modulators_genes_ordered = regulators.clone();
         modulators_genes_ordered.extend(lr_pairs.iter().cloned());
         modulators_genes_ordered.extend(tfl_pairs.iter().cloned());
         modulators_genes_ordered.extend(extra_modulators_accepted.iter().cloned());
+        modulators_genes_ordered.extend(tetraspanin_pairs.iter().cloned());
 
         let gene_excluded_tf_modulators_ablation = !use_tf_modulators
             && modulators_genes_ordered.is_empty()
@@ -2999,6 +3013,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             extra_modulators: extra_modulators_accepted,
             extra_lr_pairs: extra_lr_pairs.to_vec(),
             extra_contact_lr_pairs: extra_contact_lr_pairs.to_vec(),
+            tetraspanin_pairs,
+            extra_tetraspanin_pairs: extra_tetraspanin_pairs.to_vec(),
             contact_lr_pairs,
             modulators_genes: modulators_genes_ordered,
             max_ligands,
@@ -3098,12 +3114,16 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         m.extend(self.lr_pairs.iter().cloned());
         m.extend(self.tfl_pairs.iter().cloned());
         m.extend(self.extra_modulators.iter().cloned());
+        m.extend(self.tetraspanin_pairs.iter().cloned());
         self.modulators_genes = m;
     }
 
     /// Re-apply TOML extras after ligand-field replacement so user pairs survive `replace_lr_pairs`.
     fn merge_user_lr_extras(&mut self) -> anyhow::Result<()> {
-        if self.extra_lr_pairs.is_empty() && self.extra_contact_lr_pairs.is_empty() {
+        if self.extra_lr_pairs.is_empty()
+            && self.extra_contact_lr_pairs.is_empty()
+            && self.extra_tetraspanin_pairs.is_empty()
+        {
             return Ok(());
         }
         let var_set: HashSet<String> = self.adata.var_names().into_vec().into_iter().collect();
@@ -3125,12 +3145,20 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             &self.target_gene,
             &var_set,
         );
+        self.tetraspanin_pairs.clear();
+        crate::grn_extra::merge_tetraspanin_pairs_into(
+            &mut self.tetraspanin_pairs,
+            &self.extra_tetraspanin_pairs,
+            &self.target_gene,
+            &var_set,
+        );
         self.rebuild_modulators_genes();
         crate::grn_extra::verify_modulator_invariants(
             &self.target_gene,
             &self.regulators,
             &self.lr_pairs,
             &self.extra_modulators,
+            &self.tetraspanin_pairs,
         )
     }
 
@@ -3217,6 +3245,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             1.0,
             None,
+            &[],
             &[],
             &[],
             &[],
@@ -3665,20 +3694,23 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             if !extras.extra_modulators.is_empty()
                 || !extras.extra_lr.is_empty()
                 || !extras.extra_contact_lr.is_empty()
+                || !extras.tetraspanin_pairs.is_empty()
             {
                 log_line(
                     &hud,
                     format!(
-                        "GRN: +{} extra mod genes, +{} secreted LR pairs, +{} contact LR pairs",
+                        "GRN: +{} extra mod genes, +{} secreted LR pairs, +{} contact LR pairs, +{} tetraspanin pairs",
                         extras.extra_modulators.len(),
                         extras.extra_lr.len(),
-                        extras.extra_contact_lr.len()
+                        extras.extra_contact_lr.len(),
+                        extras.tetraspanin_pairs.len()
                     ),
                 );
             }
             let extra_mod_arc = Arc::new(extras.extra_modulators);
             let extra_lr_arc = Arc::new(extras.extra_lr);
             let extra_contact_lr_arc = Arc::new(extras.extra_contact_lr);
+            let extra_tetraspanin_arc = Arc::new(extras.tetraspanin_pairs);
 
             let ligand_field_plan_arc: Option<Arc<crate::ligand_field::LigandFieldPlan>> =
                 if spaceship_config.grn.use_lr_modulators {
@@ -3826,6 +3858,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let extra_mod_arc_w = extra_mod_arc.clone();
                 let extra_lr_arc_w = extra_lr_arc.clone();
                 let extra_contact_lr_arc_w = extra_contact_lr_arc.clone();
+                let extra_tetraspanin_arc_w = extra_tetraspanin_arc.clone();
                 let ligand_field_plan_w = ligand_field_plan_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
@@ -4010,6 +4043,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 extra_lr_arc_w.as_slice(),
                                 extra_contact_lr_arc_w.as_slice(),
                                 extra_mod_arc_w.as_slice(),
+                                extra_tetraspanin_arc_w.as_slice(),
                             )
                             .map(Box::new)
                             {
@@ -5157,6 +5191,12 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         for g in &self.extra_modulators {
             all_unique_genes.insert(g.clone());
         }
+        for pair in &self.tetraspanin_pairs {
+            if let Some((a, b)) = pair.split_once('&') {
+                all_unique_genes.insert(a.to_string());
+                all_unique_genes.insert(b.to_string());
+            }
+        }
         if let Some(plan) = self.ligand_field_plan.as_ref() {
             for inter in &plan.interactions {
                 for g in inter
@@ -5240,7 +5280,8 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         let total_modulators = self.regulators.len()
             + self.lr_pairs.len()
             + self.tfl_pairs.len()
-            + self.extra_modulators.len();
+            + self.extra_modulators.len()
+            + self.tetraspanin_pairs.len();
         let mut x_modulators = Array2::<f64>::zeros((n_obs, total_modulators));
 
         for (i, gene) in self.regulators.iter().enumerate() {
@@ -5321,6 +5362,18 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 .assign(&expr_matrix.column(idx));
         }
 
+        let offset_tspan = offset_extra + self.extra_modulators.len();
+        for (i, pair) in self.tetraspanin_pairs.iter().enumerate() {
+            let Some((a, b)) = pair.split_once('&') else {
+                continue;
+            };
+            let a_idx = gene_to_idx[a];
+            let b_idx = gene_to_idx[b];
+            let mut product = expr_matrix.column(a_idx).to_owned();
+            product *= &expr_matrix.column(b_idx);
+            x_modulators.column_mut(offset_tspan + i).assign(&product);
+        }
+
         Ok((x_modulators, target_expr))
     }
 
@@ -5361,6 +5414,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             groups.extend(std::iter::repeat_n(1i64, self.lr_pairs.len()));
             groups.extend(std::iter::repeat_n(2i64, self.tfl_pairs.len()));
             groups.extend(std::iter::repeat_n(3i64, self.extra_modulators.len()));
+            groups.extend(std::iter::repeat_n(4i64, self.tetraspanin_pairs.len()));
 
             let params = GroupLassoParams {
                 l1_reg,
@@ -5554,6 +5608,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             groups.extend(std::iter::repeat_n(1i64, self.lr_pairs.len()));
             groups.extend(std::iter::repeat_n(2i64, self.tfl_pairs.len()));
             groups.extend(std::iter::repeat_n(3i64, self.extra_modulators.len()));
+            groups.extend(std::iter::repeat_n(4i64, self.tetraspanin_pairs.len()));
 
             let params = GroupLassoParams {
                 l1_reg,

@@ -8,7 +8,7 @@ SpaceTravLR learns, from a single observational spatial slide, three coupled pie
 
 ## Analyses you can run
 
-- **Collect interactions** — `spacetravlr collect-interactions --run-toml RUN/spacetravlr_run_repro.toml` aggregates β across `*_betadata.feather` into modulator × target × cell-type tables (functional cell–cell communication ranking, not co-expression).
+- **Collect interactions** — `spacetravlr collect-interactions --run-toml RUN/spacetravlr_run_repro.toml` aggregates β into modulator × target × cell-type tables (functional cell–cell communication ranking, not co-expression). Pool-lasso runs emit a `sample` column (one row set per slide).
 - **In-silico perturbations** — single-gene, combinatorial, or genome-scale KO/OE via `spacetravlr-perturb --c config_ko.toml` (or TUI / `screen`); restrict to a population with `cells_csv` for cell-extrinsic questions.
 - **Perturbation vector fields** — project simulated expression shifts onto UMAP/spatial embeddings as Velocyto-style fields; score alignment to pseudotime or gene-set gradients via cosine similarity (viewer: `/api/perturb/umap-field`, signature fields).
 - **Functional microniches** — cluster cells by mean modulator β activity (not transcriptome similarity) into discrete niches; define each niche by its top genes and interactions.

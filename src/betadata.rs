@@ -197,6 +197,7 @@ pub struct BetaFrame {
     pub tf_betas: Array2<f32>,
     pub lr_betas: Array2<f32>,
     pub tfl_betas: Array2<f32>,
+    pub cis_betas: Array2<f32>,
 
     /// Number of output cells (== obs_names.len() after expand_to_cells).
     pub n_cells: usize,
@@ -210,6 +211,8 @@ pub struct BetaFrame {
     pub receptors: Vec<String>,
     pub tfl_ligands: Vec<String>,
     pub tfl_regulators: Vec<String>,
+    pub cis_left: Vec<String>,
+    pub cis_right: Vec<String>,
 
     /// Sorted unique modulator gene names with "beta_" prefix.
     pub modulator_genes: Vec<String>,
@@ -262,6 +265,9 @@ pub struct BetaFrameFromParts {
     pub tfl_betas: Array2<f32>,
     pub tfl_ligands: Vec<String>,
     pub tfl_regulators: Vec<String>,
+    pub cis_betas: Array2<f32>,
+    pub cis_left: Vec<String>,
+    pub cis_right: Vec<String>,
 }
 
 impl BetaFrameFromParts {
@@ -285,6 +291,9 @@ impl From<BetaFrameFromParts> for BetaFrame {
             tfl_betas,
             tfl_ligands,
             tfl_regulators,
+            cis_betas,
+            cis_left,
+            cis_right,
         } = parts;
         let n = row_labels.len();
         let modulator_genes = Self::compute_modulator_genes(
@@ -293,6 +302,8 @@ impl From<BetaFrameFromParts> for BetaFrame {
             &receptors,
             &tfl_ligands,
             &tfl_regulators,
+            &cis_left,
+            &cis_right,
         );
 
         Self {
@@ -306,11 +317,14 @@ impl From<BetaFrameFromParts> for BetaFrame {
             tf_betas,
             lr_betas,
             tfl_betas,
+            cis_betas,
             tfs,
             ligands,
             receptors,
             tfl_ligands,
             tfl_regulators,
+            cis_left,
+            cis_right,
             modulator_genes,
             modulator_gene_indices: None,
             join_by_obs_name: false,
@@ -558,6 +572,8 @@ impl BetaFrame {
         receptors: &[String],
         tfl_ligands: &[String],
         tfl_regulators: &[String],
+        cis_left: &[String],
+        cis_right: &[String],
     ) -> Vec<String> {
         let mut unique = HashSet::new();
         for g in tfs
@@ -566,6 +582,8 @@ impl BetaFrame {
             .chain(receptors.iter())
             .chain(tfl_ligands.iter())
             .chain(tfl_regulators.iter())
+            .chain(cis_left.iter())
+            .chain(cis_right.iter())
         {
             unique.insert(g.clone());
         }
@@ -592,11 +610,14 @@ impl BetaFrame {
         let mut receptors = Vec::new();
         let mut tfl_ligands = Vec::new();
         let mut tfl_regulators = Vec::new();
+        let mut cis_left = Vec::new();
+        let mut cis_right = Vec::new();
 
         let mut intercept_idx = None;
         let mut tf_indices = Vec::new();
         let mut lr_indices = Vec::new();
         let mut tfl_indices = Vec::new();
+        let mut cis_indices = Vec::new();
 
         for (i, col) in data_col_names.iter().enumerate() {
             if col == "beta0" || col == "beta_0" {
@@ -623,6 +644,11 @@ impl BetaFrame {
                 tfl_ligands.push(parts[0].to_string());
                 tfl_regulators.push(parts[1].to_string());
                 tfl_indices.push(i);
+            } else if modulator.contains('&') {
+                let parts: Vec<&str> = modulator.splitn(2, '&').collect();
+                cis_left.push(parts[0].to_string());
+                cis_right.push(parts[1].to_string());
+                cis_indices.push(i);
             } else {
                 tfs.push(modulator.to_string());
                 tf_indices.push(i);
@@ -636,6 +662,7 @@ impl BetaFrame {
         let tf_betas = Self::extract_cols(&data, &tf_indices, n_rows);
         let lr_betas = Self::extract_cols(&data, &lr_indices, n_rows);
         let tfl_betas = Self::extract_cols(&data, &tfl_indices, n_rows);
+        let cis_betas = Self::extract_cols(&data, &cis_indices, n_rows);
 
         let modulator_genes = Self::compute_modulator_genes(
             &tfs,
@@ -643,6 +670,8 @@ impl BetaFrame {
             &receptors,
             &tfl_ligands,
             &tfl_regulators,
+            &cis_left,
+            &cis_right,
         );
 
         Ok(Self {
@@ -656,11 +685,14 @@ impl BetaFrame {
             tf_betas,
             lr_betas,
             tfl_betas,
+            cis_betas,
             tfs,
             ligands,
             receptors,
             tfl_ligands,
             tfl_regulators,
+            cis_left,
+            cis_right,
             modulator_genes,
             modulator_gene_indices: None,
             join_by_obs_name,
@@ -688,6 +720,8 @@ impl BetaFrame {
     ///   dy/dL(lr)    = beta_LR * gex[R]   (× ligand_beta_scale_factor)
     ///   dy/dL(tfl)   = beta_TFL * gex[reg] (× ligand_beta_scale_factor)
     ///   dy/dTF(tfl)  = beta_TFL * wL_tfl  (TF regulator; no ligand scale)
+    ///   dy/dA(cis)   = beta_AB * gex[B]   (no ligand scale)
+    ///   dy/dB(cis)   = beta_AB * gex[A]   (no ligand scale)
     pub fn splash(
         &self,
         rw_ligands: &GeneMatrix,
@@ -705,6 +739,7 @@ impl BetaFrame {
         let n_tfs = self.tfs.len();
         let n_lr = self.ligands.len();
         let n_tfl = self.tfl_ligands.len();
+        let n_cis = self.cis_left.len();
 
         let gene_to_out: HashMap<&str, usize> = self
             .modulator_genes
@@ -760,10 +795,31 @@ impl BetaFrame {
             })
             .collect();
 
+        #[derive(Clone)]
+        struct CisWork {
+            beta_col: usize,
+            left_oi: usize,
+            right_oi: usize,
+            gex_left: usize,
+            gex_right: usize,
+        }
+        let cis_work: Vec<CisWork> = (0..n_cis)
+            .filter_map(|j| {
+                Some(CisWork {
+                    beta_col: j,
+                    left_oi: gene_to_out.get(self.cis_left[j].as_str()).copied()?,
+                    right_oi: gene_to_out.get(self.cis_right[j].as_str()).copied()?,
+                    gex_left: gex_df.col_index(&self.cis_left[j])?,
+                    gex_right: gex_df.col_index(&self.cis_right[j])?,
+                })
+            })
+            .collect();
+
         // Flat views: beta arrays are tiny (n_clusters × n_cols), always in cache
         let tf_flat = self.tf_betas.as_slice_memory_order().unwrap_or(&[]);
         let lr_flat = self.lr_betas.as_slice_memory_order().unwrap_or(&[]);
         let tfl_flat = self.tfl_betas.as_slice_memory_order().unwrap_or(&[]);
+        let cis_flat = self.cis_betas.as_slice_memory_order().unwrap_or(&[]);
 
         // Flat views of input matrices (zero-allocation direct access)
         let rw_flat = rw_ligands.data.as_slice().unwrap();
@@ -819,6 +875,16 @@ impl BetaFrame {
 
                 unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * lbs };
                 unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl };
+            }
+
+            // 6. Cis tetraspanin product: dy/dA = β B, dy/dB = β A (no ligand scale)
+            let cis_beta_base = br * n_cis;
+            for cw in &cis_work {
+                let beta = unsafe { *cis_flat.get_unchecked(cis_beta_base + cw.beta_col) };
+                let gex_a = unsafe { *gex_flat.get_unchecked(gex_base + cw.gex_left) };
+                let gex_b = unsafe { *gex_flat.get_unchecked(gex_base + cw.gex_right) };
+                unsafe { *r.get_unchecked_mut(cw.left_oi) += beta * gex_b };
+                unsafe { *r.get_unchecked_mut(cw.right_oi) += beta * gex_a };
             }
         });
 
@@ -1495,6 +1561,8 @@ pub struct CollectedInteractionRow {
     pub beta: f64,
     pub interaction_type: String,
     pub cell_type: String,
+    pub sample: Option<String>,
+    pub condition: Option<String>,
 }
 
 /// All β aggregation modes computed in one pass over matching cells.
@@ -1517,6 +1585,8 @@ pub struct CollectedInteractionRowFull {
     pub cell_type: String,
     /// Set when collecting independently per `obs[cluster_col]` partition.
     pub cluster: Option<String>,
+    pub sample: Option<String>,
+    pub condition: Option<String>,
     pub aggregates: BetaAggregates,
 }
 
@@ -1560,6 +1630,8 @@ fn classify_betadata_column_type(col: &str) -> &'static str {
         "ligand-tf"
     } else if body.contains('$') {
         "ligand-receptor"
+    } else if body.contains('&') {
+        "tetraspanin"
     } else {
         "tf"
     }
@@ -1794,7 +1866,7 @@ fn read_feather_coef_columns_and_mapping(
     Ok((coef_columns, mapping))
 }
 
-fn list_betadata_feather_gene_paths(
+pub(crate) fn list_betadata_feather_gene_paths(
     dir: &Path,
     max_genes: Option<usize>,
 ) -> Result<Vec<(String, PathBuf)>> {
@@ -1968,6 +2040,8 @@ fn collect_rows_for_cell_type_indices(
             beta,
             interaction_type: coef.interaction_type.to_string(),
             cell_type: ct_idx.labels[ct_i].to_string(),
+            sample: None,
+            condition: None,
         });
     }
     local
@@ -1991,6 +2065,8 @@ fn collect_rows_full_for_cell_type_indices(
             interaction_type: coef.interaction_type.to_string(),
             cell_type: ct_idx.labels[ct_i].to_string(),
             cluster: cluster.map(str::to_string),
+            sample: None,
+            condition: None,
             aggregates,
         });
     }
@@ -2332,6 +2408,8 @@ fn sort_collected_interaction_rows_full(merged: &mut [CollectedInteractionRowFul
         aggregate_sort_key(&b.aggregates)
             .partial_cmp(&aggregate_sort_key(&a.aggregates))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.sample.cmp(&b.sample))
+            .then_with(|| a.condition.cmp(&b.condition))
             .then_with(|| a.cluster.cmp(&b.cluster))
             .then_with(|| a.cell_type.cmp(&b.cell_type))
             .then_with(|| a.target_gene.cmp(&b.target_gene))
@@ -2571,10 +2649,618 @@ pub fn betadata_collect_interactions_all_cell_types(
             .abs()
             .partial_cmp(&a.beta.abs())
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.sample.cmp(&b.sample))
+            .then_with(|| a.condition.cmp(&b.condition))
             .then_with(|| a.cell_type.cmp(&b.cell_type))
             .then_with(|| a.target_gene.cmp(&b.target_gene))
             .then_with(|| a.interaction.cmp(&b.interaction))
     });
+    Ok(merged)
+}
+
+/// One pool-lasso sample directory plus obs row indices into the concatenated collect obs.
+#[derive(Debug, Clone)]
+pub struct PooledCollectSample {
+    pub sample: String,
+    pub condition: Option<String>,
+    pub output_dir: PathBuf,
+    pub obs_indices: Vec<usize>,
+}
+
+fn slice_obs_by_indices(src: &[String], idx: &[usize]) -> Arc<[String]> {
+    idx.iter()
+        .map(|&i| src[i].clone())
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn collect_progress_bar(n_total: usize, n_samples: usize) -> Option<Arc<indicatif::ProgressBar>> {
+    if std::io::stderr().is_terminal() && n_total > 0 {
+        let bar = indicatif::ProgressBar::new(n_total as u64);
+        let tmpl = if n_samples > 1 {
+            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {per_sec} eta {eta} {msg}"
+        } else {
+            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {per_sec} eta {eta} collect-interactions"
+        };
+        bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template(tmpl)
+                .expect("progress template")
+                .progress_chars("#>-"),
+        );
+        if n_samples > 1 {
+            bar.set_message(format!("collect-interactions · {n_samples} samples"));
+        }
+        bar.enable_steady_tick(std::time::Duration::from_millis(200));
+        Some(Arc::new(bar))
+    } else if n_total > 0 {
+        if n_samples > 1 {
+            eprintln!("Scanning {n_total} betadata feathers across {n_samples} samples…");
+        } else {
+            eprintln!("Scanning {n_total} betadata feathers…");
+        }
+        None
+    } else {
+        None
+    }
+}
+
+fn stamp_row_sample(row: &mut CollectedInteractionRow, sample: &str, condition: Option<&str>) {
+    row.sample = Some(sample.to_string());
+    row.condition = condition.map(str::to_string);
+}
+
+fn stamp_row_full_sample(
+    row: &mut CollectedInteractionRowFull,
+    sample: &str,
+    condition: Option<&str>,
+) {
+    row.sample = Some(sample.to_string());
+    row.condition = condition.map(str::to_string);
+}
+
+fn count_label(labels: &[String], want: &str) -> usize {
+    labels.iter().filter(|l| l.as_str() == want).count()
+}
+
+fn count_type_in_cluster(
+    cell_types: &[String],
+    cluster_obs: &[String],
+    cell_type: &str,
+    cluster: &str,
+) -> usize {
+    cell_types
+        .iter()
+        .zip(cluster_obs.iter())
+        .filter(|(ct, cl)| ct.as_str() == cell_type && cl.as_str() == cluster)
+        .count()
+}
+
+struct SampleObsMeta {
+    sample: String,
+    condition: Option<String>,
+    cell_types: Arc<[String]>,
+    cluster_obs: Option<Arc<[String]>>,
+}
+
+fn combine_across_beta(values: &[(f64, usize)], mode: BetadataCollectAggregate) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    match mode {
+        BetadataCollectAggregate::Mean | BetadataCollectAggregate::Sum => {
+            let mut num = 0.0;
+            let mut den = 0usize;
+            for &(v, n) in values {
+                if mode == BetadataCollectAggregate::Mean {
+                    num += v * n as f64;
+                    den += n;
+                } else {
+                    num += v;
+                    den += 1;
+                }
+            }
+            if mode == BetadataCollectAggregate::Mean {
+                if den == 0 {
+                    None
+                } else {
+                    Some(num / den as f64)
+                }
+            } else {
+                Some(num)
+            }
+        }
+        BetadataCollectAggregate::Min => values.iter().map(|(v, _)| *v).reduce(f64::min),
+        BetadataCollectAggregate::Max => values.iter().map(|(v, _)| *v).reduce(f64::max),
+        BetadataCollectAggregate::Positive | BetadataCollectAggregate::Negative => {
+            let mut num = 0.0;
+            let mut den = 0usize;
+            for &(v, n) in values {
+                num += v * n as f64;
+                den += n;
+            }
+            if den == 0 {
+                None
+            } else {
+                Some(num / den as f64)
+            }
+        }
+    }
+}
+
+fn merge_across_samples_rows(
+    rows: &[CollectedInteractionRow],
+    metas: &[SampleObsMeta],
+    mode: BetadataCollectAggregate,
+) -> Vec<CollectedInteractionRow> {
+    #[derive(Hash, Eq, PartialEq, Clone)]
+    struct K {
+        interaction: String,
+        target_gene: String,
+        cell_type: String,
+        interaction_type: String,
+    }
+    let mut keys = HashSet::new();
+    let mut by: HashMap<(K, String, Option<String>), f64> = HashMap::new();
+    for r in rows {
+        let Some(ref s) = r.sample else { continue };
+        if s == "_all" {
+            continue;
+        }
+        let k = K {
+            interaction: r.interaction.clone(),
+            target_gene: r.target_gene.clone(),
+            cell_type: r.cell_type.clone(),
+            interaction_type: r.interaction_type.clone(),
+        };
+        keys.insert(K {
+            interaction: r.interaction.clone(),
+            target_gene: r.target_gene.clone(),
+            cell_type: r.cell_type.clone(),
+            interaction_type: r.interaction_type.clone(),
+        });
+        by.insert((k, s.clone(), r.condition.clone()), r.beta);
+    }
+    let nested = metas.iter().any(|m| m.condition.is_some());
+    let mut out = Vec::new();
+    for k in keys {
+        let mut pairs = Vec::new();
+        for m in metas {
+            let n = count_label(m.cell_types.as_ref(), &k.cell_type);
+            if n == 0 {
+                continue;
+            }
+            let lookup = K {
+                interaction: k.interaction.clone(),
+                target_gene: k.target_gene.clone(),
+                cell_type: k.cell_type.clone(),
+                interaction_type: k.interaction_type.clone(),
+            };
+            let beta = by
+                .get(&(lookup, m.sample.clone(), m.condition.clone()))
+                .copied()
+                .unwrap_or(0.0);
+            if matches!(
+                mode,
+                BetadataCollectAggregate::Positive | BetadataCollectAggregate::Negative
+            ) {
+                if by.contains_key(&(
+                    K {
+                        interaction: k.interaction.clone(),
+                        target_gene: k.target_gene.clone(),
+                        cell_type: k.cell_type.clone(),
+                        interaction_type: k.interaction_type.clone(),
+                    },
+                    m.sample.clone(),
+                    m.condition.clone(),
+                )) {
+                    pairs.push((beta, n));
+                }
+            } else {
+                pairs.push((beta, n));
+            }
+        }
+        let Some(beta) = combine_across_beta(&pairs, mode) else {
+            continue;
+        };
+        if !beta.is_finite() || beta.abs() <= 1e-15 {
+            continue;
+        }
+        out.push(CollectedInteractionRow {
+            interaction: k.interaction,
+            target_gene: k.target_gene,
+            beta,
+            interaction_type: k.interaction_type,
+            cell_type: k.cell_type,
+            sample: Some("_all".into()),
+            condition: if nested { Some("_all".into()) } else { None },
+        });
+    }
+    out
+}
+
+fn merge_across_samples_rows_full(
+    rows: &[CollectedInteractionRowFull],
+    metas: &[SampleObsMeta],
+) -> Vec<CollectedInteractionRowFull> {
+    #[derive(Hash, Eq, PartialEq, Clone)]
+    struct K {
+        interaction: String,
+        target_gene: String,
+        cell_type: String,
+        interaction_type: String,
+        cluster: Option<String>,
+    }
+    let mut keys = HashSet::new();
+    let mut by: HashMap<(K, String, Option<String>), BetaAggregates> = HashMap::new();
+    for r in rows {
+        let Some(ref s) = r.sample else { continue };
+        if s == "_all" {
+            continue;
+        }
+        let k = K {
+            interaction: r.interaction.clone(),
+            target_gene: r.target_gene.clone(),
+            cell_type: r.cell_type.clone(),
+            interaction_type: r.interaction_type.clone(),
+            cluster: r.cluster.clone(),
+        };
+        keys.insert(k.clone());
+        by.insert((k, s.clone(), r.condition.clone()), r.aggregates);
+    }
+    let nested = metas.iter().any(|m| m.condition.is_some());
+    let mut out = Vec::new();
+    for k in keys {
+        let n_for = |m: &SampleObsMeta| -> usize {
+            match (&k.cluster, &m.cluster_obs) {
+                (Some(cl), Some(cobs)) => {
+                    count_type_in_cluster(m.cell_types.as_ref(), cobs.as_ref(), &k.cell_type, cl)
+                }
+                _ => count_label(m.cell_types.as_ref(), &k.cell_type),
+            }
+        };
+        let mut mean_p = Vec::new();
+        let mut min_p = Vec::new();
+        let mut max_p = Vec::new();
+        let mut sum_p = Vec::new();
+        let mut pos_p = Vec::new();
+        let mut neg_p = Vec::new();
+        for m in metas {
+            let n = n_for(m);
+            if n == 0 {
+                continue;
+            }
+            let lookup = k.clone();
+            let agg = by.get(&(lookup, m.sample.clone(), m.condition.clone()));
+            let mean = agg.and_then(|a| a.mean).unwrap_or(0.0);
+            let min = agg.and_then(|a| a.min).unwrap_or(0.0);
+            let max = agg.and_then(|a| a.max).unwrap_or(0.0);
+            let sum = agg.and_then(|a| a.sum).unwrap_or(0.0);
+            mean_p.push((mean, n));
+            min_p.push((min, n));
+            max_p.push((max, n));
+            sum_p.push((sum, n));
+            if let Some(p) = agg.and_then(|a| a.positive) {
+                pos_p.push((p, n));
+            }
+            if let Some(nv) = agg.and_then(|a| a.negative) {
+                neg_p.push((nv, n));
+            }
+        }
+        let aggregates = BetaAggregates {
+            mean: combine_across_beta(&mean_p, BetadataCollectAggregate::Mean),
+            min: combine_across_beta(&min_p, BetadataCollectAggregate::Min),
+            max: combine_across_beta(&max_p, BetadataCollectAggregate::Max),
+            sum: combine_across_beta(&sum_p, BetadataCollectAggregate::Sum),
+            positive: combine_across_beta(&pos_p, BetadataCollectAggregate::Positive),
+            negative: combine_across_beta(&neg_p, BetadataCollectAggregate::Negative),
+        };
+        if !aggregates_have_signal(&aggregates) {
+            continue;
+        }
+        out.push(CollectedInteractionRowFull {
+            interaction: k.interaction,
+            target_gene: k.target_gene,
+            interaction_type: k.interaction_type,
+            cell_type: k.cell_type,
+            cluster: k.cluster,
+            sample: Some("_all".into()),
+            condition: if nested { Some("_all".into()) } else { None },
+            aggregates,
+        });
+    }
+    out
+}
+
+/// Flattened `(sample, gene)` job count for tests.
+pub fn pooled_collect_job_count(samples: &[PooledCollectSample]) -> Result<usize> {
+    let mut n = 0usize;
+    for s in samples {
+        n += list_betadata_feather_gene_paths(&s.output_dir, None)?.len();
+    }
+    Ok(n)
+}
+
+/// Collect interactions independently per pool-lasso sample, then stack rows with `sample` set.
+///
+/// `obs_*` are the full concatenated collect obs. Each sample's `obs_indices` select that slide.
+pub fn betadata_collect_interactions_pooled(
+    samples: &[PooledCollectSample],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    mode: BetadataCollectAggregate,
+    cluster_obs: Option<&[String]>,
+    across_samples: bool,
+) -> Result<Vec<CollectedInteractionRow>> {
+    ensure_obs_slices_same_len(
+        obs_names.len(),
+        cluster_keys.len(),
+        cell_type_labels.len(),
+        cluster_obs.map(|s| s.len()),
+    )?;
+    anyhow::ensure!(!samples.is_empty(), "no pool-lasso sample plans");
+
+    struct Slice {
+        sample: Arc<str>,
+        condition: Option<Arc<str>>,
+        obs_names: Arc<[String]>,
+        cluster_keys: Arc<[String]>,
+        cell_types: Arc<[String]>,
+        cluster_obs: Option<Arc<[String]>>,
+        unique_arcs: Arc<Vec<Arc<str>>>,
+    }
+
+    let mut metas = Vec::with_capacity(samples.len());
+    let mut jobs: Vec<(Arc<Slice>, String, PathBuf)> = Vec::new();
+    for s in samples {
+        let paths = list_betadata_feather_gene_paths(&s.output_dir, None)?;
+        if paths.is_empty() {
+            eprintln!(
+                "Warning: no *_betadata.feather in {}; skipping sample {:?}",
+                s.output_dir.display(),
+                s.sample
+            );
+            continue;
+        }
+        let ct = slice_obs_by_indices(cell_type_labels, &s.obs_indices);
+        let unique_cell_types = unique_sorted_cell_types(ct.as_ref());
+        anyhow::ensure!(
+            !unique_cell_types.is_empty(),
+            "no cell types in sample {:?}",
+            s.sample
+        );
+        let unique_arcs: Arc<Vec<Arc<str>>> = Arc::new(
+            unique_cell_types
+                .iter()
+                .map(|x| Arc::from(x.as_str()))
+                .collect(),
+        );
+        let slice = Arc::new(Slice {
+            sample: Arc::from(s.sample.as_str()),
+            condition: s.condition.as_deref().map(Arc::from),
+            obs_names: slice_obs_by_indices(obs_names, &s.obs_indices),
+            cluster_keys: slice_obs_by_indices(cluster_keys, &s.obs_indices),
+            cell_types: Arc::clone(&ct),
+            cluster_obs: cluster_obs.map(|c| slice_obs_by_indices(c, &s.obs_indices)),
+            unique_arcs,
+        });
+        metas.push(SampleObsMeta {
+            sample: s.sample.clone(),
+            condition: s.condition.clone(),
+            cell_types: Arc::clone(&ct),
+            cluster_obs: slice.cluster_obs.clone(),
+        });
+        for (gene, path) in paths {
+            jobs.push((Arc::clone(&slice), gene, path));
+        }
+    }
+    anyhow::ensure!(
+        !jobs.is_empty(),
+        "pool-lasso collect-interactions: no *_betadata.feather files in sample directories"
+    );
+
+    let n_total = jobs.len();
+    let pb = collect_progress_bar(n_total, samples.len());
+    let row_counts: Arc<std::sync::atomic::AtomicUsize> =
+        Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let results: Vec<Vec<CollectedInteractionRow>> = jobs
+        .par_iter()
+        .filter_map(|(slice, gene, path)| {
+            let ps = path.to_string_lossy();
+            let r = load_collect_gene_workspace_all_ct(
+                &ps,
+                gene.as_str(),
+                slice.obs_names.as_ref(),
+                slice.cluster_keys.as_ref(),
+                slice.cell_types.as_ref(),
+                slice.unique_arcs.as_slice(),
+            )
+            .map(|ws| {
+                let mut rows = collect_interactions_all_cell_types_from_workspace(&ws, mode);
+                let cond = slice.condition.as_deref().map(|c| c.as_ref());
+                for row in &mut rows {
+                    stamp_row_sample(row, slice.sample.as_ref(), cond);
+                }
+                rows
+            });
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
+            match r {
+                Ok(v) => {
+                    row_counts.fetch_add(v.len(), std::sync::atomic::Ordering::Relaxed);
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load {}: {:#}", path.display(), e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if let Some(p) = &pb {
+        p.finish_with_message("Done collecting interactions");
+    }
+
+    let total_rows = row_counts.load(std::sync::atomic::Ordering::Relaxed);
+    let mut merged = Vec::with_capacity(total_rows);
+    for v in results {
+        merged.extend(v);
+    }
+    if across_samples {
+        let extra = merge_across_samples_rows(&merged, &metas, mode);
+        merged.extend(extra);
+    }
+    merged.par_sort_unstable_by(|a, b| {
+        b.beta
+            .abs()
+            .partial_cmp(&a.beta.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.sample.cmp(&b.sample))
+            .then_with(|| a.condition.cmp(&b.condition))
+            .then_with(|| a.cell_type.cmp(&b.cell_type))
+            .then_with(|| a.target_gene.cmp(&b.target_gene))
+            .then_with(|| a.interaction.cmp(&b.interaction))
+    });
+    Ok(merged)
+}
+
+/// Like [`betadata_collect_interactions_pooled`] with all aggregation columns (and optional cluster).
+pub fn betadata_collect_interactions_pooled_full(
+    samples: &[PooledCollectSample],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    cell_type_labels: &[String],
+    cluster_obs: Option<&[String]>,
+    across_samples: bool,
+) -> Result<Vec<CollectedInteractionRowFull>> {
+    ensure_obs_slices_same_len(
+        obs_names.len(),
+        cluster_keys.len(),
+        cell_type_labels.len(),
+        cluster_obs.map(|s| s.len()),
+    )?;
+    anyhow::ensure!(!samples.is_empty(), "no pool-lasso sample plans");
+
+    struct Slice {
+        sample: Arc<str>,
+        condition: Option<Arc<str>>,
+        obs_names: Arc<[String]>,
+        cluster_keys: Arc<[String]>,
+        cell_types: Arc<[String]>,
+        cluster_obs: Option<Arc<[String]>>,
+        unique_arcs: Arc<Vec<Arc<str>>>,
+    }
+
+    let mut metas = Vec::with_capacity(samples.len());
+    let mut jobs: Vec<(Arc<Slice>, String, PathBuf)> = Vec::new();
+    for s in samples {
+        let paths = list_betadata_feather_gene_paths(&s.output_dir, None)?;
+        if paths.is_empty() {
+            eprintln!(
+                "Warning: no *_betadata.feather in {}; skipping sample {:?}",
+                s.output_dir.display(),
+                s.sample
+            );
+            continue;
+        }
+        let ct = slice_obs_by_indices(cell_type_labels, &s.obs_indices);
+        let unique_cell_types = unique_sorted_cell_types(ct.as_ref());
+        anyhow::ensure!(
+            !unique_cell_types.is_empty(),
+            "no cell types in sample {:?}",
+            s.sample
+        );
+        let unique_arcs: Arc<Vec<Arc<str>>> = Arc::new(
+            unique_cell_types
+                .iter()
+                .map(|x| Arc::from(x.as_str()))
+                .collect(),
+        );
+        let cobs = cluster_obs.map(|c| slice_obs_by_indices(c, &s.obs_indices));
+        let slice = Arc::new(Slice {
+            sample: Arc::from(s.sample.as_str()),
+            condition: s.condition.as_deref().map(Arc::from),
+            obs_names: slice_obs_by_indices(obs_names, &s.obs_indices),
+            cluster_keys: slice_obs_by_indices(cluster_keys, &s.obs_indices),
+            cell_types: Arc::clone(&ct),
+            cluster_obs: cobs.clone(),
+            unique_arcs,
+        });
+        metas.push(SampleObsMeta {
+            sample: s.sample.clone(),
+            condition: s.condition.clone(),
+            cell_types: Arc::clone(&ct),
+            cluster_obs: cobs,
+        });
+        for (gene, path) in paths {
+            jobs.push((Arc::clone(&slice), gene, path));
+        }
+    }
+    anyhow::ensure!(
+        !jobs.is_empty(),
+        "pool-lasso collect-interactions: no *_betadata.feather files in sample directories"
+    );
+
+    let n_total = jobs.len();
+    let pb = collect_progress_bar(n_total, samples.len());
+    let row_counts: Arc<std::sync::atomic::AtomicUsize> =
+        Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let results: Vec<Vec<CollectedInteractionRowFull>> = jobs
+        .par_iter()
+        .filter_map(|(slice, gene, path)| {
+            let ps = path.to_string_lossy();
+            let r = load_collect_gene_workspace(
+                &ps,
+                gene.as_str(),
+                slice.obs_names.as_ref(),
+                slice.cluster_keys.as_ref(),
+                slice.cell_types.as_ref(),
+                slice.cluster_obs.as_deref(),
+                slice.unique_arcs.as_slice(),
+            )
+            .map(|ws| {
+                let mut rows = collect_interactions_all_cell_types_full_from_workspace(&ws);
+                let cond = slice.condition.as_deref().map(|c| c.as_ref());
+                for row in &mut rows {
+                    stamp_row_full_sample(row, slice.sample.as_ref(), cond);
+                }
+                rows
+            });
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
+            match r {
+                Ok(v) => {
+                    row_counts.fetch_add(v.len(), std::sync::atomic::Ordering::Relaxed);
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load {}: {:#}", path.display(), e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if let Some(p) = &pb {
+        p.finish_with_message("Done collecting interactions");
+    }
+
+    let total_rows = row_counts.load(std::sync::atomic::Ordering::Relaxed);
+    let mut merged = Vec::with_capacity(total_rows);
+    for v in results {
+        merged.extend(v);
+    }
+    if across_samples {
+        let extra = merge_across_samples_rows_full(&merged, &metas);
+        merged.extend(extra);
+    }
+    sort_collected_interaction_rows_full(&mut merged);
     Ok(merged)
 }
 
@@ -2593,6 +3279,8 @@ pub fn write_collected_interactions_full_feather(
     let interaction_type: Vec<String> = rows.iter().map(|r| r.interaction_type.clone()).collect();
     let cell_type: Vec<String> = rows.iter().map(|r| r.cell_type.clone()).collect();
     let cluster: Vec<Option<String>> = rows.iter().map(|r| r.cluster.clone()).collect();
+    let sample: Vec<Option<String>> = rows.iter().map(|r| r.sample.clone()).collect();
+    let condition: Vec<Option<String>> = rows.iter().map(|r| r.condition.clone()).collect();
     let mean: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.mean).collect();
     let min: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.min).collect();
     let max: Vec<Option<f64>> = rows.iter().map(|r| r.aggregates.max).collect();
@@ -2614,6 +3302,27 @@ pub fn write_collected_interactions_full_feather(
     ];
     if rows.iter().any(|r| r.cluster.is_some()) {
         columns.insert(4, Series::new("cluster".into(), cluster).into());
+    }
+    if rows.iter().any(|r| r.sample.is_some()) {
+        let idx = columns
+            .iter()
+            .position(|c| c.name().as_str() == "cell_type")
+            .map(|i| i + 1)
+            .unwrap_or(columns.len());
+        columns.insert(idx, Series::new("sample".into(), sample).into());
+    }
+    if rows.iter().any(|r| r.condition.is_some()) {
+        let idx = columns
+            .iter()
+            .position(|c| c.name().as_str() == "sample")
+            .or_else(|| {
+                columns
+                    .iter()
+                    .position(|c| c.name().as_str() == "cell_type")
+            })
+            .map(|i| i + 1)
+            .unwrap_or(columns.len());
+        columns.insert(idx, Series::new("condition".into(), condition).into());
     }
 
     let mut df = DataFrame::new(columns)?;
@@ -2640,13 +3349,22 @@ pub fn write_collected_interactions_feather(
     let interaction_type: Vec<String> = rows.iter().map(|r| r.interaction_type.clone()).collect();
     let cell_type: Vec<String> = rows.iter().map(|r| r.cell_type.clone()).collect();
 
-    let mut df = DataFrame::new(vec![
+    let sample: Vec<Option<String>> = rows.iter().map(|r| r.sample.clone()).collect();
+    let condition: Vec<Option<String>> = rows.iter().map(|r| r.condition.clone()).collect();
+    let mut columns: Vec<Column> = vec![
         Series::new("interaction".into(), interaction).into(),
         Series::new("target_gene".into(), target_gene).into(),
         Series::new("beta".into(), beta).into(),
         Series::new("interaction_type".into(), interaction_type).into(),
         Series::new("cell_type".into(), cell_type).into(),
-    ])?;
+    ];
+    if rows.iter().any(|r| r.sample.is_some()) {
+        columns.push(Series::new("sample".into(), sample).into());
+    }
+    if rows.iter().any(|r| r.condition.is_some()) {
+        columns.push(Series::new("condition".into(), condition).into());
+    }
+    let mut df = DataFrame::new(columns)?;
 
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -3003,7 +3721,18 @@ pub fn betadata_pair_lr_parallel(
 
 #[cfg(test)]
 mod feather_label_tests {
-    use super::betadata_feather_label_column_index;
+    use super::{betadata_feather_label_column_index, classify_betadata_column_type};
+
+    #[test]
+    fn classify_tetraspanin_ampersand() {
+        assert_eq!(
+            classify_betadata_column_type("beta_CD9&CD81"),
+            "tetraspanin"
+        );
+        assert_eq!(classify_betadata_column_type("beta_A$B"), "ligand-receptor");
+        assert_eq!(classify_betadata_column_type("beta_A#B"), "ligand-tf");
+        assert_eq!(classify_betadata_column_type("beta_MOD"), "tf");
+    }
 
     #[test]
     fn label_index_prefers_cellid_when_cluster_is_first_column() {
@@ -3255,5 +3984,494 @@ mod collect_interactions_all_cell_types_tests {
         assert!((beta_mod.values[1] - 30.0).abs() < 1e-9);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod pooled_collect_independence_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "st_pooled_collect_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_mod(dir: &Path, gene: &str, id_col: &str, ids: &[String], betas: &[f64]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let cols = vec!["beta0".into(), "beta_MOD".into()];
+        let mut m = ndarray::Array2::<f64>::zeros((ids.len(), 2));
+        for (i, b) in betas.iter().enumerate() {
+            m[[i, 1]] = *b;
+        }
+        write_betadata_feather(
+            dir.join(format!("{gene}_betadata.feather"))
+                .to_str()
+                .unwrap(),
+            id_col,
+            ids,
+            &cols,
+            &m,
+        )
+        .unwrap();
+    }
+
+    fn row_beta(rows: &[CollectedInteractionRow], sample: &str, ct: &str) -> f64 {
+        let hits: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.sample.as_deref() == Some(sample)
+                    && r.cell_type == ct
+                    && r.interaction == "beta_MOD"
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "sample={sample} ct={ct} n={}", hits.len());
+        hits[0].beta
+    }
+
+    #[test]
+    fn per_sample_means_not_diluted_by_other_slide() {
+        let root = tmp("dilute");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(
+            &s1,
+            "TG",
+            "CellID",
+            &["c0".into(), "c1".into()],
+            &[10.0, 10.0],
+        );
+        write_mod(
+            &s2,
+            "TG",
+            "CellID",
+            &["c2".into(), "c3".into()],
+            &[100.0, 100.0],
+        );
+        let obs_names = vec!["c0".into(), "c1".into(), "c2".into(), "c3".into()];
+        let cluster_keys = obs_names.clone();
+        let labels = vec!["T".into(), "T".into(), "T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0, 1],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![2, 3],
+            },
+        ];
+        assert_eq!(pooled_collect_job_count(&samples).unwrap(), 2);
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &cluster_keys,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(rows.iter().all(|r| r.sample.as_deref() != Some("_all")));
+        assert!((row_beta(&rows, "s1", "T") - 10.0).abs() < 1e-9);
+        assert!((row_beta(&rows, "s2", "T") - 100.0).abs() < 1e-9);
+        let only_s1 = betadata_collect_interactions_all_cell_types(
+            samples[0].output_dir.to_str().unwrap(),
+            &obs_names[0..2].to_vec(),
+            &cluster_keys[0..2].to_vec(),
+            &labels[0..2].to_vec(),
+            BetadataCollectAggregate::Mean,
+            None,
+        )
+        .unwrap();
+        assert!((only_s1[0].beta - 10.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gene_only_on_one_sample() {
+        let root = tmp("onegene");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(&s1, "TG", "CellID", &["a".into()], &[4.0]);
+        write_mod(&s2, "OTHER", "CellID", &["b".into()], &[9.0]);
+        let obs_names = vec!["a".into(), "b".into()];
+        let labels = vec!["T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![1],
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        let tg: Vec<_> = rows.iter().filter(|r| r.target_gene == "TG").collect();
+        assert_eq!(tg.len(), 1);
+        assert_eq!(tg[0].sample.as_deref(), Some("s1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn across_samples_cell_weighted_not_unweighted_mean() {
+        let root = tmp("weighted");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(
+            &s1,
+            "TG",
+            "CellID",
+            &["a".into(), "b".into()],
+            &[10.0, 10.0],
+        );
+        let s2_ids: Vec<String> = (0..50).map(|i| format!("z{i}")).collect();
+        let s2_betas = vec![30.0; 50];
+        write_mod(&s2, "TG", "CellID", &s2_ids, &s2_betas);
+        let mut obs_names = vec!["a".into(), "b".into()];
+        obs_names.extend(s2_ids.iter().cloned());
+        let labels = vec!["T".into(); obs_names.len()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0, 1],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: (2..52).collect(),
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!((row_beta(&rows, "s1", "T") - 10.0).abs() < 1e-9);
+        assert!((row_beta(&rows, "s2", "T") - 30.0).abs() < 1e-9);
+        let all = row_beta(&rows, "_all", "T");
+        let want = (10.0 * 2.0 + 30.0 * 50.0) / 52.0;
+        assert!((all - want).abs() < 1e-9);
+        let unweighted = 20.0;
+        assert!((all - unweighted).abs() > 1.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cluster_keyed_seed_feathers_independent() {
+        let root = tmp("seed");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(&s1, "TG", "Cluster", &["cA".into()], &[2.0]);
+        write_mod(&s2, "TG", "Cluster", &["cA".into()], &[8.0]);
+        let obs_names = vec!["n1".into(), "n2".into()];
+        let cluster_keys = vec!["cA".into(), "cA".into()];
+        let labels = vec!["T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![1],
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &cluster_keys,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!((row_beta(&rows, "s1", "T") - 2.0).abs() < 1e-9);
+        assert!((row_beta(&rows, "s2", "T") - 8.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cluster_col_does_not_leak_across_samples() {
+        let root = tmp("cl");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(&s1, "TG", "CellID", &["a".into()], &[5.0]);
+        write_mod(&s2, "TG", "CellID", &["b".into()], &[7.0]);
+        let obs_names = vec!["a".into(), "b".into()];
+        let labels = vec!["T".into(), "T".into()];
+        let cluster_obs = vec!["L0".into(), "L1".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![1],
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled_full(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            Some(cluster_obs.as_slice()),
+            false,
+        )
+        .unwrap();
+        let r1 = rows
+            .iter()
+            .find(|r| r.sample.as_deref() == Some("s1"))
+            .unwrap();
+        let r2 = rows
+            .iter()
+            .find(|r| r.sample.as_deref() == Some("s2"))
+            .unwrap();
+        assert_eq!(r1.cluster.as_deref(), Some("L0"));
+        assert_eq!(r2.cluster.as_deref(), Some("L1"));
+        assert!((r1.aggregates.mean.unwrap() - 5.0).abs() < 1e-9);
+        assert!((r2.aggregates.mean.unwrap() - 7.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nested_same_sample_name_two_conditions() {
+        let root = tmp("nested");
+        let a = root.join("cA").join("s1");
+        let b = root.join("cB").join("s1");
+        write_mod(&a, "TG", "CellID", &["a".into()], &[1.0]);
+        write_mod(&b, "TG", "CellID", &["b".into()], &[2.0]);
+        let obs_names = vec!["a".into(), "b".into()];
+        let labels = vec!["T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: Some("cA".into()),
+                output_dir: a,
+                obs_indices: vec![0],
+            },
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: Some("cB".into()),
+                output_dir: b,
+                obs_indices: vec![1],
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let ca = rows
+            .iter()
+            .find(|r| r.condition.as_deref() == Some("cA"))
+            .unwrap();
+        let cb = rows
+            .iter()
+            .find(|r| r.condition.as_deref() == Some("cB"))
+            .unwrap();
+        assert!((ca.beta - 1.0).abs() < 1e-9);
+        assert!((cb.beta - 2.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unmapped_cell_zero_fills_that_sample_only() {
+        let root = tmp("unmap");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(&s1, "TG", "CellID", &["a".into()], &[10.0]);
+        write_mod(&s2, "TG", "CellID", &["c".into()], &[100.0]);
+        let obs_names = vec!["a".into(), "missing".into(), "c".into()];
+        let labels = vec!["T".into(), "T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0, 1],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![2],
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!((row_beta(&rows, "s1", "T") - 5.0).abs() < 1e-9);
+        assert!((row_beta(&rows, "s2", "T") - 100.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_sample_dir_skipped() {
+        let root = tmp("empty_one");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        std::fs::create_dir_all(&s2).unwrap();
+        write_mod(&s1, "TG", "CellID", &["a".into()], &[3.0]);
+        let obs_names = vec!["a".into(), "b".into()];
+        let labels = vec!["T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![1],
+            },
+        ];
+        let rows = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sample.as_deref(), Some("s1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pooled_collect_errors_when_no_feathers() {
+        let root = tmp("nof");
+        let s1 = root.join("s1");
+        std::fs::create_dir_all(&s1).unwrap();
+        let err = betadata_collect_interactions_pooled(
+            &[PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0],
+            }],
+            &["a".into()],
+            &["a".into()],
+            &["T".into()],
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no *_betadata.feather"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rayon_sort_is_deterministic() {
+        let root = tmp("det");
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        write_mod(&s1, "TG", "CellID", &["a".into()], &[1.0]);
+        write_mod(&s2, "TG", "CellID", &["b".into()], &[2.0]);
+        let obs_names = vec!["a".into(), "b".into()];
+        let labels = vec!["T".into(), "T".into()];
+        let samples = vec![
+            PooledCollectSample {
+                sample: "s1".into(),
+                condition: None,
+                output_dir: s1,
+                obs_indices: vec![0],
+            },
+            PooledCollectSample {
+                sample: "s2".into(),
+                condition: None,
+                output_dir: s2,
+                obs_indices: vec![1],
+            },
+        ];
+        let a = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        let b = betadata_collect_interactions_pooled(
+            &samples,
+            &obs_names,
+            &obs_names,
+            &labels,
+            BetadataCollectAggregate::Mean,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.sample, y.sample);
+            assert_eq!(x.interaction, y.interaction);
+            assert!((x.beta - y.beta).abs() < 1e-12);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

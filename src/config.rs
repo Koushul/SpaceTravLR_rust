@@ -332,6 +332,10 @@ pub struct GrnConfig {
     pub extra_contact_lr: Vec<String>,
     /// Optional file: one contact pair per line (`LIG$REC` or `LIG,REC`); `#` comments.
     pub extra_contact_lr_file: Option<String>,
+    /// Same-cell tetraspanin–tetraspanin products as `A&B` (fifth Lasso group). Empty by default.
+    /// Canonicalized by sorting the two symbols (`CD81&CD9` → `CD9&CD81`).
+    #[serde(default)]
+    pub tetraspanin_pairs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,6 +647,7 @@ impl Default for GrnConfig {
             extra_lr_file: None,
             extra_contact_lr: Vec::new(),
             extra_contact_lr_file: None,
+            tetraspanin_pairs: Vec::new(),
         }
     }
 }
@@ -675,6 +680,7 @@ pub struct ResolvedGrnExtras {
     pub extra_modulators: Vec<String>,
     pub extra_lr: Vec<(String, String)>,
     pub extra_contact_lr: Vec<(String, String)>,
+    pub tetraspanin_pairs: Vec<(String, String)>,
 }
 
 impl GrnConfig {
@@ -693,9 +699,13 @@ impl GrnConfig {
             self.use_lr_modulators = use_lr;
             self.use_tfl_modulators = use_tfl;
         }
-        if !self.use_tf_modulators && !self.use_lr_modulators && !self.use_tfl_modulators {
+        if !self.use_tf_modulators
+            && !self.use_lr_modulators
+            && !self.use_tfl_modulators
+            && self.tetraspanin_pairs.is_empty()
+        {
             anyhow::bail!(
-                "at least one GRN modulator family must be enabled (TF targets, ligand–receptor, or TF–ligand / NicheNet-style); set [grn].train_modulators or the use_*_modulators flags"
+                "at least one GRN modulator family must be enabled (TF targets, ligand–receptor, TF–ligand / NicheNet-style, or tetraspanin_pairs); set [grn].train_modulators or the use_*_modulators flags"
             );
         }
         Ok(())
@@ -757,12 +767,36 @@ impl GrnConfig {
             .filter(|(l, r)| !contact_keys.contains(&format!("{l}${r}")))
             .collect();
 
+        let tetraspanin_pairs = collect_tetraspanin_entries(&self.tetraspanin_pairs)?;
+
         Ok(ResolvedGrnExtras {
             extra_modulators: genes,
             extra_lr,
             extra_contact_lr,
+            tetraspanin_pairs,
         })
     }
+}
+
+fn collect_tetraspanin_entries(list: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for s in list {
+        let t = s.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let Some(p) = crate::grn_extra::parse_tetraspanin_token(t) else {
+            anyhow::bail!(
+                "invalid tetraspanin_pairs token {t:?}: expected GENEA&GENEB (e.g. CD9&CD81)"
+            );
+        };
+        let key = crate::grn_extra::canonical_tetraspanin_key(&p.0, &p.1);
+        if seen.insert(key) {
+            pairs.push(p);
+        }
+    }
+    Ok(pairs)
 }
 
 fn collect_extra_lr_entries(
@@ -1622,6 +1656,24 @@ extra_contact_lr = ["CADM1$CADM1", "CDH1$CDH1"]
             vec![
                 ("CADM1".to_string(), "CADM1".to_string()),
                 ("CDH1".to_string(), "CDH1".to_string()),
+            ]
+        );
+        assert!(extras.tetraspanin_pairs.is_empty());
+    }
+
+    #[test]
+    fn tetraspanin_pairs_toml_canonicalizes_and_dedupes() {
+        let toml = r#"
+[grn]
+tetraspanin_pairs = ["CD81&CD9", "CD9&CD81", "CD9&CD9"]
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        let extras = cfg.grn.resolve_extra_modulators_and_lr(None).unwrap();
+        assert_eq!(
+            extras.tetraspanin_pairs,
+            vec![
+                ("CD9".to_string(), "CD81".to_string()),
+                ("CD9".to_string(), "CD9".to_string()),
             ]
         );
     }

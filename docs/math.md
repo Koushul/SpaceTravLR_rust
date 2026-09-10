@@ -122,7 +122,8 @@ SpaceTravLR uses a custom sparse group lasso implementation written in pure Rust
 
 For each target gene \(g\) and each cell type \(c\), a regularized linear model predicts the spatial
 expression profile from the modulator design matrix \(\mathbf{X}_c\) (columns =
-TFs + received ligands × receptors + TF–ligand terms):
+TFs + received ligands × receptors + TF–ligand terms + extra genes + optional
+same-cell tetraspanin products \(A_i B_i\)):
 
 \[
 \hat{\boldsymbol{\beta}}^{(g)}_c
@@ -215,7 +216,7 @@ This function is affectionately named `splash` for the ligands from neighbors sp
 
 For each trained gene, partial derivatives of predicted expression w.r.t.
 modulators form a sparse per-cell matrix \(J\). The rules (stored
-in betadata) include TF, LR, and TF–ligand channels:
+in betadata) include TF, LR, TF–ligand, and cis tetraspanin channels:
 
 \[
 \frac{\partial \hat{y}_g}{\partial x_{\mathrm{TF}}} = \beta_{\mathrm{TF}},
@@ -224,8 +225,16 @@ in betadata) include TF, LR, and TF–ligand channels:
   = \beta_{\mathrm{LR}} \cdot \widetilde{L} \cdot \mathbb{1}[x_R > 0] \cdot s,
 \quad
 \frac{\partial \hat{y}_g}{\partial x_L}
-  = \beta_{\mathrm{LR}} \cdot x_R \cdot s
+  = \beta_{\mathrm{LR}} \cdot x_R \cdot s,
+\quad
+\frac{\partial \hat{y}_g}{\partial A}
+  = \beta_{A\&B} \cdot B,
+\quad
+\frac{\partial \hat{y}_g}{\partial B}
+  = \beta_{A\&B} \cdot A
 \]
+
+The \(A\&B\) terms are same-cell products from `[grn].tetraspanin_pairs`; they do not use received ligands or \(s\).
 
 ```rust
 // src/betadata.rs — splash, row-parallel, flat indexed, L1-hot

@@ -322,6 +322,148 @@ fn prepare_obs_splits(
     )
 }
 
+/// Read-only sample (and optional condition) plan for `collect-interactions` on a pool-lasso run.
+#[derive(Debug, Clone)]
+pub struct CollectSamplePlan {
+    pub sample: String,
+    pub condition: Option<String>,
+    pub output_dir: PathBuf,
+    pub obs_indices: Vec<usize>,
+}
+
+fn group_aligned_labels(labels: &[String]) -> BTreeMap<String, Vec<usize>> {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (idx, raw) in labels.iter().enumerate() {
+        let label = if raw.trim().is_empty() {
+            "_na".to_string()
+        } else {
+            raw.clone()
+        };
+        groups.entry(label).or_default().push(idx);
+    }
+    groups
+}
+
+fn count_betadata_feathers(dir: &Path) -> usize {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with("_betadata.feather"))
+        })
+        .count()
+}
+
+/// Locate existing pool-lasso sample directories without creating files.
+///
+/// `obs_sample_labels` / `obs_condition_labels` must be aligned with collect-interactions obs
+/// (including `perturb_obs_subset_file`). When `obs_condition_labels` is `Some`, dirs are
+/// `conditions/<condition>/samples/<sample>/`; otherwise `conditions/<sample>/`.
+pub fn discover_pool_lasso_collect_plans(
+    output_root: &Path,
+    obs_sample_labels: &[String],
+    obs_condition_labels: Option<&[String]>,
+) -> anyhow::Result<Vec<CollectSamplePlan>> {
+    anyhow::ensure!(
+        !obs_sample_labels.is_empty(),
+        "no cells to assign to pool-lasso samples"
+    );
+    if let Some(cond) = obs_condition_labels {
+        anyhow::ensure!(
+            cond.len() == obs_sample_labels.len(),
+            "obs_condition_labels len {} != obs_sample_labels len {}",
+            cond.len(),
+            obs_sample_labels.len()
+        );
+    }
+    let root_s = output_root
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("training output directory path must be UTF-8"))?;
+
+    let mut plans = Vec::new();
+    if let Some(cond_labels) = obs_condition_labels {
+        let mut pairs: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+        for i in 0..obs_sample_labels.len() {
+            let c = if cond_labels[i].trim().is_empty() {
+                "_na".to_string()
+            } else {
+                cond_labels[i].clone()
+            };
+            let s = if obs_sample_labels[i].trim().is_empty() {
+                "_na".to_string()
+            } else {
+                obs_sample_labels[i].clone()
+            };
+            pairs.entry((c, s)).or_default().push(i);
+        }
+        for ((condition, sample), obs_indices) in pairs {
+            let Some(cond_dir) = find_split_dir_matching_label(
+                root_s,
+                CONDITION_RUNS_SUBDIR,
+                CONDITION_LABEL_FILENAME,
+                &condition,
+            ) else {
+                eprintln!(
+                    "Warning: no conditions/ directory for condition {condition:?}; skipping sample {sample:?}"
+                );
+                continue;
+            };
+            let cond_s = cond_dir
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("condition directory path must be UTF-8"))?;
+            let Some(sample_dir) = find_split_dir_matching_label(
+                cond_s,
+                SAMPLE_RUNS_SUBDIR,
+                SAMPLE_LABEL_FILENAME,
+                &sample,
+            ) else {
+                eprintln!(
+                    "Warning: no samples/ directory for sample {sample:?} under condition {condition:?}"
+                );
+                continue;
+            };
+            plans.push(CollectSamplePlan {
+                sample,
+                condition: Some(condition),
+                output_dir: sample_dir,
+                obs_indices,
+            });
+        }
+    } else {
+        for (sample, obs_indices) in group_aligned_labels(obs_sample_labels) {
+            let Some(sample_dir) = find_split_dir_matching_label(
+                root_s,
+                CONDITION_RUNS_SUBDIR,
+                CONDITION_LABEL_FILENAME,
+                &sample,
+            ) else {
+                eprintln!("Warning: no conditions/ directory matching sample label {sample:?}");
+                continue;
+            };
+            plans.push(CollectSamplePlan {
+                sample,
+                condition: None,
+                output_dir: sample_dir,
+                obs_indices,
+            });
+        }
+    }
+
+    let n_feathers: usize = plans
+        .iter()
+        .map(|p| count_betadata_feathers(&p.output_dir))
+        .sum();
+    anyhow::ensure!(
+        n_feathers > 0,
+        "pool-lasso collect-interactions: no *_betadata.feather files under sample directories of {}",
+        output_root.display()
+    );
+    Ok(plans)
+}
+
 fn find_split_dir_matching_label(
     output_root: &str,
     runs_subdir: &str,
@@ -409,4 +551,66 @@ fn write_split_plans(
     }
 
     Ok(plans)
+}
+
+#[cfg(test)]
+mod collect_sample_plan_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "st_collect_plans_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn discover_uses_label_file_not_folder_name() {
+        let root = tmp("label");
+        let dir = root.join(CONDITION_RUNS_SUBDIR).join("slide_a");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(CONDITION_LABEL_FILENAME), "Slide A!\n").unwrap();
+        fs::write(dir.join("GENE_betadata.feather"), b"x").unwrap();
+        let labels = vec!["Slide A!".into(), "Slide A!".into()];
+        let plans = discover_pool_lasso_collect_plans(&root, &labels, None).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].sample, "Slide A!");
+        assert_eq!(plans[0].obs_indices, vec![0, 1]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_nested_condition_sample() {
+        let root = tmp("nested");
+        let cdir = root.join(CONDITION_RUNS_SUBDIR).join("cA");
+        let sdir = cdir.join(SAMPLE_RUNS_SUBDIR).join("s1");
+        fs::create_dir_all(&sdir).unwrap();
+        fs::write(cdir.join(CONDITION_LABEL_FILENAME), "condA\n").unwrap();
+        fs::write(sdir.join(SAMPLE_LABEL_FILENAME), "s1\n").unwrap();
+        fs::write(sdir.join("G_betadata.feather"), b"x").unwrap();
+        let samples = vec!["s1".into(), "s1".into()];
+        let conds = vec!["condA".into(), "condA".into()];
+        let plans = discover_pool_lasso_collect_plans(&root, &samples, Some(&conds)).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].sample, "s1");
+        assert_eq!(plans[0].condition.as_deref(), Some("condA"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_errors_when_no_feathers() {
+        let root = tmp("empty");
+        let dir = root.join(CONDITION_RUNS_SUBDIR).join("s1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(CONDITION_LABEL_FILENAME), "s1\n").unwrap();
+        let err = discover_pool_lasso_collect_plans(&root, &["s1".into()], None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no *_betadata.feather"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

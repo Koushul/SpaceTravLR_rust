@@ -211,14 +211,15 @@ pub mod verify_bundle;
 pub use betadata::{
     BetaAggregates, BetaFrame, BetaFrameFromParts, Betabase, BetadataCollectAggregate,
     CollectedInteraction, CollectedInteractionFull, CollectedInteractionRow,
-    CollectedInteractionRowFull, GeneMatrix, TopBetaCoefficient,
+    CollectedInteractionRowFull, GeneMatrix, PooledCollectSample, TopBetaCoefficient,
     betadata_collect_interactions_all_cell_types,
     betadata_collect_interactions_all_cell_types_full,
     betadata_collect_interactions_all_cell_types_one_gene,
     betadata_collect_interactions_all_cell_types_one_gene_full,
     betadata_collect_interactions_parallel, betadata_collect_interactions_parallel_full,
-    write_betadata_feather, write_betadata_feather_to_writer, write_collected_interactions_feather,
-    write_collected_interactions_full_feather,
+    betadata_collect_interactions_pooled, betadata_collect_interactions_pooled_full,
+    pooled_collect_job_count, write_betadata_feather, write_betadata_feather_to_writer,
+    write_collected_interactions_feather, write_collected_interactions_full_feather,
 };
 pub use config::{
     CnnConfig, CnnLrSchedule, CnnOutputActivation, CnnTrainingMode, PreprocessConfig,

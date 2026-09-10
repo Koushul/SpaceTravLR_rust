@@ -248,9 +248,10 @@ fn probe_verify_wgpu_adapter() -> Option<wgpu::AdapterInfo> {
 fn wgpu_probe_section() -> String {
     let mut out =
         String::from("WebGPU / wgpu (adapter probe — same path as training CNN backend)\n");
-    let adapter_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe_verify_wgpu_adapter))
-        .ok()
-        .flatten();
+    let adapter_info =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe_verify_wgpu_adapter))
+            .ok()
+            .flatten();
     match adapter_info {
         Some(info) => {
             use std::fmt::Write;
@@ -1126,9 +1127,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             &mut all_ok,
             &mut failed_checks,
             backend_ok,
-            &format!(
-                "CNN compute backend (WebGPU={gpu_used}, CPU NdArray={cpu_used})"
-            ),
+            &format!("CNN compute backend (WebGPU={gpu_used}, CPU NdArray={cpu_used})"),
             &backend_details,
         )?;
     } else {
