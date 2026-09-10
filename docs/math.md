@@ -427,8 +427,11 @@ pub(crate) fn select_compute_backend() -> ComputeChoice {
         ComputeChoice::NdArray(NdArrayDevice::Cpu)
     } else {
         match wgpu_adapter_probe_cached() {
-            Some(_) => ComputeChoice::Wgpu(WgpuDevice::default()),
-            None    => ComputeChoice::NdArray(NdArrayDevice::Cpu),
+            Some(info) if wgpu_device_type_ok(info.device_type) => {
+                try_wgpu_device().map(ComputeChoice::Wgpu)
+                    .unwrap_or(ComputeChoice::NdArray(NdArrayDevice::Cpu))
+            }
+            _ => ComputeChoice::NdArray(NdArrayDevice::Cpu),
         }
     }
 }

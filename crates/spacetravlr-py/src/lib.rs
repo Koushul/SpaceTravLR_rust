@@ -6,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use spacetravlr_transition::{
-    NullSubtractMode, TransitionGrid, TransitionUmapParams, col_delta_cor,
-    col_delta_cor_partial, compute_umap_transition_grid, pearson_vel_vs_expr_delta,
-    round_delta_inplace, umap_grid_axes, umap_knn_indices,
+    NullSubtractMode, TransitionGrid, TransitionUmapParams, col_delta_cor, col_delta_cor_partial,
+    compute_umap_transition_grid, pearson_vel_vs_expr_delta, round_delta_inplace, umap_grid_axes,
+    umap_knn_indices,
 };
 
 fn arr2_from_py(a: PyReadonlyArray2<'_, f64>) -> PyResult<Array2<f64>> {
@@ -136,7 +136,10 @@ fn col_delta_cor_py<'py>(
         return Err(PyValueError::new_err("expr/delta shape mismatch"));
     }
     let out = col_delta_cor(&e, &d);
-    Ok(PyArray2::from_vec2(py, &out.outer_iter().map(|r| r.to_vec()).collect::<Vec<_>>())?)
+    Ok(PyArray2::from_vec2(
+        py,
+        &out.outer_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+    )?)
 }
 
 /// Partial `colDeltaCor` for neighbor lists (list of list of int indices).
@@ -153,7 +156,10 @@ fn col_delta_cor_partial_py<'py>(
         return Err(PyValueError::new_err("neighbors length must equal n_cells"));
     }
     let out = col_delta_cor_partial(&e, &d, &neighbors);
-    Ok(PyArray2::from_vec2(py, &out.outer_iter().map(|r| r.to_vec()).collect::<Vec<_>>())?)
+    Ok(PyArray2::from_vec2(
+        py,
+        &out.outer_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+    )?)
 }
 
 /// UMAP KNN indices (self excluded), shape (n, k) jagged as list of lists.
@@ -219,7 +225,9 @@ fn compute_transition_grid<'py>(
     let d = arr2_from_py(delta)?;
     let u = umap_from_py(umap)?;
     if e.nrows() != d.nrows() || e.nrows() != u.len() {
-        return Err(PyValueError::new_err("n_cells mismatch across expr/delta/umap"));
+        return Err(PyValueError::new_err(
+            "n_cells mismatch across expr/delta/umap",
+        ));
     }
     if e.ncols() != d.ncols() {
         return Err(PyValueError::new_err("n_genes mismatch"));

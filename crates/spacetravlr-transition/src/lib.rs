@@ -268,7 +268,11 @@ fn subtract_null_sparse(
         .collect()
 }
 
-fn subtract_null_dense(p_sig: &Array2<f64>, p_null: &Array2<f64>, mode: NullSubtractMode) -> Array2<f64> {
+fn subtract_null_dense(
+    p_sig: &Array2<f64>,
+    p_null: &Array2<f64>,
+    mode: NullSubtractMode,
+) -> Array2<f64> {
     let n = p_sig.nrows();
     if n <= 1 {
         return Array2::<f64>::zeros((n, n));

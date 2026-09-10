@@ -1743,7 +1743,12 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let names = if n == 0 {
                     "…".to_string()
                 } else {
-                    let shown = st.pool_sample_labels.iter().take(4).cloned().collect::<Vec<_>>();
+                    let shown = st
+                        .pool_sample_labels
+                        .iter()
+                        .take(4)
+                        .cloned()
+                        .collect::<Vec<_>>();
                     let mut s = shown.join(", ");
                     if n > 4 {
                         s.push_str(&format!(" (+{})", n - 4));
@@ -1758,9 +1763,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                     let mut parts: Vec<String> = st
                         .gene_pool_sample
                         .iter()
-                        .map(|(gene, (i, n_s, label))| {
-                            format!("{gene} {i}/{n_s} {label}")
-                        })
+                        .map(|(gene, (i, n_s, label))| format!("{gene} {i}/{n_s} {label}"))
                         .collect();
                     parts.sort();
                     let shown = parts.into_iter().take(3).collect::<Vec<_>>().join("  ·  ");
@@ -2121,18 +2124,20 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 work_row[2],
             );
 
-            let (total, pos, ratio, celloracle_prog) = if st.celloracle_infer_total > 0 {
+            let (total, pos, ratio, setup_prog) = if st.celloracle_infer_total > 0 {
                 let t = st.celloracle_infer_total.max(1) as u64;
                 let d = st
                     .celloracle_infer_done
                     .load(Ordering::Relaxed)
                     .min(st.celloracle_infer_total) as u64;
                 let r = (d as f64 / t as f64).clamp(0.0, 1.0);
-                (t, d, r, true)
+                (t, d, r, Some(("CellOracle GRN", "targets")))
+            } else if let Some((d, t, r, label)) = st.ligand_field_progress() {
+                (t, d, r, Some(("Ligand field", label)))
             } else {
                 let (p, t) = st.gene_progress_pos_total();
                 let r = (p as f64 / t as f64).clamp(0.0, 1.0);
-                (t, p, r, false)
+                (t, p, r, None)
             };
             let gene_pct = (ratio * 100.0).round().clamp(0.0, 100.0) as u32;
 
@@ -2170,11 +2175,11 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             let prog_area = vchunks[2];
             let sky_bold = Style::default().fg(pal.sky).add_modifier(Modifier::BOLD);
             let title_bold = Style::default().fg(pal.title).add_modifier(Modifier::BOLD);
-            let prog_title_line = if celloracle_prog {
+            let prog_title_line = if let Some((title, unit)) = setup_prog {
                 Line::from(vec![
-                    Span::styled(" CellOracle GRN ", sky_bold),
+                    Span::styled(format!(" {title} "), sky_bold),
                     Span::styled(" · ", Style::default().fg(pal.muted)),
-                    Span::styled(format!("{}/{} targets", pos, total), title_bold),
+                    Span::styled(format!("{pos}/{total} {unit}"), title_bold),
                 ])
             } else {
                 let n_samp = st.pool_sample_labels.len();
@@ -2310,7 +2315,11 @@ mod scan_output_metrics_tests {
         let s1 = root.join("conditions").join("s1");
         fs::create_dir_all(&s1).unwrap();
         fs::write(s1.join("GENE_betadata.feather"), b"abc").unwrap();
-        let nested = root.join("conditions").join("treat").join("samples").join("s2");
+        let nested = root
+            .join("conditions")
+            .join("treat")
+            .join("samples")
+            .join("s2");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("GENE_betadata.feather"), b"xyz").unwrap();
 
@@ -2319,10 +2328,7 @@ mod scan_output_metrics_tests {
             scan_output_metrics(root.to_str().unwrap(), &active);
         assert!(bytes >= 3 + 3);
         assert!(n_files >= 4);
-        assert!(
-            disk_done >= 3,
-            "done + two feathers, got {disk_done}"
-        );
+        assert!(disk_done >= 3, "done + two feathers, got {disk_done}");
         assert_eq!(external_locks, 1);
         let _ = fs::remove_dir_all(&root);
     }

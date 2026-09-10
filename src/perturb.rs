@@ -940,6 +940,7 @@ fn recompute_weighted_ligands(args: RecomputeWeightedLigandsArgs<'_>) -> Option<
                 scale_factor,
                 gf,
                 contact_distance,
+                None,
             ),
             _ => calculate_weighted_ligands_with_cutoff(
                 xy,

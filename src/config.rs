@@ -320,10 +320,18 @@ pub struct GrnConfig {
     /// Optional file: one gene per line or comma-separated; `#` comments. Appended to `extra_modulators`.
     pub extra_modulators_file: Option<String>,
     /// Extra L–R pairs as `LIG$REC` strings (or `LIG,REC` per element). Merged after database LR selection.
+    /// Treated as **secreted / diffusible** (Gaussian σ = `[spatial].radius`).
     #[serde(default)]
     pub extra_lr: Vec<String>,
     /// Optional file: one pair per line (`LIG$REC` or `LIG,REC`); `#` comments.
     pub extra_lr_file: Option<String>,
+    /// Extra juxtacrine L–R pairs (`LIG$REC` / `LIG,REC`). Same merge rules as `extra_lr`, but
+    /// received-ligand fields use `[spatial].contact_distance` as the Gaussian σ.
+    /// If a pair appears in both lists, contact wins.
+    #[serde(default)]
+    pub extra_contact_lr: Vec<String>,
+    /// Optional file: one contact pair per line (`LIG$REC` or `LIG,REC`); `#` comments.
+    pub extra_contact_lr_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,6 +641,8 @@ impl Default for GrnConfig {
             extra_modulators_file: None,
             extra_lr: Vec::new(),
             extra_lr_file: None,
+            extra_contact_lr: Vec::new(),
+            extra_contact_lr_file: None,
         }
     }
 }
@@ -661,7 +671,11 @@ pub fn parse_train_modulators_tokens(raw: &str) -> anyhow::Result<(bool, bool, b
     Ok((tf, lr, tfl))
 }
 
-pub type ResolvedExtraModulatorsAndLr = (Vec<String>, Vec<(String, String)>);
+pub struct ResolvedGrnExtras {
+    pub extra_modulators: Vec<String>,
+    pub extra_lr: Vec<(String, String)>,
+    pub extra_contact_lr: Vec<(String, String)>,
+}
 
 impl GrnConfig {
     /// Applies [`GrnConfig::train_modulators`] when set (overwrites the three `use_*_modulators`
@@ -687,12 +701,13 @@ impl GrnConfig {
         Ok(())
     }
 
-    /// Merge TOML `extra_modulators` / `extra_lr` with optional files. Paths are expanded (`~`);
-    /// relative paths resolve against `config_file_parent` when provided.
+    /// Merge TOML `extra_modulators` / `extra_lr` / `extra_contact_lr` with optional files.
+    /// Paths are expanded (`~`); relative paths resolve against `config_file_parent` when provided.
+    /// A pair listed in both `extra_lr` and `extra_contact_lr` is kept only as contact.
     pub fn resolve_extra_modulators_and_lr(
         &self,
         config_file_parent: Option<&Path>,
-    ) -> anyhow::Result<ResolvedExtraModulatorsAndLr> {
+    ) -> anyhow::Result<ResolvedGrnExtras> {
         let resolve_path = |raw: &str| -> PathBuf {
             let exp = expand_user_path(raw.trim());
             let pb = Path::new(&exp);
@@ -726,28 +741,55 @@ impl GrnConfig {
             }
         }
 
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        let mut pair_seen: HashSet<String> = HashSet::new();
-        for s in &self.extra_lr {
-            if let Some(p) = crate::grn_extra::parse_extra_lr_token(s) {
-                let key = format!("{}${}", p.0, p.1);
-                if pair_seen.insert(key.clone()) {
-                    pairs.push(p);
-                }
-            }
-        }
-        if let Some(ref f) = self.extra_lr_file {
-            let path = resolve_path(f);
-            for p in crate::grn_extra::load_extra_lr_file(&path)? {
-                let key = format!("{}${}", p.0, p.1);
-                if pair_seen.insert(key) {
-                    pairs.push(p);
-                }
-            }
-        }
+        let extra_lr =
+            collect_extra_lr_entries(&self.extra_lr, self.extra_lr_file.as_deref(), &resolve_path)?;
+        let extra_contact_lr = collect_extra_lr_entries(
+            &self.extra_contact_lr,
+            self.extra_contact_lr_file.as_deref(),
+            &resolve_path,
+        )?;
+        let contact_keys: HashSet<String> = extra_contact_lr
+            .iter()
+            .map(|(l, r)| format!("{l}${r}"))
+            .collect();
+        let extra_lr = extra_lr
+            .into_iter()
+            .filter(|(l, r)| !contact_keys.contains(&format!("{l}${r}")))
+            .collect();
 
-        Ok((genes, pairs))
+        Ok(ResolvedGrnExtras {
+            extra_modulators: genes,
+            extra_lr,
+            extra_contact_lr,
+        })
     }
+}
+
+fn collect_extra_lr_entries(
+    list: &[String],
+    file: Option<&str>,
+    resolve_path: &impl Fn(&str) -> PathBuf,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pair_seen: HashSet<String> = HashSet::new();
+    for s in list {
+        if let Some(p) = crate::grn_extra::parse_extra_lr_token(s) {
+            let key = format!("{}${}", p.0, p.1);
+            if pair_seen.insert(key) {
+                pairs.push(p);
+            }
+        }
+    }
+    if let Some(f) = file {
+        let path = resolve_path(f);
+        for p in crate::grn_extra::load_extra_lr_file(&path)? {
+            let key = format!("{}${}", p.0, p.1);
+            if pair_seen.insert(key) {
+                pairs.push(p);
+            }
+        }
+    }
+    Ok(pairs)
 }
 
 impl Default for CnnConfig {
@@ -1171,11 +1213,7 @@ enabled = true
         )
         .unwrap();
         migrate_ligand_field_toml(&mut root);
-        let lf = root
-            .get("ligand_field")
-            .unwrap()
-            .as_table()
-            .unwrap();
+        let lf = root.get("ligand_field").unwrap().as_table().unwrap();
         assert_eq!(lf.get("mode").unwrap().as_str(), Some("spatial"));
         assert!(lf.get("enabled").is_none());
     }
@@ -1253,8 +1291,8 @@ impl SpaceshipConfig {
         let contents = std::fs::read_to_string(path.as_ref())?;
         let mut root: toml::Value = toml::from_str(&contents)?;
         migrate_ligand_field_toml(&mut root);
-        let mut config: SpaceshipConfig =
-            <SpaceshipConfig as Deserialize>::deserialize(root).context("deserialize SpaceshipConfig")?;
+        let mut config: SpaceshipConfig = <SpaceshipConfig as Deserialize>::deserialize(root)
+            .context("deserialize SpaceshipConfig")?;
         config.consolidate_ligand_field();
         config.grn.apply_train_modulators_shorthand()?;
         Ok(config)
@@ -1564,6 +1602,28 @@ max_lr = 42
 "#;
         let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.grn.max_ligands, Some(42));
+    }
+
+    #[test]
+    fn extra_contact_lr_toml_contact_wins_on_overlap() {
+        let toml = r#"
+[grn]
+extra_lr = ["VEGFA$FLT1", "CADM1$CADM1"]
+extra_contact_lr = ["CADM1$CADM1", "CDH1$CDH1"]
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        let extras = cfg.grn.resolve_extra_modulators_and_lr(None).unwrap();
+        assert_eq!(
+            extras.extra_lr,
+            vec![("VEGFA".to_string(), "FLT1".to_string())]
+        );
+        assert_eq!(
+            extras.extra_contact_lr,
+            vec![
+                ("CADM1".to_string(), "CADM1".to_string()),
+                ("CDH1".to_string(), "CDH1".to_string()),
+            ]
+        );
     }
 
     #[test]

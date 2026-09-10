@@ -221,6 +221,7 @@ pub fn compute_initial_weighted_ligands(args: ComputeInitialWeightedLigandsArgs<
                 weighted_ligand_scale,
                 gf,
                 contact_distance,
+                None,
             ),
             _ => calculate_weighted_ligands_with_cutoff(
                 xy,
@@ -390,9 +391,22 @@ impl PerturbRuntime {
             ui.reset();
         }
 
+        let extras = cfg
+            .grn
+            .resolve_extra_modulators_and_lr(run_toml_path.parent())?;
+        let contact_ligands: HashSet<String> = extras
+            .extra_contact_lr
+            .into_iter()
+            .map(|(lig, _)| lig)
+            .collect();
         let mut lr_radii: HashMap<String, f64> = HashMap::new();
         for lig in bb.ligands_set.iter().chain(bb.tfl_ligands_set.iter()) {
-            lr_radii.insert(lig.clone(), cfg.spatial.radius);
+            let radius = if contact_ligands.contains(lig) {
+                cfg.spatial.contact_distance
+            } else {
+                cfg.spatial.radius
+            };
+            lr_radii.insert(lig.clone(), radius);
         }
 
         let min_expression = 1e-9;

@@ -2,6 +2,8 @@ use ndarray::{Array2, Axis};
 use polars::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How Gaussian received-ligand weights are reduced to a per-cell scalar field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -11,6 +13,28 @@ pub enum WeightedLigandReduce {
     GlobalN,
     /// `Σ_j w_{ij} L_j / Σ_j w_{ij}` (degree / kernel-mass normalized; comparable to a global mean).
     KernelMass,
+}
+
+/// Optional HUD counters for received-ligand aggregation (unique ligands × inner kernel units).
+#[derive(Clone)]
+pub struct ReceivedLigandProgress {
+    pub ligands_done: Arc<AtomicUsize>,
+    pub unit_done: Arc<AtomicUsize>,
+    pub unit_total: Arc<AtomicUsize>,
+}
+
+fn kernel_unit_begin(progress: Option<&ReceivedLigandProgress>, n_units: usize) {
+    let Some(p) = progress else {
+        return;
+    };
+    p.unit_total.store(n_units, Ordering::Relaxed);
+    p.unit_done.store(0, Ordering::Relaxed);
+}
+
+fn kernel_unit_bump(progress: Option<&ReceivedLigandProgress>) {
+    if let Some(p) = progress {
+        p.unit_done.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Compute the amount of ligand received by each cell.
@@ -43,6 +67,7 @@ pub fn calculate_weighted_ligands_with_cutoff(
         scale_factor,
         max_neighbor_distance,
         WeightedLigandReduce::GlobalN,
+        None,
     )
 }
 
@@ -54,6 +79,7 @@ pub fn calculate_weighted_ligands_with_cutoff_reduce(
     scale_factor: f64,
     max_neighbor_distance: Option<f64>,
     reduce: WeightedLigandReduce,
+    progress: Option<&ReceivedLigandProgress>,
 ) -> Array2<f64> {
     let n_cells = xy.nrows();
     let n_ligands = lig_values.ncols();
@@ -67,6 +93,7 @@ pub fn calculate_weighted_ligands_with_cutoff_reduce(
         return result;
     }
     let n_inv = 1.0 / n_cells as f64;
+    kernel_unit_begin(progress, n_cells);
 
     result
         .axis_iter_mut(Axis(0))
@@ -105,6 +132,7 @@ pub fn calculate_weighted_ligands_with_cutoff_reduce(
                     }
                 }
             }
+            kernel_unit_bump(progress);
         });
 
     result
@@ -137,6 +165,7 @@ pub fn calculate_weighted_ligands_grid(
         scale_factor,
         grid_factor,
         None,
+        None,
     )
 }
 
@@ -148,6 +177,7 @@ pub fn calculate_weighted_ligands_grid_with_cutoff(
     scale_factor: f64,
     grid_factor: f64,
     max_neighbor_distance: Option<f64>,
+    progress: Option<&ReceivedLigandProgress>,
 ) -> Array2<f64> {
     let n_cells = xy.nrows();
     let n_ligands = lig_values.ncols();
@@ -191,12 +221,14 @@ pub fn calculate_weighted_ligands_grid_with_cutoff(
     let n_anchors = nx * ny;
 
     if n_anchors >= n_cells {
-        return calculate_weighted_ligands_with_cutoff(
+        return calculate_weighted_ligands_with_cutoff_reduce(
             xy,
             lig_values,
             radius,
             scale_factor,
             max_neighbor_distance,
+            WeightedLigandReduce::GlobalN,
+            progress,
         );
     }
 
@@ -204,6 +236,7 @@ pub fn calculate_weighted_ligands_grid_with_cutoff(
 
     let mut anchor_vals = vec![0.0f64; n_anchors * n_ligands];
     let n_inv = 1.0 / n_cells as f64;
+    kernel_unit_begin(progress, n_anchors);
 
     anchor_vals
         .par_chunks_mut(n_ligands)
@@ -231,6 +264,7 @@ pub fn calculate_weighted_ligands_grid_with_cutoff(
             for v in row.iter_mut() {
                 *v *= n_inv;
             }
+            kernel_unit_bump(progress);
         });
 
     // Bilinear interpolation for each cell: O(N × L)
@@ -642,6 +676,20 @@ mod tests {
         for (a, b) in exact.iter().zip(grid.iter()) {
             assert_abs_diff_eq!(a, b, epsilon = 1e-14);
         }
+    }
+
+    #[test]
+    fn contact_distance_kernel_is_tighter_than_secreted_radius() {
+        let xy = array![[0.0, 0.0], [100.0, 0.0]];
+        let lig = array![[1.0], [0.0]];
+        let secreted = calculate_weighted_ligands(&xy, &lig, 300.0, 1.0);
+        let contact = calculate_weighted_ligands(&xy, &lig, 30.0, 1.0);
+        assert!(
+            secreted[[1, 0]] > contact[[1, 0]] * 10.0,
+            "secreted={:.3e} should greatly exceed contact={:.3e} at 100µm",
+            secreted[[1, 0]],
+            contact[[1, 0]]
+        );
     }
 
     #[test]

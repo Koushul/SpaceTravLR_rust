@@ -150,7 +150,6 @@ pub mod banksy_cluster;
 pub mod betadata;
 #[cfg(feature = "spatial-viewer")]
 pub mod betadata_view;
-pub mod ligand_field;
 pub mod celloracle;
 pub mod condition_split;
 pub mod config;
@@ -161,6 +160,7 @@ pub mod grn_extra;
 pub mod h5ad_peek;
 pub mod lasso;
 pub mod ligand;
+pub mod ligand_field;
 pub mod malt_label_transfer;
 pub mod model;
 mod modulator_scale;
@@ -225,8 +225,8 @@ pub use config::{
     RUN_REPRO_TOML_FILENAME, SpaceshipConfig, canonical_adata_stem, canonical_training_prep_stem,
     default_output_dir_for_adata_path, expand_user_path, filter_training_var_names,
     mix_execution_random_seed, normalize_ui_path, resolve_banksy_cluster_py_path,
-    resolve_malt_label_transfer_py_path,
-    resolve_spaceship_config_toml_path, resolve_training_target_genes,
+    resolve_malt_label_transfer_py_path, resolve_spaceship_config_toml_path,
+    resolve_training_target_genes,
 };
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,

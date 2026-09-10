@@ -63,6 +63,8 @@ use_tfl_modulators = true
 # extra_modulators_file = "path/to/extra_genes.txt"
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
+# extra_contact_lr = ["CADM1$CADM1"]
+# extra_contact_lr_file = "path/to/extra_contact_lr.txt"
 
 [ligand_field]
 # Received-ligand aggregation + communication-prob pair selection (when LR modulators are on).

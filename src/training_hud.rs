@@ -1,5 +1,6 @@
 use crate::config::{CnnTrainingMode, SpaceshipConfig};
 use crate::estimator::{ClusterTrainingSummary, CnnEpochHudSlot};
+use crate::ligand::ReceivedLigandProgress;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -179,6 +180,15 @@ pub struct TrainingHudState {
     pub pool_sample_labels: Vec<String>,
     /// Per-gene pool-lasso sample progress: `(1-based index, n_samples, label)`.
     pub gene_pool_sample: HashMap<String, (usize, usize, String)>,
+    /// Ligand-field setup: unique ligands (or other units) in the active phase (0 = not in this phase).
+    pub ligand_field_total: usize,
+    /// Completed ligands / units; updated without holding the HUD mutex.
+    pub ligand_field_done: Arc<AtomicUsize>,
+    /// Inner kernel work for the current ligand (cells or grid anchors).
+    pub ligand_field_unit_done: Arc<AtomicUsize>,
+    pub ligand_field_unit_total: Arc<AtomicUsize>,
+    /// TUI label for the active ligand-field phase (`pair selection`, `received ligands`, …).
+    pub ligand_field_label: String,
 }
 
 impl TrainingHudState {
@@ -227,6 +237,11 @@ impl TrainingHudState {
             pool_lasso: false,
             pool_sample_labels: Vec::new(),
             gene_pool_sample: HashMap::new(),
+            ligand_field_total: 0,
+            ligand_field_done: Arc::new(AtomicUsize::new(0)),
+            ligand_field_unit_done: Arc::new(AtomicUsize::new(0)),
+            ligand_field_unit_total: Arc::new(AtomicUsize::new(0)),
+            ligand_field_label: String::new(),
         }
     }
 
@@ -272,6 +287,7 @@ impl TrainingHudState {
         self.celloracle_infer_total = 0;
         self.celloracle_infer_done.store(0, Ordering::Relaxed);
         self.gene_pool_sample.clear();
+        self.clear_ligand_field_progress();
     }
 
     pub fn record_gene_time(&mut self, gene: &str, secs: f64) {
@@ -374,6 +390,43 @@ impl TrainingHudState {
         self.gene_pool_sample.remove(gene);
     }
 
+    pub fn begin_ligand_field_progress(&mut self, label: &str, total: usize) {
+        self.ligand_field_label = label.to_string();
+        self.ligand_field_total = total;
+        self.ligand_field_done.store(0, Ordering::Relaxed);
+        self.ligand_field_unit_done.store(0, Ordering::Relaxed);
+        self.ligand_field_unit_total.store(0, Ordering::Relaxed);
+    }
+
+    pub fn clear_ligand_field_progress(&mut self) {
+        self.ligand_field_label.clear();
+        self.ligand_field_total = 0;
+        self.ligand_field_done.store(0, Ordering::Relaxed);
+        self.ligand_field_unit_done.store(0, Ordering::Relaxed);
+        self.ligand_field_unit_total.store(0, Ordering::Relaxed);
+    }
+
+    /// `(done_ligands, total_ligands, ratio, label)` while ligand-field setup is running.
+    pub fn ligand_field_progress(&self) -> Option<(u64, u64, f64, &str)> {
+        if self.ligand_field_total == 0 {
+            return None;
+        }
+        let t = self.ligand_field_total as u64;
+        let d = self
+            .ligand_field_done
+            .load(Ordering::Relaxed)
+            .min(self.ligand_field_total) as u64;
+        let ut = self.ligand_field_unit_total.load(Ordering::Relaxed);
+        let ud = self.ligand_field_unit_done.load(Ordering::Relaxed);
+        let partial = if ut > 0 {
+            (ud as f64 / ut as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let r = ((d as f64 + partial) / t.max(1) as f64).clamp(0.0, 1.0);
+        Some((d, t, r, self.ligand_field_label.as_str()))
+    }
+
     pub fn set_pool_lasso_samples(&mut self, labels: Vec<String>) {
         self.pool_lasso = !labels.is_empty();
         self.pool_sample_labels = labels;
@@ -463,6 +516,44 @@ impl TrainingHudState {
 }
 
 pub type TrainingHud = Arc<Mutex<TrainingHudState>>;
+
+/// Clone atomics out of the HUD so ligand-field kernels can tick without holding the mutex.
+pub fn ligand_field_hud_progress(hud: Option<&TrainingHud>) -> Option<ReceivedLigandProgress> {
+    hud.and_then(|h| {
+        h.lock().ok().map(|g| ReceivedLigandProgress {
+            ligands_done: Arc::clone(&g.ligand_field_done),
+            unit_done: Arc::clone(&g.ligand_field_unit_done),
+            unit_total: Arc::clone(&g.ligand_field_unit_total),
+        })
+    })
+}
+
+pub fn begin_ligand_field_hud_phase(hud: Option<&TrainingHud>, label: &str, total: usize) {
+    if let Some(h) = hud {
+        if let Ok(mut g) = h.lock() {
+            g.begin_ligand_field_progress(label, total);
+        }
+    }
+}
+
+struct LigandFieldHudClear<'a> {
+    hud: Option<&'a TrainingHud>,
+}
+
+impl Drop for LigandFieldHudClear<'_> {
+    fn drop(&mut self) {
+        if let Some(h) = self.hud {
+            if let Ok(mut g) = h.lock() {
+                g.clear_ligand_field_progress();
+            }
+        }
+    }
+}
+
+/// Clears ligand-field TUI progress when dropped (success or error).
+pub fn ligand_field_hud_clear_guard(hud: Option<&TrainingHud>) -> impl Drop + '_ {
+    LigandFieldHudClear { hud }
+}
 
 /// After a run with the dashboard, explain when nothing wrote betadata (TUI hides per-gene `println!`).
 pub fn print_training_outcome_banner(hud: &Option<TrainingHud>) {
@@ -599,5 +690,21 @@ mod pool_progress_tests {
         g.set_pool_lasso_samples(vec!["s1".into(), "s2".into()]);
         g.genes_rounds = 3;
         assert_eq!(g.gene_progress_pos_total(), (2, 2));
+    }
+
+    #[test]
+    fn ligand_field_progress_includes_inner_kernel_fraction() {
+        use std::sync::atomic::Ordering;
+        let mut g = empty_hud();
+        assert!(g.ligand_field_progress().is_none());
+        g.begin_ligand_field_progress("received ligands", 4);
+        g.ligand_field_done.store(1, Ordering::Relaxed);
+        g.ligand_field_unit_total.store(10, Ordering::Relaxed);
+        g.ligand_field_unit_done.store(5, Ordering::Relaxed);
+        let (d, t, r, label) = g.ligand_field_progress().expect("phase active");
+        assert_eq!((d, t, label), (1, 4, "received ligands"));
+        assert!((r - 1.5 / 4.0).abs() < 1e-9);
+        g.clear_ligand_field_progress();
+        assert!(g.ligand_field_progress().is_none());
     }
 }

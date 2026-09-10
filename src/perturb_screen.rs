@@ -16,7 +16,8 @@ fn screen_feather_name(gene: &str) -> String {
     format!("{}_KO.feather", sanitize_gene_for_filename(gene))
 }
 
-/// Union of TFs, LR ligands/receptors, TFL ligands, `[grn].extra_modulators`, and genes from `extra_lr`.
+/// Union of TFs, LR ligands/receptors, TFL ligands, `[grn].extra_modulators`,
+/// and genes from `extra_lr` / `extra_contact_lr`.
 pub fn collect_screen_genes(runtime: &PerturbRuntime) -> anyhow::Result<Vec<String>> {
     let bb = &runtime.bb;
     let mut genes: HashSet<String> = HashSet::new();
@@ -30,12 +31,16 @@ pub fn collect_screen_genes(runtime: &PerturbRuntime) -> anyhow::Result<Vec<Stri
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let (extra_modulators, extra_lr) = runtime
+    let extras = runtime
         .cfg
         .grn
         .resolve_extra_modulators_and_lr(Some(run_parent))?;
-    genes.extend(extra_modulators);
-    for (lig, rec) in extra_lr {
+    genes.extend(extras.extra_modulators);
+    for (lig, rec) in extras.extra_lr {
+        genes.insert(lig);
+        genes.insert(rec);
+    }
+    for (lig, rec) in extras.extra_contact_lr {
         genes.insert(lig);
         genes.insert(rec);
     }
@@ -255,6 +260,7 @@ mod tests {
         let mut cfg = SpaceshipConfig::default();
         cfg.grn.extra_modulators = extra_modulators.iter().map(|s| s.to_string()).collect();
         cfg.grn.extra_lr = extra_lr.iter().map(|s| s.to_string()).collect();
+        cfg.grn.extra_contact_lr = Vec::new();
 
         PerturbRuntime {
             run_toml_path: PathBuf::from("/tmp/spacetravlr_run_repro.toml"),
@@ -294,6 +300,21 @@ mod tests {
         );
         let genes = collect_screen_genes(&rt).unwrap();
         assert_eq!(genes, vec!["L1", "R1", "TF1", "X1"]);
+    }
+
+    #[test]
+    fn collect_screen_genes_includes_extra_contact_lr() {
+        let mut rt = minimal_runtime(
+            &["TF1", "CADM1", "L1", "R1"],
+            &["TF1"],
+            &["L1"],
+            &["R1"],
+            &[],
+            &[],
+        );
+        rt.cfg.grn.extra_contact_lr = vec!["CADM1$CADM1".into()];
+        let genes = collect_screen_genes(&rt).unwrap();
+        assert_eq!(genes, vec!["CADM1", "L1", "R1", "TF1"]);
     }
 
     #[test]

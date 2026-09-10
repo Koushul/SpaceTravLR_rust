@@ -1,7 +1,7 @@
 //! Opt-in self-update: only used when the user runs `spacetravlr --update`.
 //! Naming matches `scripts/install.sh` (see `GITHUB_REPO`, `tarball_name`, `prebuilt_tarball_target`, raw `data/` + `scripts/malt_label_transfer.py` sync).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use semver::Version;
 use serde::Deserialize;

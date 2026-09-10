@@ -18,7 +18,9 @@ use crate::modulator_scale::{
 use crate::run_summary_html::{RunSummaryParams, write_run_summary_html};
 use crate::sample_pool::{concat_usize, concat_vec1, vstack_rows};
 use crate::training_hud::{
-    TrainingHud, log_line, pipeline_step_begin, pipeline_step_end, print_training_outcome_banner,
+    TrainingHud, begin_ligand_field_hud_phase, ligand_field_hud_clear_guard,
+    ligand_field_hud_progress, log_line, pipeline_step_begin, pipeline_step_end,
+    print_training_outcome_banner,
 };
 use anndata::data::{ArrayConvert, SelectInfoElem};
 use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, AxisArraysOp, Backend};
@@ -98,7 +100,9 @@ fn backfill_pool_lasso_done_marker(training_dir: &str, gene: &str, sample_dirs: 
     if pool_lasso_gene_already_done(training_dir, gene, sample_dirs) {
         let marker = pool_lasso_parent_done_marker(training_dir, gene);
         if !marker.is_file()
-            && !Path::new(training_dir).join(format!("{gene}.orphan")).is_file()
+            && !Path::new(training_dir)
+                .join(format!("{gene}.orphan"))
+                .is_file()
             && !Path::new(training_dir)
                 .join(format!("{gene}.tf_ablated"))
                 .is_file()
@@ -686,11 +690,9 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     config_file_parent: Option<&Path>,
     output_dir: Option<&Path>,
     spatial_radius: Option<f64>,
+    hud: Option<&TrainingHud>,
 ) -> anyhow::Result<Arc<crate::ligand_field::LigandFieldPlan>> {
-    if matches!(
-        cfg.mode,
-        crate::ligand_field::LigandFieldMode::Spatial
-    ) {
+    if matches!(cfg.mode, crate::ligand_field::LigandFieldMode::Spatial) {
         load_spatial_coords_f64(adata).context(
             "ligand_field.mode = \"spatial\" (Gaussian received ligand) requires 2D cell coordinates in obsm['spatial'] (also tried X_spatial, spatial_loc)",
         )?;
@@ -705,11 +707,8 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     let db = crate::ligand_field::load_cellchat_db(&db_path)?;
     let var_names = adata.var_names().into_vec();
     let var_set: HashSet<String> = var_names.iter().cloned().collect();
-    let interactions = crate::ligand_field::filter_interactions_for_adata(
-        &db,
-        &var_set,
-        &cfg.signaling_types,
-    );
+    let interactions =
+        crate::ligand_field::filter_interactions_for_adata(&db, &var_set, &cfg.signaling_types);
     if interactions.is_empty() {
         anyhow::bail!(
             "Ligand field: no interactions after filtering DB {} against AnnData genes / signaling_types",
@@ -765,6 +764,10 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     }
     let group_ids: Vec<usize> = clusters.iter().copied().collect();
 
+    let _lf_hud_guard = ligand_field_hud_clear_guard(hud);
+    begin_ligand_field_hud_phase(hud, "pair selection", 1);
+    let kernel_progress = ligand_field_hud_progress(hud);
+
     let result = crate::ligand_field::compute_commun_prob(
         &expr,
         &gene_names,
@@ -774,13 +777,13 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
         cfg,
     )?;
     let expr_scores = match cfg.pair_selection {
-        crate::ligand_field::PairSelectionMode::Expressed => Some(
-            crate::ligand_field::interaction_mean_expr_product_scores(
+        crate::ligand_field::PairSelectionMode::Expressed => {
+            Some(crate::ligand_field::interaction_mean_expr_product_scores(
                 &expr,
                 &gene_names,
                 &result.interactions,
-            ),
-        ),
+            ))
+        }
         crate::ligand_field::PairSelectionMode::Prob => None,
     };
     let selected = crate::ligand_field::select_interactions_with_expr_scores(
@@ -813,6 +816,14 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     }
 
     if let Some(radius) = spatial_radius.filter(|r| r.is_finite() && *r > 0.0) {
+        let mut unique_ligands: Vec<String> = plan
+            .interactions
+            .iter()
+            .map(|i| i.ligand().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        unique_ligands.sort();
+        unique_ligands.dedup();
         let xy = match obs_row_subset {
             Some(rows) => {
                 let full = load_spatial_coords_f64(adata)?;
@@ -825,6 +836,7 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
             }
             None => load_spatial_coords_f64(adata)?,
         };
+        begin_ligand_field_hud_phase(hud, "received ligands", unique_ligands.len().max(1));
         crate::ligand_field::precompute_received_ligand_cache(
             &mut plan,
             &xy,
@@ -833,28 +845,23 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
             radius,
             cfg.weighted_ligand_scale_factor,
             cfg.ligand_grid_factor,
+            kernel_progress.as_ref(),
         )?;
         if cfg.write_ligand_diagnostics {
             if let Some(dir) = output_dir {
-                let mut ligands: Vec<String> = plan
-                    .interactions
-                    .iter()
-                    .map(|i| i.ligand().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                ligands.sort();
-                ligands.dedup();
+                begin_ligand_field_hud_phase(hud, "diagnostics", unique_ligands.len().max(1));
                 let diag = dir.join("ligand_field_L_diagnostics.csv");
                 let _ = crate::ligand_field::write_ligand_field_diagnostics_csv(
                     &diag,
                     &xy,
                     &expr,
                     &gene_to_idx,
-                    &ligands,
+                    &unique_ligands,
                     radius,
                     cfg.weighted_ligand_scale_factor,
                     cfg.ligand_grid_factor,
                     cfg.received_ligand_norm,
+                    kernel_progress.as_ref(),
                 );
             }
         }
@@ -2764,6 +2771,10 @@ pub struct SpatialCellularProgramsEstimator<AB: AutodiffBackend, AnB: Backend> {
     pub tfl_pairs: Vec<String>,
     /// User-requested genes in the fourth Lasso group (raw expression), after filtering vs target/occupied.
     pub extra_modulators: Vec<String>,
+    extra_lr_pairs: Vec<(String, String)>,
+    extra_contact_lr_pairs: Vec<(String, String)>,
+    /// `LIG$REC` keys whose received-ligand field uses `[spatial].contact_distance`.
+    contact_lr_pairs: HashSet<String>,
     pub modulators_genes: Vec<String>,
     pub max_ligands: Option<usize>,
     pub regulator_masks_by_cluster: Option<HashMap<usize, Vec<bool>>>,
@@ -2806,6 +2817,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         weighted_ligand_scale_factor: f64,
         obs_row_subset: Option<Arc<[usize]>>,
         extra_lr_pairs: &[(String, String)],
+        extra_contact_lr_pairs: &[(String, String)],
         extra_modulator_candidates: &[String],
     ) -> anyhow::Result<Self> {
         let target_gene_str = target_gene.to_string();
@@ -2833,6 +2845,18 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 &mut receptors,
                 &mut lr_pairs,
                 extra_lr_pairs,
+                &target_gene_str,
+                &var_set,
+            );
+        }
+        let mut contact_lr_pairs: HashSet<String> = HashSet::new();
+        if use_lr_modulators && !extra_contact_lr_pairs.is_empty() {
+            crate::grn_extra::merge_extra_contact_lr_into(
+                &mut ligands,
+                &mut receptors,
+                &mut lr_pairs,
+                &mut contact_lr_pairs,
+                extra_contact_lr_pairs,
                 &target_gene_str,
                 &var_set,
             );
@@ -2973,6 +2997,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             lr_pairs,
             tfl_pairs,
             extra_modulators: extra_modulators_accepted,
+            extra_lr_pairs: extra_lr_pairs.to_vec(),
+            extra_contact_lr_pairs: extra_contact_lr_pairs.to_vec(),
+            contact_lr_pairs,
             modulators_genes: modulators_genes_ordered,
             max_ligands,
             regulator_masks_by_cluster,
@@ -3051,23 +3078,103 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             self.tfl_ligands = keep_l;
             self.tfl_regulators = keep_r;
             self.tfl_pairs = keep_p;
-            self.modulators_genes = {
-                let mut m = self.regulators.clone();
-                m.extend(self.lr_pairs.iter().cloned());
-                m.extend(self.tfl_pairs.iter().cloned());
-                m.extend(self.extra_modulators.iter().cloned());
-                m
-            };
+            self.rebuild_modulators_genes();
 
             if keep_idx.len() != plan.interactions.len() {
                 self.ligand_field_plan = Some(Arc::new(plan.filtered_to_indices(&keep_idx)));
             } else {
                 self.ligand_field_plan = Some(plan);
             }
+            self.merge_user_lr_extras()?;
         } else {
             self.ligand_field_plan = Some(plan);
+            self.merge_user_lr_extras()?;
         }
         Ok(())
+    }
+
+    fn rebuild_modulators_genes(&mut self) {
+        let mut m = self.regulators.clone();
+        m.extend(self.lr_pairs.iter().cloned());
+        m.extend(self.tfl_pairs.iter().cloned());
+        m.extend(self.extra_modulators.iter().cloned());
+        self.modulators_genes = m;
+    }
+
+    /// Re-apply TOML extras after ligand-field replacement so user pairs survive `replace_lr_pairs`.
+    fn merge_user_lr_extras(&mut self) -> anyhow::Result<()> {
+        if self.extra_lr_pairs.is_empty() && self.extra_contact_lr_pairs.is_empty() {
+            return Ok(());
+        }
+        let var_set: HashSet<String> = self.adata.var_names().into_vec().into_iter().collect();
+        crate::grn_extra::merge_extra_lr_into(
+            &mut self.ligands,
+            &mut self.receptors,
+            &mut self.lr_pairs,
+            &self.extra_lr_pairs,
+            &self.target_gene,
+            &var_set,
+        );
+        self.contact_lr_pairs.clear();
+        crate::grn_extra::merge_extra_contact_lr_into(
+            &mut self.ligands,
+            &mut self.receptors,
+            &mut self.lr_pairs,
+            &mut self.contact_lr_pairs,
+            &self.extra_contact_lr_pairs,
+            &self.target_gene,
+            &var_set,
+        );
+        self.rebuild_modulators_genes();
+        crate::grn_extra::verify_modulator_invariants(
+            &self.target_gene,
+            &self.regulators,
+            &self.lr_pairs,
+            &self.extra_modulators,
+        )
+    }
+
+    fn weighted_received_for_ligands(
+        &self,
+        xy: &Array2<f64>,
+        expr_matrix: &Array2<f64>,
+        gene_to_idx: &HashMap<String, usize>,
+        ligand_names: &[String],
+        radius: f64,
+    ) -> HashMap<String, Array1<f64>> {
+        let mut out = HashMap::new();
+        if ligand_names.is_empty() {
+            return out;
+        }
+        let n = xy.nrows();
+        let mut lig_expr = Array2::<f64>::zeros((n, ligand_names.len()));
+        for (k, lig) in ligand_names.iter().enumerate() {
+            let idx = gene_to_idx[lig];
+            lig_expr.column_mut(k).assign(&expr_matrix.column(idx));
+        }
+        let grid_factor = self.ligand_grid_factor.or({
+            if n > LARGE_DATASET_GRID_AUTO_CELLS {
+                Some(DEFAULT_LIGAND_GRID_FACTOR)
+            } else {
+                None
+            }
+        });
+        let received = match grid_factor {
+            Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid(
+                xy,
+                &lig_expr,
+                radius,
+                self.weighted_ligand_scale_factor,
+                gf,
+            ),
+            _ => {
+                calculate_weighted_ligands(xy, &lig_expr, radius, self.weighted_ligand_scale_factor)
+            }
+        };
+        for (k, lig) in ligand_names.iter().enumerate() {
+            out.insert(lig.clone(), received.column(k).to_owned());
+        }
+        out
     }
 
     pub fn new(
@@ -3110,6 +3217,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             1.0,
             None,
+            &[],
             &[],
             &[],
         )
@@ -3551,25 +3659,31 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             };
 
             let cfg_parent = config_source_path.as_deref().and_then(Path::parent);
-            let (resolved_ex_mod, resolved_ex_lr) = spaceship_config
+            let extras = spaceship_config
                 .grn
                 .resolve_extra_modulators_and_lr(cfg_parent)?;
-            if !resolved_ex_mod.is_empty() || !resolved_ex_lr.is_empty() {
+            if !extras.extra_modulators.is_empty()
+                || !extras.extra_lr.is_empty()
+                || !extras.extra_contact_lr.is_empty()
+            {
                 log_line(
                     &hud,
                     format!(
-                        "GRN: +{} extra mod genes, +{} LR pairs",
-                        resolved_ex_mod.len(),
-                        resolved_ex_lr.len()
+                        "GRN: +{} extra mod genes, +{} secreted LR pairs, +{} contact LR pairs",
+                        extras.extra_modulators.len(),
+                        extras.extra_lr.len(),
+                        extras.extra_contact_lr.len()
                     ),
                 );
             }
-            let extra_mod_arc = Arc::new(resolved_ex_mod);
-            let extra_lr_arc = Arc::new(resolved_ex_lr);
+            let extra_mod_arc = Arc::new(extras.extra_modulators);
+            let extra_lr_arc = Arc::new(extras.extra_lr);
+            let extra_contact_lr_arc = Arc::new(extras.extra_contact_lr);
 
             let ligand_field_plan_arc: Option<Arc<crate::ligand_field::LigandFieldPlan>> =
                 if spaceship_config.grn.use_lr_modulators {
-                    let t_cc = pipeline_step_begin(&hud, "Ligand-field pair selection probabilities");
+                    let t_cc =
+                        pipeline_step_begin(&hud, "Ligand-field pair selection probabilities");
                     let group_names: Vec<String> = (0..num_clusters)
                         .map(|c| {
                             cluster_to_cell_type
@@ -3591,6 +3705,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         cfg_parent,
                         Some(Path::new(training_dir)),
                         Some(spaceship_config.spatial.radius),
+                        hud.as_ref(),
                     )?;
                     pipeline_step_end(&hud, "Ligand-field pair selection probabilities", t_cc);
                     log_line(
@@ -3710,6 +3825,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let gene_mean_arc = gene_mean_arc.clone();
                 let extra_mod_arc_w = extra_mod_arc.clone();
                 let extra_lr_arc_w = extra_lr_arc.clone();
+                let extra_contact_lr_arc_w = extra_contact_lr_arc.clone();
                 let ligand_field_plan_w = ligand_field_plan_arc.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
@@ -3892,6 +4008,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 weighted_ligand_scale_factor,
                                 obs_subset.clone(),
                                 extra_lr_arc_w.as_slice(),
+                                extra_contact_lr_arc_w.as_slice(),
                                 extra_mod_arc_w.as_slice(),
                             )
                             .map(Box::new)
@@ -5050,13 +5167,9 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     all_unique_genes.insert(g.clone());
                 }
             }
-        } else {
-            for g in &self.ligands {
-                all_unique_genes.insert(g.clone());
-            }
-            for g in &self.receptors {
-                all_unique_genes.insert(g.clone());
-            }
+        }
+        for g in self.ligands.iter().chain(self.receptors.iter()) {
+            all_unique_genes.insert(g.clone());
         }
 
         let unique_genes_vec: Vec<String> = all_unique_genes.into_iter().collect::<Vec<_>>();
@@ -5067,65 +5180,58 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             gene_to_idx.insert(g.clone(), i);
         }
 
-        // Collect unique ligand genes from LR and TFL pairs for received-ligand computation
-        let mut unique_lig_genes: Vec<String> = Vec::new();
-        let mut lig_seen: HashSet<String> = HashSet::new();
-        if self.ligand_field_plan.is_none() {
-            for pair in &self.lr_pairs {
-                let parts: Vec<&str> = pair.split('$').collect();
-                if parts.len() == 2 {
-                    let lig = parts[0].to_string();
-                    if lig_seen.insert(lig.clone()) {
-                        unique_lig_genes.push(lig);
-                    }
+        let plan_pair_names: HashSet<&str> = self
+            .ligand_field_plan
+            .as_ref()
+            .map(|p| {
+                p.interactions
+                    .iter()
+                    .map(|i| i.pair_name.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut secreted_lig_genes: Vec<String> = Vec::new();
+        let mut contact_lig_genes: Vec<String> = Vec::new();
+        let mut secreted_seen: HashSet<String> = HashSet::new();
+        let mut contact_seen: HashSet<String> = HashSet::new();
+        for pair in &self.lr_pairs {
+            let Some((lig, _)) = pair.split_once('$') else {
+                continue;
+            };
+            if self.contact_lr_pairs.contains(pair) {
+                if contact_seen.insert(lig.to_string()) {
+                    contact_lig_genes.push(lig.to_string());
+                }
+            } else if plan_pair_names.is_empty() || !plan_pair_names.contains(pair.as_str()) {
+                if secreted_seen.insert(lig.to_string()) {
+                    secreted_lig_genes.push(lig.to_string());
                 }
             }
         }
         for pair in &self.tfl_pairs {
-            let parts: Vec<&str> = pair.split('#').collect();
-            if parts.len() == 2 {
-                let lig = parts[0].to_string();
-                if lig_seen.insert(lig.clone()) {
-                    unique_lig_genes.push(lig);
-                }
+            let Some((lig, _)) = pair.split_once('#') else {
+                continue;
+            };
+            if secreted_seen.insert(lig.to_string()) {
+                secreted_lig_genes.push(lig.to_string());
             }
         }
 
-        // Compute spatially-weighted received ligands via Gaussian kernel
-        let mut received_map: HashMap<String, Array1<f64>> = HashMap::new();
-        if !unique_lig_genes.is_empty() {
-            let n = xy.nrows();
-            let mut lig_expr = Array2::<f64>::zeros((n, unique_lig_genes.len()));
-            for (k, lig) in unique_lig_genes.iter().enumerate() {
-                let idx = gene_to_idx[lig];
-                lig_expr.column_mut(k).assign(&expr_matrix.column(idx));
-            }
-            let grid_factor = self.ligand_grid_factor.or({
-                if n > LARGE_DATASET_GRID_AUTO_CELLS {
-                    Some(DEFAULT_LIGAND_GRID_FACTOR)
-                } else {
-                    None
-                }
-            });
-            let received = match grid_factor {
-                Some(gf) if gf.is_finite() && gf > 0.0 => calculate_weighted_ligands_grid(
-                    xy,
-                    &lig_expr,
-                    self.radius,
-                    self.weighted_ligand_scale_factor,
-                    gf,
-                ),
-                _ => calculate_weighted_ligands(
-                    xy,
-                    &lig_expr,
-                    self.radius,
-                    self.weighted_ligand_scale_factor,
-                ),
-            };
-            for (k, lig) in unique_lig_genes.iter().enumerate() {
-                received_map.insert(lig.clone(), received.column(k).to_owned());
-            }
-        }
+        let received_secreted = self.weighted_received_for_ligands(
+            xy,
+            &expr_matrix,
+            &gene_to_idx,
+            &secreted_lig_genes,
+            self.radius,
+        );
+        let received_contact = self.weighted_received_for_ligands(
+            xy,
+            &expr_matrix,
+            &gene_to_idx,
+            &contact_lig_genes,
+            self.contact_distance,
+        );
 
         let n_obs = match &self.obs_row_subset {
             Some(rows) => rows.len(),
@@ -5143,7 +5249,18 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         }
 
         let offset_lr = self.regulators.len();
-        if let Some(plan) = self.ligand_field_plan.as_ref() {
+        let plan_col: HashMap<String, usize> = self
+            .ligand_field_plan
+            .as_ref()
+            .map(|plan| {
+                plan.interactions
+                    .iter()
+                    .enumerate()
+                    .map(|(k, inter)| (inter.pair_name.clone(), k))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let lr_mat = if let Some(plan) = self.ligand_field_plan.as_ref() {
             let grid_factor = self.ligand_grid_factor.or({
                 if xy.nrows() > LARGE_DATASET_GRID_AUTO_CELLS {
                     Some(DEFAULT_LIGAND_GRID_FACTOR)
@@ -5151,7 +5268,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                     None
                 }
             });
-            let lr_mat = crate::ligand_field::build_hybrid_lr_matrix_with_grid(
+            Some(crate::ligand_field::build_hybrid_lr_matrix_with_grid(
                 plan,
                 xy,
                 &expr_matrix,
@@ -5159,29 +5276,28 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 self.radius,
                 self.weighted_ligand_scale_factor,
                 grid_factor,
-            )?;
-            if lr_mat.ncols() != self.lr_pairs.len() {
-                anyhow::bail!(
-                    "CellChat LR matrix cols ({}) != lr_pairs ({})",
-                    lr_mat.ncols(),
-                    self.lr_pairs.len()
-                );
-            }
-            for i in 0..self.lr_pairs.len() {
+            )?)
+        } else {
+            None
+        };
+        for (i, pair) in self.lr_pairs.iter().enumerate() {
+            let Some((lig_name, rec_name)) = pair.split_once('$') else {
+                continue;
+            };
+            if self.contact_lr_pairs.contains(pair) {
+                let r_idx = gene_to_idx[rec_name];
+                let mut interaction = received_contact[lig_name].clone();
+                interaction *= &expr_matrix.column(r_idx);
+                x_modulators.column_mut(offset_lr + i).assign(&interaction);
+            } else if let (Some(mat), Some(&k)) = (lr_mat.as_ref(), plan_col.get(pair)) {
                 x_modulators
                     .column_mut(offset_lr + i)
-                    .assign(&lr_mat.column(i));
-            }
-        } else {
-            for (i, pair) in self.lr_pairs.iter().enumerate() {
-                let parts: Vec<&str> = pair.split('$').collect::<Vec<_>>();
-                if parts.len() == 2 {
-                    let lig_name = parts[0].to_string();
-                    let r_idx = gene_to_idx[&parts[1].to_string()];
-                    let mut interaction = received_map[&lig_name].clone();
-                    interaction *= &expr_matrix.column(r_idx);
-                    x_modulators.column_mut(offset_lr + i).assign(&interaction);
-                }
+                    .assign(&mat.column(k));
+            } else {
+                let r_idx = gene_to_idx[rec_name];
+                let mut interaction = received_secreted[lig_name].clone();
+                interaction *= &expr_matrix.column(r_idx);
+                x_modulators.column_mut(offset_lr + i).assign(&interaction);
             }
         }
 
@@ -5191,7 +5307,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             if parts.len() == 2 {
                 let lig_name = parts[0].to_string();
                 let tf_idx = gene_to_idx[&parts[1].to_string()];
-                let mut interaction = received_map[&lig_name].clone();
+                let mut interaction = received_secreted[&lig_name].clone();
                 interaction *= &expr_matrix.column(tf_idx);
                 x_modulators.column_mut(offset_tfl + i).assign(&interaction);
             }
@@ -6269,8 +6385,8 @@ mod mean_lasso_r2_patch_tests {
 #[cfg(test)]
 mod pool_lasso_done_marker_tests {
     use super::{
-        backfill_pool_lasso_done_marker, gene_terminal_artifact_in_dir, pool_lasso_gene_already_done,
-        write_pool_lasso_gene_done_marker,
+        backfill_pool_lasso_done_marker, gene_terminal_artifact_in_dir,
+        pool_lasso_gene_already_done, write_pool_lasso_gene_done_marker,
     };
     use std::fs;
     use std::path::PathBuf;

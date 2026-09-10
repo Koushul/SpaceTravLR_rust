@@ -1,5 +1,5 @@
-//! User-supplied LR pairs (`extra_lr`) and extra modulator genes (fourth Lasso group).
-//! See plan: merge after DB LR selection; filter extras against an occupied gene set.
+//! User-supplied LR pairs (`extra_lr`, `extra_contact_lr`) and extra modulator genes
+//! (fourth Lasso group). Merge after DB LR selection; filter extras against an occupied gene set.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -193,6 +193,38 @@ pub fn merge_extra_lr_into(
     n
 }
 
+/// Append or re-label user **contact** LR pairs. Existing `LIG$REC` keys are marked contact
+/// without duplicating columns. Returns number of newly appended pairs.
+pub fn merge_extra_contact_lr_into(
+    ligands: &mut Vec<String>,
+    receptors: &mut Vec<String>,
+    lr_pairs: &mut Vec<String>,
+    contact_keys: &mut HashSet<String>,
+    pairs: &[(String, String)],
+    target_gene: &str,
+    var_set: &HashSet<String>,
+) -> usize {
+    let mut seen: HashSet<String> = lr_pairs.iter().cloned().collect();
+    let mut n = 0usize;
+    for (l, r) in pairs {
+        if l == target_gene || r == target_gene {
+            continue;
+        }
+        if !var_set.contains(l) || !var_set.contains(r) {
+            continue;
+        }
+        let pair = format!("{}${}", l, r);
+        contact_keys.insert(pair.clone());
+        if seen.insert(pair.clone()) {
+            ligands.push(l.clone());
+            receptors.push(r.clone());
+            lr_pairs.push(pair);
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Filter requested extra modulators: must be in `var_set`, not in `occupied`. Preserves order, dedupes.
 pub fn filter_extra_modulators(
     requested: &[String],
@@ -280,6 +312,25 @@ mod tests {
         let n = merge_extra_lr_into(&mut l, &mut r, &mut p, &pairs, "T", &var);
         assert_eq!(n, 1);
         assert_eq!(p, vec!["L0$R0", "A$B"]);
+    }
+
+    #[test]
+    fn merge_contact_marks_existing_and_appends_new() {
+        let mut l = vec!["L0".into()];
+        let mut r = vec!["R0".into()];
+        let mut p = vec!["L0$R0".into()];
+        let mut contact = HashSet::new();
+        let var: HashSet<_> = ["L0", "R0", "A", "B", "T"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let pairs = vec![("L0".into(), "R0".into()), ("A".into(), "B".into())];
+        let n =
+            merge_extra_contact_lr_into(&mut l, &mut r, &mut p, &mut contact, &pairs, "T", &var);
+        assert_eq!(n, 1);
+        assert_eq!(p, vec!["L0$R0", "A$B"]);
+        assert!(contact.contains("L0$R0"));
+        assert!(contact.contains("A$B"));
     }
 
     #[test]

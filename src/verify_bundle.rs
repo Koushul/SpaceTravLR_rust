@@ -2,8 +2,10 @@
 //! `imputed_count` layers so training runs **Rust full preprocess** (QC → normalize → HVG → … → MAGIC), then
 //! tiny full-mode train on **AICDA** and **CD74** with **`--parallel 2`**, confirm two `*_betadata.feather` files.
 //! Writes a plain-text log (checklist + hardware). `SPACETRAVLR_VERIFY_MAX_LR` caps DB ligand–receptor pairs
-//! (default 256; very low values can orphan a target with no `*_betadata.feather`). Set **`SPACETRAVLR_VERIFY_ALLOW_CPU=1`**
-//! to pass when no WebGPU adapter is used (default: require training stderr line `CNN/compute backend = WebGPU`).
+//! (default 256; very low values can orphan a target with no `*_betadata.feather`). Training on CPU-only
+//! machines is accepted (NdArray backend). Set **`SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1`** to fail unless
+//! training stderr contains `CNN/compute backend = WebGPU`. **`SPACETRAVLR_VERIFY_ALLOW_CPU=1`** is kept
+//! as an alias for the default (CPU allowed).
 //! **`SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1`** uses the raw `.h5ad` (skips forcing full Rust prep + related log checks).
 //!
 //! Verify sets **`SPACETRAVLR_FORCE_KEEP_GENES=AICDA,CD74`** on the training subprocess so target genes
@@ -55,6 +57,7 @@ const VERIFY_TRAIN_LOG_TAIL_LINES: usize = 48;
 const VERIFY_LOG_RUST_FULL_PREP: &str = "running Rust preprocess (QC → log-norm → HVG";
 const VERIFY_LOG_MAGIC_CELLTYPE: &str = ">>> MAGIC per cell_type";
 const VERIFY_LOG_WEBGPU: &str = "CNN/compute backend = WebGPU";
+const VERIFY_LOG_CPU: &str = "CNN/compute backend = CPU (NdArray)";
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -228,10 +231,8 @@ fn verify_workspace_and_config() -> Option<(PathBuf, PathBuf)> {
     Some((parent.to_path_buf(), cfg))
 }
 
-fn wgpu_probe_section() -> String {
-    let mut out =
-        String::from("WebGPU / wgpu (adapter probe — same path as training CNN backend)\n");
-    let adapter_info = pollster::block_on(async {
+fn probe_verify_wgpu_adapter() -> Option<wgpu::AdapterInfo> {
+    pollster::block_on(async {
         let instance = wgpu::Instance::default();
         instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -241,7 +242,15 @@ fn wgpu_probe_section() -> String {
             })
             .await
             .map(|a| a.get_info())
-    });
+    })
+}
+
+fn wgpu_probe_section() -> String {
+    let mut out =
+        String::from("WebGPU / wgpu (adapter probe — same path as training CNN backend)\n");
+    let adapter_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe_verify_wgpu_adapter))
+        .ok()
+        .flatten();
     match adapter_info {
         Some(info) => {
             use std::fmt::Write;
@@ -252,8 +261,20 @@ fn wgpu_probe_section() -> String {
             let _ = writeln!(out, "  backend:       {:?}", info.backend);
             let _ = writeln!(out, "  driver:        {}", info.driver);
             let _ = writeln!(out, "  driver_info:   {}", info.driver_info);
+            if !matches!(
+                info.device_type,
+                wgpu::DeviceType::DiscreteGpu
+                    | wgpu::DeviceType::IntegratedGpu
+                    | wgpu::DeviceType::VirtualGpu
+            ) {
+                out.push_str(
+                    "  (software/CPU adapter — training uses NdArray, not this wgpu device)\n",
+                );
+            }
         }
-        None => out.push_str("  (no adapter returned — training will use CPU NdArray unless WebGPU becomes available)\n"),
+        None => out.push_str(
+            "  (no adapter returned or probe panicked — training will use CPU NdArray)\n",
+        ),
     }
     let force_cpu = std::env::var("SPACETRAVLR_FORCE_CPU").unwrap_or_default();
     let disable_wgpu = std::env::var("SPACETRAVLR_DISABLE_WGPU").unwrap_or_default();
@@ -705,7 +726,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     println!(
         "{}",
         format!(
-            "Tip: SPACETRAVLR_VERIFY_H5AD=…  ·  SPACETRAVLR_ROOT or run from repo / beside data/spaceship_config.toml  ·  SPACETRAVLR_VERIFY_ALLOW_CPU=1 on CPU-only  ·  SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips prep-layer strip + prep log checks  ·  log → {}",
+            "Tip: SPACETRAVLR_VERIFY_H5AD=…  ·  SPACETRAVLR_ROOT or run from repo / beside data/spaceship_config.toml  ·  CPU-only hosts use NdArray automatically  ·  SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1 to require a GPU  ·  SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips prep-layer strip + prep log checks  ·  log → {}",
             log_path.display()
         )
         .dimmed()
@@ -773,7 +794,8 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
         .with_context(|| format!("mkdir {}", work_path.display()))?;
 
     let skip_prep_strip = env_flag("SPACETRAVLR_VERIFY_SKIP_PREP_STRIP");
-    let allow_cpu = env_flag("SPACETRAVLR_VERIFY_ALLOW_CPU");
+    let require_webgpu = env_flag("SPACETRAVLR_VERIFY_REQUIRE_WEBGPU");
+    let allow_cpu = !require_webgpu || env_flag("SPACETRAVLR_VERIFY_ALLOW_CPU");
 
     log.writeln_str(&rule(w))?;
     log.writeln_str(" Verify run parameters")?;
@@ -797,8 +819,12 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
         if skip_prep_strip { "no" } else { "yes" }
     ))?;
     log.writeln_str(&format!(
-        "  require_webgpu:    {}  (relax → SPACETRAVLR_VERIFY_ALLOW_CPU=1)",
-        if allow_cpu { "no" } else { "yes" }
+        "  require_webgpu:    {}  (on → SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1; CPU NdArray is the default when no GPU)",
+        if require_webgpu && !env_flag("SPACETRAVLR_VERIFY_ALLOW_CPU") {
+            "yes"
+        } else {
+            "no"
+        }
     ))?;
     log.writeln_str(&format!(
         "  force_keep_genes:  {}  (env SPACETRAVLR_FORCE_KEEP_GENES on training subprocess; preserves targets through HVG)",
@@ -1084,15 +1110,26 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
     }
 
     let gpu_used = train_combined.contains(VERIFY_LOG_WEBGPU);
+    let cpu_used = train_combined.contains(VERIFY_LOG_CPU);
     if allow_cpu {
-        emit_check(
+        let backend_ok = gpu_used || cpu_used;
+        let backend_details = if backend_ok {
+            Vec::new()
+        } else {
+            vec![
+                format!("expected log substring: {VERIFY_LOG_WEBGPU:?} or {VERIFY_LOG_CPU:?}"),
+                "searched combined stdout+stderr from training subprocess".into(),
+            ]
+        };
+        emit_check_details(
             &mut log,
             &mut all_ok,
             &mut failed_checks,
-            true,
+            backend_ok,
             &format!(
-                "CNN compute backend (SPACETRAVLR_VERIFY_ALLOW_CPU: WebGPU={gpu_used}, NdArray allowed)"
+                "CNN compute backend (WebGPU={gpu_used}, CPU NdArray={cpu_used})"
             ),
+            &backend_details,
         )?;
     } else {
         let gpu_details = if gpu_used {
@@ -1100,7 +1137,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
         } else {
             vec![
                 format!("expected log substring: {VERIFY_LOG_WEBGPU:?}"),
-                "searched combined stdout+stderr; set SPACETRAVLR_VERIFY_ALLOW_CPU=1 to allow CPU-only".into(),
+                "searched combined stdout+stderr; omit SPACETRAVLR_VERIFY_REQUIRE_WEBGPU to allow CPU NdArray".into(),
             ]
         };
         emit_check_details(
@@ -1108,7 +1145,7 @@ pub fn run_spacetravlr_verify() -> anyhow::Result<()> {
             &mut all_ok,
             &mut failed_checks,
             gpu_used,
-            "CNN compute backend = WebGPU (training stderr; set SPACETRAVLR_VERIFY_ALLOW_CPU=1 for CPU-only)",
+            "CNN compute backend = WebGPU (SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1; omit that env to allow CPU NdArray)",
             &gpu_details,
         )?;
     }

@@ -129,7 +129,7 @@ Required AnnData shape: expression in `.X`, 2D coordinates in `.obsm['spatial']`
 
 ### Utility flags (exit without training)
 
-- `--verify` — install smoke test: downloads a tonsil `.h5ad`, runs Rust prep, trains two genes, checks the WebGPU backend. Best first command on a new machine.
+- `--verify` — install smoke test: downloads a tonsil `.h5ad`, runs Rust prep, trains two genes, accepts WebGPU or CPU (NdArray). Best first command on a new machine.
 - `--peek PATH` (alias `--peak`) — fast HDF5 metadata summary without a full load; works on `.h5ad` and 10x `.h5`. Add `--obs COL` for value counts.
 - `--make-cells-csv --run-toml PATH` — write `cells.csv` in the training output directory, one column per distinct `[data].cluster_annot` value, each listing `obs_names`. **This is how you set up a cell-type-restricted perturbation** for `spacetravlr-perturb --cells-csv`.
 - `--infer-species --h5ad PATH` — print human/mouse inference
@@ -282,7 +282,7 @@ spacetravlr run-summary --config spaceship_config.toml --h5ad /path/data.h5ad --
 | `{gene}.orphan` files | No usable modulators or failed `[training].score_threshold`. Lower the threshold, raise `max_ligands`, or check `[data].layer` exists and is non-zero. |
 | Join host errors | Join hosts must not override repro hyperparameters. Pass only `--join-output-dir`, `--parallel`, `--plain`. |
 | Locks left after a crash | Set `[execution].stale_lock_secs` (3600 is reasonable on NFS) |
-| GPU unavailable / wgpu issues | `SPACETRAVLR_FORCE_CPU=1`; confirm with `spacetravlr --verify` |
+| GPU unavailable / wgpu issues | Training already falls back to CPU (NdArray). Optionally set `SPACETRAVLR_FORCE_CPU=1`. Confirm with `spacetravlr --verify`. |
 | GRN parquet not found | Set `SPACETRAVLR_DATA_DIR` or `[grn].network_data_dir` |
 | Out of memory | Lower `[execution].n_parallel`, `[cnn].cnn_max_cells_per_epoch`, `cnn_minibatch_size`, or `[spatial].spatial_dim` |
 | Perturbation slow on large slides | Set `[perturbation].ligand_grid_factor` ≈ `0.5`; raise `--batch-parallelism` |

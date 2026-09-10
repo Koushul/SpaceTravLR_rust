@@ -56,7 +56,8 @@ Each target gene is predicted from modulator groups: **TFs**, **ligand–recepto
 | `use_tfl_modulators` | `true` | Include `TF#LIG` columns. | — | Disable to drop ligand-mediated TF terms. |
 | `train_modulators` |  | Shorthand: `"tf,lr,tfl"` replaces the three `use_*` flags. | Combine only the families you need for an ablation. | Must leave at least one family enabled. |
 | `extra_modulators` / `extra_modulators_file` |  | Add raw-expression predictors (fourth Lasso group). | Force inclusion of known covariates (e.g. ambient RNA proxies). | — |
-| `extra_lr` / `extra_lr_file` |  | Add `LIG$REC` pairs beyond the database screen. | Hypothesis-driven pairs (e.g. `CXCL13$CXCR5`). | — |
+| `extra_lr` / `extra_lr_file` |  | Add secreted `LIG$REC` pairs beyond the database screen (Gaussian σ = `[spatial].radius`). | Hypothesis-driven paracrine pairs (e.g. `CXCL13$CXCR5`). | — |
+| `extra_contact_lr` / `extra_contact_lr_file` |  | Add juxtacrine `LIG$REC` pairs (Gaussian σ = `[spatial].contact_distance`). If a pair is in both lists, contact wins. | Cadherins / Notch-style contact pairs (e.g. `CADM1$CADM1`). | — |
 
 ---
 

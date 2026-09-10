@@ -63,6 +63,8 @@ use_tfl_modulators = true
 # extra_modulators_file = "path/to/extra_genes.txt"
 # extra_lr = ["LIG1$REC1"]
 # extra_lr_file = "path/to/extra_lr.txt"
+# extra_contact_lr = ["CADM1$CADM1"]
+# extra_contact_lr_file = "path/to/extra_contact_lr.txt"
 
 [cnn]
 # Adam hyperparameters (CNN fine-tuning when seed_only = false)

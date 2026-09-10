@@ -7,10 +7,11 @@
 
 use crate::config::expand_user_path;
 use crate::ligand::{
-    WeightedLigandReduce, calculate_weighted_ligands, calculate_weighted_ligands_grid,
-    calculate_weighted_ligands_with_cutoff_reduce,
+    ReceivedLigandProgress, WeightedLigandReduce, calculate_weighted_ligands_with_cutoff_reduce,
 };
-use crate::network::{SPACETRAVLR_DATA_DIR_ENV, download_github_raw_data_file, run_network_data_dir};
+use crate::network::{
+    SPACETRAVLR_DATA_DIR_ENV, download_github_raw_data_file, run_network_data_dir,
+};
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Axis};
 use rand::rngs::StdRng;
@@ -21,6 +22,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 const CELLCHAT_CSV_MIN_BYTES: u64 = 10_000;
 
@@ -316,9 +318,9 @@ pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
         .map(|s| s.trim().to_ascii_lowercase())
         .collect();
     let idx = |name: &str| -> Result<usize> {
-        cols.iter()
-            .position(|c| c == name)
-            .ok_or_else(|| anyhow::anyhow!("CellChatDB missing column {name:?} in {}", path.display()))
+        cols.iter().position(|c| c == name).ok_or_else(|| {
+            anyhow::anyhow!("CellChatDB missing column {name:?} in {}", path.display())
+        })
     };
     let i_lig = idx("ligand")?;
     let i_rec = idx("receptor")?;
@@ -327,7 +329,8 @@ pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
 
     let mut out = Vec::new();
     for (lineno, line) in lines.enumerate() {
-        let line = line.with_context(|| format!("read line {} of {}", lineno + 2, path.display()))?;
+        let line =
+            line.with_context(|| format!("read line {} of {}", lineno + 2, path.display()))?;
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
             continue;
@@ -336,12 +339,8 @@ pub fn load_cellchat_db(path: &Path) -> Result<Vec<CellChatInteraction>> {
         if parts.len() <= i_sig.max(i_path).max(i_rec).max(i_lig) {
             continue;
         }
-        let inter = CellChatInteraction::from_row(
-            parts[i_lig],
-            parts[i_rec],
-            parts[i_path],
-            parts[i_sig],
-        );
+        let inter =
+            CellChatInteraction::from_row(parts[i_lig], parts[i_rec], parts[i_path], parts[i_sig]);
         if inter.ligand_subunits.is_empty() || inter.receptor_subunits.is_empty() {
             continue;
         }
@@ -527,8 +526,7 @@ pub fn filter_interactions_for_adata(
         .collect();
     db.iter()
         .filter(|inter| {
-            if !sig_filter.is_empty()
-                && !sig_filter.contains(&inter.signaling.to_ascii_lowercase())
+            if !sig_filter.is_empty() && !sig_filter.contains(&inter.signaling.to_ascii_lowercase())
             {
                 return false;
             }
@@ -734,10 +732,7 @@ pub fn compute_commun_prob(
 }
 
 /// Keep significant / strong interactions; optionally cap by max \(P\) or expression product.
-pub fn select_interactions(
-    result: &CellChatProbResult,
-    cfg: &LigandFieldConfig,
-) -> Vec<usize> {
+pub fn select_interactions(result: &CellChatProbResult, cfg: &LigandFieldConfig) -> Vec<usize> {
     select_interactions_with_expr_scores(result, cfg, None)
 }
 
@@ -838,14 +833,19 @@ impl LigandFieldPlan {
     /// units for SpaceTravLR columns; the parent \(P_{s\to t}\) slice is copied
     /// to every child (so multi-subunit complexes keep a single communication
     /// probability, while local receptor subunits may still differ in \(X\)).
-    pub fn from_selected(result: CellChatProbResult, selected: &[usize], cfg: &LigandFieldConfig) -> Self {
+    pub fn from_selected(
+        result: CellChatProbResult,
+        selected: &[usize],
+        cfg: &LigandFieldConfig,
+    ) -> Self {
         let n_g = result.n_groups();
         let mut interactions = Vec::new();
         let mut pair_names = Vec::new();
         let mut parent_of: Vec<usize> = Vec::new();
         for &old_k in selected {
-            let units =
-                expand_complexes_to_independent_units(std::slice::from_ref(&result.interactions[old_k]));
+            let units = expand_complexes_to_independent_units(std::slice::from_ref(
+                &result.interactions[old_k],
+            ));
             for unit in units {
                 pair_names.push(unit.pair_name.clone());
                 interactions.push(unit);
@@ -963,6 +963,7 @@ fn received_ligand_field(
     scale_factor: f64,
     grid_factor: Option<f64>,
     norm: ReceivedLigandNorm,
+    progress: Option<&ReceivedLigandProgress>,
 ) -> Array1<f64> {
     let n = xy.nrows();
     let mut lig = Array2::<f64>::zeros((n, 1));
@@ -980,15 +981,35 @@ fn received_ligand_field(
                 None
             };
             calculate_weighted_ligands_with_cutoff_reduce(
-                xy, &lig, radius, scale_factor, cutoff, reduce,
+                xy,
+                &lig,
+                radius,
+                scale_factor,
+                cutoff,
+                reduce,
+                progress,
             )
         }
         (ReceivedLigandNorm::GlobalN, Some(gf)) => {
-            calculate_weighted_ligands_grid(xy, &lig, radius, scale_factor, gf)
+            crate::ligand::calculate_weighted_ligands_grid_with_cutoff(
+                xy,
+                &lig,
+                radius,
+                scale_factor,
+                gf,
+                None,
+                progress,
+            )
         }
-        (ReceivedLigandNorm::GlobalN, None) => {
-            calculate_weighted_ligands(xy, &lig, radius, scale_factor)
-        }
+        (ReceivedLigandNorm::GlobalN, None) => calculate_weighted_ligands_with_cutoff_reduce(
+            xy,
+            &lig,
+            radius,
+            scale_factor,
+            None,
+            WeightedLigandReduce::GlobalN,
+            progress,
+        ),
     };
     recv.column(0).to_owned()
 }
@@ -1002,6 +1023,7 @@ pub fn precompute_received_ligand_cache(
     radius: f64,
     scale_factor: f64,
     grid_factor: Option<f64>,
+    progress: Option<&ReceivedLigandProgress>,
 ) -> Result<()> {
     let n = xy.nrows();
     let mut cache: HashMap<String, Arc<Array1<f64>>> = HashMap::new();
@@ -1014,13 +1036,7 @@ pub fn precompute_received_ligand_cache(
     ligands.sort();
     ligands.dedup();
 
-    let grid_factor = grid_factor.or_else(|| {
-        if n > 5_000 {
-            Some(0.5)
-        } else {
-            None
-        }
-    });
+    let grid_factor = grid_factor.or_else(|| if n > 5_000 { Some(0.5) } else { None });
 
     for lig_name in ligands {
         let idx = gene_to_idx
@@ -1036,6 +1052,7 @@ pub fn precompute_received_ligand_cache(
                 scale_factor,
                 grid_factor,
                 plan.received_ligand_norm,
+                progress,
             ),
             LigandFieldMode::Meanfield => {
                 let l_mf = lig_expr.mean().unwrap_or(0.0);
@@ -1043,6 +1060,10 @@ pub fn precompute_received_ligand_cache(
             }
         };
         cache.insert(lig_name, Arc::new(field));
+        if let Some(p) = progress {
+            p.ligands_done.fetch_add(1, Ordering::Relaxed);
+            p.unit_done.store(0, Ordering::Relaxed);
+        }
     }
     plan.received_ligand_cache = Some(cache);
     Ok(())
@@ -1062,6 +1083,7 @@ pub fn write_ligand_field_diagnostics_csv(
     scale_factor: f64,
     grid_factor: Option<f64>,
     _norm: ReceivedLigandNorm,
+    progress: Option<&ReceivedLigandProgress>,
 ) -> Result<()> {
     use std::io::Write;
     let mut f = File::create(path).with_context(|| format!("create {}", path.display()))?;
@@ -1071,9 +1093,17 @@ pub fn write_ligand_field_diagnostics_csv(
     )?;
     let n = xy.nrows();
     // Prefer grid for diagnostics regardless of training norm (exact kernel_mass is O(N²·L)).
-    let grid_factor = Some(grid_factor.filter(|g| g.is_finite() && *g > 0.0).unwrap_or(0.5));
+    let grid_factor = Some(
+        grid_factor
+            .filter(|g| g.is_finite() && *g > 0.0)
+            .unwrap_or(0.5),
+    );
     for lig in ligand_genes {
         let Some(&idx) = gene_to_idx.get(lig) else {
+            if let Some(p) = progress {
+                p.ligands_done.fetch_add(1, Ordering::Relaxed);
+                p.unit_done.store(0, Ordering::Relaxed);
+            }
             continue;
         };
         let lig_expr = expr.column(idx).to_owned();
@@ -1085,28 +1115,21 @@ pub fn write_ligand_field_diagnostics_csv(
             scale_factor,
             grid_factor,
             ReceivedLigandNorm::GlobalN,
+            progress,
         );
         let sp_mean = sp.mean().unwrap_or(0.0);
         let sp_std = {
             let var = sp.iter().map(|x| (x - sp_mean).powi(2)).sum::<f64>() / n.max(1) as f64;
             var.sqrt()
         };
-        let mae = sp
-            .iter()
-            .map(|&x| (x - l_bar).abs())
-            .sum::<f64>()
-            / n.max(1) as f64;
+        let mae = sp.iter().map(|&x| (x - l_bar).abs()).sum::<f64>() / n.max(1) as f64;
         let mae_rel = if l_bar.abs() > 1e-12 {
             mae / l_bar.abs()
         } else {
             f64::NAN
         };
         let l2_sp = sp.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let l2_diff = sp
-            .iter()
-            .map(|&x| (x - l_bar).powi(2))
-            .sum::<f64>()
-            .sqrt();
+        let l2_diff = sp.iter().map(|&x| (x - l_bar).powi(2)).sum::<f64>().sqrt();
         let rel_l2 = if l2_sp > 1e-12 {
             l2_diff / l2_sp
         } else {
@@ -1122,6 +1145,10 @@ pub fn write_ligand_field_diagnostics_csv(
             f,
             "{lig},{l_bar},{sp_mean},{sp_std},{mae},{mae_rel},{rel_l2},{cv},{frac_gt}"
         )?;
+        if let Some(p) = progress {
+            p.ligands_done.fetch_add(1, Ordering::Relaxed);
+            p.unit_done.store(0, Ordering::Relaxed);
+        }
     }
     Ok(())
 }
@@ -1170,18 +1197,10 @@ pub fn build_hybrid_lr_matrix_with_grid(
         return Ok(out);
     }
 
-    let grid_factor = grid_factor.or_else(|| {
-        if n > 5_000 {
-            Some(0.5)
-        } else {
-            None
-        }
-    });
+    let grid_factor = grid_factor.or_else(|| if n > 5_000 { Some(0.5) } else { None });
 
     let mut subunit_expr_cache: HashMap<String, Array1<f64>> = HashMap::new();
-    let get_gene = |name: &str,
-                        cache: &mut HashMap<String, Array1<f64>>|
-     -> Result<Array1<f64>> {
+    let get_gene = |name: &str, cache: &mut HashMap<String, Array1<f64>>| -> Result<Array1<f64>> {
         if let Some(v) = cache.get(name) {
             return Ok(v.clone());
         }
@@ -1207,13 +1226,14 @@ pub fn build_hybrid_lr_matrix_with_grid(
             continue;
         }
         let lig_expr = get_gene(&lig_name, &mut subunit_expr_cache)?;
-        let rec = receptor_complex_expr(expr, gene_to_idx, &inter.receptor_subunits)
-            .ok_or_else(|| {
+        let rec = receptor_complex_expr(expr, gene_to_idx, &inter.receptor_subunits).ok_or_else(
+            || {
                 anyhow::anyhow!(
                     "CellChat receptor complex {:?} missing subunits in expr",
                     inter.receptor_subunits
                 )
-            })?;
+            },
+        )?;
 
         let recv = if let Some(cached) = field_cache.get(&lig_name) {
             cached.clone()
@@ -1226,6 +1246,7 @@ pub fn build_hybrid_lr_matrix_with_grid(
                     scale_factor,
                     grid_factor,
                     plan.received_ligand_norm,
+                    None,
                 ),
                 LigandFieldMode::Meanfield => {
                     let l_mf = if !lig_expr.is_empty() {
@@ -1263,7 +1284,11 @@ pub fn encode_groups_from_labels(labels: &[String]) -> (Vec<usize>, Vec<String>)
 }
 
 /// Write a long-format CSV of \(P_{i\to j}^k\) (and optional p-values) for inspection.
-pub fn write_prob_csv(path: &Path, result: &CellChatProbResult, selected: Option<&[usize]>) -> Result<()> {
+pub fn write_prob_csv(
+    path: &Path,
+    result: &CellChatProbResult,
+    selected: Option<&[usize]>,
+) -> Result<()> {
     use std::io::Write;
     let mut f = File::create(path).with_context(|| format!("create {}", path.display()))?;
     writeln!(
@@ -1357,15 +1382,8 @@ mod tests {
             n_perm: 0,
             ..Default::default()
         };
-        let res = compute_commun_prob(
-            &expr,
-            &gene_names,
-            &group_ids,
-            &group_names,
-            &[inter],
-            &cfg,
-        )
-        .unwrap();
+        let res = compute_commun_prob(&expr, &gene_names, &group_ids, &group_names, &[inter], &cfg)
+            .unwrap();
         // A→B should be strong; B→A ~0; A→A and B→B ~0
         assert!(res.prob[[0, 0, 1]] > 0.5);
         assert!(res.prob[[0, 1, 0]] < 1e-9);
@@ -1412,12 +1430,7 @@ mod tests {
     fn hybrid_meanfield_uses_global_ligand_not_space() {
         // Distant senders (x=0) vs receivers (x=100): spatial ~0, meanfield uses global mean L.
         let xy = array![[0.0, 0.0], [0.0, 0.0], [100.0, 0.0], [100.0, 0.0]];
-        let expr = array![
-            [2.0, 0.0],
-            [2.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 1.0],
-        ];
+        let expr = array![[2.0, 0.0], [2.0, 0.0], [0.0, 1.0], [0.0, 1.0],];
         let mut gene_to_idx = HashMap::new();
         gene_to_idx.insert("L".into(), 0);
         gene_to_idx.insert("R".into(), 1);
@@ -1436,8 +1449,7 @@ mod tests {
             pair_names: vec!["L$R".into()],
             received_ligand_cache: None,
         };
-        let x_mf =
-            build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
+        let x_mf = build_hybrid_lr_matrix(&plan_mf, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
         assert!((x_mf[[2, 0]] - 1.0).abs() < 1e-9);
         assert!((x_mf[[3, 0]] - 1.0).abs() < 1e-9);
         assert_eq!(x_mf[[0, 0]], 0.0);
@@ -1446,20 +1458,15 @@ mod tests {
             mode: LigandFieldMode::Spatial,
             ..plan_mf
         };
-        let x_sp =
-            build_hybrid_lr_matrix(&plan_sp, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
+        let x_sp = build_hybrid_lr_matrix(&plan_sp, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
         assert!(x_sp[[2, 0]] < 1e-6);
         assert!(x_sp[[3, 0]] < 1e-6);
     }
 
     #[test]
     fn from_selected_expands_complex_and_copies_prob() {
-        let inter = CellChatInteraction::from_row(
-            "Tgfb1",
-            "Tgfbr1_Tgfbr2",
-            "TGFb",
-            "Secreted Signaling",
-        );
+        let inter =
+            CellChatInteraction::from_row("Tgfb1", "Tgfbr1_Tgfbr2", "TGFb", "Secreted Signaling");
         let mut prob = Array3::<f64>::zeros((1, 2, 2));
         prob[[0, 0, 1]] = 0.7;
         let result = CellChatProbResult {
@@ -1496,15 +1503,8 @@ mod tests {
             n_perm: 0,
             ..Default::default()
         };
-        let res = compute_commun_prob(
-            &expr,
-            &gene_names,
-            &group_ids,
-            &group_names,
-            &[inter],
-            &cfg,
-        )
-        .unwrap();
+        let res = compute_commun_prob(&expr, &gene_names, &group_ids, &group_names, &[inter], &cfg)
+            .unwrap();
         let p = res.prob[[0, 0, 0]];
         let expected = hill_commun_prob(1.0, 1.0, 0.5, 1.0);
         assert!((p - expected).abs() < 1e-9, "p={p} expected={expected}");
@@ -1512,12 +1512,8 @@ mod tests {
 
     #[test]
     fn expand_complex_to_independent_lig_rec_units() {
-        let raw = CellChatInteraction::from_row(
-            "Tgfb1",
-            "Tgfbr1_Tgfbr2",
-            "TGFb",
-            "Secreted Signaling",
-        );
+        let raw =
+            CellChatInteraction::from_row("Tgfb1", "Tgfbr1_Tgfbr2", "TGFb", "Secreted Signaling");
         assert_eq!(raw.receptor_subunits.len(), 2);
         let units = expand_complexes_to_independent_units(&[raw]);
         assert_eq!(units.len(), 2);
@@ -1536,10 +1532,7 @@ mod tests {
         let b = CellChatInteraction::from_row("A", "R1", "P", "Secreted Signaling");
         let units = expand_complexes_to_independent_units(&[a, b]);
         // A×R1 appears once despite coming from both the complex cartesian product and the singleton.
-        assert_eq!(
-            units.iter().filter(|u| u.pair_name == "A$R1").count(),
-            1
-        );
+        assert_eq!(units.iter().filter(|u| u.pair_name == "A$R1").count(), 1);
         assert!(units.iter().any(|u| u.pair_name == "A$R2"));
         assert!(units.iter().any(|u| u.pair_name == "B$R1"));
         assert!(units.iter().any(|u| u.pair_name == "B$R2"));
@@ -1581,8 +1574,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&run_net).unwrap();
         let dest = run_net.join("cellchat_axolotl.csv");
-        std::fs::write(&dest, "ligand,receptor,pathway,signaling\nA,B,P,Secreted Signaling\n")
-            .unwrap();
+        std::fs::write(
+            &dest,
+            "ligand,receptor,pathway,signaling\nA,B,P,Secreted Signaling\n",
+        )
+        .unwrap();
         let p = resolve_or_fetch_cellchat_db_path("axolotl", None, None, Some(&out)).unwrap();
         assert_eq!(p, dest);
         let _ = std::fs::remove_dir_all(&out);
@@ -1650,12 +1646,7 @@ mod tests {
     fn kernel_mass_spatial_matches_meanfield_when_ligand_uniform() {
         // Uniform L → kernel-mass neighborhood mean equals global mean.
         let xy = array![[0.0, 0.0], [1.0, 0.0], [10.0, 0.0], [11.0, 0.0]];
-        let expr = array![
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-        ];
+        let expr = array![[1.0, 0.0], [1.0, 1.0], [1.0, 0.0], [1.0, 1.0],];
         let mut gene_to_idx = HashMap::new();
         gene_to_idx.insert("L".into(), 0);
         gene_to_idx.insert("R".into(), 1);
@@ -1708,17 +1699,14 @@ mod tests {
             pair_names: vec!["L$R".into()],
             received_ligand_cache: None,
         };
-        precompute_received_ligand_cache(
-            &mut plan,
-            &xy,
-            &expr,
-            &gene_to_idx,
-            1.0,
-            1.0,
-            None,
-        )
-        .unwrap();
-        assert!(plan.received_ligand_cache.as_ref().unwrap().contains_key("L"));
+        precompute_received_ligand_cache(&mut plan, &xy, &expr, &gene_to_idx, 1.0, 1.0, None, None)
+            .unwrap();
+        assert!(
+            plan.received_ligand_cache
+                .as_ref()
+                .unwrap()
+                .contains_key("L")
+        );
         let x = build_hybrid_lr_matrix(&plan, &xy, &expr, &gene_to_idx, 1.0, 1.0).unwrap();
         // mean(L)=1 → X = 1 * R
         assert_abs_diff_eq!(x[[0, 0]], 1.0, epsilon = 1e-12);

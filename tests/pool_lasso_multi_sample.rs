@@ -401,9 +401,11 @@ fn pool_lasso_partial_sample_resume_keeps_finished_slide() {
     let t_s1 = feather_mtime(&dir, "s1", gene);
     std::fs::remove_file(sample_dir(&dir, "s2").join(format!("{gene}_betadata.feather"))).unwrap();
     let _ = std::fs::remove_file(dir.join(format!("{gene}.done")));
-    assert!(!sample_dir(&dir, "s2")
-        .join(format!("{gene}_betadata.feather"))
-        .is_file());
+    assert!(
+        !sample_dir(&dir, "s2")
+            .join(format!("{gene}_betadata.feather"))
+            .is_file()
+    );
 
     std::thread::sleep(std::time::Duration::from_millis(50));
     run_fit(&dir, CnnTrainingMode::Seed, None);
@@ -443,8 +445,10 @@ fn pool_lasso_resume_parent_done_skips_even_if_sample_feathers_missing() {
             .is_file(),
         "parent .done must skip retraining even if sample feathers were deleted"
     );
-    assert!(!sample_dir(&dir, "s2")
-        .join(format!("{gene}_betadata.feather"))
-        .is_file());
+    assert!(
+        !sample_dir(&dir, "s2")
+            .join(format!("{gene}_betadata.feather"))
+            .is_file()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

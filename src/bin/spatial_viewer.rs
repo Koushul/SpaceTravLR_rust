@@ -51,8 +51,7 @@ use spacetravlr::perturb_batch::{
 use spacetravlr::perturb_mode::{PerturbRuntime, validate_perturb_simulated_matrix};
 use spacetravlr::transition_umap::{
     NullSubtractMode, SignatureUmapParams, TransitionGrid, TransitionUmapParams,
-    compute_signature_umap_grid,
-    compute_umap_transition_grid, signature_sum_per_cell,
+    compute_signature_umap_grid, compute_umap_transition_grid, signature_sum_per_cell,
 };
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;

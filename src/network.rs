@@ -23,11 +23,7 @@ fn push_tried(tried: &mut Vec<String>, p: &Path) {
 
 fn try_file_path(path: PathBuf, tried: &mut Vec<String>) -> Option<PathBuf> {
     push_tried(tried, &path);
-    if path.is_file() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.is_file() { Some(path) } else { None }
 }
 
 fn grn_parquet_ready(path: &Path) -> bool {

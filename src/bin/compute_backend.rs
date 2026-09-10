@@ -5,6 +5,7 @@ use burn_autodiff::Autodiff;
 use spacetravlr::config::{CnnConfig, CnnTrainingMode, ModelExportConfig, SpaceshipConfig};
 use spacetravlr::spatial_estimator::SpatialCellularProgramsEstimator;
 use spacetravlr::training_hud::TrainingHud;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]
@@ -28,19 +29,38 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Burn **WebGPU** backend when the `wgpu` crate can request an adapter, otherwise Burn **NdArray** on CPU.
-/// `SPACETRAVLR_FORCE_CPU` / `SPACETRAVLR_DISABLE_WGPU` force CPU (no adapter probe).
+/// Discrete / integrated / virtual GPUs can run Burn WebGPU. CPU and `Other` adapters
+/// (llvmpipe, SwiftShader) are not a reliable CNN path — NdArray is used instead.
+pub(crate) fn wgpu_device_type_ok(device_type: wgpu::DeviceType) -> bool {
+    matches!(
+        device_type,
+        wgpu::DeviceType::DiscreteGpu
+            | wgpu::DeviceType::IntegratedGpu
+            | wgpu::DeviceType::VirtualGpu
+    )
+}
+
+/// Burn **WebGPU** when a real GPU adapter is present and `WgpuDevice` initializes;
+/// otherwise Burn **NdArray** on CPU. Never panics if wgpu/Vulkan/Metal is missing.
+/// `SPACETRAVLR_FORCE_CPU` / `SPACETRAVLR_DISABLE_WGPU` skip the adapter probe.
 pub(crate) fn select_compute_backend() -> ComputeChoice {
     let choice = if env_truthy("SPACETRAVLR_FORCE_CPU") || env_truthy("SPACETRAVLR_DISABLE_WGPU") {
         ComputeChoice::NdArray(NdArrayDevice::Cpu)
     } else {
         match wgpu_adapter_probe_cached().as_ref() {
-            Some(_) => ComputeChoice::Wgpu(WgpuDevice::default()),
-            None => ComputeChoice::NdArray(NdArrayDevice::Cpu),
+            Some(info) if wgpu_device_type_ok(info.device_type) => match try_wgpu_device() {
+                Some(device) => ComputeChoice::Wgpu(device),
+                None => ComputeChoice::NdArray(NdArrayDevice::Cpu),
+            },
+            Some(_) | None => ComputeChoice::NdArray(NdArrayDevice::Cpu),
         }
     };
     log_compute_backend_choice(&choice);
     choice
+}
+
+fn try_wgpu_device() -> Option<WgpuDevice> {
+    catch_unwind(AssertUnwindSafe(WgpuDevice::default)).ok()
 }
 
 fn log_compute_backend_choice(choice: &ComputeChoice) {
@@ -63,9 +83,21 @@ fn log_compute_backend_choice(choice: &ComputeChoice) {
                 eprintln!(
                     "spacetravlr: CNN/compute backend = CPU (NdArray) — SPACETRAVLR_FORCE_CPU or SPACETRAVLR_DISABLE_WGPU is set"
                 );
+            } else if let Some(info) = wgpu_adapter_probe_cached().as_ref() {
+                if wgpu_device_type_ok(info.device_type) {
+                    eprintln!(
+                        "spacetravlr: CNN/compute backend = CPU (NdArray) — WebGPU device init failed after adapter `{}` ({:?}); CNN training will be much slower than WebGPU",
+                        info.name, info.device_type
+                    );
+                } else {
+                    eprintln!(
+                        "spacetravlr: CNN/compute backend = CPU (NdArray) — wgpu adapter `{}` is {:?} (software/CPU); using NdArray (CNN training will be much slower than a GPU)",
+                        info.name, info.device_type
+                    );
+                }
             } else {
                 eprintln!(
-                    "spacetravlr: CNN/compute backend = CPU (NdArray) — no usable wgpu adapter (CNN training will be much slower than WebGPU)"
+                    "spacetravlr: CNN/compute backend = CPU (NdArray) — no usable wgpu GPU adapter (CNN training will be much slower than WebGPU)"
                 );
             }
         }
@@ -78,7 +110,7 @@ fn wgpu_adapter_probe_cached() -> &'static Option<wgpu::AdapterInfo> {
     WGPU_ADAPTER_PROBE.get_or_init(preferred_wgpu_adapter_info)
 }
 
-fn preferred_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
+fn probe_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
         let adapter = instance
@@ -90,6 +122,12 @@ fn preferred_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
             .await?;
         Some(adapter.get_info())
     })
+}
+
+fn preferred_wgpu_adapter_info() -> Option<wgpu::AdapterInfo> {
+    catch_unwind(AssertUnwindSafe(probe_wgpu_adapter_info))
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn compute_hardware_details(choice: &ComputeChoice) -> String {
@@ -205,5 +243,24 @@ pub(crate) fn fit_all_genes_dispatch(
         ComputeChoice::NdArray(device) => {
             dispatch_fit_all_genes!(NdArray<f32, i32>, p, device)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wgpu_device_type_ok;
+    use wgpu::DeviceType;
+
+    #[test]
+    fn gpu_device_types_are_accepted() {
+        assert!(wgpu_device_type_ok(DeviceType::DiscreteGpu));
+        assert!(wgpu_device_type_ok(DeviceType::IntegratedGpu));
+        assert!(wgpu_device_type_ok(DeviceType::VirtualGpu));
+    }
+
+    #[test]
+    fn cpu_and_other_adapters_are_rejected() {
+        assert!(!wgpu_device_type_ok(DeviceType::Cpu));
+        assert!(!wgpu_device_type_ok(DeviceType::Other));
     }
 }

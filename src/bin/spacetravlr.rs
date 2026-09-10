@@ -75,7 +75,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
 • Use --view PATH to display .png, .jpg, .jpeg, or .svg images directly in the terminal (auto-detects Kitty/iTerm2/Sixel protocols for full-resolution; falls back to colored Unicode blocks). Optional --view-width / --view-height to constrain size.
-• Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74, require WebGPU CNN backend unless SPACETRAVLR_VERIFY_ALLOW_CPU=1; confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
+• Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74; WebGPU or CPU NdArray is accepted (set SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1 to require a GPU); confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
 
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
@@ -194,7 +194,10 @@ struct LigandFieldCli {
         help = "spaceship_config.toml overlay for [ligand_field] / data keys"
     )]
     config: Option<PathBuf>,
-    #[arg(long, help = "obs column for groups (default: data.cluster_annot / cell_type)")]
+    #[arg(
+        long,
+        help = "obs column for groups (default: data.cluster_annot / cell_type)"
+    )]
     cluster_key: Option<String>,
     #[arg(long, help = "expression layer (default: data.layer)")]
     layer: Option<String>,
@@ -433,15 +436,31 @@ struct BanksyCli {
         help = "Neighbour weight decay: scaled_gaussian|uniform|reciprocal|ranked"
     )]
     nbr_weight_decay: String,
-    #[arg(long, default_value_t = 1, help = "Maximum azimuthal Gabor filter order")]
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Maximum azimuthal Gabor filter order"
+    )]
     max_m: u32,
     #[arg(long, default_value_t = 0.6, help = "Leiden resolution")]
     resolution: f64,
-    #[arg(long, default_value_t = 50, help = "Expression-space neighbours for Leiden")]
+    #[arg(
+        long,
+        default_value_t = 50,
+        help = "Expression-space neighbours for Leiden"
+    )]
     num_nn: u32,
-    #[arg(long, default_value_t = 20, help = "PCA dimensions on the BANKSY matrix")]
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "PCA dimensions on the BANKSY matrix"
+    )]
     pca_dims: u32,
-    #[arg(long, default_value_t = 1234, help = "Random seed for Leiden partitioning")]
+    #[arg(
+        long,
+        default_value_t = 1234,
+        help = "Random seed for Leiden partitioning"
+    )]
     partition_seed: u32,
     #[arg(
         long,
@@ -508,7 +527,7 @@ struct Cli {
         long,
         action = ArgAction::SetTrue,
         help_heading = "Utility",
-        help = "Smoke test: curl SlideTags_human_tonsil.h5ad from GitHub (override with SPACETRAVLR_VERIFY_H5AD=…), copy with stripped normalized_count/imputed_count layers so training auto-prep runs Rust full preprocess (QC → normalize → HVG → PCA → UMAP → Leiden → MAGIC). Verify sets SPACETRAVLR_FORCE_KEEP_GENES=AICDA,CD74 on the subprocess so the target genes survive dispersion HVG. Full-mode training on AICDA and CD74 with --parallel 2 (2 epochs, spatial_dim 8 — minimum safe for three 2×2 max-pools). Captures training stderr: requires `CNN/compute backend = WebGPU` unless SPACETRAVLR_VERIFY_ALLOW_CPU=1. Confirms each gene’s *_betadata.feather with real β values. DB ligand cap defaults to 256 (`--max-lr`); set SPACETRAVLR_VERIFY_MAX_LR to override. SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips the layer strip and the Rust prep/MAGIC log checks (uses raw .h5ad as-is). Writes a plain-text log (host CPU/RAM/swap, wgpu adapter, SPACETRAVLR_* env, checklist); default log under $TMPDIR, or SPACETRAVLR_VERIFY_LOG=/path/verify.log. Uses spaceship_config.toml under SPACETRAVLR_ROOT or the crate manifest dir; needs curl."
+        help = "Smoke test: curl SlideTags_human_tonsil.h5ad from GitHub (override with SPACETRAVLR_VERIFY_H5AD=…), copy with stripped normalized_count/imputed_count layers so training auto-prep runs Rust full preprocess (QC → normalize → HVG → PCA → UMAP → Leiden → MAGIC). Verify sets SPACETRAVLR_FORCE_KEEP_GENES=AICDA,CD74 on the subprocess so the target genes survive dispersion HVG. Full-mode training on AICDA and CD74 with --parallel 2 (2 epochs, spatial_dim 8 — minimum safe for three 2×2 max-pools). Captures training stderr: WebGPU or CPU (NdArray) is accepted; set SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1 to require `CNN/compute backend = WebGPU`. Confirms each gene’s *_betadata.feather with real β values. DB ligand cap defaults to 256 (`--max-lr`); set SPACETRAVLR_VERIFY_MAX_LR to override. SPACETRAVLR_VERIFY_SKIP_PREP_STRIP=1 skips the layer strip and the Rust prep/MAGIC log checks (uses raw .h5ad as-is). Writes a plain-text log (host CPU/RAM/swap, wgpu adapter, SPACETRAVLR_* env, checklist); default log under $TMPDIR, or SPACETRAVLR_VERIFY_LOG=/path/verify.log. Uses spaceship_config.toml under SPACETRAVLR_ROOT or the crate manifest dir; needs curl."
     )]
     verify: bool,
 
@@ -644,9 +663,17 @@ struct Cli {
         long = "extra-lr",
         value_name = "PAIRS",
         help_heading = "Gene list & GRN extras",
-        help = "Extra ligand→receptor pairs, merged with [grn].extra_lr / *_file. Forms: L1$R1,L2$R2  or  L1,R1;L2,R2  or  single L1,R1"
+        help = "Extra secreted ligand→receptor pairs, merged with [grn].extra_lr / *_file. Forms: L1$R1,L2$R2  or  L1,R1;L2,R2  or  single L1,R1. Uses [spatial].radius"
     )]
     extra_lr: Option<String>,
+
+    #[arg(
+        long = "extra-contact-lr",
+        value_name = "PAIRS",
+        help_heading = "Gene list & GRN extras",
+        help = "Extra juxtacrine ligand→receptor pairs, merged with [grn].extra_contact_lr / *_file. Same pair syntax as --extra-lr; uses [spatial].contact_distance"
+    )]
+    extra_contact_lr: Option<String>,
 
     #[arg(
         long = "train-modulators",
@@ -1493,6 +1520,11 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Res
     if let Some(ref raw) = cli.extra_lr {
         cfg.grn.extra_lr.extend(grn_extra::parse_extra_lr_cli(raw)?);
     }
+    if let Some(ref raw) = cli.extra_contact_lr {
+        cfg.grn
+            .extra_contact_lr
+            .extend(grn_extra::parse_extra_lr_cli(raw)?);
+    }
     cfg.validate_pool_lasso_sample()?;
     Ok(())
 }
@@ -1581,6 +1613,11 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     }
     if let Some(ref raw) = cli.extra_lr {
         cfg.grn.extra_lr.extend(grn_extra::parse_extra_lr_cli(raw)?);
+    }
+    if let Some(ref raw) = cli.extra_contact_lr {
+        cfg.grn
+            .extra_contact_lr
+            .extend(grn_extra::parse_extra_lr_cli(raw)?);
     }
     if let Some(genes) = parse_gene_filter(cli) {
         cfg.training.genes = Some(genes);
@@ -1847,10 +1884,7 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
     )?;
 
     let adata_path = lf.h5ad.clone();
-    let layer = lf
-        .layer
-        .clone()
-        .unwrap_or_else(|| cfg.data.layer.clone());
+    let layer = lf.layer.clone().unwrap_or_else(|| cfg.data.layer.clone());
     let cluster_key = lf
         .cluster_key
         .clone()
@@ -1917,6 +1951,7 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
         cfg_parent,
         Some(&out_dir),
         Some(cfg.spatial.radius),
+        None,
     )?;
 
     let default_csv = out_dir.join("ligand_field_commun_prob.csv");
@@ -2111,10 +2146,7 @@ fn run_banksy(b: &BanksyCli) -> anyhow::Result<()> {
         .output
         .as_ref()
         .map(|p| PathBuf::from(expand_user_path(p.to_string_lossy().as_ref())));
-    eprintln!(
-        "spacetravlr: banksy via uv on {}",
-        h5ad.display()
-    );
+    eprintln!("spacetravlr: banksy via uv on {}", h5ad.display());
     spacetravlr::banksy_cluster::run_banksy(spacetravlr::banksy_cluster::BanksyParams {
         h5ad: h5ad.as_path(),
         output: output.as_deref(),
