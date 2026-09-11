@@ -705,8 +705,7 @@ pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<St
     Ok(out)
 }
 
-/// Build a [`crate::ligand_field::LigandFieldPlan`] from an open AnnData + cluster labels.
-/// Build a [`crate::ligand_field::LigandFieldPlan`] from an open AnnData + cluster labels.
+/// Build a [`crate::ligand_field::LigandFieldPrep`] from an open AnnData + cluster labels.
 ///
 /// When `spatial_radius` is `Some`, unique-ligand received fields are precomputed once and
 /// shared across per-gene workers (major speedup for `mode = spatial`).
@@ -723,7 +722,7 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
     output_dir: Option<&Path>,
     spatial_radius: Option<f64>,
     hud: Option<&TrainingHud>,
-) -> anyhow::Result<Arc<crate::ligand_field::LigandFieldPlan>> {
+) -> anyhow::Result<crate::ligand_field::LigandFieldPrep> {
     if matches!(cfg.mode, crate::ligand_field::LigandFieldMode::Spatial) {
         load_spatial_coords_f64(adata).context(
             "ligand_field.mode = \"spatial\" (Gaussian received ligand) requires 2D cell coordinates in obsm['spatial'] (also tried X_spatial, spatial_loc)",
@@ -899,7 +898,11 @@ pub fn prepare_ligand_field_plan<AnB: Backend>(
         }
     }
 
-    Ok(Arc::new(plan))
+    Ok(crate::ligand_field::LigandFieldPrep {
+        plan: Arc::new(plan),
+        expr,
+        gene_to_idx,
+    })
 }
 
 /// When the sliced `X`/layer is canonical CSR in AnnData, returns it without densifying (useful for
@@ -3772,7 +3775,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let extra_contact_lr_arc = Arc::new(extras.extra_contact_lr);
             let extra_tetraspanin_arc = Arc::new(extras.tetraspanin_pairs);
 
-            let ligand_field_plan_arc: Option<Arc<crate::ligand_field::LigandFieldPlan>> =
+            let ligand_field_prep: Option<crate::ligand_field::LigandFieldPrep> =
                 if spaceship_config.grn.use_lr_modulators {
                     let t_cc =
                         pipeline_step_begin(&hud, "Ligand-field pair selection probabilities");
@@ -3785,7 +3788,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                 .unwrap_or_else(|| c.to_string())
                         })
                         .collect();
-                    let plan = prepare_ligand_field_plan(
+                    let prep = prepare_ligand_field_plan(
                         setup_adata.as_ref(),
                         layer,
                         clusters.as_ref(),
@@ -3804,27 +3807,70 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         &hud,
                         format!(
                             "Ligand field: {} interactions (mode={:?}, pair_selection={:?}, norm={:?}, replace_lr={}, cached_L={})",
-                            plan.interactions.len(),
-                            plan.mode,
+                            prep.plan.interactions.len(),
+                            prep.plan.mode,
                             spaceship_config.ligand_field.pair_selection,
-                            plan.received_ligand_norm,
-                            plan.replace_lr_pairs,
-                            plan.received_ligand_cache
+                            prep.plan.received_ligand_norm,
+                            prep.plan.replace_lr_pairs,
+                            prep.plan
+                                .received_ligand_cache
                                 .as_ref()
                                 .map(|m| m.len())
                                 .unwrap_or(0)
                         ),
                     );
-                    Some(plan)
+                    Some(prep)
                 } else {
                     None
                 };
+            let ligand_field_plan_arc: Option<Arc<crate::ligand_field::LigandFieldPlan>> =
+                ligand_field_prep.as_ref().map(|p| p.plan.clone());
 
             let layer_for_workers = layer.to_string();
             let cnn_for_workers = cnn.clone();
             let ligand_grid_factor = spaceship_config.ligand_field.ligand_grid_factor;
             let weighted_ligand_scale_factor =
                 spaceship_config.ligand_field.weighted_ligand_scale_factor;
+
+            let pooled_ligand_plans: Option<
+                Arc<Vec<Arc<crate::ligand_field::LigandFieldPlan>>>,
+            > = if pool_lasso {
+                if let Some(ref prep) = ligand_field_prep {
+                    let plans = sample_plans.as_ref().expect("pool_lasso sample plans");
+                    let caches: Vec<Arc<crate::ligand_field::LigandFieldPlan>> = plans
+                        .par_iter()
+                        .map(|sp| {
+                            let sample_xy = xy.select(Axis(0), &sp.obs_indices);
+                            let sample_expr = prep.expr.select(Axis(0), &sp.obs_indices);
+                            let cg: Vec<usize> =
+                                sp.obs_indices.iter().map(|&i| clusters[i]).collect();
+                            crate::ligand_field::relocalize_ligand_field_plan(
+                                prep.plan.as_ref(),
+                                cg,
+                                &sample_xy,
+                                &sample_expr,
+                                &prep.gene_to_idx,
+                                radius,
+                                weighted_ligand_scale_factor,
+                                ligand_grid_factor,
+                            )
+                            .map(Arc::new)
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    log_line(
+                        &hud,
+                        format!(
+                            "ligand field: {} sample spatial universes",
+                            caches.len()
+                        ),
+                    );
+                    Some(Arc::new(caches))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let classic_received: Arc<ClassicReceivedLigandCache> = if pool_lasso {
                 let plans = sample_plans.as_ref().expect("pool_lasso sample plans");
                 let slides: Vec<Arc<SlideReceivedLigandCache>> = plans
@@ -3959,6 +4005,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let extra_contact_lr_arc_w = extra_contact_lr_arc.clone();
                 let extra_tetraspanin_arc_w = extra_tetraspanin_arc.clone();
                 let ligand_field_plan_w = ligand_field_plan_arc.clone();
+                let pooled_ligand_plans_w = pooled_ligand_plans.clone();
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
@@ -4322,6 +4369,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     worker_run_full_cnn,
                                     cnn_epoch_slot_fit.clone(),
                                     pooled_spatial.as_deref().map(|v| v.as_slice()),
+                                    pooled_ligand_plans_w.as_deref().map(|v| v.as_slice()),
                                     on_lasso_progress,
                                 );
                                 match pooled {
@@ -5630,10 +5678,12 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         _run_full_cnn: bool,
         _cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
         pooled_spatial: Option<&[Arc<CachedSpatialData>]>,
+        pooled_ligand_plans: Option<&[Arc<crate::ligand_field::LigandFieldPlan>]>,
         lasso_progress: F,
     ) -> anyhow::Result<Vec<PooledSampleFit>> {
         let orig_subset = self.obs_row_subset.clone();
         let orig_slide = self.classic_received_slide;
+        let orig_ligand_plan = self.ligand_field_plan.clone();
         let mut slices: Vec<PooledSampleFit> = Vec::with_capacity(plans.len());
         let mut x_parts: Vec<Array2<f64>> = Vec::with_capacity(plans.len());
         let mut y_parts: Vec<Array1<f64>> = Vec::with_capacity(plans.len());
@@ -5652,6 +5702,25 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             };
             self.obs_row_subset = Some(Arc::from(global_rows.into_boxed_slice()));
             self.classic_received_slide = si;
+            if orig_ligand_plan.is_some() {
+                let sample_plans = pooled_ligand_plans.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "fail pool: missing per-sample ligand field plans (sample index {si})"
+                    )
+                })?;
+                let sample_lf = sample_plans.get(si).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "fail pool: ligand field plans shorter than samples (have {}, need {})",
+                        sample_plans.len(),
+                        si + 1
+                    )
+                })?;
+                let gene_plan = orig_ligand_plan.as_ref().expect("ligand field plan");
+                self.ligand_field_plan = Some(Arc::new(gene_plan.with_spatial_universe(
+                    sample_lf.cell_group.clone(),
+                    sample_lf.received_ligand_cache.clone(),
+                )));
+            }
             let (x, y) = self.build_x_modulators_and_target_y(&sample_xy)?;
             let cached_spatial = pooled_spatial
                 .and_then(|v| v.get(si).cloned())
@@ -5681,6 +5750,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         }
         self.obs_row_subset = orig_subset;
         self.classic_received_slide = orig_slide;
+        self.ligand_field_plan = orig_ligand_plan;
 
         let mut x_pool = vstack_rows(&x_parts)?;
         let y_pool = concat_vec1(&y_parts)?;

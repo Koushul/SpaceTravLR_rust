@@ -826,6 +826,13 @@ pub struct LigandFieldPlan {
     pub received_ligand_cache: Option<HashMap<String, Arc<Array1<f64>>>>,
 }
 
+/// Pair-selected plan plus the CellChat gene matrix used to build it (row-aligned to training obs).
+pub struct LigandFieldPrep {
+    pub plan: Arc<LigandFieldPlan>,
+    pub expr: Array2<f64>,
+    pub gene_to_idx: HashMap<String, usize>,
+}
+
 impl LigandFieldPlan {
     /// Build a Lasso plan from selected **complex-level** interactions.
     ///
@@ -879,6 +886,28 @@ impl LigandFieldPlan {
     pub fn with_cell_groups(mut self, cell_group: Vec<usize>) -> Self {
         self.cell_group = cell_group;
         self
+    }
+
+    /// Keep pair list / \(P\) / group names; replace per-cell spatial universe.
+    pub fn with_spatial_universe(
+        &self,
+        cell_group: Vec<usize>,
+        received_ligand_cache: Option<HashMap<String, Arc<Array1<f64>>>>,
+    ) -> Self {
+        Self {
+            mode: self.mode,
+            kh: self.kh,
+            hill_coef: self.hill_coef,
+            replace_lr_pairs: self.replace_lr_pairs,
+            min_cells: self.min_cells,
+            received_ligand_norm: self.received_ligand_norm,
+            interactions: self.interactions.clone(),
+            cell_group,
+            group_names: self.group_names.clone(),
+            prob: self.prob.clone(),
+            pair_names: self.pair_names.clone(),
+            received_ligand_cache,
+        }
     }
 
     pub fn lr_pairs_as_extra(&self) -> Vec<(String, String)> {
@@ -1067,6 +1096,46 @@ pub fn precompute_received_ligand_cache(
     }
     plan.received_ligand_cache = Some(cache);
     Ok(())
+}
+
+/// Clone `parent` pair list onto `cell_group` / `xy` / `expr` (FOV-isolated neighbors and \(N\)).
+pub fn relocalize_ligand_field_plan(
+    parent: &LigandFieldPlan,
+    cell_group: Vec<usize>,
+    xy: &Array2<f64>,
+    expr: &Array2<f64>,
+    gene_to_idx: &HashMap<String, usize>,
+    radius: f64,
+    scale_factor: f64,
+    grid_factor: Option<f64>,
+) -> Result<LigandFieldPlan> {
+    let n = xy.nrows();
+    if cell_group.len() != n {
+        bail!(
+            "relocalize ligand field: cell_group len {} != n_cells {}",
+            cell_group.len(),
+            n
+        );
+    }
+    if expr.nrows() != n {
+        bail!(
+            "relocalize ligand field: expr nrows {} != n_cells {}",
+            expr.nrows(),
+            n
+        );
+    }
+    let mut plan = parent.with_spatial_universe(cell_group, None);
+    precompute_received_ligand_cache(
+        &mut plan,
+        xy,
+        expr,
+        gene_to_idx,
+        radius,
+        scale_factor,
+        grid_factor,
+        None,
+    )?;
+    Ok(plan)
 }
 
 /// Write per-ligand meanfield vs spatial field diagnostics.
@@ -1711,5 +1780,154 @@ mod tests {
         // mean(L)=1 → X = 1 * R
         assert_abs_diff_eq!(x[[0, 0]], 1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(x[[1, 0]], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn full_plan_hybrid_on_subset_xy_errors_on_cell_group_len() {
+        let xy = Array2::from_shape_fn((8, 2), |(i, j)| {
+            let local = i % 4;
+            if j == 0 { local as f64 } else { 0.0 }
+        });
+        let mut expr = Array2::<f64>::zeros((8, 2));
+        for i in 0..8 {
+            expr[[i, 0]] = if i < 4 { 1.0 } else { 50.0 };
+            expr[[i, 1]] = 1.0;
+        }
+        let mut gene_to_idx = HashMap::new();
+        gene_to_idx.insert("L".into(), 0);
+        gene_to_idx.insert("R".into(), 1);
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let mut parent = LigandFieldPlan {
+            mode: LigandFieldMode::Spatial,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
+            interactions: vec![inter],
+            cell_group: vec![0, 0, 1, 1, 0, 0, 1, 1],
+            group_names: vec!["A".into(), "B".into()],
+            prob: Array3::<f64>::zeros((1, 2, 2)),
+            pair_names: vec!["L$R".into()],
+            received_ligand_cache: None,
+        };
+        precompute_received_ligand_cache(
+            &mut parent,
+            &xy,
+            &expr,
+            &gene_to_idx,
+            2.0,
+            1.0,
+            None,
+            None,
+        )
+        .unwrap();
+        let s1: Vec<usize> = (0..4).collect();
+        let xy_s1 = xy.select(Axis(0), &s1);
+        let err = build_hybrid_lr_matrix(&parent, &xy_s1, &expr.select(Axis(0), &s1), &gene_to_idx, 2.0, 1.0)
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cell_group len 8 != n_cells 4"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn relocalize_sample_matches_subset_kernel_not_parent_cache_slice() {
+        let xy = Array2::from_shape_fn((8, 2), |(i, j)| {
+            let local = i % 4;
+            if j == 0 { local as f64 } else { 0.0 }
+        });
+        let mut expr = Array2::<f64>::zeros((8, 2));
+        for i in 0..8 {
+            expr[[i, 0]] = if i < 4 { 1.0 } else { 50.0 };
+            expr[[i, 1]] = 1.0;
+        }
+        let mut gene_to_idx = HashMap::new();
+        gene_to_idx.insert("L".into(), 0);
+        gene_to_idx.insert("R".into(), 1);
+        let inter = CellChatInteraction::from_row("L", "R", "Test", "Secreted Signaling");
+        let mut parent = LigandFieldPlan {
+            mode: LigandFieldMode::Spatial,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
+            interactions: vec![inter],
+            cell_group: vec![0, 0, 1, 1, 0, 0, 1, 1],
+            group_names: vec!["A".into(), "B".into()],
+            prob: Array3::<f64>::zeros((1, 2, 2)),
+            pair_names: vec!["L$R".into()],
+            received_ligand_cache: None,
+        };
+        precompute_received_ligand_cache(
+            &mut parent,
+            &xy,
+            &expr,
+            &gene_to_idx,
+            2.0,
+            1.0,
+            None,
+            None,
+        )
+        .unwrap();
+        let s1: Vec<usize> = (0..4).collect();
+        let xy_s1 = xy.select(Axis(0), &s1);
+        let expr_s1 = expr.select(Axis(0), &s1);
+        let cg_s1: Vec<usize> = parent.cell_group.iter().take(4).copied().collect();
+        let sample = relocalize_ligand_field_plan(
+            &parent,
+            cg_s1,
+            &xy_s1,
+            &expr_s1,
+            &gene_to_idx,
+            2.0,
+            1.0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(sample.cell_group.len(), 4);
+        let x = build_hybrid_lr_matrix(&sample, &xy_s1, &expr_s1, &gene_to_idx, 2.0, 1.0).unwrap();
+        assert_eq!(x.nrows(), 4);
+        let mut isolated = LigandFieldPlan {
+            mode: LigandFieldMode::Spatial,
+            kh: 0.5,
+            hill_coef: 1.0,
+            replace_lr_pairs: true,
+            min_cells: 1,
+            received_ligand_norm: ReceivedLigandNorm::GlobalN,
+            interactions: parent.interactions.clone(),
+            cell_group: vec![0, 0, 1, 1],
+            group_names: parent.group_names.clone(),
+            prob: parent.prob.clone(),
+            pair_names: parent.pair_names.clone(),
+            received_ligand_cache: None,
+        };
+        precompute_received_ligand_cache(
+            &mut isolated,
+            &xy_s1,
+            &expr_s1,
+            &gene_to_idx,
+            2.0,
+            1.0,
+            None,
+            None,
+        )
+        .unwrap();
+        let sample_l = sample.received_ligand_cache.as_ref().unwrap().get("L").unwrap();
+        let isolated_l = isolated.received_ligand_cache.as_ref().unwrap().get("L").unwrap();
+        let parent_l = parent.received_ligand_cache.as_ref().unwrap().get("L").unwrap();
+        for i in 0..4 {
+            assert_abs_diff_eq!(sample_l[i], isolated_l[i], epsilon = 1e-15);
+            assert!(
+                (sample_l[i] - parent_l[i]).abs() > 1e-6,
+                "row {i}: sample cache {} should differ from parent slice {}",
+                sample_l[i],
+                parent_l[i]
+            );
+        }
+        let _ = x;
     }
 }

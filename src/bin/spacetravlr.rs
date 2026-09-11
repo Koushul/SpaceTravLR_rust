@@ -2098,7 +2098,7 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
         .or(cli.config.as_ref())
         .and_then(|p| p.parent());
 
-    let plan = prepare_ligand_field_plan(
+    let prep = prepare_ligand_field_plan(
         &adata,
         &layer,
         &clusters,
@@ -2120,8 +2120,8 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
     }
     eprintln!(
         "Ligand field: {} interactions (mode={:?}) → {}",
-        plan.interactions.len(),
-        plan.mode,
+        prep.plan.interactions.len(),
+        prep.plan.mode,
         desired.display()
     );
     adata.close()?;
