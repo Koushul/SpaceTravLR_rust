@@ -189,6 +189,7 @@ pub(crate) struct FitAllGenesParams<'a> {
     /// Loaded from shared `spacetravlr_run_repro.toml` (`--join-output-dir`); skips overwriting that file at end.
     pub join_training: bool,
     pub verbose: bool,
+    pub setup_leader: Option<&'a spacetravlr::run_setup_lock::SetupLeaderGuard>,
 }
 
 macro_rules! dispatch_fit_all_genes {
@@ -229,6 +230,7 @@ macro_rules! dispatch_fit_all_genes {
             $p.join_training,
             $p.verbose,
             None,
+            $p.setup_leader,
             $device,
         )
     };

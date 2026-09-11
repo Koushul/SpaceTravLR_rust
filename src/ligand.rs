@@ -1,9 +1,134 @@
-use ndarray::{Array2, Axis};
+use ndarray::{Array1, Array2, Axis};
 use polars::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub(crate) const LARGE_DATASET_GRID_AUTO_CELLS: usize = 15_000;
+pub(crate) const DEFAULT_LIGAND_GRID_FACTOR: f64 = 0.5;
+
+/// Configured `[ligand_field].ligand_grid_factor`, else auto-grid when `n` is large.
+pub fn resolved_classic_grid_factor(n: usize, configured: Option<f64>) -> Option<f64> {
+    match configured.or({
+        if n > LARGE_DATASET_GRID_AUTO_CELLS {
+            Some(DEFAULT_LIGAND_GRID_FACTOR)
+        } else {
+            None
+        }
+    }) {
+        Some(gf) if gf.is_finite() && gf > 0.0 => Some(gf),
+        _ => None,
+    }
+}
+
+/// Classic (non-ligand-field) received field for one ligand column.
+pub fn compute_classic_received_column(
+    xy: &Array2<f64>,
+    lig_expr: &Array1<f64>,
+    radius: f64,
+    scale_factor: f64,
+    grid_factor: Option<f64>,
+) -> Array1<f64> {
+    let n = xy.nrows();
+    let mut lig_mat = Array2::<f64>::zeros((n, 1));
+    lig_mat.column_mut(0).assign(lig_expr);
+    let received = match grid_factor {
+        Some(gf) => calculate_weighted_ligands_grid(xy, &lig_mat, radius, scale_factor, gf),
+        None => calculate_weighted_ligands(xy, &lig_mat, radius, scale_factor),
+    };
+    received.column(0).to_owned()
+}
+
+/// Per-slide lazy cache for classic `L$R` / `TF#LIG` Gaussians (secreted vs contact radii).
+pub struct SlideReceivedLigandCache {
+    secreted: Mutex<HashMap<String, Arc<Array1<f64>>>>,
+    contact: Mutex<HashMap<String, Arc<Array1<f64>>>>,
+    xy: Array2<f64>,
+    secreted_radius: f64,
+    contact_radius: f64,
+    scale_factor: f64,
+    grid_factor: Option<f64>,
+}
+
+impl SlideReceivedLigandCache {
+    pub fn new(
+        xy: Array2<f64>,
+        secreted_radius: f64,
+        contact_radius: f64,
+        scale_factor: f64,
+        ligand_grid_factor: Option<f64>,
+    ) -> Self {
+        let n = xy.nrows();
+        let grid_factor = resolved_classic_grid_factor(n, ligand_grid_factor);
+        Self {
+            secreted: Mutex::new(HashMap::new()),
+            contact: Mutex::new(HashMap::new()),
+            xy,
+            secreted_radius,
+            contact_radius,
+            scale_factor,
+            grid_factor,
+        }
+    }
+
+    pub fn grid_factor(&self) -> Option<f64> {
+        self.grid_factor
+    }
+
+    pub fn get_or_compute(
+        &self,
+        ligand: &str,
+        lig_expr: &Array1<f64>,
+        contact: bool,
+    ) -> Arc<Array1<f64>> {
+        let map = if contact {
+            &self.contact
+        } else {
+            &self.secreted
+        };
+        if let Ok(guard) = map.lock() {
+            if let Some(v) = guard.get(ligand) {
+                return Arc::clone(v);
+            }
+        }
+        let radius = if contact {
+            self.contact_radius
+        } else {
+            self.secreted_radius
+        };
+        let computed = compute_classic_received_column(
+            &self.xy,
+            lig_expr,
+            radius,
+            self.scale_factor,
+            self.grid_factor,
+        );
+        let arc = Arc::new(computed);
+        if let Ok(mut guard) = map.lock() {
+            guard
+                .entry(ligand.to_string())
+                .or_insert_with(|| Arc::clone(&arc));
+            if let Some(v) = guard.get(ligand) {
+                return Arc::clone(v);
+            }
+        }
+        arc
+    }
+}
+
+/// One spatial universe per slot: full slide (non-pool) or one pool-lasso sample.
+#[derive(Clone)]
+pub struct ClassicReceivedLigandCache {
+    pub slides: Vec<Arc<SlideReceivedLigandCache>>,
+}
+
+impl ClassicReceivedLigandCache {
+    pub fn slide(&self, idx: usize) -> Option<&SlideReceivedLigandCache> {
+        self.slides.get(idx).map(|s| s.as_ref())
+    }
+}
 
 /// How Gaussian received-ligand weights are reduced to a per-cell scalar field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -710,6 +835,101 @@ mod tests {
                 col,
                 max_err
             );
+        }
+    }
+
+    #[test]
+    fn classic_received_cache_matches_kernel_miss_and_hit() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]];
+        let lig = Array1::from_vec(vec![1.0, 0.5, 0.2]);
+        let cache = SlideReceivedLigandCache::new(xy.clone(), 2.0, 0.5, 1.0, None);
+        let first = cache.get_or_compute("L", &lig, false);
+        let second = cache.get_or_compute("L", &lig, false);
+        let expected = compute_classic_received_column(&xy, &lig, 2.0, 1.0, None);
+        for i in 0..3 {
+            assert_abs_diff_eq!(first[i], expected[i], epsilon = 1e-15);
+            assert_abs_diff_eq!(second[i], expected[i], epsilon = 1e-15);
+        }
+        let mut mat = Array2::<f64>::zeros((3, 1));
+        mat.column_mut(0).assign(&lig);
+        let batched = calculate_weighted_ligands(&xy, &mat, 2.0, 1.0);
+        for i in 0..3 {
+            assert_abs_diff_eq!(first[i], batched[[i, 0]], epsilon = 1e-15);
+        }
+    }
+
+    #[test]
+    fn classic_received_secreted_and_contact_are_separate() {
+        let xy = array![[0.0, 0.0], [5.0, 0.0]];
+        let lig = Array1::from_vec(vec![1.0, 0.0]);
+        let cache = SlideReceivedLigandCache::new(xy.clone(), 10.0, 1.0, 1.0, None);
+        let sec = cache.get_or_compute("L", &lig, false);
+        let con = cache.get_or_compute("L", &lig, true);
+        assert!((sec[1] - con[1]).abs() > 1e-9);
+        let sec2 = compute_classic_received_column(&xy, &lig, 10.0, 1.0, None);
+        let con2 = compute_classic_received_column(&xy, &lig, 1.0, 1.0, None);
+        for i in 0..2 {
+            assert_abs_diff_eq!(sec[i], sec2[i], epsilon = 1e-15);
+            assert_abs_diff_eq!(con[i], con2[i], epsilon = 1e-15);
+        }
+    }
+
+    #[test]
+    fn classic_received_cache_grid_matches_grid_kernel() {
+        let xy = Array2::from_shape_fn((20, 2), |(i, j)| {
+            if j == 0 {
+                i as f64
+            } else {
+                0.0
+            }
+        });
+        let lig = Array1::from_elem(20, 1.0);
+        let gf = 0.5;
+        let cache = SlideReceivedLigandCache::new(xy.clone(), 3.0, 1.0, 1.0, Some(gf));
+        assert_eq!(cache.grid_factor(), Some(gf));
+        let got = cache.get_or_compute("L", &lig, false);
+        let expected = compute_classic_received_column(&xy, &lig, 3.0, 1.0, Some(gf));
+        for i in 0..20 {
+            assert_abs_diff_eq!(got[i], expected[i], epsilon = 1e-15);
+        }
+        let mut mat = Array2::<f64>::zeros((20, 1));
+        mat.column_mut(0).assign(&lig);
+        let grid = calculate_weighted_ligands_grid(&xy, &mat, 3.0, 1.0, gf);
+        for i in 0..20 {
+            assert_abs_diff_eq!(got[i], grid[[i, 0]], epsilon = 1e-15);
+        }
+    }
+
+    #[test]
+    fn resolved_classic_grid_factor_auto_above_threshold() {
+        assert_eq!(
+            resolved_classic_grid_factor(LARGE_DATASET_GRID_AUTO_CELLS, None),
+            None
+        );
+        assert_eq!(
+            resolved_classic_grid_factor(LARGE_DATASET_GRID_AUTO_CELLS + 1, None),
+            Some(DEFAULT_LIGAND_GRID_FACTOR)
+        );
+        assert_eq!(
+            resolved_classic_grid_factor(10, Some(0.25)),
+            Some(0.25)
+        );
+        assert_eq!(resolved_classic_grid_factor(10, Some(0.0)), None);
+    }
+
+    #[test]
+    fn classic_received_two_ligands_match_batched_kernel() {
+        let xy = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let mut lig_mat = Array2::<f64>::zeros((3, 2));
+        lig_mat.column_mut(0).assign(&Array1::from_vec(vec![1.0, 0.4, 0.2]));
+        lig_mat.column_mut(1).assign(&Array1::from_vec(vec![0.3, 0.8, 0.1]));
+        let batched = calculate_weighted_ligands(&xy, &lig_mat, 2.0, 1.5);
+        let cache = SlideReceivedLigandCache::new(xy.clone(), 2.0, 0.4, 1.5, None);
+        let a = cache.get_or_compute("A", &lig_mat.column(0).to_owned(), false);
+        let b = cache.get_or_compute("B", &lig_mat.column(1).to_owned(), false);
+        for i in 0..3 {
+            assert_abs_diff_eq!(a[i], batched[[i, 0]], epsilon = 1e-15);
+            assert_abs_diff_eq!(b[i], batched[[i, 1]], epsilon = 1e-15);
         }
     }
 }

@@ -10,6 +10,10 @@ use compute_backend::{
 };
 use serde_json::Value;
 use spacetravlr::condition_split::{prepare_condition_splits, scan_condition_status};
+use spacetravlr::run_setup_lock::{
+    DEFAULT_SETUP_STALE_SECS, SETUP_READY_FILENAME, SetupLeaderGuard, SetupParticipateOpts,
+    SetupRole, participate_run_setup, setup_is_ready, wait_for_setup_ready,
+};
 use spacetravlr::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
     canonical_adata_stem, canonical_training_prep_stem, default_output_dir_for_adata_path,
@@ -81,7 +85,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 const SPACETRAVLR_AFTER_LONG_HELP: &str = r#"
 
 Multi-host / shared storage
-  Start a leader run (writes spacetravlr_run_repro.toml early), then use --join-output-dir DIR on other hosts with --parallel set per machine.
+  Start a leader run. It takes spacetravlr_setup.flock while writing the repro TOML, preparing AnnData, and building shared caches, then writes spacetravlr_setup.ready. Other hosts: spacetravlr --join-output-dir DIR --parallel N (they wait for .ready if you launched the array together).
   Per-gene mean_lasso_r2 (and mean_cnn_r2 when used) are merged into spacetravlr_gene_performance.feather in the output directory under an advisory flock (no single-host-only step).
 
 Condition splits
@@ -832,7 +836,7 @@ struct Cli {
         long = "join-output-dir",
         value_name = "DIR",
         help_heading = "Output",
-        help = "Resume/join a shared run: read DIR/spacetravlr_run_repro.toml; claim unfinished genes via locks. Hyperparameters come from the repro file (not --config)"
+        help = "Resume/join a shared run: wait for DIR/spacetravlr_setup.ready if a leader is still preparing caches, then read DIR/spacetravlr_run_repro.toml and claim genes via .lock files. Hyperparameters come from the repro file (not --config)"
     )]
     join_output_dir: Option<PathBuf>,
 
@@ -1737,11 +1741,22 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
     }
     if let Some(j) = cli.join_output_dir.as_ref() {
         let jexp = expand_user_path(j.to_string_lossy().as_ref());
-        let repro = Path::new(&jexp).join(RUN_REPRO_TOML_FILENAME);
+        std::fs::create_dir_all(&jexp)?;
+        let out = Path::new(&jexp);
+        let repro = out.join(RUN_REPRO_TOML_FILENAME);
+        if !repro.is_file() || !setup_is_ready(out) {
+            eprintln!(
+                "join: waiting for leader setup in {} ({}) …",
+                out.display(),
+                SETUP_READY_FILENAME
+            );
+            wait_for_setup_ready(out, DEFAULT_SETUP_STALE_SECS, &|m| eprintln!("{m}"))?;
+        }
         if !repro.is_file() {
             anyhow::bail!(
-                "--join-output-dir: missing run config {} (start a leader run on this directory first, or copy the TOML from the primary host)",
-                repro.display()
+                "--join-output-dir: missing run config {} after waiting for {}. Start a leader run on this directory first.",
+                repro.display(),
+                SETUP_READY_FILENAME
             );
         }
         let mut cfg = SpaceshipConfig::from_run_repro_merged(&repro, cli.config.as_deref())?;
@@ -1754,6 +1769,143 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
         let mut cfg = SpaceshipConfig::try_load_merged(cli.config.as_deref())?;
         apply_cli_to_config(cli, &mut cfg)?;
         Ok((cfg, false))
+    }
+}
+
+fn reload_cfg_from_repro_join(
+    cli: &Cli,
+    output_dir_pb: &Path,
+    cfg: &mut SpaceshipConfig,
+    path: &mut String,
+    adata_path_for_stem: &mut String,
+    network_data_dir: &mut Option<String>,
+    tf_priors_feather: &mut Option<String>,
+    note: &str,
+) -> anyhow::Result<()> {
+    let repro_pb = output_dir_pb.join(RUN_REPRO_TOML_FILENAME);
+    if !repro_pb.is_file() {
+        anyhow::bail!(
+            "{note}: expected {} after setup ready",
+            repro_pb.display()
+        );
+    }
+    eprintln!(
+        "Note: {} — loading {} (same training contract as --join-output-dir).",
+        note,
+        repro_pb.display()
+    );
+    *cfg = SpaceshipConfig::from_run_repro_merged(&repro_pb, cli.config.as_deref())?;
+    cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
+    validate_join_cli_against_repro(cli, cfg, &repro_pb, "Resume:")?;
+    apply_cli_join_overrides(cli, cfg)?;
+    eprint_join_style_resume_cli_notes(cli, &repro_pb, false);
+    *path = expand_user_path(cfg.data.adata_path.trim());
+    cfg.data.adata_path = path.clone();
+    if !Path::new(path.as_str()).exists() {
+        anyhow::bail!("Dataset not found at {}.", path);
+    }
+    *adata_path_for_stem = path.clone();
+    *network_data_dir = cfg
+        .grn
+        .network_data_dir
+        .as_ref()
+        .map(|s| expand_user_path(s.trim()))
+        .filter(|s| !s.is_empty());
+    *tf_priors_feather = cfg
+        .grn
+        .tf_priors_feather
+        .as_ref()
+        .map(|s| expand_user_path(s.trim()))
+        .filter(|s| !s.is_empty());
+    cfg.grn.tf_priors_feather = tf_priors_feather.clone();
+    Ok(())
+}
+
+fn elect_or_wait_run_setup(
+    cli: &Cli,
+    cfg: &mut SpaceshipConfig,
+    join_training: &mut bool,
+    output_dir_pb: &Path,
+    path: &mut String,
+    adata_path_for_stem: &mut String,
+    network_data_dir: &mut Option<String>,
+    tf_priors_feather: &mut Option<String>,
+) -> anyhow::Result<Option<SetupLeaderGuard>> {
+    if *join_training {
+        if !setup_is_ready(output_dir_pb) {
+            wait_for_setup_ready(
+                output_dir_pb,
+                cfg.execution.stale_lock_secs,
+                &|m| eprintln!("{m}"),
+            )?;
+        }
+        return Ok(None);
+    }
+
+    if setup_is_ready(output_dir_pb) {
+        if output_dir_pb.join(RUN_REPRO_TOML_FILENAME).is_file() {
+            *join_training = true;
+            reload_cfg_from_repro_join(
+                cli,
+                output_dir_pb,
+                cfg,
+                path,
+                adata_path_for_stem,
+                network_data_dir,
+                tf_priors_feather,
+                "setup already ready",
+            )?;
+        }
+        return Ok(None);
+    }
+
+    if output_dir_pb.join(RUN_REPRO_TOML_FILENAME).is_file() {
+        eprintln!(
+            "Note: {} exists but {} does not — waiting for the leader to finish caches.",
+            RUN_REPRO_TOML_FILENAME,
+            SETUP_READY_FILENAME
+        );
+        wait_for_setup_ready(
+            output_dir_pb,
+            cfg.execution.stale_lock_secs,
+            &|m| eprintln!("{m}"),
+        )?;
+        *join_training = true;
+        reload_cfg_from_repro_join(
+            cli,
+            output_dir_pb,
+            cfg,
+            path,
+            adata_path_for_stem,
+            network_data_dir,
+            tf_priors_feather,
+            "leader setup finished",
+        )?;
+        return Ok(None);
+    }
+
+    match participate_run_setup(SetupParticipateOpts {
+        output_dir: output_dir_pb,
+        can_lead: true,
+        stale_lock_secs: cfg.execution.stale_lock_secs,
+        wait_timeout: None,
+        log: &|m| eprintln!("{m}"),
+    })? {
+        SetupRole::Leader(g) => Ok(Some(g)),
+        SetupRole::Follower => {
+            *join_training = true;
+            reload_cfg_from_repro_join(
+                cli,
+                output_dir_pb,
+                cfg,
+                path,
+                adata_path_for_stem,
+                network_data_dir,
+                tf_priors_feather,
+                "setup already ready",
+            )?;
+            Ok(None)
+        }
     }
 }
 
@@ -3552,41 +3704,16 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&output_dir_pb)?;
     cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
 
-    if !join_training {
-        let repro_pb = output_dir_pb.join(RUN_REPRO_TOML_FILENAME);
-        if repro_pb.is_file() {
-            eprintln!(
-                "Note: {} already exists under {} — loading it (same training contract as --join-output-dir).",
-                RUN_REPRO_TOML_FILENAME,
-                output_dir_pb.display()
-            );
-            join_training = true;
-            cfg = SpaceshipConfig::from_run_repro_merged(&repro_pb, cli.config.as_deref())?;
-            cfg.execution.output_dir = output_dir_pb.to_string_lossy().to_string();
-            validate_join_cli_against_repro(&cli, &cfg, &repro_pb, "Resume:")?;
-            apply_cli_join_overrides(&cli, &mut cfg)?;
-            eprint_join_style_resume_cli_notes(&cli, &repro_pb, false);
-            path = expand_user_path(cfg.data.adata_path.trim());
-            cfg.data.adata_path = path.clone();
-            if !Path::new(&path).exists() {
-                anyhow::bail!("Dataset not found at {}.", path);
-            }
-            adata_path_for_stem = path.clone();
-            network_data_dir = cfg
-                .grn
-                .network_data_dir
-                .as_ref()
-                .map(|s| expand_user_path(s.trim()))
-                .filter(|s| !s.is_empty());
-            tf_priors_feather = cfg
-                .grn
-                .tf_priors_feather
-                .as_ref()
-                .map(|s| expand_user_path(s.trim()))
-                .filter(|s| !s.is_empty());
-            cfg.grn.tf_priors_feather = tf_priors_feather.clone();
-        }
-    }
+    let setup_leader = elect_or_wait_run_setup(
+        &cli,
+        &mut cfg,
+        &mut join_training,
+        &output_dir_pb,
+        &mut path,
+        &mut adata_path_for_stem,
+        &mut network_data_dir,
+        &mut tf_priors_feather,
+    )?;
 
     let max_genes = cfg.training.max_genes;
     let gene_filter = cfg.training.genes.clone();
@@ -3818,6 +3945,7 @@ fn main() -> anyhow::Result<()> {
                     config_source_path: config_source_path.clone(),
                     join_training,
                     verbose,
+                    setup_leader: setup_leader.as_ref(),
                 };
                 fit_all_genes_dispatch(&params, &compute)?;
             }
@@ -3857,6 +3985,7 @@ fn main() -> anyhow::Result<()> {
                 config_source_path: config_source_path.clone(),
                 join_training,
                 verbose,
+                setup_leader: setup_leader.as_ref(),
             };
             fit_all_genes_dispatch(&params, &compute)?;
         }
@@ -3938,6 +4067,7 @@ fn main() -> anyhow::Result<()> {
                         config_source_path: config_source_for_training.clone(),
                         join_training,
                         verbose,
+                        setup_leader: setup_leader.as_ref(),
                     };
                     fit_all_genes_dispatch(&params, &compute_thread)?;
                 }
@@ -3978,6 +4108,7 @@ fn main() -> anyhow::Result<()> {
                     config_source_path: config_source_for_training,
                     join_training,
                     verbose,
+                    setup_leader: setup_leader.as_ref(),
                 };
                 fit_all_genes_dispatch(&params, &compute_thread)
             }

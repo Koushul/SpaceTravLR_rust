@@ -137,6 +137,7 @@ fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Op
         false,
         false,
         None,
+        None,
         &device,
     )
     .expect("fit_all_genes");

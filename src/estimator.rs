@@ -76,6 +76,28 @@ pub struct CachedSpatialData {
     pub spatial_maps: Array4<f32>,
 }
 
+/// Same kernels as the uncached CNN path: [`create_spatial_features`] + [`xyc2spatial_fast`].
+pub fn cached_spatial_for(
+    xy: &Array2<f64>,
+    clusters: &Array1<usize>,
+    num_clusters: usize,
+    spatial_dim: usize,
+    spatial_feature_radius: f64,
+    ego_center_spatial_maps: bool,
+) -> CachedSpatialData {
+    CachedSpatialData {
+        spatial_features: create_spatial_features(xy, clusters, num_clusters, spatial_feature_radius),
+        spatial_maps: xyc2spatial_fast(
+            xy,
+            clusters,
+            num_clusters,
+            spatial_dim,
+            spatial_dim,
+            ego_center_spatial_maps,
+        ),
+    }
+}
+
 #[inline]
 pub(crate) fn finite_or_zero_f64(x: f64) -> f64 {
     if x.is_finite() { x } else { 0.0 }
@@ -2146,6 +2168,47 @@ mod tests {
         let m1 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4, false);
         let m2 = xyc2spatial_fast(&xy, &clusters, 2, 4, 4, false);
         assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn cached_spatial_for_matches_kernels() {
+        let xy = array![[0.0, 0.0], [1.0, 1.0], [0.5, 0.5]];
+        let clusters = Array1::from_vec(vec![0, 1, 0]);
+        let got = cached_spatial_for(&xy, &clusters, 2, 4, 10.0, false);
+        let sf = create_spatial_features(&xy, &clusters, 2, 10.0);
+        let sm = xyc2spatial_fast(&xy, &clusters, 2, 4, 4, false);
+        assert_eq!(got.spatial_maps, sm);
+        for (a, b) in got.spatial_features.iter().zip(sf.iter()) {
+            assert!((a - b).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn cached_spatial_sample_subset_does_not_see_other_slide() {
+        let xy = Array2::from_shape_fn((8, 2), |(i, j)| {
+            let local = i % 4;
+            if j == 0 {
+                if i < 4 {
+                    local as f64
+                } else {
+                    local as f64 + 80.0
+                }
+            } else {
+                0.0
+            }
+        });
+        let clusters = Array1::from_vec(vec![0, 0, 1, 1, 0, 0, 1, 1]);
+        let s1: Vec<usize> = (0..4).collect();
+        let xy_s1 = xy.select(ndarray::Axis(0), &s1);
+        let cl_s1 = clusters.select(ndarray::Axis(0), &s1);
+        let sub = cached_spatial_for(&xy_s1, &cl_s1, 2, 4, 10.0, false);
+        let all = cached_spatial_for(&xy, &clusters, 2, 4, 10.0, false);
+        assert_eq!(sub.spatial_maps.shape()[0], 4);
+        assert_eq!(all.spatial_maps.shape()[0], 8);
+        let sub_again = cached_spatial_for(&xy_s1, &cl_s1, 2, 4, 10.0, false);
+        assert_eq!(sub.spatial_maps, sub_again.spatial_maps);
+        let leaked = all.spatial_maps.slice(ndarray::s![0..4, .., .., ..]);
+        assert_ne!(sub.spatial_maps, leaked.to_owned());
     }
 
     #[test]

@@ -551,6 +551,7 @@ pub struct ExecutionConfig {
     pub write_minimal_repro_h5ad: bool,
     /// If > 0, remove a gene `*.lock` file older than this many seconds before claiming the gene,
     /// and run a background sweep about every 10 minutes over the output directory (crash recovery on shared storage).
+    /// Also used as the max age of `spacetravlr_setup.flock` before another process may steal setup leadership (when 0, setup steal uses a 2h default).
     pub stale_lock_secs: u64,
     /// RNG seed for Lasso (per target via [`mix_execution_random_seed`]) and CNN minibatch order.
     #[serde(default = "default_execution_random_seed")]

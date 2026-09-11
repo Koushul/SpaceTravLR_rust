@@ -3722,6 +3722,7 @@ pub fn betadata_pair_lr_parallel(
 #[cfg(test)]
 mod feather_label_tests {
     use super::{betadata_feather_label_column_index, classify_betadata_column_type};
+    use polars::prelude::SerReader;
 
     #[test]
     fn classify_tetraspanin_ampersand() {
@@ -3744,6 +3745,38 @@ mod feather_label_tests {
     fn label_index_falls_back_to_cluster_when_no_cellid() {
         let names = vec!["Cluster".into(), "beta0".into()];
         assert_eq!(betadata_feather_label_column_index(&names), Some(0));
+    }
+
+    #[test]
+    fn write_feather_allows_ampersand_tetraspanin_column() {
+        use super::write_betadata_feather;
+        use ndarray::array;
+        let dir = std::env::temp_dir().join(format!(
+            "betadata_tspan_amp_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("G_betadata.feather");
+        let cols = vec!["beta0".into(), "beta_Cd9&Cd81".into()];
+        let m = array![[0.1f64, 0.5], [0.2, 0.6]];
+        write_betadata_feather(
+            path.to_str().unwrap(),
+            "CellID",
+            &["c0".into(), "c1".into()],
+            &cols,
+            &m,
+        )
+        .expect("feather write with beta_Cd9&Cd81");
+        let df = polars::prelude::IpcReader::new(std::fs::File::open(&path).unwrap())
+            .finish()
+            .unwrap();
+        let names: Vec<String> = df
+            .get_column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(names.iter().any(|c| c == "beta_Cd9&Cd81"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

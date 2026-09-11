@@ -164,6 +164,41 @@ mod tests {
     }
 
     #[test]
+    fn classic_received_cache_slot_matches_subset_not_full_xy() {
+        use crate::ligand::SlideReceivedLigandCache;
+        let xy = Array2::from_shape_fn((8, 2), |(i, j)| {
+            let local = i % 4;
+            if j == 0 { local as f64 } else { 0.0 }
+        });
+        let mut lig = Array2::<f64>::zeros((8, 1));
+        for i in 0..4 {
+            lig[[i, 0]] = 1.0;
+        }
+        for i in 4..8 {
+            lig[[i, 0]] = 50.0;
+        }
+        let s1: Vec<usize> = (0..4).collect();
+        let xy_s1 = xy.select(Axis(0), &s1);
+        let lig_s1 = lig.select(Axis(0), &s1);
+        let col = lig_s1.column(0).to_owned();
+        let cache = SlideReceivedLigandCache::new(xy_s1.clone(), 2.0, 0.5, 1.0, None);
+        let cached = cache.get_or_compute("L", &col, false);
+        let isolated = calculate_weighted_ligands(&xy_s1, &lig_s1, 2.0, 1.0);
+        for i in 0..4 {
+            assert_abs_diff_eq!(cached[i], isolated[[i, 0]], epsilon = 1e-15);
+        }
+        let naive = calculate_weighted_ligands(&xy, &lig, 2.0, 1.0);
+        for i in 0..4 {
+            assert!(
+                (cached[i] - naive[[i, 0]]).abs() > 1e-6,
+                "row {i}: cache {} should differ from naive {}",
+                cached[i],
+                naive[[i, 0]]
+            );
+        }
+    }
+
+    #[test]
     fn global_cluster_ids_stable_when_subset_missing_a_type() {
         let all = vec!["ct_a".into(), "ct_b".into(), "ct_a".into(), "ct_b".into()];
         let (ids_all, map) = encode_cluster_ids(&all);

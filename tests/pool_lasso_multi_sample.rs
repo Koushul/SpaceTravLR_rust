@@ -153,6 +153,7 @@ fn run_fit(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Option<usize
         false,
         false,
         None,
+        None,
         &device,
     )
     .expect("fit_all_genes pool_lasso");

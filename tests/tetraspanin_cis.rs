@@ -135,6 +135,7 @@ fn run_fit(dir: &Path, tetraspanin_pairs: Vec<String>) {
         false,
         false,
         None,
+        None,
         &device,
     )
     .expect("fit_all_genes");
@@ -176,6 +177,169 @@ fn training_omits_tetraspanin_column_when_list_empty() {
         assert!(
             !cols.iter().any(|c| c.contains('&')),
             "unexpected cis column in {cols:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn write_two_sample_tspan_h5ad(path: &Path) -> anyhow::Result<()> {
+    let a = AnnData::<H5>::new(path)?;
+    let n_per = 8usize;
+    let n_obs = n_per * 2;
+    let obs_names: Vec<String> = (0..n_obs)
+        .map(|i| {
+            if i < n_per {
+                format!("s1_c{i}")
+            } else {
+                format!("s2_c{}", i - n_per)
+            }
+        })
+        .collect();
+    a.set_obs_names(obs_names.into())?;
+    a.set_var_names(vec!["Cd9".into(), "Cd81".into(), "Tgt1".into()].into())?;
+
+    let mut cell_types = Vec::with_capacity(n_obs);
+    let mut samples = Vec::with_capacity(n_obs);
+    for i in 0..n_obs {
+        let local = i % n_per;
+        cell_types.push(if local < n_per / 2 { "ct_a" } else { "ct_b" }.to_string());
+        samples.push(if i < n_per { "s1" } else { "s2" }.to_string());
+    }
+    let obs = DataFrame::new(vec![
+        Series::new("cell_type".into(), cell_types).into(),
+        Series::new("sample".into(), samples).into(),
+    ])?;
+    a.set_obs(obs)?;
+    a.set_var(DataFrame::new(vec![
+        Series::new("gene_ids".into(), vec!["cd9", "cd81", "tgt"]).into(),
+    ])?)?;
+
+    let mut mat = Array2::<f64>::zeros((n_obs, 3));
+    for i in 0..n_obs {
+        let local = (i % n_per) as f64;
+        let cl = if (i % n_per) < n_per / 2 { 0.0 } else { 1.0 };
+        let sample_off = if i < n_per { 0.0 } else { 0.12 };
+        let cd9 = 0.4 + cl * 0.5 + local * 0.03;
+        let cd81 = 0.5 + cl * 0.4 + local * 0.02 + sample_off;
+        mat[[i, 0]] = cd9;
+        mat[[i, 1]] = cd81;
+        mat[[i, 2]] = cd9 * cd81 + 0.05 * cl;
+    }
+    a.set_x(ArrayData::from(dense_to_csr_f64(&mat)?))?;
+    let xy = Array2::from_shape_fn((n_obs, 2), |(i, j)| {
+        let local = i % n_per;
+        if j == 0 {
+            (local % 4) as f64
+        } else {
+            (local / 4) as f64
+        }
+    });
+    a.set_obsm([("spatial".to_string(), ArrayData::from(xy))])?;
+    a.close()?;
+    Ok(())
+}
+
+fn run_pool_fit(dir: &Path, mode: CnnTrainingMode) {
+    let h5ad = dir.join("mock_train.h5ad");
+    let mut cfg = SpaceshipConfig::default();
+    cfg.data.adata_path = h5ad.to_string_lossy().into_owned();
+    cfg.data.layer = "X".into();
+    cfg.data.cluster_annot = "cell_type".into();
+    cfg.data.sample = Some("sample".into());
+    cfg.grn.network_data_dir = Some(dir.to_string_lossy().into_owned());
+    cfg.grn.use_tf_modulators = false;
+    cfg.grn.use_lr_modulators = false;
+    cfg.grn.use_tfl_modulators = false;
+    cfg.grn.tetraspanin_pairs = vec!["Cd81&Cd9".into()];
+    cfg.training.score_threshold = -1.0;
+    cfg.training.mode = Some(mode);
+    cfg.training.pool_lasso = true;
+    cfg.training.epochs = 2;
+    cfg.execution.output_dir = dir.to_string_lossy().into_owned();
+    cfg.lasso.n_iter = 80;
+    cfg.execution.n_parallel = 1;
+    cfg.spatial.spatial_dim = 8;
+    cfg.validate_pool_lasso_sample().unwrap();
+
+    let device = NdArrayDevice::Cpu;
+    SpatialCellularProgramsEstimator::<Autodiff<NdArray<f32, i32>>, H5>::fit_all_genes(
+        cfg.data.adata_path.as_str(),
+        None,
+        cfg.spatial.radius,
+        cfg.spatial.spatial_dim,
+        cfg.spatial.contact_distance,
+        cfg.grn.tf_ligand_cutoff,
+        cfg.grn.max_ligands,
+        cfg.grn.use_tf_modulators,
+        cfg.grn.use_lr_modulators,
+        cfg.grn.use_tfl_modulators,
+        cfg.data.layer.as_str(),
+        cfg.data.cluster_annot.as_str(),
+        &cfg.cnn,
+        cfg.training.epochs,
+        cfg.training.learning_rate,
+        cfg.training.score_threshold,
+        cfg.lasso.l1_reg,
+        cfg.lasso.group_reg,
+        cfg.lasso.n_iter,
+        cfg.lasso.tol,
+        cfg.resolved_cnn_mode(),
+        Some(vec!["Tgt1".into()]),
+        None,
+        cfg.execution.n_parallel,
+        cfg.execution.output_dir.as_str(),
+        &cfg.model_export,
+        None,
+        cfg.grn.network_data_dir.as_deref(),
+        None,
+        false,
+        &cfg,
+        None,
+        false,
+        false,
+        None,
+        None,
+        &device,
+    )
+    .expect("fit_all_genes pool_lasso tetraspanin");
+}
+
+#[test]
+fn pool_lasso_full_cnn_tetraspanin_writes_feather_and_parent_log() {
+    let dir = setup_run_dir("pool_full");
+    write_two_sample_tspan_h5ad(&dir.join("mock_train.h5ad")).unwrap();
+    run_pool_fit(&dir, CnnTrainingMode::Full);
+
+    let parent_log = dir.join("log").join("Tgt1.log");
+    assert!(
+        parent_log.is_file(),
+        "expected parent training log {}",
+        parent_log.display()
+    );
+    for sample in ["s1", "s2"] {
+        let sample_dir = dir.join("conditions").join(sample);
+        let feather = sample_dir.join("Tgt1_betadata.feather");
+        assert!(
+            feather.is_file(),
+            "tetraspanin pool-lasso should write {}",
+            feather.display()
+        );
+        let df = IpcReader::new(std::fs::File::open(&feather).unwrap())
+            .finish()
+            .unwrap();
+        let cols: Vec<String> = df
+            .get_column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "beta_Cd9&Cd81"),
+            "{sample} columns: {cols:?}"
+        );
+        assert!(df.column("CellID").is_ok(), "{sample} expected CellID");
+        assert!(
+            !sample_dir.join("Tgt1.orphan").is_file(),
+            "{sample} should not be orphan"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);

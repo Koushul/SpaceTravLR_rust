@@ -183,6 +183,7 @@ pub use microniches::{
     MicronichesParams, MicronichesResult, MicronichesSummary, resolve_run_adata_path,
     run_microniches,
 };
+pub mod run_setup_lock;
 pub mod run_summary_html;
 pub mod rust_preprocess;
 pub mod scanpy_preprocess;
@@ -232,7 +233,8 @@ pub use config::{
 pub use estimator::{
     CachedSpatialData, ClusterTrainingSummary, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs,
     ClusteredGcnNwrFitInputs, CnnEpochHudSlot, FittedClusterResult, PredictBetasInput,
-    TrainClusterCnnEpochsInput, run_benchmark_mock_cluster_cnn_training, train_cluster_cnn_epochs,
+    TrainClusterCnnEpochsInput, cached_spatial_for, run_benchmark_mock_cluster_cnn_training,
+    train_cluster_cnn_epochs,
 };
 pub use h5ad_peek::print_h5ad_peek;
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
