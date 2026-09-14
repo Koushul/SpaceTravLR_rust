@@ -21,7 +21,7 @@ layer           = "imputed_count"
 cluster_annot   = "cell_type"
 # Optional: split into independent training by this condition
 # condition      = "batch"
-# obs column for sample when pooling. Requires [training].pool_lasso.
+# obs column for sample when pooling . Requires [training].pool_lasso.
 # sample         = "batch"
 
 [preprocess]
