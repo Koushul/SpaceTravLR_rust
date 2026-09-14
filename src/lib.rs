@@ -172,9 +172,9 @@ pub mod perturb_batch;
 pub mod perturb_mode;
 pub mod perturb_screen;
 pub use perturb_mode::{
-    CollectInteractionsObs, load_obs_column_for_collect_interactions,
+    CELLS_CSV_FILENAME, CollectInteractionsObs, load_obs_column_for_collect_interactions,
     load_obs_for_collect_interactions, write_cells_csv_from_run_toml,
-    write_cells_csv_grouped_by_label,
+    write_cells_csv_grouped_by_label, write_training_init_cells_csv,
 };
 pub mod microniches;
 #[cfg(feature = "tui")]

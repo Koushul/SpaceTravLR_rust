@@ -876,13 +876,7 @@ mod tests {
 
     #[test]
     fn classic_received_cache_grid_matches_grid_kernel() {
-        let xy = Array2::from_shape_fn((20, 2), |(i, j)| {
-            if j == 0 {
-                i as f64
-            } else {
-                0.0
-            }
-        });
+        let xy = Array2::from_shape_fn((20, 2), |(i, j)| if j == 0 { i as f64 } else { 0.0 });
         let lig = Array1::from_elem(20, 1.0);
         let gf = 0.5;
         let cache = SlideReceivedLigandCache::new(xy.clone(), 3.0, 1.0, 1.0, Some(gf));
@@ -910,10 +904,7 @@ mod tests {
             resolved_classic_grid_factor(LARGE_DATASET_GRID_AUTO_CELLS + 1, None),
             Some(DEFAULT_LIGAND_GRID_FACTOR)
         );
-        assert_eq!(
-            resolved_classic_grid_factor(10, Some(0.25)),
-            Some(0.25)
-        );
+        assert_eq!(resolved_classic_grid_factor(10, Some(0.25)), Some(0.25));
         assert_eq!(resolved_classic_grid_factor(10, Some(0.0)), None);
     }
 
@@ -921,8 +912,12 @@ mod tests {
     fn classic_received_two_ligands_match_batched_kernel() {
         let xy = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         let mut lig_mat = Array2::<f64>::zeros((3, 2));
-        lig_mat.column_mut(0).assign(&Array1::from_vec(vec![1.0, 0.4, 0.2]));
-        lig_mat.column_mut(1).assign(&Array1::from_vec(vec![0.3, 0.8, 0.1]));
+        lig_mat
+            .column_mut(0)
+            .assign(&Array1::from_vec(vec![1.0, 0.4, 0.2]));
+        lig_mat
+            .column_mut(1)
+            .assign(&Array1::from_vec(vec![0.3, 0.8, 0.1]));
         let batched = calculate_weighted_ligands(&xy, &lig_mat, 2.0, 1.5);
         let cache = SlideReceivedLigandCache::new(xy.clone(), 2.0, 0.4, 1.5, None);
         let a = cache.get_or_compute("A", &lig_mat.column(0).to_owned(), false);

@@ -3751,10 +3751,7 @@ mod feather_label_tests {
     fn write_feather_allows_ampersand_tetraspanin_column() {
         use super::write_betadata_feather;
         use ndarray::array;
-        let dir = std::env::temp_dir().join(format!(
-            "betadata_tspan_amp_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("betadata_tspan_amp_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("G_betadata.feather");
         let cols = vec!["beta0".into(), "beta_Cd9&Cd81".into()];

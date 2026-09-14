@@ -156,10 +156,14 @@ beta_scale_factor = 100.0
 # beta_cap        = 10.0
 # Number of signal propagation rounds
 n_propagation     = 4
-# cells_csv = "cell_scope.csv"
+# Default cell scope for spacetravlr-perturb when CLI omits --cells-csv.
+# Training writes output_dir/cells.csv (and per-sample copies under pool-lasso).
+# Uncomment and set cells_csv_column to a header from that file (a cluster_annot value).
+# cells_csv = "cells.csv"
 # cells_csv_column = "my_cells"
 
 [model_export]
 save_cnn_weights = false
+save_lasso_coefs = false
 compressed_npz = true
 output_subdir = "CNN_weights"

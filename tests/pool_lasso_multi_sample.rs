@@ -111,6 +111,7 @@ fn run_fit(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Option<usize
     cfg.execution.output_dir = dir.to_string_lossy().into_owned();
     cfg.lasso.n_iter = 200;
     cfg.execution.n_parallel = 1;
+    cfg.model_export.save_lasso_coefs = matches!(mode, CnnTrainingMode::Full);
     if let Some(d) = spatial_dim_override {
         cfg.spatial.spatial_dim = d.max(1);
     }
@@ -163,6 +164,52 @@ fn sample_dir(root: &Path, name: &str) -> PathBuf {
     root.join("conditions").join(name)
 }
 
+fn two_sample_obs_names() -> Vec<String> {
+    (0..16)
+        .map(|i| {
+            if i < 8 {
+                format!("s1_c{i}")
+            } else {
+                format!("s2_c{}", i - 8)
+            }
+        })
+        .collect()
+}
+
+fn assert_pool_lasso_cells_csv(dir: &Path) {
+    let obs = two_sample_obs_names();
+    let parent = dir.join("cells.csv");
+    assert!(parent.is_file(), "expected {}", parent.display());
+    let parsed = spacetravlr::perturb_mode::parse_obs_columns_csv(&parent, &obs).unwrap();
+    assert_eq!(
+        parsed.indices_for_column("ct_a").unwrap(),
+        &[0usize, 1, 2, 3, 8, 9, 10, 11]
+    );
+    assert_eq!(
+        parsed.indices_for_column("ct_b").unwrap(),
+        &[4usize, 5, 6, 7, 12, 13, 14, 15]
+    );
+
+    let s1 = spacetravlr::perturb_mode::parse_obs_columns_csv(
+        &sample_dir(dir, "s1").join("cells.csv"),
+        &obs,
+    )
+    .unwrap();
+    assert_eq!(s1.indices_for_column("ct_a").unwrap(), &[0usize, 1, 2, 3]);
+    assert_eq!(s1.indices_for_column("ct_b").unwrap(), &[4usize, 5, 6, 7]);
+
+    let s2 = spacetravlr::perturb_mode::parse_obs_columns_csv(
+        &sample_dir(dir, "s2").join("cells.csv"),
+        &obs,
+    )
+    .unwrap();
+    assert_eq!(s2.indices_for_column("ct_a").unwrap(), &[8usize, 9, 10, 11]);
+    assert_eq!(
+        s2.indices_for_column("ct_b").unwrap(),
+        &[12usize, 13, 14, 15]
+    );
+}
+
 #[test]
 fn pool_lasso_seed_writes_identical_cluster_betadata_per_sample() {
     let dir = setup_run_dir("seed");
@@ -211,6 +258,8 @@ fn pool_lasso_seed_writes_identical_cluster_betadata_per_sample() {
         n_ok > 0,
         "expected at least one gene with pooled seed betadata"
     );
+
+    assert_pool_lasso_cells_csv(&dir);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

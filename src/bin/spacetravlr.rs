@@ -10,16 +10,16 @@ use compute_backend::{
 };
 use serde_json::Value;
 use spacetravlr::condition_split::{prepare_condition_splits, scan_condition_status};
-use spacetravlr::run_setup_lock::{
-    DEFAULT_SETUP_STALE_SECS, SETUP_READY_FILENAME, SetupLeaderGuard, SetupParticipateOpts,
-    SetupRole, participate_run_setup, setup_is_ready, wait_for_setup_ready,
-};
 use spacetravlr::config::{
     CnnOutputActivation, CnnTrainingMode, RUN_REPRO_TOML_FILENAME, SpaceshipConfig,
     canonical_adata_stem, canonical_training_prep_stem, default_output_dir_for_adata_path,
     expand_user_path,
 };
 use spacetravlr::grn_extra;
+use spacetravlr::run_setup_lock::{
+    DEFAULT_SETUP_STALE_SECS, SETUP_READY_FILENAME, SetupLeaderGuard, SetupParticipateOpts,
+    SetupRole, participate_run_setup, setup_is_ready, wait_for_setup_ready,
+};
 #[cfg(feature = "tui")]
 use spacetravlr::training_demo::{
     DEMO_KIDNEY_SLIDETAGS_H5AD, DEMO_OUTPUT_DIR_LABEL, prepare_demo_hud, run_demo_training,
@@ -1784,10 +1784,7 @@ fn reload_cfg_from_repro_join(
 ) -> anyhow::Result<()> {
     let repro_pb = output_dir_pb.join(RUN_REPRO_TOML_FILENAME);
     if !repro_pb.is_file() {
-        anyhow::bail!(
-            "{note}: expected {} after setup ready",
-            repro_pb.display()
-        );
+        anyhow::bail!("{note}: expected {} after setup ready", repro_pb.display());
     }
     eprintln!(
         "Note: {} — loading {} (same training contract as --join-output-dir).",
@@ -1833,11 +1830,9 @@ fn elect_or_wait_run_setup(
 ) -> anyhow::Result<Option<SetupLeaderGuard>> {
     if *join_training {
         if !setup_is_ready(output_dir_pb) {
-            wait_for_setup_ready(
-                output_dir_pb,
-                cfg.execution.stale_lock_secs,
-                &|m| eprintln!("{m}"),
-            )?;
+            wait_for_setup_ready(output_dir_pb, cfg.execution.stale_lock_secs, &|m| {
+                eprintln!("{m}")
+            })?;
         }
         return Ok(None);
     }
@@ -1862,14 +1857,11 @@ fn elect_or_wait_run_setup(
     if output_dir_pb.join(RUN_REPRO_TOML_FILENAME).is_file() {
         eprintln!(
             "Note: {} exists but {} does not — waiting for the leader to finish caches.",
-            RUN_REPRO_TOML_FILENAME,
-            SETUP_READY_FILENAME
+            RUN_REPRO_TOML_FILENAME, SETUP_READY_FILENAME
         );
-        wait_for_setup_ready(
-            output_dir_pb,
-            cfg.execution.stale_lock_secs,
-            &|m| eprintln!("{m}"),
-        )?;
+        wait_for_setup_ready(output_dir_pb, cfg.execution.stale_lock_secs, &|m| {
+            eprintln!("{m}")
+        })?;
         *join_training = true;
         reload_cfg_from_repro_join(
             cli,

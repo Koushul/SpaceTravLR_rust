@@ -587,6 +587,10 @@ pub struct PerturbationConfig {
 pub struct ModelExportConfig {
     /// When true, export trained CNN weights for genes that run per-cell CNN refinement (default off).
     pub save_cnn_weights: bool,
+    /// When true, write cluster-level raw Lasso coefficients to `lasso_coefs/{gene}_lasso_coefs.feather`
+    /// in full-CNN mode (seed-only already stores that table in `{gene}_betadata.feather`). Default off to save disk.
+    #[serde(default)]
+    pub save_lasso_coefs: bool,
     /// When true, write `{gene}_cnn_train_data.npz` plus `{gene}_cnn_train_meta.json` under
     /// [`Self::output_subdir`] for the Python reference trainer (`scripts/python_train_cnn.py`): same
     /// scaled `x`, `y`, spatial maps, and Lasso anchor init Rust used—no
@@ -947,6 +951,7 @@ impl Default for ModelExportConfig {
     fn default() -> Self {
         Self {
             save_cnn_weights: false,
+            save_lasso_coefs: false,
             write_cnn_train_data_npz: false,
             compressed_npz: true,
             output_subdir: "CNN_weights".into(),

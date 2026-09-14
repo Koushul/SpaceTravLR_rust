@@ -1824,8 +1824,15 @@ mod tests {
         .unwrap();
         let s1: Vec<usize> = (0..4).collect();
         let xy_s1 = xy.select(Axis(0), &s1);
-        let err = build_hybrid_lr_matrix(&parent, &xy_s1, &expr.select(Axis(0), &s1), &gene_to_idx, 2.0, 1.0)
-            .unwrap_err();
+        let err = build_hybrid_lr_matrix(
+            &parent,
+            &xy_s1,
+            &expr.select(Axis(0), &s1),
+            &gene_to_idx,
+            2.0,
+            1.0,
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("cell_group len 8 != n_cells 4"),
@@ -1916,9 +1923,24 @@ mod tests {
             None,
         )
         .unwrap();
-        let sample_l = sample.received_ligand_cache.as_ref().unwrap().get("L").unwrap();
-        let isolated_l = isolated.received_ligand_cache.as_ref().unwrap().get("L").unwrap();
-        let parent_l = parent.received_ligand_cache.as_ref().unwrap().get("L").unwrap();
+        let sample_l = sample
+            .received_ligand_cache
+            .as_ref()
+            .unwrap()
+            .get("L")
+            .unwrap();
+        let isolated_l = isolated
+            .received_ligand_cache
+            .as_ref()
+            .unwrap()
+            .get("L")
+            .unwrap();
+        let parent_l = parent
+            .received_ligand_cache
+            .as_ref()
+            .unwrap()
+            .get("L")
+            .unwrap();
         for i in 0..4 {
             assert_abs_diff_eq!(sample_l[i], isolated_l[i], epsilon = 1e-15);
             assert!(

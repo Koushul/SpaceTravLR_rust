@@ -12,6 +12,7 @@ Typical single-run tree (no condition split):
 output_dir/
 ├── spacetravlr_run_repro.toml    # reproducible configs
 ├── spacetravlr_run_summary.html  # HTML training summary
+├── cells.csv                     # cluster_annot columns → obs_names (perturb cell scope)
 │
 ├── GENE_betadata.feather         # cell x modulator coefficients
 ├── OTHER_GENE_betadata.feather
@@ -28,6 +29,10 @@ output_dir/
 ├── CNN_weights/              # only if [model_export].save_cnn_weights = true
 │   ├── GENE_cnn_weights.npz
 │   └── …
+│
+├── lasso_coefs/              # only if [model_export].save_lasso_coefs = true
+│   ├── GENE_lasso_coefs.feather
+│   └── …
 ```
 
 With **`[data].condition`** (or `--condition`), each group trains under a subdirectory; the repro TOML stays at the **parent** `output_dir/`:
@@ -40,6 +45,7 @@ output_dir/
 └── conditions/
     ├── batch_A/                        # sanitized obs value (folder name)
     │   ├── condition_label.txt         # human-readable condition value
+    │   ├── cells.csv                   # cells in this condition only
     │   ├── GENE_betadata.feather
     │   ├── GENE.lock
     │   ├── log/GENE.log
@@ -47,6 +53,8 @@ output_dir/
     └── batch_B/
         └── …
 ```
+
+**`cells.csv`** is written when training initializes: one column per distinct `[data].cluster_annot` value, each listing `obs_names`. Use it with `spacetravlr-perturb --cells-csv` / `--cells-csv-column`. **`--make-cells-csv --run-toml`** regenerates the same file from a finished run. Pool-lasso also writes a copy under each `conditions/<sample>/` (or `samples/<sample>/`) with **that slide’s cells only**, so you can restrict a KO to one sample’s cell type without mixing slides. Perturb still matches names against the full AnnData.
 
 **Multi-host training:** additional machines use `spacetravlr --join-output-dir output_dir`. They read the same repro TOML, claim genes via `{gene}.lock`, and write feathers into the same tree (or into `conditions/<group>/` when splitting). Stale locks can be removed after `[execution].stale_lock_secs`.
 
@@ -107,6 +115,15 @@ output_dir/CNN_weights/   # or [model_export].output_subdir
 ```
 
 Optional parity dumps (`write_cnn_train_data_npz`): `{gene}_cnn_train_data.npz` and `{gene}_cnn_train_meta.json` for external Python reference training.
+
+When **`[model_export].save_lasso_coefs = true`** (full-CNN runs only):
+
+```
+output_dir/lasso_coefs/
+└── GENE_lasso_coefs.feather  # one row per cell type: raw Lasso intercepts/βs (no CNN)
+```
+
+Seed-only mode already stores that table in `{gene}_betadata.feather`, so this folder is never written in seed-only. Default is off.
 
 ---
 

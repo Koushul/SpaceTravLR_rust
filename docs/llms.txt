@@ -4,23 +4,30 @@
 
 ## Model
 
-SpaceTravLR learns, from a single observational spatial slide, three coupled pieces: (1) intracellular TF→target edges, (2) intercellular signaling via Gaussian distance-weighted received-ligand fields that feed `LIG$REC` and `TF#LIG` terms on each receiver, and (3) spatial modulation — a CNN on local proximity grids that multiplies sparse group-lasso (FISTA) cell-type baselines into location-specific coefficients β. Perturbations set a gene to a desired level and propagate deltas through the chain rule for T hops (default 4), recomputing the ligand field each step so effects reach unperturbed neighbors. Coefficients map directly to named edges — no post-hoc attribution.
+SpaceTravLR learns, from observational transcriptomics, three coupled pieces: (1) intracellular TF→target edges, (2) intercellular signaling — Gaussian distance-weighted received-ligand fields (`[ligand_field] mode = "spatial"`) or **FreeTravLR** global mean ligand × local receptor (`mode = "meanfield"`) feeding `LIG$REC` and `TF#LIG` terms, and (3) spatial modulation — a CNN on local proximity grids that multiplies sparse group-lasso (FISTA) cell-type baselines into location-specific coefficients β (`full` mode; skip with `seed`). Perturbations set a gene to a desired level and propagate deltas through the chain rule for T hops (default 4), recomputing the ligand field each step so effects reach unperturbed neighbors. Coefficients map directly to named edges — no post-hoc attribution. Multi-slide runs use **pool-lasso**: one jointly scaled Lasso, then a CNN per sample.
 
 ## Analyses you can run
 
-- **Collect interactions** — `spacetravlr collect-interactions --run-toml RUN/spacetravlr_run_repro.toml` aggregates β into modulator × target × cell-type tables (functional cell–cell communication ranking, not co-expression). Pool-lasso runs emit a `sample` column (one row set per slide).
-- **In-silico perturbations** — single-gene, combinatorial, or genome-scale KO/OE via `spacetravlr-perturb --c config_ko.toml` (or TUI / `screen`); restrict to a population with `cells_csv` for cell-extrinsic questions.
+- **Collect interactions** — `spacetravlr collect-interactions --run-toml RUN/spacetravlr_run_repro.toml` aggregates β into modulator × target × cell-type tables (functional cell–cell communication ranking, not co-expression). Pool-lasso runs emit a `sample` column (one row set per slide); `--across-samples` adds cell-weighted `sample="_all"` rows.
+- **In-silico perturbations** — single-gene, combinatorial, or genome-scale KO/OE via `spacetravlr-perturb --c config_ko.toml` (or TUI / `screen`); restrict to a population with `cells_csv` for cell-extrinsic questions. Training writes `RUN/cells.csv` at init (regenerate with `--make-cells-csv`).
 - **Perturbation vector fields** — project simulated expression shifts onto UMAP/spatial embeddings as Velocyto-style fields; score alignment to pseudotime or gene-set gradients via cosine similarity (viewer: `/api/perturb/umap-field`, signature fields).
-- **Functional microniches** — cluster cells by mean modulator β activity (not transcriptome similarity) into discrete niches; define each niche by its top genes and interactions.
+- **Functional microniches** — `spacetravlr get-microniches --run-toml RUN/spacetravlr_run_repro.toml` clusters cells by spatially filtered modulator β (not transcriptome similarity); default Leiden resolution is silhouette-optimized.
 - **Cell-extrinsic neighbor effects** — perturb type A, then compare simulated vs baseline expression in neighboring type B within ~200 µm.
 - **Mechanistic pathway tracing** — hop-differenced gradients yield directed graphs from perturbation source to downstream targets.
 - **KO/OE screens** — systematically score TF/ligand/receptor knockouts against a functional axis (exhaustion, differentiation, tumorigenicity).
+- **Pool-lasso (multi-slide)** — concatenate independent slides into one `.h5ad` with an `obs` sample column, then `spacetravlr --sample COL --pool-lasso`. One jointly scaled sparse group Lasso across slides, then a CNN per sample. Feathers land under `conditions/<sample>/` (or `conditions/<condition>/samples/<sample>/` with `--condition`). Gene locks stay on the parent output dir.
+- **FreeTravLR (non-spatial ligand field)** — `[ligand_field] mode = "meanfield"`: received ligand is the **global mean ligand × local receptor**, not a Gaussian neighborhood. Use for scRNA-seq (with `--training-mode seed`, which does not need coordinates) or as a fast screen before a spatial re-run. `full` CNN still needs `obsm['spatial']`. Preview pair probabilities with `spacetravlr ligand-field --h5ad DATA.h5ad`.
 - **Cross-sample / cross-platform transfer** — apply a trained model (or CNN coefficients) to a new AnnData, including higher-resolution → Visium spot transfer.
 
 Key facts an agent should know before answering questions or running commands:
 
-- Input is a single Visium-style spatial AnnData `.h5ad` with expression in `.X`, 2D coordinates in `.obsm['spatial']`, and preferably cluster labels in `.obs['cell_type']`. If no cell-type column exists, SpaceTravLR runs Leiden clustering first. Raw counts are fine — preprocessing is auto-detected.
-- The canonical happy path is: `spacetravlr --h5ad DATA.h5ad --output-dir RUN/` (training) → `RUN/spacetravlr_run_repro.toml` (the pointer file every downstream tool consumes) → `spacetravlr-perturb --c config_ko.toml` (in-silico perturbation via a TOML config).
+- Input is typically a spatial AnnData `.h5ad` with expression in `.X`, 2D coordinates in `.obsm['spatial']`, and preferably cluster labels in `.obs['cell_type']`. If no cell-type column exists, SpaceTravLR runs Leiden clustering first. Raw counts are fine — preprocessing is auto-detected. **FreeTravLR** changes only the ligand kernel (`meanfield`); `--training-mode seed` can run without spatial coordinates, while `full` CNN still needs `obsm['spatial']`.
+- The canonical happy path is: `spacetravlr --h5ad DATA.h5ad --output-dir RUN/` (training) → `RUN/spacetravlr_run_repro.toml` (the pointer file every downstream tool consumes) → `spacetravlr-perturb --c config_ko.toml` (in-silico perturbation via a TOML config). Always pass `--plain` for non-interactive / agent / SLURM runs.
+- Training modes: `seed` = cluster-level Lasso only (fast); `full` = Lasso then per-cell CNN (spatially varying β). `--training-mode seed|full`.
+- **`--sample` and `--pool-lasso` must be set together.** Concatenate slides first (`scanpy.concat(..., label="sample")`). Do not use pool-lasso as a substitute for `--condition` when groups must not share a Lasso (different treatments); `--condition` trains fully separate models.
+- Training writes `{output_dir}/cells.csv` at init (one column per `[data].cluster_annot` value listing `obs_names`). Pool-lasso also writes per-sample copies under each sample directory. `[perturbation].cells_csv` is not auto-enabled — perturb still hits all cells unless you pass `--cells-csv` / `--cells-csv-column`. `--make-cells-csv --run-toml` regenerates the file.
+- `[model_export].save_lasso_coefs` defaults to **false**. Full-CNN overwrites `{gene}_betadata.feather` with per-cell CNN βs; set `true` to also keep cluster-level raw Lasso under `lasso_coefs/`.
+- Ligand–receptor design lives under `[ligand_field]` (not a legacy `[cellchat]` block). Default `mode = "spatial"` (Gaussian received ligand). Pair selection: `prob` (CellChat \(P\)) or `expressed`. CLI: `spacetravlr ligand-field` (alias `cellchat`).
 - Perturbation configs drive batch knockouts/overexpression. Example `config_ko.toml`:
   ```
   run_toml = "/output/spacetravlr_run_repro.toml"
@@ -59,9 +66,10 @@ Key facts an agent should know before answering questions or running commands:
 - [Overview](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/index.md): Landing page with the four-command quickstart (install, run, join, collect-interactions) and a GPU training-time estimator.
 - [Installation](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/install.md): One-line installer, prebuilt platform matrix, building from source with cargo, self-update, and the `--verify` hardware smoke test.
 - [Usage](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/usage.md): Primary CLI guide — input requirements, interactive and batch training, multi-host `--join-output-dir`, `.h5ad` inspection with `--peek`, terminal UMAP plots, Rust preprocessing, label transfer, and β aggregation.
-- [Parameters](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/params.md): Every `spaceship_config.toml` key across `[data]`, `[spatial]`, `[grn]`, `[lasso]`, `[training]`, `[cnn]`, `[execution]`, `[perturbation]`, and `[model_export]`, with guidance on what happens when you turn each one up or down.
+- [Parameters](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/params.md): Every `spaceship_config.toml` key across `[data]`, `[spatial]`, `[ligand_field]`, `[grn]`, `[lasso]`, `[training]`, `[cnn]`, `[execution]`, `[perturbation]`, and `[model_export]`, with guidance on what happens when you turn each one up or down.
+- [Ligand field](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/ligand_field.md): Spatial vs **FreeTravLR** meanfield received-ligand modes, CellChat pair selection, and fair A/B settings.
 - [How it works](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/math.md): The math and Rust implementation — Gaussian received-ligand fields, sparse group lasso via FISTA, CNN-derived spatially varying coefficients, and chain-rule perturbation propagation.
-- [Output files](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/output.md): Catalog of every artifact — run directory layout, `{gene}_betadata.feather` schema, `spacetravlr_run_repro.toml`, per-gene logs, lock/orphan markers, CNN weight exports, and perturbation feathers.
+- [Output files](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/output.md): Catalog of every artifact — run directory layout, `{gene}_betadata.feather` schema, `cells.csv`, pool-lasso sample dirs, `spacetravlr_run_repro.toml`, per-gene logs, lock/orphan markers, CNN weight exports, and perturbation feathers.
 - [FAQ](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/docs/faq.md): Common questions — install, input requirements, cluster training, perturbation, troubleshooting, and comparisons to other tools.
 
 ## Tutorials
@@ -70,13 +78,13 @@ Key facts an agent should know before answering questions or running commands:
 
 ## Agent skills
 
-- [spacetravlr-cli skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/spacetravlr-cli/SKILL.md): Agent-oriented operating guide for `spacetravlr` and `spacetravlr-perturb`, including config TOMLs, gene subsets, condition splits, multi-host join, and compute-backend selection.
+- [spacetravlr-cli skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/spacetravlr-cli/SKILL.md): Agent-oriented operating guide for `spacetravlr` and `spacetravlr-perturb`, including config TOMLs, gene subsets, condition splits, **pool-lasso**, FreeTravLR / `[ligand_field]`, auto `cells.csv`, multi-host join, and compute-backend selection.
 - [spatial-viewer-mcp skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/spatial-viewer-mcp/SKILL.md): Driving the Deck.gl spatial viewer from an agent via MCP — opening the viewer, capturing renders, running perturbations from chat, and querying interactions.
 - [single-cell-rna-qc skill](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/.agents/skills/single-cell-rna-qc/SKILL.md): scVerse-style MAD-based quality control for `.h5ad` / `.h5` inputs before spatial analysis.
 
 ## Source
 
-- [Repository](https://github.com/Koushul/SpaceTravLR_rust): Rust implementation (current, recommended). Package version 3.3.1.
+- [Repository](https://github.com/Koushul/SpaceTravLR_rust): Rust implementation (current, recommended). Package version 3.7.2.
 - [Config template](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/spaceship_config.toml): Annotated `spaceship_config.toml` with every section and inline comments.
 - [Installer script](https://raw.githubusercontent.com/Koushul/SpaceTravLR_rust/main/scripts/install.sh): What `curl -fsSL https://tinyurl.com/spacetravlr/scripts/install.sh | sh` actually runs.
 - [Original Python implementation](https://github.com/jishnu-lab/SpaceTravLR): Reference research code that the Rust port supersedes.

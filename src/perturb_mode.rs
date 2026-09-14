@@ -3,6 +3,7 @@ use crate::betadata::{
     betadata_cluster_keys_from_obs_dataframe, clusters_usize_from_obs_dataframe,
     obs_series_row_str, resolve_betadata_cluster_key_column, write_betadata_feather,
 };
+use crate::condition_split::ConditionSplitPlan;
 use crate::config::{SpaceshipConfig, expand_user_path};
 use crate::ligand::{
     calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
@@ -662,6 +663,76 @@ fn escape_csv_field(s: &str) -> String {
     }
 }
 
+pub const CELLS_CSV_FILENAME: &str = "cells.csv";
+
+pub fn cluster_annot_labels_from_obs(
+    obs_df: &polars::prelude::DataFrame,
+    cluster_annot: &str,
+) -> anyhow::Result<Vec<String>> {
+    let col = obs_df.column(cluster_annot).with_context(|| {
+        format!("obs column {cluster_annot:?} missing while writing {CELLS_CSV_FILENAME}")
+    })?;
+    let series = col.as_materialized_series();
+    let n = obs_df.height();
+    let mut labels = Vec::with_capacity(n);
+    for i in 0..n {
+        labels.push(obs_series_row_str(series, i)?);
+    }
+    Ok(labels)
+}
+
+fn slice_obs_by_plan_indices(
+    src: &[String],
+    indices: &[usize],
+    sample: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::with_capacity(indices.len());
+    for &i in indices {
+        let Some(v) = src.get(i) else {
+            anyhow::bail!(
+                "pool-lasso sample {sample:?} obs index {i} out of range (n={})",
+                src.len()
+            );
+        };
+        out.push(v.clone());
+    }
+    Ok(out)
+}
+
+/// Write `{training_dir}/cells.csv` at training init (one column per cluster label).
+///
+/// For `[training].pool_lasso`, also writes the same grouping restricted to each sample's
+/// cells under that sample's output directory (`conditions/<sample>/` or `samples/<sample>/`).
+pub fn write_training_init_cells_csv(
+    training_dir: &Path,
+    obs_names: &[String],
+    obs_df: &polars::prelude::DataFrame,
+    cluster_annot: &str,
+    sample_plans: Option<&[ConditionSplitPlan]>,
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        obs_names.len() == obs_df.height(),
+        "obs_names len {} != obs rows {} while writing {CELLS_CSV_FILENAME}",
+        obs_names.len(),
+        obs_df.height()
+    );
+    let labels = cluster_annot_labels_from_obs(obs_df, cluster_annot)?;
+    let parent = training_dir.join(CELLS_CSV_FILENAME);
+    write_cells_csv_grouped_by_label(&parent, obs_names, &labels)?;
+    if let Some(plans) = sample_plans {
+        for plan in plans {
+            let names = slice_obs_by_plan_indices(obs_names, &plan.obs_indices, &plan.label)?;
+            let labs = slice_obs_by_plan_indices(&labels, &plan.obs_indices, &plan.label)?;
+            write_cells_csv_grouped_by_label(
+                &plan.output_dir.join(CELLS_CSV_FILENAME),
+                &names,
+                &labs,
+            )?;
+        }
+    }
+    Ok(parent)
+}
+
 /// Write a perturbation `cells.csv`: header = distinct `labels`, each column lists `obs_names`.
 pub fn write_cells_csv_grouped_by_label(
     out_path: &Path,
@@ -736,7 +807,7 @@ pub fn write_cells_csv_from_run_toml(
     let output_dir = cfg.resolve_training_output_dir(run_toml);
     let out = out_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| output_dir.join("cells.csv"));
+        .unwrap_or_else(|| output_dir.join(CELLS_CSV_FILENAME));
     write_cells_csv_grouped_by_label(&out, &ctx.obs_names, &ctx.cell_type_labels)?;
     eprintln!(
         "Wrote {} ({} columns, {} cells) using obs[{:?}] from {}",
@@ -1405,6 +1476,70 @@ mod tests {
         let parsed = parse_obs_columns_csv(&p, &obs).unwrap();
         assert_eq!(parsed.indices_for_column("A").unwrap(), &[1usize, 2]);
         assert_eq!(parsed.indices_for_column("B").unwrap(), &[0usize, 3]);
+    }
+
+    #[test]
+    fn write_training_init_cells_csv_writes_parent_and_sample_files() {
+        use crate::condition_split::ConditionSplitPlan;
+        use polars::prelude::{DataFrame, NamedFrom, Series};
+
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_init_cells_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s1 = dir.join("conditions").join("s1");
+        let s2 = dir.join("conditions").join("s2");
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::create_dir_all(&s2).unwrap();
+
+        let obs = vec![
+            "s1_c0".into(),
+            "s1_c1".into(),
+            "s2_c0".into(),
+            "s2_c1".into(),
+        ];
+        let labels: Vec<String> =
+            vec!["ct_a".into(), "ct_b".into(), "ct_a".into(), "ct_b".into()];
+        let obs_df = DataFrame::new(vec![Series::new("cell_type".into(), labels).into()]).unwrap();
+        let plans = vec![
+            ConditionSplitPlan {
+                label: "s1".into(),
+                output_dir: s1.clone(),
+                obs_indices: vec![0, 1],
+                n_obs: 2,
+            },
+            ConditionSplitPlan {
+                label: "s2".into(),
+                output_dir: s2.clone(),
+                obs_indices: vec![2, 3],
+                n_obs: 2,
+            },
+        ];
+
+        let parent =
+            write_training_init_cells_csv(&dir, &obs, &obs_df, "cell_type", Some(&plans)).unwrap();
+        assert_eq!(parent, dir.join(CELLS_CSV_FILENAME));
+
+        let parsed_all = parse_obs_columns_csv(&parent, &obs).unwrap();
+        assert_eq!(parsed_all.indices_for_column("ct_a").unwrap(), &[0usize, 2]);
+        assert_eq!(parsed_all.indices_for_column("ct_b").unwrap(), &[1usize, 3]);
+
+        let parsed_s1 = parse_obs_columns_csv(&s1.join(CELLS_CSV_FILENAME), &obs).unwrap();
+        assert_eq!(parsed_s1.indices_for_column("ct_a").unwrap(), &[0usize]);
+        assert_eq!(parsed_s1.indices_for_column("ct_b").unwrap(), &[1usize]);
+        assert!(
+            parsed_s1
+                .indices_for_column("ct_a")
+                .unwrap()
+                .iter()
+                .all(|&i| i < 2)
+        );
+
+        let parsed_s2 = parse_obs_columns_csv(&s2.join(CELLS_CSV_FILENAME), &obs).unwrap();
+        assert_eq!(parsed_s2.indices_for_column("ct_a").unwrap(), &[2usize]);
+        assert_eq!(parsed_s2.indices_for_column("ct_b").unwrap(), &[3usize]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

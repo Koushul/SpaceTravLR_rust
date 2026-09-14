@@ -79,7 +79,10 @@ fn ready_payload() -> String {
 fn file_age_secs(path: &Path) -> Option<u64> {
     let meta = fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?;
-    SystemTime::now().duration_since(modified).ok().map(|d| d.as_secs())
+    SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 fn resolved_stale_secs(configured: u64) -> u64 {
@@ -139,7 +142,11 @@ fn spawn_heartbeat(lock_path: PathBuf, stop: Arc<AtomicBool>) -> JoinHandle<()> 
                 continue;
             }
             acc_ms = 0;
-            if let Ok(mut f) = OpenOptions::new().write(true).truncate(true).open(&lock_path) {
+            if let Ok(mut f) = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&lock_path)
+            {
                 let _ = f.write_all(lock_payload().as_bytes());
                 let _ = f.flush();
             }
@@ -185,14 +192,9 @@ impl SetupLeaderGuard {
             fs::create_dir_all(parent)?;
         }
         let tmp = self.ready_path.with_extension("ready.tmp");
-        fs::write(&tmp, ready_payload())
-            .with_context(|| format!("write {}", tmp.display()))?;
+        fs::write(&tmp, ready_payload()).with_context(|| format!("write {}", tmp.display()))?;
         fs::rename(&tmp, &self.ready_path).with_context(|| {
-            format!(
-                "rename {} -> {}",
-                tmp.display(),
-                self.ready_path.display()
-            )
+            format!("rename {} -> {}", tmp.display(), self.ready_path.display())
         })?;
         let _ = fs::remove_file(&self.lock_path);
         Ok(())
@@ -243,7 +245,10 @@ pub fn participate_run_setup(opts: SetupParticipateOpts<'_>) -> anyhow::Result<S
 
     loop {
         if ready_path.is_file() {
-            log(&format!("setup: {} present — joining", SETUP_READY_FILENAME));
+            log(&format!(
+                "setup: {} present — joining",
+                SETUP_READY_FILENAME
+            ));
             return Ok(SetupRole::Follower);
         }
 

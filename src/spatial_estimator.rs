@@ -100,7 +100,9 @@ fn write_pool_lasso_gene_done_marker(training_dir: &str, gene: &str) {
 
 fn gene_log_path(training_dir: &str, gene: &str) -> PathBuf {
     let safe = gene.replace(['/', '\\'], "_");
-    Path::new(training_dir).join("log").join(format!("{safe}.log"))
+    Path::new(training_dir)
+        .join("log")
+        .join(format!("{safe}.log"))
 }
 
 fn write_gene_fail_log(training_dir: &str, gene: &str, msg: &str) {
@@ -198,6 +200,7 @@ fn cluster_rows_all_tf_coef_columns_zero(rows: &[Vec<f64>], n_tf: usize) -> bool
 /// raw lasso intercepts/coefficients (no CNN). Mirrors the seed-only branch's
 /// scaling, zeroing of bad-fit clusters, and cluster→label mapping so downstream
 /// code (Betabase / spatial_viewer) sees identical numbers regardless of CNN mode.
+/// Gated by [`ModelExportConfig::save_lasso_coefs`] (default off).
 #[allow(clippy::too_many_arguments)]
 fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     training_dir: &Path,
@@ -273,6 +276,34 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
         &ids,
         col_names,
         &mat,
+    )
+}
+
+fn maybe_write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
+    model_export: &ModelExportConfig,
+    training_dir: &Path,
+    gene: &str,
+    est_inner: &crate::estimator::ClusteredGCNNWR<AB>,
+    modulator_scales: Option<&Array1<f64>>,
+    col_names: &[String],
+    n_mods: usize,
+    bad_betadata_clusters: &HashSet<usize>,
+    cluster_betadata_row_keys: &HashMap<usize, String>,
+    unscale_betas_on_export: bool,
+) -> anyhow::Result<()> {
+    if !model_export.save_lasso_coefs {
+        return Ok(());
+    }
+    write_lasso_coefs_feather_for_gene(
+        training_dir,
+        gene,
+        est_inner,
+        modulator_scales,
+        col_names,
+        n_mods,
+        bad_betadata_clusters,
+        cluster_betadata_row_keys,
+        unscale_betas_on_export,
     )
 }
 
@@ -393,7 +424,8 @@ fn export_pooled_sample_gene<AB: AutodiffBackend>(
             match write_betadata_feather(&betadata_path, "CellID", obs_names, &data_cols, &mat) {
                 Ok(()) => {
                     wrote = true;
-                    let _ = write_lasso_coefs_feather_for_gene(
+                    let _ = maybe_write_lasso_coefs_feather_for_gene(
+                        model_export,
                         Path::new(training_dir),
                         gene,
                         est_inner,
@@ -3694,6 +3726,24 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 } else {
                     None
                 };
+            let cells_csv_path = crate::perturb_mode::write_training_init_cells_csv(
+                Path::new(training_dir),
+                obs_names.as_ref(),
+                &obs_df,
+                cluster_annot,
+                sample_plans.as_ref().map(|p| p.as_slice()),
+            )?;
+            log_line(
+                &hud,
+                if sample_plans.is_some() {
+                    format!(
+                        "cells.csv: wrote {} (+ per-sample copies)",
+                        cells_csv_path.display()
+                    )
+                } else {
+                    format!("cells.csv: wrote {}", cells_csv_path.display())
+                },
+            );
             let cached_spatial: Option<Arc<CachedSpatialData>> = if pool_lasso {
                 None
             } else {
@@ -3832,45 +3882,41 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let weighted_ligand_scale_factor =
                 spaceship_config.ligand_field.weighted_ligand_scale_factor;
 
-            let pooled_ligand_plans: Option<
-                Arc<Vec<Arc<crate::ligand_field::LigandFieldPlan>>>,
-            > = if pool_lasso {
-                if let Some(ref prep) = ligand_field_prep {
-                    let plans = sample_plans.as_ref().expect("pool_lasso sample plans");
-                    let caches: Vec<Arc<crate::ligand_field::LigandFieldPlan>> = plans
-                        .par_iter()
-                        .map(|sp| {
-                            let sample_xy = xy.select(Axis(0), &sp.obs_indices);
-                            let sample_expr = prep.expr.select(Axis(0), &sp.obs_indices);
-                            let cg: Vec<usize> =
-                                sp.obs_indices.iter().map(|&i| clusters[i]).collect();
-                            crate::ligand_field::relocalize_ligand_field_plan(
-                                prep.plan.as_ref(),
-                                cg,
-                                &sample_xy,
-                                &sample_expr,
-                                &prep.gene_to_idx,
-                                radius,
-                                weighted_ligand_scale_factor,
-                                ligand_grid_factor,
-                            )
-                            .map(Arc::new)
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    log_line(
-                        &hud,
-                        format!(
-                            "ligand field: {} sample spatial universes",
-                            caches.len()
-                        ),
-                    );
-                    Some(Arc::new(caches))
+            let pooled_ligand_plans: Option<Arc<Vec<Arc<crate::ligand_field::LigandFieldPlan>>>> =
+                if pool_lasso {
+                    if let Some(ref prep) = ligand_field_prep {
+                        let plans = sample_plans.as_ref().expect("pool_lasso sample plans");
+                        let caches: Vec<Arc<crate::ligand_field::LigandFieldPlan>> = plans
+                            .par_iter()
+                            .map(|sp| {
+                                let sample_xy = xy.select(Axis(0), &sp.obs_indices);
+                                let sample_expr = prep.expr.select(Axis(0), &sp.obs_indices);
+                                let cg: Vec<usize> =
+                                    sp.obs_indices.iter().map(|&i| clusters[i]).collect();
+                                crate::ligand_field::relocalize_ligand_field_plan(
+                                    prep.plan.as_ref(),
+                                    cg,
+                                    &sample_xy,
+                                    &sample_expr,
+                                    &prep.gene_to_idx,
+                                    radius,
+                                    weighted_ligand_scale_factor,
+                                    ligand_grid_factor,
+                                )
+                                .map(Arc::new)
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        log_line(
+                            &hud,
+                            format!("ligand field: {} sample spatial universes", caches.len()),
+                        );
+                        Some(Arc::new(caches))
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
             let classic_received: Arc<ClassicReceivedLigandCache> = if pool_lasso {
                 let plans = sample_plans.as_ref().expect("pool_lasso sample plans");
                 let slides: Vec<Arc<SlideReceivedLigandCache>> = plans
@@ -4883,7 +4929,8 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             {
                                                 wrote = true;
 
-                                                if let Err(e) = write_lasso_coefs_feather_for_gene(
+                                                if let Err(e) = maybe_write_lasso_coefs_feather_for_gene(
+                                                    &model_export_w,
                                                     Path::new(&training_dir),
                                                     &gene,
                                                     est_inner,
@@ -6826,13 +6873,8 @@ mod classic_received_x_identity_tests {
         let path = dir.join("mock.h5ad");
         let a = AnnData::<H5>::new(&path).unwrap();
         let n = 8usize;
-        a.set_obs_names(
-            (0..n)
-                .map(|i| format!("c{i}"))
-                .collect::<Vec<_>>()
-                .into(),
-        )
-        .unwrap();
+        a.set_obs_names((0..n).map(|i| format!("c{i}")).collect::<Vec<_>>().into())
+            .unwrap();
         a.set_var_names(
             vec![
                 "Sox2".into(),
@@ -6957,9 +6999,7 @@ mod classic_received_x_identity_tests {
         for (a, b) in x_cached.iter().zip(x_bypass.iter()) {
             assert_abs_diff_eq!(*a, *b, epsilon = 1e-15);
         }
-        let lr_i = est
-            .regulators
-            .len();
+        let lr_i = est.regulators.len();
         for i in 0..xy.nrows() {
             assert_abs_diff_eq!(x_cached[[i, lr_i]], expected_lr[i], epsilon = 1e-15);
         }

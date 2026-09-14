@@ -82,7 +82,12 @@ fn setup_run_dir(suffix: &str) -> PathBuf {
     dir
 }
 
-fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Option<usize>) {
+fn run_fit_all_genes(
+    dir: &Path,
+    mode: CnnTrainingMode,
+    spatial_dim_override: Option<usize>,
+    save_lasso_coefs: bool,
+) {
     let h5ad = dir.join("mock_train.h5ad");
     let mut cfg = SpaceshipConfig::default();
     cfg.data.adata_path = h5ad.to_string_lossy().into_owned();
@@ -96,6 +101,7 @@ fn run_fit_all_genes(dir: &Path, mode: CnnTrainingMode, spatial_dim_override: Op
     cfg.execution.output_dir = dir.to_string_lossy().into_owned();
     cfg.lasso.n_iter = 200;
     cfg.execution.n_parallel = 1;
+    cfg.model_export.save_lasso_coefs = save_lasso_coefs;
     if let Some(d) = spatial_dim_override {
         cfg.spatial.spatial_dim = d.max(1);
     }
@@ -172,13 +178,42 @@ fn assert_gene_performance_feather(dir: &Path) {
 #[test]
 fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
     let dir = setup_run_dir("seed");
-    run_fit_all_genes(&dir, CnnTrainingMode::Seed, None);
+    run_fit_all_genes(&dir, CnnTrainingMode::Seed, None, false);
     assert_gene_performance_feather(&dir);
 
     let lasso_dir = dir.join("lasso_coefs");
     assert!(
         !lasso_dir.exists(),
         "seed-only mode must NOT create {}",
+        lasso_dir.display()
+    );
+
+    let cells_csv = dir.join("cells.csv");
+    assert!(cells_csv.is_file(), "expected {}", cells_csv.display());
+    let obs: Vec<String> = (0..12).map(|i| format!("c{i}")).collect();
+    let parsed = spacetravlr::perturb_mode::parse_obs_columns_csv(&cells_csv, &obs).unwrap();
+    assert_eq!(
+        parsed.indices_for_column("ct_a").unwrap(),
+        &[0usize, 1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        parsed.indices_for_column("ct_b").unwrap(),
+        &[6usize, 7, 8, 9, 10, 11]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fit_all_genes_full_cnn_skips_lasso_coefs_by_default() {
+    let dir = setup_run_dir("full_skip_lasso");
+    run_fit_all_genes(&dir, CnnTrainingMode::Full, Some(8), false);
+    assert_gene_performance_feather(&dir);
+
+    let lasso_dir = dir.join("lasso_coefs");
+    assert!(
+        !lasso_dir.exists(),
+        "full-CNN default must NOT create {}",
         lasso_dir.display()
     );
 
@@ -189,7 +224,7 @@ fn fit_all_genes_writes_finite_mean_lasso_r2_to_gene_performance_feather() {
 fn fit_all_genes_full_cnn_writes_lasso_coefs_per_cluster_feathers() {
     let dir = setup_run_dir("full");
     // Default `spatial_dim` is 32 (CNN grid H=W). Use a tiny grid here to keep full-CNN CPU tests fast.
-    run_fit_all_genes(&dir, CnnTrainingMode::Full, Some(8));
+    run_fit_all_genes(&dir, CnnTrainingMode::Full, Some(8), true);
     assert_gene_performance_feather(&dir);
 
     let lasso_dir = dir.join("lasso_coefs");

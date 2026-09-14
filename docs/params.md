@@ -167,7 +167,7 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 | `beta_scale_factor` | `100.0` | Global multiplier on all β before propagation. | Stronger perturbation amplitudes. | Weaker systemic response. |
 | `beta_cap` |  | Clamp β to `[-cap, cap]` after scaling. | Prevent extreme coefficients from dominating. | Omit for uncapped dynamics. |
 | `n_propagation` | `4` | Rounds of ligand / GRN signal propagation in `splash()`. | Deeper equilibration; more neighbor feedback. | Shallower, more local effects. |
-| `cells_csv` / `cells_csv_column` |  | Default ROI for perturb export. | Restrict splash to a cell list. | — |
+| `cells_csv` / `cells_csv_column` |  | Default ROI for perturb export. Training writes `cells.csv` at init; uncomment these to use it when CLI omits `--cells-csv`. | Restrict splash to a cell list. | — |
 | `perturbed_gene_min_bound` | `0.0` (when omitted) | Lower clip on simulated expression after each propagation step. | Keep predictions non-negative or in a biologically plausible range. | Set explicitly to allow negative values (unusual). |
 | `perturbed_gene_max_bound` |  | Upper clip on simulated expression after each propagation step. | Cap OOD overexpression from linear propagation. | Omit for no upper bound. |
 
@@ -178,6 +178,7 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
 | `save_cnn_weights` | `false` | Write `{gene}_cnn_weights.npz` under `output_subdir`. | Enable for external analysis or Python trainer parity. | Off to save disk. |
+| `save_lasso_coefs` | `false` | Write `lasso_coefs/{gene}_lasso_coefs.feather` (cluster-level raw Lasso) in full-CNN mode. | Enable to keep seed-only–style Lasso tables beside per-cell CNN betadata. | Off to save disk (default). |
 | `compressed_npz` | `true` | Deflate compression on `.npz`. | — | `false` for slightly faster writes. |
 | `output_subdir` | `CNN_weights` | Subfolder under `output_dir`. | — | — |
 

@@ -46,7 +46,7 @@ Typical sections:
 - `[cnn]`, `[lasso]`, `[training]` — CNN and Lasso hyperparameters
 - `[execution]` — `n_parallel`, `output_dir`, `write_minimal_repro_h5ad`, `stale_lock_secs` (join lock recovery)
 - `[perturbation]` — `beta_scale_factor`, optional `beta_cap`, `n_propagation`, `ligand_grid_factor` (grid vs exact received ligands), optional `cells_csv` / `cells_csv_column` (defaults for `spacetravlr-perturb --export` and TUI cell-scope CSV when the CLI does not pass `--cells-csv`; paths relative to the run TOML's directory unless absolute)
-- `[model_export]` — `save_cnn_weights`, `write_cnn_train_data_npz`, `compressed_npz`, `output_subdir` (default `CNN_weights`)
+- `[model_export]` — `save_cnn_weights`, `save_lasso_coefs`, `write_cnn_train_data_npz`, `compressed_npz`, `output_subdir` (default `CNN_weights`)
 
 CLI flags override many of these when **not** in `--join-output-dir` mode.
 
@@ -133,7 +133,7 @@ Required AnnData shape: expression in `.X`, 2D coordinates in `.obsm['spatial']`
 
 - `--verify` — install smoke test: downloads a tonsil `.h5ad`, runs Rust prep, trains two genes, accepts WebGPU or CPU (NdArray). Best first command on a new machine.
 - `--peek PATH` (alias `--peak`) — fast HDF5 metadata summary without a full load; works on `.h5ad` and 10x `.h5`. Add `--obs COL` for value counts.
-- `--make-cells-csv --run-toml PATH` — write `cells.csv` in the training output directory, one column per distinct `[data].cluster_annot` value, each listing `obs_names`. **This is how you set up a cell-type-restricted perturbation** for `spacetravlr-perturb --cells-csv`.
+- `--make-cells-csv --run-toml PATH` — regenerate `cells.csv` in the training output directory (also written automatically when training starts), one column per distinct `[data].cluster_annot` value, each listing `obs_names`. Use with `spacetravlr-perturb --cells-csv`. Pool-lasso runs also write per-sample copies under each sample directory.
 - `--infer-species --h5ad PATH` — print human/mouse inference
 - `--plot-h5ad`, `--plot-umap [PATH]` (`--plot-umap-backend rust|scanpy`) — terminal scatter plots
 - `--update` / `--update-version TAG` — self-update (feature `self-update`)
@@ -156,10 +156,12 @@ Selection lives in `src/bin/compute_backend.rs`. `SPACETRAVLR_FORCE_CPU=1` or `S
 ### Artifacts
 
 - `{gene}_betadata.feather` under the output dir (or under `conditions/<value>/` when split). Columns: `Cluster` (seed mode) or `CellID` (full mode), `beta0`, and `beta_<name>` per modulator. Naming: bare symbol = TF, `LIG$REC` = ligand–receptor, `TF#LIG` = ligand-mediated TF.
+- `cells.csv` — written at training init (and via `--make-cells-csv`); one column per cluster label listing `obs_names`. Pool-lasso also writes per-sample `cells.csv` under each sample dir.
 - `spacetravlr_run_repro.toml` — canonical config for join / viewer / perturb
 - `log/{gene}.log` — per-gene training metrics (`spacetravlr_training_log v1`)
 - `{gene}.lock` (in progress), `{gene}.orphan` (no usable modulators or failed the `score_threshold` gate), `{gene}.tf_ablated`
 - `CNN_weights/{gene}_cnn_weights.npz` when `[model_export].save_cnn_weights = true` (subdir configurable via `[model_export].output_subdir`)
+- `lasso_coefs/{gene}_lasso_coefs.feather` when `[model_export].save_lasso_coefs = true` (full-CNN cluster-level raw Lasso; off by default)
 
 ### GRN data
 
@@ -201,7 +203,7 @@ Full example: run `spacetravlr-perturb --help` (see `after_long_help`).
 
 The distinguishing capability of SpaceTravLR is predicting how a perturbation confined to one population changes **neighboring, unperturbed** cells. The pattern:
 
-1. `spacetravlr --make-cells-csv --run-toml RUN/spacetravlr_run_repro.toml`
+1. Use `RUN/cells.csv` from training (or `spacetravlr --make-cells-csv --run-toml RUN/spacetravlr_run_repro.toml` to regenerate). Pool-lasso: `RUN/conditions/<sample>/cells.csv` for one slide.
 2. `spacetravlr-perturb … --cells-csv RUN/cells.csv --cells-csv-column <SenderCellType>`
 3. Compare simulated vs baseline expression restricted to a **different** cell type within the spatial neighborhood of the perturbed cells (the convention in the paper is a k-d tree query within ~200 µm).
 
@@ -257,7 +259,7 @@ spacetravlr --join-output-dir /path/run --parallel 16 --plain
 spacetravlr-perturb --run-toml /path/run/spacetravlr_run_repro.toml --out /tmp/sim.feather --gene SOX2 --desired-expr 0 --n-propagation 4 --verbose
 
 # Knockout restricted to one cell type (cell-extrinsic setup)
-spacetravlr --make-cells-csv --run-toml /path/run/spacetravlr_run_repro.toml
+# Training already wrote /path/run/cells.csv; --make-cells-csv regenerates it.
 spacetravlr-perturb --run-toml /path/run/spacetravlr_run_repro.toml --out /tmp/mif_ko.feather \
   --gene MIF --desired-expr 0 --cells-csv /path/run/cells.csv --cells-csv-column Epithelial
 

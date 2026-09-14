@@ -86,7 +86,12 @@ pub fn cached_spatial_for(
     ego_center_spatial_maps: bool,
 ) -> CachedSpatialData {
     CachedSpatialData {
-        spatial_features: create_spatial_features(xy, clusters, num_clusters, spatial_feature_radius),
+        spatial_features: create_spatial_features(
+            xy,
+            clusters,
+            num_clusters,
+            spatial_feature_radius,
+        ),
         spatial_maps: xyc2spatial_fast(
             xy,
             clusters,

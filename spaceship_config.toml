@@ -1,19 +1,28 @@
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  SpaceTravLR — Spaceship Config                                            ║
-# ║  All training hyperparameters in one place.                                ║
-# ║  CLI flags (--epochs, --parallel, etc.) override values here.              ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
+# ╔════════════════════════════════════════════╗
+#           We're going on a trip 
+#        in our favorite rocket ship
+#       
+#            __  _
+#        .-.'  `; `-._  __  _
+#       (_,         .-:'  `; `-._
+#     ,'o"(        (_,           )
+#    (__,-'      ,'o"(            )>
+#       (       (__,-'            )
+#        `-'._.--._(             )
+#           |||  |||`-'._.--._.-'
+#                      |||  |||
+#
+# ╚════════════════════════════════════════════╝
+
 
 [data]
-# adata_path      = "/Unhinged/soul/slideseq_brain_processed.h5ad"
-# Expression layer to read from AnnData
+# adata_path      = "/data/slideseq_brain.h5ad"
 layer           = "imputed_count"
-# obs column holding integer cluster labels
 cluster_annot   = "cell_type"
-# Optional: split training by this condition (fully independent lasso+CNN per value)
+# Optional: split into independent training by this condition
 # condition      = "batch"
-# Independent spatial samples (slides). Requires [training].pool_lasso.
-# sample         = "library_id"
+# obs column for sample when pooling. Requires [training].pool_lasso.
+# sample         = "batch"
 
 [preprocess]
 # QC (Scanpy filter_cells / filter_genes)
@@ -51,13 +60,12 @@ contact_distance = 30
 # tf_priors_feather = "/prior_links.feather"
 # Minimum score for a TF to be included as a ligand-mediated regulator
 tf_ligand_cutoff = 0.1
-# Max p-value for CellOracle Bayesian ridge edges to enter the TF priors feather (default 0.05).
+# Max p-value for Bayesian ridge edges priors
 celloracle_p_max = 0.05
 max_lr = 200
 use_tf_modulators = true
 use_lr_modulators = true
 use_tfl_modulators = true
-# Shorthand (overwrites the three flags when set): comma-separated tf, lr, tfl (alias ltf). Example LR-only ablation:
 # train_modulators = "tf,lr"
 # extra_modulators = ["GENE1", "GENE2"]
 # extra_modulators_file = "path/to/extra_genes.txt"
@@ -65,7 +73,7 @@ use_tfl_modulators = true
 # extra_lr_file = "path/to/extra_lr.txt"
 # extra_contact_lr = ["CADM1$CADM1"]
 # extra_contact_lr_file = "path/to/extra_contact_lr.txt"
-# tetraspanin_pairs = ["CD9&CD81"]
+# tetraspanin_pairs = ["CD9&CD37", "CD37&CD37"]
 
 [ligand_field]
 # Received-ligand aggregation + communication-prob pair selection (when LR modulators are on).
@@ -198,7 +206,9 @@ beta_scale_factor = 100.0
 # beta_cap        = 10.0
 # Number of signal propagation rounds
 n_propagation     = 4
-# cells_csv = "cell_scope.csv"
+# Training writes output_dir/cells.csv at init (pool-lasso also writes per-sample copies).
+# Uncomment to make that the default perturb cell scope when CLI omits --cells-csv.
+# cells_csv = "cells.csv"
 # cells_csv_column = "my_cells"
 # Clip simulated expression after each propagation iteration (omit max for no upper bound)
 # perturbed_gene_min_bound = 0.0
@@ -206,5 +216,6 @@ n_propagation     = 4
 
 [model_export]
 save_cnn_weights = false
+save_lasso_coefs = false
 compressed_npz = true
 output_subdir = "CNN_weights"
