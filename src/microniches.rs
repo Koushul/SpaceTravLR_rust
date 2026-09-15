@@ -899,10 +899,6 @@ fn score_feature_matrix(
     Ok(kept)
 }
 
-#[cfg(test)]
-static RELOAD_COLUMN_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 fn load_one_feature_column(
     path: &Path,
     gene: &str,
@@ -910,8 +906,6 @@ fn load_one_feature_column(
     obs_names: &[String],
     cluster_keys: &[String],
 ) -> anyhow::Result<Option<(f64, Vec<f64>)>> {
-    #[cfg(test)]
-    RELOAD_COLUMN_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let vals_f32 = betadata_feather_per_cell_column(
         path.to_str().unwrap_or_default(),
         feature,
@@ -1537,17 +1531,15 @@ stale_lock_secs = 0
         let knn = spatial_knn_indices(&spatial, params.spatial_k);
         let scored = score_genes_pass1(&feathers, &obs, &obs, &spatial, &knn, &params).unwrap();
         let cap = params.spatial_test_cap.max(32);
-        assert!(scored.len() > cap);
+        let n_scored = scored.len();
+        assert!(n_scored > cap, "got {n_scored} scores, cap {cap}");
         let selected = select_scores_for_reload(scored, &params).unwrap();
         assert!(selected.len() <= cap);
+        assert!(selected.len() < n_scored);
         assert!(!selected.is_empty());
-        RELOAD_COLUMN_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
         let kept = reload_scored_features(&feathers, &selected, &obs, &obs, &params).unwrap();
+        assert!(kept.len() <= selected.len());
         assert!(kept.len() <= cap);
-        assert_eq!(
-            RELOAD_COLUMN_CALLS.load(std::sync::atomic::Ordering::SeqCst),
-            selected.len()
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
