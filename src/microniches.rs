@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{IsTerminal, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -49,6 +50,7 @@ const DEFAULT_LEIDEN_MAX_ITER: usize = 100;
 const DEFAULT_GRID: usize = 8;
 const DEFAULT_SEED: u64 = 0;
 const DEFAULT_SPATIAL_TEST_CAP: usize = 4000;
+const DEFAULT_FILTER_PARALLELISM: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct MicronichesParams {
@@ -71,6 +73,7 @@ pub struct MicronichesParams {
     pub features_csv: Option<PathBuf>,
     pub max_genes: Option<usize>,
     pub spatial_test_cap: usize,
+    pub filter_parallelism: usize,
     pub seed: u64,
 }
 
@@ -96,6 +99,7 @@ impl Default for MicronichesParams {
             features_csv: None,
             max_genes: None,
             spatial_test_cap: DEFAULT_SPATIAL_TEST_CAP,
+            filter_parallelism: DEFAULT_FILTER_PARALLELISM,
             seed: DEFAULT_SEED,
         }
     }
@@ -144,10 +148,9 @@ pub struct MicronichesResult {
 }
 
 #[derive(Clone, Debug)]
-struct FeatureCandidate {
+struct FeatureScore {
     gene: String,
     feature: String,
-    values: Vec<f64>,
     #[allow(dead_code)]
     mad: f64,
     moran_i: f64,
@@ -155,6 +158,30 @@ struct FeatureCandidate {
     p_perm: f64,
     q_bh: f64,
     spatial_score: f64,
+}
+
+#[derive(Clone, Debug)]
+struct FeatureCandidate {
+    gene: String,
+    feature: String,
+    values: Vec<f64>,
+    moran_i: f64,
+    eta2: f64,
+    q_bh: f64,
+    spatial_score: f64,
+}
+
+fn par_map_limited<I, T, F>(items: &[I], n_threads: usize, f: F) -> Vec<T>
+where
+    I: Sync,
+    T: Send,
+    F: Fn(&I) -> T + Sync + Send,
+{
+    let n = n_threads.max(1);
+    match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+        Ok(pool) => pool.install(|| items.par_iter().map(&f).collect()),
+        Err(_) => items.iter().map(&f).collect(),
+    }
 }
 
 /// Resolve AnnData path relative to common locations around the run TOML.
@@ -203,11 +230,11 @@ fn list_betadata_feathers(output_dir: &Path) -> anyhow::Result<Vec<(String, Path
     Ok(out)
 }
 
-fn spatial_knn_indices(spatial: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
+#[cfg(test)]
+fn spatial_knn_indices_brute(spatial: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
     let n = spatial.nrows();
     let kk = k.min(n.saturating_sub(1));
     (0..n)
-        .into_par_iter()
         .map(|i| {
             let xi = spatial.row(i);
             let mut dists: Vec<(f64, usize)> = (0..n)
@@ -219,6 +246,33 @@ fn spatial_knn_indices(spatial: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
                 .collect();
             dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             dists.into_iter().take(kk).map(|(_, j)| j).collect()
+        })
+        .collect()
+}
+
+fn spatial_knn_indices(spatial: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
+    let n = spatial.nrows();
+    let kk = k.min(n.saturating_sub(1));
+    if n < 2 || kk == 0 {
+        return vec![Vec::new(); n];
+    }
+    let points: Vec<[f64; 2]> = (0..n)
+        .map(|i| [spatial[(i, 0)], spatial[(i, 1)]])
+        .collect();
+    let tree = kiddo::ImmutableKdTree::<f64, 2>::new_from_slice(&points);
+    let qty = NonZeroUsize::new(kk.saturating_add(1)).unwrap_or(NonZeroUsize::MIN);
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let q = [spatial[(i, 0)], spatial[(i, 1)]];
+            let nn = tree.nearest_n::<kiddo::SquaredEuclidean>(&q, qty);
+            nn.into_iter()
+                .filter_map(|nb| {
+                    let j = nb.item as usize;
+                    if j == i { None } else { Some(j) }
+                })
+                .take(kk)
+                .collect()
         })
         .collect()
 }
@@ -427,12 +481,11 @@ fn zscore_columns(mut x: Array2<f64>) -> Array2<f64> {
 }
 
 /// Dense PCA via covariance eigendecomposition (feature Gram matrix).
-pub fn dense_pca(x: &Array2<f64>, n_comps: usize) -> anyhow::Result<Array2<f64>> {
-    let n = x.nrows();
-    let p = x.ncols();
+pub fn dense_pca(mut centered: Array2<f64>, n_comps: usize) -> anyhow::Result<Array2<f64>> {
+    let n = centered.nrows();
+    let p = centered.ncols();
     anyhow::ensure!(n >= 2 && p >= 1, "PCA needs n>=2 and p>=1");
     let k = n_comps.min(p).min(n - 1).max(1);
-    let mut centered = x.clone();
     for j in 0..p {
         let mean = centered.column(j).mean().unwrap_or(0.0);
         for i in 0..n {
@@ -705,7 +758,7 @@ fn score_one_gene(
     spatial: &Array2<f64>,
     knn: &[Vec<usize>],
     params: &MicronichesParams,
-) -> anyhow::Result<Vec<FeatureCandidate>> {
+) -> anyhow::Result<Vec<FeatureScore>> {
     let columns = betadata_feather_all_float_columns_for_cells(
         path.to_str().unwrap_or_default(),
         obs_names,
@@ -725,10 +778,9 @@ fn score_one_gene(
             .wrapping_mul(31)
             .wrapping_add(feature.len() as u64);
         let p = permute_moran_p(&values, knn, mi, params.moran_n_perm, seed);
-        out.push(FeatureCandidate {
+        out.push(FeatureScore {
             gene: gene.to_string(),
             feature,
-            values,
             mad: m,
             moran_i: mi,
             eta2: e2,
@@ -749,34 +801,39 @@ fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-fn score_feature_matrix(
+fn score_genes_pass1(
     feathers: &[(String, PathBuf)],
     obs_names: &[String],
     cluster_keys: &[String],
     spatial: &Array2<f64>,
+    knn: &[Vec<usize>],
     params: &MicronichesParams,
-) -> anyhow::Result<Vec<FeatureCandidate>> {
-    let knn = spatial_knn_indices(spatial, params.spatial_k);
+) -> anyhow::Result<Vec<FeatureScore>> {
     let pb = Arc::new(progress_bar(feathers.len() as u64, "spatial β filter"));
-    let gene_results: Vec<anyhow::Result<Vec<FeatureCandidate>>> = feathers
-        .par_iter()
-        .map(|(gene, path)| {
-            let r = score_one_gene(gene, path, obs_names, cluster_keys, spatial, &knn, params);
+    let gene_results: Vec<anyhow::Result<Vec<FeatureScore>>> = par_map_limited(
+        feathers,
+        params.filter_parallelism,
+        |(gene, path)| {
+            let r = score_one_gene(gene, path, obs_names, cluster_keys, spatial, knn, params);
             pb.inc(1);
             r
-        })
-        .collect();
+        },
+    );
     pb.finish_and_clear();
-
-    let mut scored: Vec<FeatureCandidate> = Vec::new();
+    let mut scored = Vec::new();
     for r in gene_results {
         scored.extend(r?);
     }
     if scored.is_empty() {
         bail!("no β features passed the MAD noise gate");
     }
+    Ok(scored)
+}
 
-    // Rank by spatial_score and FDR only the top cap (matches prior Python filter).
+fn select_scores_for_reload(
+    mut scored: Vec<FeatureScore>,
+    params: &MicronichesParams,
+) -> anyhow::Result<Vec<FeatureScore>> {
     scored.sort_by(|a, b| {
         b.spatial_score
             .partial_cmp(&a.spatial_score)
@@ -791,11 +848,8 @@ fn score_feature_matrix(
         c.q_bh = qq;
     }
 
-    let mut kept: Vec<_> = scored
-        .iter()
-        .filter(|c| c.q_bh <= params.q_bh_max && c.spatial_score > 0.0)
-        .cloned()
-        .collect();
+    let mut kept = scored.clone();
+    kept.retain(|c| c.q_bh <= params.q_bh_max && c.spatial_score > 0.0);
 
     if !kept.is_empty() {
         let mut is: Vec<f64> = kept.iter().map(|c| c.moran_i).collect();
@@ -804,18 +858,14 @@ fn score_feature_matrix(
         es.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let i_min = percentile_sorted(&is, 0.50);
         let e_min = percentile_sorted(&es, 0.25);
-        let adaptive: Vec<_> = kept
-            .iter()
-            .filter(|c| c.moran_i >= i_min && c.eta2 >= e_min)
-            .cloned()
-            .collect();
-        if adaptive.len() >= 16 {
-            kept = adaptive;
+        let fdr_kept = kept.clone();
+        kept.retain(|c| c.moran_i >= i_min && c.eta2 >= e_min);
+        if kept.len() < 16 {
+            kept = fdr_kept;
         }
     }
 
     if kept.is_empty() {
-        // Fallback: strongest spatial scores regardless of FDR.
         kept = scored.into_iter().take(256).collect();
     }
     if kept.is_empty() {
@@ -826,6 +876,20 @@ fn score_feature_matrix(
             .partial_cmp(&a.spatial_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    Ok(kept)
+}
+
+fn score_feature_matrix(
+    feathers: &[(String, PathBuf)],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    spatial: &Array2<f64>,
+    params: &MicronichesParams,
+) -> anyhow::Result<Vec<FeatureCandidate>> {
+    let knn = spatial_knn_indices(spatial, params.spatial_k);
+    let scored = score_genes_pass1(feathers, obs_names, cluster_keys, spatial, &knn, params)?;
+    let selected = select_scores_for_reload(scored, params)?;
+    let mut kept = reload_scored_features(feathers, &selected, obs_names, cluster_keys, params)?;
     kept = greedy_decorrelate(kept, params.corr_max);
     if let Some(max_f) = params.max_features {
         if kept.len() > max_f {
@@ -835,50 +899,110 @@ fn score_feature_matrix(
     Ok(kept)
 }
 
+#[cfg(test)]
+static RELOAD_COLUMN_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn load_one_feature_column(
+    path: &Path,
+    gene: &str,
+    feature: &str,
+    obs_names: &[String],
+    cluster_keys: &[String],
+) -> anyhow::Result<Option<(f64, Vec<f64>)>> {
+    #[cfg(test)]
+    RELOAD_COLUMN_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let vals_f32 = betadata_feather_per_cell_column(
+        path.to_str().unwrap_or_default(),
+        feature,
+        obs_names,
+        cluster_keys,
+    )?;
+    let values: Vec<f64> = vals_f32.iter().map(|v| *v as f64).collect();
+    let feature_mad = mad(&values);
+    if feature_mad <= 1e-12 {
+        return Ok(None);
+    }
+    let _ = gene;
+    Ok(Some((feature_mad, values)))
+}
+
+fn reload_scored_features(
+    feathers: &[(String, PathBuf)],
+    scores: &[FeatureScore],
+    obs_names: &[String],
+    cluster_keys: &[String],
+    params: &MicronichesParams,
+) -> anyhow::Result<Vec<FeatureCandidate>> {
+    let by_gene: HashMap<&str, &PathBuf> = feathers.iter().map(|(g, p)| (g.as_str(), p)).collect();
+    let pb = Arc::new(progress_bar(scores.len() as u64, "reload β features"));
+    let jobs: Vec<(&FeatureScore, Option<&PathBuf>)> = scores
+        .iter()
+        .map(|s| (s, by_gene.get(s.gene.as_str()).copied()))
+        .collect();
+    let loaded: Vec<Option<FeatureCandidate>> = par_map_limited(
+        &jobs,
+        params.filter_parallelism,
+        |(score, path)| {
+            let out = match path {
+                Some(path) => load_one_feature_column(
+                    path,
+                    &score.gene,
+                    &score.feature,
+                    obs_names,
+                    cluster_keys,
+                )
+                .ok()
+                .flatten()
+                .map(|(_feature_mad, values)| FeatureCandidate {
+                    gene: score.gene.clone(),
+                    feature: score.feature.clone(),
+                    values,
+                    moran_i: score.moran_i,
+                    eta2: score.eta2,
+                    q_bh: score.q_bh,
+                    spatial_score: score.spatial_score,
+                }),
+                None => None,
+            };
+            pb.inc(1);
+            out
+        },
+    );
+    pb.finish_and_clear();
+    let mut out: Vec<FeatureCandidate> = loaded.into_iter().flatten().collect();
+    if out.is_empty() {
+        bail!("none of the selected features could be reloaded from betadata feathers");
+    }
+    out.sort_by(|a, b| {
+        b.spatial_score
+            .partial_cmp(&a.spatial_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(out)
+}
+
 fn load_specified_features(
     feathers: &[(String, PathBuf)],
     wanted: &[(String, String)],
     obs_names: &[String],
     cluster_keys: &[String],
+    params: &MicronichesParams,
 ) -> anyhow::Result<Vec<FeatureCandidate>> {
-    let by_gene: HashMap<&str, &PathBuf> = feathers.iter().map(|(g, p)| (g.as_str(), p)).collect();
-    let pb = progress_bar(wanted.len() as u64, "loading β features");
-    let mut out = Vec::new();
-    for (gene, feature) in wanted {
-        let Some(path) = by_gene.get(gene.as_str()) else {
-            pb.inc(1);
-            continue;
-        };
-        let vals_f32 = betadata_feather_per_cell_column(
-            path.to_str().unwrap_or_default(),
-            feature,
-            obs_names,
-            cluster_keys,
-        )?;
-        let values: Vec<f64> = vals_f32.iter().map(|v| *v as f64).collect();
-        let feature_mad = mad(&values);
-        if feature_mad <= 1e-12 {
-            pb.inc(1);
-            continue;
-        }
-        out.push(FeatureCandidate {
+    let scores: Vec<FeatureScore> = wanted
+        .iter()
+        .map(|(gene, feature)| FeatureScore {
             gene: gene.clone(),
             feature: feature.clone(),
-            values,
-            mad: feature_mad,
+            mad: 0.0,
             moran_i: 0.0,
             eta2: 0.0,
             p_perm: 0.0,
             q_bh: 0.0,
             spatial_score: 0.0,
-        });
-        pb.inc(1);
-    }
-    pb.finish_and_clear();
-    if out.is_empty() {
-        bail!("none of the requested features were found in betadata feathers");
-    }
-    Ok(out)
+        })
+        .collect();
+    reload_scored_features(feathers, &scores, obs_names, cluster_keys, params)
 }
 
 fn matrix_from_features(feats: &[FeatureCandidate]) -> Array2<f64> {
@@ -924,6 +1048,7 @@ pub fn run_microniches(
         resolve_betadata_cluster_key_column(&obs_df, cfg.data.cluster_annot.as_str());
     let cluster_keys_full =
         betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
+    drop(adata);
 
     let subset: Vec<usize> = match &params.cell_type {
         Some(ct) => annot
@@ -974,19 +1099,31 @@ pub fn run_microniches(
 
     let kept = if let Some(csv) = &params.features_csv {
         let wanted = load_features_csv(csv)?;
-        load_specified_features(&feathers, &wanted, &obs_names, &cluster_keys)?
+        load_specified_features(&feathers, &wanted, &obs_names, &cluster_keys, params)?
     } else {
         score_feature_matrix(&feathers, &obs_names, &cluster_keys, &spatial, params)?
     };
     eprintln!("get-microniches: kept {} β features", kept.len());
 
+    let kept_features: Vec<KeptBetaFeature> = kept
+        .iter()
+        .map(|f| KeptBetaFeature {
+            gene: f.gene.clone(),
+            feature: f.feature.clone(),
+            moran_i: f.moran_i,
+            eta2: f.eta2,
+            q_bh: f.q_bh,
+            spatial_score: f.spatial_score,
+        })
+        .collect();
     let x = zscore_columns(matrix_from_features(&kept));
+    drop(kept);
     let n_pcs = params
         .n_pcs
         .min(x.ncols())
         .min(x.nrows().saturating_sub(1))
         .max(1);
-    let pca = dense_pca(&x, n_pcs)?;
+    let pca = dense_pca(x, n_pcs)?;
     eprintln!(
         "get-microniches: PCA {}×{} → fuzzy graph (k={})…",
         pca.nrows(),
@@ -1011,18 +1148,6 @@ pub fn run_microniches(
         .map(PathBuf::from)
         .unwrap_or_else(|| output_dir.join("microniches"));
     std::fs::create_dir_all(&dest)?;
-
-    let kept_features: Vec<KeptBetaFeature> = kept
-        .iter()
-        .map(|f| KeptBetaFeature {
-            gene: f.gene.clone(),
-            feature: f.feature.clone(),
-            moran_i: f.moran_i,
-            eta2: f.eta2,
-            q_bh: f.q_bh,
-            spatial_score: f.spatial_score,
-        })
-        .collect();
 
     let summary = MicronichesSummary {
         n_cells: obs_names.len(),
@@ -1207,7 +1332,7 @@ stale_lock_secs = 0
     #[test]
     fn dense_pca_reduces_dims() {
         let x = Array2::from_shape_fn((30, 5), |(i, j)| (i * j) as f64 * 0.1);
-        let pca = dense_pca(&x, 3).unwrap();
+        let pca = dense_pca(x, 3).unwrap();
         assert_eq!(pca.nrows(), 30);
         assert_eq!(pca.ncols(), 3);
     }
@@ -1302,6 +1427,19 @@ stale_lock_secs = 0
         let res = run_microniches(&repro, &params, Some(&out)).expect("run microniches");
         assert_eq!(res.summary.n_cells, 40);
         assert!(res.summary.n_kept_features >= 1);
+        let kept_names: std::collections::HashSet<&str> = res
+            .kept_features
+            .iter()
+            .map(|f| f.feature.as_str())
+            .collect();
+        assert!(
+            kept_names.contains("beta_L1$R1") || kept_names.contains("beta_TF"),
+            "expected spatially structured βs, got {kept_names:?}"
+        );
+        assert!(
+            !kept_names.contains("beta_noise"),
+            "noise column should be dropped, got {kept_names:?}"
+        );
         assert!(res.summary.n_clusters >= 2);
         assert!(out.join("microniche_labels.csv").is_file());
         assert!(out.join("summary.json").is_file());
@@ -1336,6 +1474,80 @@ stale_lock_secs = 0
         let res = run_microniches(&repro, &params, Some(&dir.join("fixed"))).unwrap();
         assert!(!res.summary.optimized_by_silhouette);
         assert!((res.summary.chosen_resolution - 0.6).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spatial_knn_sets_match_brute() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for n in [20usize, 40, 80] {
+            let mut spatial = Array2::<f64>::zeros((n, 2));
+            for i in 0..n {
+                spatial[(i, 0)] = rng.r#gen::<f64>() * 10.0 + i as f64 * 1e-9;
+                spatial[(i, 1)] = rng.r#gen::<f64>() * 10.0 + (n - i) as f64 * 1e-9;
+            }
+            for k in [1usize, 4, 8] {
+                let kiddo = spatial_knn_indices(&spatial, k);
+                let brute = spatial_knn_indices_brute(&spatial, k);
+                for i in 0..n {
+                    let a: std::collections::HashSet<usize> = kiddo[i].iter().copied().collect();
+                    let b: std::collections::HashSet<usize> = brute[i].iter().copied().collect();
+                    assert_eq!(a, b, "neighbor sets differ n={n} k={k} i={i}");
+                    assert_eq!(a.len(), k.min(n - 1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pass1_reload_count_respects_spatial_test_cap_floor() {
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_microniches_cap_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = 40usize;
+        let obs: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+        let mut spatial = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            spatial[(i, 0)] = (i / 10) as f64;
+            spatial[(i, 1)] = (i % 10) as f64;
+        }
+        let mut feathers = Vec::new();
+        for g in 0..3 {
+            let ncols = 16;
+            let mut data = Array2::<f64>::zeros((n, ncols));
+            let names: Vec<String> = (0..ncols).map(|j| format!("beta_{j}")).collect();
+            for j in 0..ncols {
+                for i in 0..n {
+                    data[(i, j)] = (i / 10) as f64 + 0.01 * j as f64 + g as f64 * 0.1;
+                }
+            }
+            let path = dir.join(format!("GENE{g}_betadata.feather"));
+            write_betadata_feather(path.to_str().unwrap(), "CellID", &obs, &names, &data).unwrap();
+            feathers.push((format!("GENE{g}"), path));
+        }
+        let params = MicronichesParams {
+            spatial_test_cap: 8,
+            filter_parallelism: 2,
+            moran_n_perm: 0,
+            ..Default::default()
+        };
+        let knn = spatial_knn_indices(&spatial, params.spatial_k);
+        let scored = score_genes_pass1(&feathers, &obs, &obs, &spatial, &knn, &params).unwrap();
+        let cap = params.spatial_test_cap.max(32);
+        assert!(scored.len() > cap);
+        let selected = select_scores_for_reload(scored, &params).unwrap();
+        assert!(selected.len() <= cap);
+        assert!(!selected.is_empty());
+        RELOAD_COLUMN_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let kept = reload_scored_features(&feathers, &selected, &obs, &obs, &params).unwrap();
+        assert!(kept.len() <= cap);
+        assert_eq!(
+            RELOAD_COLUMN_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            selected.len()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

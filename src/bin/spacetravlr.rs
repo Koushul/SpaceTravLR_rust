@@ -398,6 +398,12 @@ struct GetMicronichesCli {
         help = "After Moran×η² ranking, FDR only this many top spatial β features"
     )]
     spatial_test_cap: usize,
+    #[arg(
+        long,
+        default_value_t = 4,
+        help = "Max concurrent betadata feather loads during spatial filter (min 1)"
+    )]
+    filter_parallelism: usize,
     #[arg(long, default_value_t = 0, help = "RNG seed for Moran permutations")]
     seed: u64,
 }
@@ -625,7 +631,7 @@ struct Cli {
         long = "skip-auto-adata-prep",
         action = ArgAction::SetTrue,
         help_heading = "Input",
-        help = "Do not auto-run Scanpy / imputation when AnnData lacks cell_type or layers[\"imputed_count\"]"
+        help = "Do not auto-run Scanpy / imputation when AnnData lacks cell_type or layers[\"imputed_count\"]. Same as [preprocess].skip_auto_adata_prep = true"
     )]
     skip_auto_adata_prep: bool,
 
@@ -1523,6 +1529,9 @@ fn apply_cli_join_overrides(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Res
     if cli.pool_lasso {
         cfg.training.pool_lasso = true;
     }
+    if cli.skip_auto_adata_prep {
+        cfg.preprocess.skip_auto_adata_prep = true;
+    }
     if let Some(ref raw) = cli.extra_modulators {
         cfg.grn
             .extra_modulators
@@ -1616,6 +1625,9 @@ fn apply_cli_to_config(cli: &Cli, cfg: &mut SpaceshipConfig) -> anyhow::Result<(
     }
     if cli.pool_lasso {
         cfg.training.pool_lasso = true;
+    }
+    if cli.skip_auto_adata_prep {
+        cfg.preprocess.skip_auto_adata_prep = true;
     }
     if let Some(ref raw) = cli.extra_modulators {
         cfg.grn
@@ -2398,6 +2410,7 @@ fn run_get_microniches(gm: &GetMicronichesCli) -> anyhow::Result<()> {
         features_csv: gm.features_csv.clone(),
         max_genes: gm.max_genes,
         spatial_test_cap: gm.spatial_test_cap,
+        filter_parallelism: gm.filter_parallelism.max(1),
         seed: gm.seed,
     };
     let result = run_microniches(gm.run_toml.as_path(), &params, gm.out.as_deref())?;
@@ -3737,7 +3750,7 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    if !cli.skip_auto_adata_prep
+    if !cfg.preprocess.skip_auto_adata_prep
         && Path::new(&path)
             .extension()
             .and_then(|e| e.to_str())

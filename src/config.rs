@@ -223,6 +223,9 @@ pub struct PreprocessConfig {
     pub leiden_max_iter: usize,
     /// MAGIC diffusion time `t` (Rust `magic-impute` path).
     pub magic_t: u32,
+    /// Skip automatic QC / normalize / HVG / PCA / UMAP / Leiden / MAGIC when training.
+    /// CLI `--skip-auto-adata-prep` sets this true. Does not affect explicit `--rust-process-h5ad`.
+    pub skip_auto_adata_prep: bool,
 }
 
 impl PreprocessConfig {
@@ -265,6 +268,7 @@ impl Default for PreprocessConfig {
             leiden_resolution: 1.0,
             leiden_max_iter: 100,
             magic_t: 3,
+            skip_auto_adata_prep: false,
         }
     }
 }
@@ -2226,6 +2230,7 @@ mod preprocess_config_tests {
         assert_eq!(p.n_neighbors, 15);
         assert_eq!(p.leiden_resolution, 1.0);
         assert_eq!(p.magic_t, 3);
+        assert!(!p.skip_auto_adata_prep);
         let rust = p.to_rust_preprocess_params();
         assert_eq!(rust.n_top_hvg, p.n_top_hvg);
         assert_eq!(rust.n_pca_components, p.n_pca_components);
@@ -2257,6 +2262,22 @@ magic_t = 2
         assert!((cfg.preprocess.leiden_resolution - 0.8).abs() < 1e-9);
         assert_eq!(cfg.preprocess.magic_t, 2);
         assert_eq!(cfg.preprocess.min_cells, 3);
+        assert!(!cfg.preprocess.skip_auto_adata_prep);
+    }
+
+    #[test]
+    fn toml_skip_auto_adata_prep() {
+        let toml = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "c"
+
+[preprocess]
+skip_auto_adata_prep = true
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.preprocess.skip_auto_adata_prep);
     }
 
     #[test]

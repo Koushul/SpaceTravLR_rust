@@ -25,7 +25,8 @@ cluster_annot   = "cell_type"
 # sample         = "batch"
 
 [preprocess]
-# QC (Scanpy filter_cells / filter_genes)
+# Skip auto QC/MAGIC/Leiden when training (same as --skip-auto-adata-prep)
+# skip_auto_adata_prep = true
 min_genes             = 100
 min_cells             = 3
 # normalize_total target_sum when X is raw counts

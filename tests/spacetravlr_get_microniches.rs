@@ -90,6 +90,7 @@ fn help_lists_get_microniches() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("--run-toml"));
     assert!(s.contains("--cell-type"));
+    assert!(s.contains("--filter-parallelism"));
     assert!(s.contains("silhouette") || s.contains("resolution"));
 }
 
@@ -125,6 +126,10 @@ fn cli_writes_microniche_outputs() {
             "8",
             "--n-pcs",
             "2",
+            "--filter-parallelism",
+            "2",
+            "--spatial-test-cap",
+            "8",
         ])
         .output()
         .expect("spawn get-microniches");

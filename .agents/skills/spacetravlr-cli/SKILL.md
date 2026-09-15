@@ -41,6 +41,7 @@ Install: `cargo install --path . --locked`, `cargo run --bin …`, or the releas
 Typical sections:
 
 - `[data]` — `adata_path`, `layer` (e.g. `imputed_count`), `cluster_annot`, optional `condition`, optional `perturb_obs_subset_file` (one `obs_names` per line; **perturbation** loads only those rows for smaller RAM)
+- `[preprocess]` — QC / MAGIC knobs for auto-prep; `skip_auto_adata_prep` (same as `--skip-auto-adata-prep`)
 - `[spatial]` — `radius`, `spatial_dim`, `contact_distance`, `weighted_ligand_scale_factor`
 - `[grn]` — `network_data_dir`, `tf_priors_feather`, `tf_ligand_cutoff`, `max_ligands` (serde aliases `max_lr` and legacy `max_lr_pairs`), modulator toggles, `extra_modulators`, `extra_lr`, file variants
 - `[cnn]`, `[lasso]`, `[training]` — CNN and Lasso hyperparameters
@@ -94,14 +95,14 @@ spacetravlr get-microniches \
   --out ./microniches
 ```
 
-Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`. Writes `microniche_labels.csv` (obs names as index, `microniche` column), `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
+Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`, `--filter-parallelism` (max concurrent feather loads; default 4). Writes `microniche_labels.csv` (obs names as index, `microniche` column), `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
 
 ### Input
 
 - `--config` — TOML path; if omitted, searches for `spaceship_config.toml`
 - `--h5ad` — overrides `[data].adata_path`
 - `--tf-prior` — overrides `[grn].tf_priors_feather`
-- `--skip-auto-adata-prep` — skip automatic preprocessing and imputation
+- `--skip-auto-adata-prep` — skip automatic preprocessing and imputation (also `[preprocess].skip_auto_adata_prep` in TOML)
 
 Required AnnData shape: expression in `.X`, 2D coordinates in `.obsm['spatial']`, cluster labels in `.obs[cluster_annot]` (Leiden runs first if absent).
 

@@ -28,6 +28,19 @@ Values below match the checked-in [`spaceship_config.toml`](https://github.com/K
 
 ---
 
+## `[preprocess]` — auto AnnData prep
+
+Used when training would otherwise run QC → normalize → HVG → PCA → UMAP → Leiden → MAGIC because `cell_type` or `layers["imputed_count"]` is missing. Explicit `--rust-process-h5ad` still uses the numeric keys below.
+
+| Parameter | Template | What it does | Increase / enable | Decrease / disable |
+|-----------|----------|--------------|-------------------|---------------------|
+| `skip_auto_adata_prep` | `false` | Skip that auto-prep and train on the `.h5ad` as given. Same as `--skip-auto-adata-prep`. | Set `true` when the file is already processed. | Default runs prep when needed. |
+| `min_genes` / `min_cells` | `100` / `3` | Cell / gene QC filters. | Stricter QC. | Keep more cells/genes. |
+| `n_top_hvg` | `2000` | Highly variable genes kept. | Broader transcriptome. | Faster, tighter gene set. |
+| `magic_t` | `3` | MAGIC diffusion time. | Stronger smoothing. | Less imputation. |
+
+---
+
 ## `[spatial]` — distances and CNN grids
 
 Coordinate units should match `obsm['spatial']` (µm after prep). These settings affect **received ligands**, **contact signaling**, and the **spatial proximity maps** fed to the CNN (see [How it works](math.md)).

@@ -117,7 +117,7 @@ A single AnnData `.h5ad` file (spatial by default; FreeTravLR meanfield does not
 
 Supported and validated platforms include Slide-tags, Slide-seq V2, Stereo-seq, Visium and Visium HD, Xenium (including Prime 5K), MERFISH, XYZeqV2, and Atera whole-transcriptome. The model has been applied across 16+ datasets spanning both human and mouse.
 
-To skip automatic preparation entirely, pass `--skip-auto-adata-prep`.
+To skip automatic preparation entirely, pass `--skip-auto-adata-prep` or set `[preprocess].skip_auto_adata_prep = true`.
 
 ### Inspecting a file before committing to a run
 
@@ -274,6 +274,7 @@ Add `--plain` for line-oriented logs instead of the full-screen dashboard — **
 | `--n-neighbors N` | `15` | kNN for Leiden |
 | `--q-bh-max F` | `0.05` | BH FDR for keeping β features |
 | `--features-csv PATH` | — | Skip filter; reuse a prior kept-β list |
+| `--filter-parallelism N` | `4` | Max concurrent `*_betadata.feather` loads during the spatial β filter |
 
 **`spacetravlr ligand-field`** (alias `cellchat`) — write CellChat-style communication-probability CSV without training. Flags: `--h5ad`, `--config`, `--cluster-key`, `--layer`, `--species`, `--out` (default `./ligand_field_commun_prob.csv`).
 
@@ -287,7 +288,7 @@ Add `--plain` for line-oriented logs instead of the full-screen dashboard — **
 | `--h5ad PATH` | Spatial AnnData input |
 | `--peek PATH` (alias `--peak`) | HDF5 metadata summary without a full load |
 | `--obs STR` | With `--peek`, print value counts; with `--plot-umap`, choose the color column |
-| `--skip-auto-adata-prep` | Skip automatic Scanpy-equivalent preprocessing and imputation |
+| `--skip-auto-adata-prep` | Skip automatic Scanpy-equivalent preprocessing and imputation (also `[preprocess].skip_auto_adata_prep`) |
 | `--tf-prior PATH` | Precomputed TF priors feather |
 
 ### Gene list and GRN flags
@@ -608,7 +609,7 @@ Fair spatial vs FreeTravLR A/B: hold `pair_selection = "expressed"` and `receive
 
 ### `[preprocess]`
 
-`min_genes` 100, `min_cells` 3, `normalize_target_sum` 10000, `n_top_hvg` 2000, `n_pca_components` 50, `pca_random_seed` 42, `n_neighbors` 15, `min_dist` 0.5, `spread` 0.5, `umap_learning_rate` 1.0, `n_epochs` (auto), `ef_construction` 30, `leiden_resolution` 1.0, `leiden_max_iter` 100, `magic_t` 3.
+`min_genes` 100, `min_cells` 3, `normalize_target_sum` 10000, `n_top_hvg` 2000, `n_pca_components` 50, `pca_random_seed` 42, `n_neighbors` 15, `min_dist` 0.5, `spread` 0.5, `umap_learning_rate` 1.0, `n_epochs` (auto), `ef_construction` 30, `leiden_resolution` 1.0, `leiden_max_iter` 100, `magic_t` 3, `skip_auto_adata_prep` (`false`; same as `--skip-auto-adata-prep`).
 
 ---
 
