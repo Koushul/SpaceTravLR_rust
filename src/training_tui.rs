@@ -32,6 +32,7 @@ const GENE_PROGRESS_LINE_SET: symbols::line::Set = symbols::line::Set {
 };
 
 const HARDWARE_POLL_INTERVAL: Duration = Duration::from_secs(3 * 60);
+const DIR_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
 // ── Rocket ────────────────────────────────────────────────────────────────────
 // Compact ASCII rocket — art is ~14 display columns, centered in the panel.
@@ -623,7 +624,6 @@ fn scan_dir_artifacts(
         if name.ends_with("_betadata.feather")
             || name.ends_with(".orphan")
             || name.ends_with(".tf_ablated")
-            || name.ends_with(".done")
         {
             *disk_done += 1;
         } else if name.ends_with(".lock") {
@@ -704,6 +704,11 @@ fn scan_output_metrics(
         }
     }
     (bytes, n_files, disk_done, external_locks)
+}
+
+fn merge_disk_gene_progress(hud_pos: u64, total: u64, disk_done: usize) -> u64 {
+    let total = total.max(1);
+    hud_pos.max(disk_done as u64).min(total)
 }
 
 fn format_t(secs: f64) -> String {
@@ -1243,11 +1248,15 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
 
     let mut dir_bytes: u64 = 0;
     let mut dir_files: usize = 0;
+    let mut dir_disk_done: usize = 0;
     let mut external_workers: usize = 0;
+    let mut dir_scan_path = String::new();
 
     if let Ok(st) = hud.lock() {
         let active: HashSet<String> = st.active_genes.keys().cloned().collect();
-        (dir_bytes, dir_files, _, external_workers) = scan_output_metrics(&st.output_dir, &active);
+        (dir_bytes, dir_files, dir_disk_done, external_workers) =
+            scan_output_metrics(&st.output_dir, &active);
+        dir_scan_path = st.output_dir.clone();
     }
 
     let mut dashboard_exit = TrainingDashboardExit::Completed;
@@ -1289,12 +1298,19 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
             sys.refresh_memory();
             last_sys = Instant::now();
         }
-        if last_dir_scan.elapsed() > Duration::from_secs(2) {
-            if let Ok(st) = hud.lock() {
+        let scan_job = hud.lock().ok().and_then(|st| {
+            let path_changed = st.output_dir != dir_scan_path;
+            if path_changed || last_dir_scan.elapsed() > DIR_SCAN_INTERVAL {
                 let active: HashSet<String> = st.active_genes.keys().cloned().collect();
-                (dir_bytes, dir_files, _, external_workers) =
-                    scan_output_metrics(&st.output_dir, &active);
+                Some((st.output_dir.clone(), active))
+            } else {
+                None
             }
+        });
+        if let Some((path, active)) = scan_job {
+            (dir_bytes, dir_files, dir_disk_done, external_workers) =
+                scan_output_metrics(&path, &active);
+            dir_scan_path = path;
             last_dir_scan = Instant::now();
         }
         if event::poll(Duration::from_millis(40))? {
@@ -2136,6 +2152,8 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 (t, d, r, Some(("Ligand field", label)))
             } else {
                 let (p, t) = st.gene_progress_pos_total();
+                let disk = if st.is_demo { 0 } else { dir_disk_done };
+                let p = merge_disk_gene_progress(p, t, disk);
                 let r = (p as f64 / t as f64).clamp(0.0, 1.0);
                 (t, p, r, None)
             };
@@ -2183,11 +2201,17 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 ])
             } else {
                 let n_samp = st.pool_sample_labels.len();
+                let disk = if st.is_demo { 0 } else { dir_disk_done };
+                let shown_rounds = if st.pool_lasso && n_samp > 0 {
+                    st.genes_rounds.max(disk / n_samp)
+                } else {
+                    st.genes_rounds.max(disk)
+                };
                 let mut spans = vec![
                     Span::styled(" Gene progress ", sky_bold),
                     Span::styled(" · ", Style::default().fg(pal.muted)),
                     Span::styled(
-                        format!("{}/{}", st.genes_rounds, st.total_genes),
+                        format!("{}/{}", shown_rounds, st.total_genes),
                         title_bold,
                     ),
                 ];
@@ -2328,7 +2352,10 @@ mod scan_output_metrics_tests {
             scan_output_metrics(root.to_str().unwrap(), &active);
         assert!(bytes >= 3 + 3);
         assert!(n_files >= 4);
-        assert!(disk_done >= 3, "done + two feathers, got {disk_done}");
+        assert_eq!(
+            disk_done, 2,
+            "two sample feathers (parent .done is not a progress unit)"
+        );
         assert_eq!(external_locks, 1);
         let _ = fs::remove_dir_all(&root);
     }
@@ -2342,5 +2369,12 @@ mod scan_output_metrics_tests {
         let (_, _, _, external) = scan_output_metrics(root.to_str().unwrap(), &active);
         assert_eq!(external, 0);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disk_progress_fills_ahead_of_local_hud() {
+        assert_eq!(super::merge_disk_gene_progress(2, 10, 7), 7);
+        assert_eq!(super::merge_disk_gene_progress(8, 10, 3), 8);
+        assert_eq!(super::merge_disk_gene_progress(0, 10, 99), 10);
     }
 }
