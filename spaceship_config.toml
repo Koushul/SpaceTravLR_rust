@@ -214,6 +214,9 @@ n_propagation     = 4
 # Clip simulated expression after each propagation iteration (omit max for no upper bound)
 # perturbed_gene_min_bound = 0.0
 # perturbed_gene_max_bound = 10.0
+# auto | materialize | fused — auto skips full splash Jacobians when they would exceed RAM
+# splash_mode = "auto"
+# splash_jacobian_max_mb = 2048
 
 [model_export]
 save_cnn_weights = false

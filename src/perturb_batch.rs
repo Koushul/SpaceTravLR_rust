@@ -146,7 +146,12 @@ pub fn batch_from_perturb_table(tbl: &toml::value::Table) -> anyhow::Result<Pert
 }
 
 /// Top-level keys in `--config` TOML that belong under `[perturbation]` for repro merge.
-const PERTURBATION_SCALAR_HOIST_KEYS: &[&str] = &["beta_scale_factor", "beta_cap"];
+const PERTURBATION_SCALAR_HOIST_KEYS: &[&str] = &[
+    "beta_scale_factor",
+    "beta_cap",
+    "splash_mode",
+    "splash_jacobian_max_mb",
+];
 
 fn hoist_perturbation_scalars_into_overlay(root: &mut toml::Value) {
     let Some(tbl) = root.as_table_mut() else {

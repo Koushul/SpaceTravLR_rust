@@ -46,7 +46,7 @@ Typical sections:
 - `[grn]` — `network_data_dir`, `tf_priors_feather`, `tf_ligand_cutoff`, `max_ligands` (serde aliases `max_lr` and legacy `max_lr_pairs`), modulator toggles, `extra_modulators`, `extra_lr`, file variants
 - `[cnn]`, `[lasso]`, `[training]` — CNN and Lasso hyperparameters
 - `[execution]` — `n_parallel`, `output_dir`, `write_minimal_repro_h5ad`, `stale_lock_secs` (join lock recovery)
-- `[perturbation]` — `beta_scale_factor`, optional `beta_cap`, `n_propagation`, `ligand_grid_factor` (grid vs exact received ligands), optional `cells_csv` / `cells_csv_column` (defaults for `spacetravlr-perturb --export` and TUI cell-scope CSV when the CLI does not pass `--cells-csv`; paths relative to the run TOML's directory unless absolute)
+- `[perturbation]` — `beta_scale_factor`, optional `beta_cap`, `n_propagation`, `ligand_grid_factor` (grid vs exact received ligands), optional `cells_csv` / `cells_csv_column` (defaults for `spacetravlr-perturb --export` and TUI cell-scope CSV when the CLI does not pass `--cells-csv`; paths relative to the run TOML's directory unless absolute), `splash_mode` (`auto` / `materialize` / `fused`), optional `splash_jacobian_max_mb`
 - `[model_export]` — `save_cnn_weights`, `save_lasso_coefs`, `write_cnn_train_data_npz`, `compressed_npz`, `output_subdir` (default `CNN_weights`)
 
 CLI flags override many of these when **not** in `--join-output-dir` mode.
@@ -232,7 +232,7 @@ For many **single-gene** perturbations with one `PerturbRuntime::from_run_toml` 
 
 ### Perturbation physics (from TOML)
 
-`[perturbation]` in `spaceship_config.toml`: `beta_scale_factor`, `n_propagation`, `ligand_grid_factor` (grid-approx vs exact received ligands), optional `beta_cap`, optional `perturbed_gene_min_bound` / `perturbed_gene_max_bound` (per-step clipping).
+`[perturbation]` in `spaceship_config.toml`: `beta_scale_factor`, `n_propagation`, `ligand_grid_factor` (grid-approx vs exact received ligands), optional `beta_cap`, optional `perturbed_gene_min_bound` / `perturbed_gene_max_bound` (per-step clipping), `splash_mode` / `splash_jacobian_max_mb` (large-slide Jacobian memory).
 
 **Accuracy caveat:** simulated overexpression beyond roughly twice the highest observed expression for that gene produces aberrant fold changes and loses distance dependency. Keep `desired_expr` near the observed distribution, and consider `perturbed_gene_max_bound` as a guard.
 
@@ -289,8 +289,8 @@ spacetravlr run-summary --config spaceship_config.toml --h5ad /path/data.h5ad --
 | Locks left after a crash | Set `[execution].stale_lock_secs` (3600 is reasonable on NFS) |
 | GPU unavailable / wgpu issues | Training already falls back to CPU (NdArray). Optionally set `SPACETRAVLR_FORCE_CPU=1`. Confirm with `spacetravlr --verify`. |
 | GRN parquet not found | Set `SPACETRAVLR_DATA_DIR` or `[grn].network_data_dir` |
-| Out of memory | Lower `[execution].n_parallel`, `[cnn].cnn_max_cells_per_epoch`, `cnn_minibatch_size`, or `[spatial].spatial_dim` |
-| Perturbation slow on large slides | Set `[perturbation].ligand_grid_factor` ≈ `0.5`; raise `--batch-parallelism` |
+| Out of memory | Lower `[execution].n_parallel`, `[cnn].cnn_max_cells_per_epoch`, `cnn_minibatch_size`, or `[spatial].spatial_dim`. Perturbation: `auto` switches to fused splash (no full Jacobian HashMap) when the estimate exceeds `splash_jacobian_max_mb` / 40% RAM / 2048 MiB; set `splash_mode = "fused"` to force it. The spatial-viewer splash-network still materializes `compute_splash_all`. |
+| Perturbation slow on large slides | Set `[perturbation].ligand_grid_factor` ≈ `0.5`; raise `--batch-parallelism`. Fused splash trades Jacobian RAM for recomputing per-cell rows (no iter-0 splash cache). |
 
 ---
 

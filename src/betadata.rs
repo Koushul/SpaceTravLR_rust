@@ -710,6 +710,77 @@ impl BetaFrame {
         out
     }
 
+    /// Pre-resolved modulator indices for [`SplashPlan::fill_row`].
+    pub fn splash_plan(
+        &self,
+        rw_ligands: &GeneMatrix,
+        rw_ligands_tfl: &GeneMatrix,
+        mut gex_col: impl FnMut(&str) -> Option<usize>,
+        ligand_beta_scale_factor: f32,
+    ) -> SplashPlan {
+        let n_out = self.modulator_genes.len();
+        let n_tfs = self.tfs.len();
+        let n_lr = self.ligands.len();
+        let n_tfl = self.tfl_ligands.len();
+        let n_cis = self.cis_left.len();
+        let gene_to_out: HashMap<&str, usize> = self
+            .modulator_genes
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (g.strip_prefix("beta_").unwrap_or(g.as_str()), i))
+            .collect();
+        let tf_oi: Vec<usize> = self
+            .tfs
+            .iter()
+            .map(|t| gene_to_out.get(t.as_str()).copied().unwrap_or(0))
+            .collect();
+        let lr_work: Vec<SplashLrWork> = (0..n_lr)
+            .filter_map(|j| {
+                Some(SplashLrWork {
+                    beta_col: j,
+                    rec_oi: gene_to_out.get(self.receptors[j].as_str()).copied()?,
+                    lig_oi: gene_to_out.get(self.ligands[j].as_str()).copied()?,
+                    wl_col: rw_ligands.col_index(&self.ligands[j])?,
+                    gex_col: gex_col(self.receptors[j].as_str())?,
+                })
+            })
+            .collect();
+        let tfl_work: Vec<SplashTflWork> = (0..n_tfl)
+            .filter_map(|j| {
+                Some(SplashTflWork {
+                    beta_col: j,
+                    lig_oi: gene_to_out.get(self.tfl_ligands[j].as_str()).copied()?,
+                    reg_oi: gene_to_out.get(self.tfl_regulators[j].as_str()).copied()?,
+                    gex_col: gex_col(self.tfl_regulators[j].as_str())?,
+                    wl_col: rw_ligands_tfl.col_index(&self.tfl_ligands[j])?,
+                })
+            })
+            .collect();
+        let cis_work: Vec<SplashCisWork> = (0..n_cis)
+            .filter_map(|j| {
+                Some(SplashCisWork {
+                    beta_col: j,
+                    left_oi: gene_to_out.get(self.cis_left[j].as_str()).copied()?,
+                    right_oi: gene_to_out.get(self.cis_right[j].as_str()).copied()?,
+                    gex_left: gex_col(self.cis_left[j].as_str())?,
+                    gex_right: gex_col(self.cis_right[j].as_str())?,
+                })
+            })
+            .collect();
+        SplashPlan {
+            tf_oi,
+            lr_work,
+            tfl_work,
+            cis_work,
+            n_tfs,
+            n_lr,
+            n_tfl,
+            n_cis,
+            n_out,
+            ligand_beta_scale_factor,
+        }
+    }
+
     /// Compute partial derivatives of target gene expression w.r.t. each modulator gene.
     ///
     /// `[perturbation].beta_scale_factor` is passed as `ligand_beta_scale_factor` at splash time
@@ -731,170 +802,181 @@ impl BetaFrame {
         beta_cap: Option<f32>,
     ) -> GeneMatrix {
         let n = self.n_cells;
-        let map = self.cell_to_beta_row.as_slice();
         let n_out = self.modulator_genes.len();
         if n_out == 0 {
             return GeneMatrix::new(Array2::zeros((n, 0)), vec![]);
         }
-        let n_tfs = self.tfs.len();
-        let n_lr = self.ligands.len();
-        let n_tfl = self.tfl_ligands.len();
-        let n_cis = self.cis_left.len();
-
-        let gene_to_out: HashMap<&str, usize> = self
-            .modulator_genes
-            .iter()
-            .enumerate()
-            .map(|(i, g)| (g.strip_prefix("beta_").unwrap_or(g.as_str()), i))
-            .collect();
-
-        let tf_oi: Vec<usize> = self
-            .tfs
-            .iter()
-            .map(|t| gene_to_out.get(t.as_str()).copied().unwrap_or(0))
-            .collect();
-
-        // LR work items with pre-resolved flat indices into input matrices
-        #[derive(Clone)]
-        struct LrWork {
-            beta_col: usize,
-            rec_oi: usize,
-            lig_oi: usize,
-            wl_col: usize,
-            gex_col: usize,
-        }
-        let lr_work: Vec<LrWork> = (0..n_lr)
-            .filter_map(|j| {
-                Some(LrWork {
-                    beta_col: j,
-                    rec_oi: gene_to_out.get(self.receptors[j].as_str()).copied()?,
-                    lig_oi: gene_to_out.get(self.ligands[j].as_str()).copied()?,
-                    wl_col: rw_ligands.col_index(&self.ligands[j])?,
-                    gex_col: gex_df.col_index(&self.receptors[j])?,
-                })
-            })
-            .collect();
-
-        #[derive(Clone)]
-        struct TflWork {
-            beta_col: usize,
-            lig_oi: usize,
-            reg_oi: usize,
-            gex_col: usize,
-            wl_col: usize,
-        }
-        let tfl_work: Vec<TflWork> = (0..n_tfl)
-            .filter_map(|j| {
-                Some(TflWork {
-                    beta_col: j,
-                    lig_oi: gene_to_out.get(self.tfl_ligands[j].as_str()).copied()?,
-                    reg_oi: gene_to_out.get(self.tfl_regulators[j].as_str()).copied()?,
-                    gex_col: gex_df.col_index(&self.tfl_regulators[j])?,
-                    wl_col: rw_ligands_tfl.col_index(&self.tfl_ligands[j])?,
-                })
-            })
-            .collect();
-
-        #[derive(Clone)]
-        struct CisWork {
-            beta_col: usize,
-            left_oi: usize,
-            right_oi: usize,
-            gex_left: usize,
-            gex_right: usize,
-        }
-        let cis_work: Vec<CisWork> = (0..n_cis)
-            .filter_map(|j| {
-                Some(CisWork {
-                    beta_col: j,
-                    left_oi: gene_to_out.get(self.cis_left[j].as_str()).copied()?,
-                    right_oi: gene_to_out.get(self.cis_right[j].as_str()).copied()?,
-                    gex_left: gex_df.col_index(&self.cis_left[j])?,
-                    gex_right: gex_df.col_index(&self.cis_right[j])?,
-                })
-            })
-            .collect();
-
-        // Flat views: beta arrays are tiny (n_clusters × n_cols), always in cache
-        let tf_flat = self.tf_betas.as_slice_memory_order().unwrap_or(&[]);
-        let lr_flat = self.lr_betas.as_slice_memory_order().unwrap_or(&[]);
-        let tfl_flat = self.tfl_betas.as_slice_memory_order().unwrap_or(&[]);
-        let cis_flat = self.cis_betas.as_slice_memory_order().unwrap_or(&[]);
-
-        // Flat views of input matrices (zero-allocation direct access)
+        let plan = self.splash_plan(
+            rw_ligands,
+            rw_ligands_tfl,
+            |name| gex_df.col_index(name),
+            ligand_beta_scale_factor,
+        );
         let rw_flat = rw_ligands.data.as_slice().unwrap();
         let rw_nc = rw_ligands.data.ncols();
         let rw_tfl_flat = rw_ligands_tfl.data.as_slice().unwrap();
         let rw_tfl_nc = rw_ligands_tfl.data.ncols();
         let gex_flat = gex_df.data.as_slice().unwrap();
         let gex_nc = gex_df.data.ncols();
-
-        // Row-by-row parallel processing: each cell's result row (~2KB) fits in L1
+        let gex = SplashGex::F32 {
+            flat: gex_flat,
+            ncols: gex_nc,
+        };
         let mut result = vec![0.0f32; n * n_out];
-
-        let n_beta_rows = self.n_beta_rows;
         result.par_chunks_mut(n_out).enumerate().for_each(|(i, r)| {
-            let br = unsafe { *map.get_unchecked(i) };
-            if br >= n_beta_rows {
-                return;
-            }
-            let rw_base = i * rw_nc;
-            let rw_tfl_base = i * rw_tfl_nc;
-            let gex_base = i * gex_nc;
-
-            // 1. TF derivatives (plain TF modulators; no ligand_beta_scale_factor)
-            let tf_base = br * n_tfs;
-            for j in 0..n_tfs {
-                unsafe {
-                    *r.get_unchecked_mut(*tf_oi.get_unchecked(j)) +=
-                        *tf_flat.get_unchecked(tf_base + j);
-                }
-            }
-
-            let lbs = ligand_beta_scale_factor;
-
-            // 2+3. LR derivatives (ligand + receptor)
-            let lr_beta_base = br * n_lr;
-            for lw in &lr_work {
-                let beta = unsafe { *lr_flat.get_unchecked(lr_beta_base + lw.beta_col) };
-                let wl = unsafe { *rw_flat.get_unchecked(rw_base + lw.wl_col) };
-                let gex = unsafe { *gex_flat.get_unchecked(gex_base + lw.gex_col) };
-
-                if gex > 0.0f32 {
-                    unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * lbs };
-                }
-                unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex * lbs };
-            }
-
-            // 4+5. TFL: scale ligand leg only; regulator is a TF modulator
-            let tfl_beta_base = br * n_tfl;
-            for tw in &tfl_work {
-                let beta = unsafe { *tfl_flat.get_unchecked(tfl_beta_base + tw.beta_col) };
-                let gex_reg = unsafe { *gex_flat.get_unchecked(gex_base + tw.gex_col) };
-                let wl = unsafe { *rw_tfl_flat.get_unchecked(rw_tfl_base + tw.wl_col) };
-
-                unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * lbs };
-                unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl };
-            }
-
-            // 6. Cis tetraspanin product: dy/dA = β B, dy/dB = β A (no ligand scale)
-            let cis_beta_base = br * n_cis;
-            for cw in &cis_work {
-                let beta = unsafe { *cis_flat.get_unchecked(cis_beta_base + cw.beta_col) };
-                let gex_a = unsafe { *gex_flat.get_unchecked(gex_base + cw.gex_left) };
-                let gex_b = unsafe { *gex_flat.get_unchecked(gex_base + cw.gex_right) };
-                unsafe { *r.get_unchecked_mut(cw.left_oi) += beta * gex_b };
-                unsafe { *r.get_unchecked_mut(cw.right_oi) += beta * gex_a };
-            }
+            plan.fill_row(self, i, r, rw_flat, rw_nc, rw_tfl_flat, rw_tfl_nc, gex);
         });
-
         let mut result_arr = Array2::from_shape_vec((n, n_out), result).unwrap();
-
         if let Some(cap) = beta_cap {
             result_arr.mapv_inplace(|v| v.clamp(-cap, cap));
         }
-
         GeneMatrix::new(result_arr, self.modulator_genes.clone())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SplashLrWork {
+    beta_col: usize,
+    rec_oi: usize,
+    lig_oi: usize,
+    wl_col: usize,
+    gex_col: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SplashTflWork {
+    beta_col: usize,
+    lig_oi: usize,
+    reg_oi: usize,
+    gex_col: usize,
+    wl_col: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SplashCisWork {
+    beta_col: usize,
+    left_oi: usize,
+    right_oi: usize,
+    gex_left: usize,
+    gex_right: usize,
+}
+
+/// Expression source for [`SplashPlan::fill_row`]: pre-masked f32 (materialize) or live f64.
+#[derive(Clone, Copy)]
+pub enum SplashGex<'a> {
+    F32 {
+        flat: &'a [f32],
+        ncols: usize,
+    },
+    F64Masked {
+        flat: &'a [f64],
+        ncols: usize,
+        min_expression: f64,
+    },
+}
+
+impl SplashGex<'_> {
+    #[inline]
+    fn ncols(self) -> usize {
+        match self {
+            Self::F32 { ncols, .. } | Self::F64Masked { ncols, .. } => ncols,
+        }
+    }
+
+    #[inline]
+    fn value_at(self, row_base: usize, col: usize) -> f32 {
+        match self {
+            Self::F32 { flat, .. } => unsafe { *flat.get_unchecked(row_base + col) },
+            Self::F64Masked {
+                flat,
+                min_expression,
+                ..
+            } => {
+                let v = unsafe { *flat.get_unchecked(row_base + col) };
+                if v > min_expression { v as f32 } else { 0.0 }
+            }
+        }
+    }
+}
+
+/// Per-target splash work lists (no `n_cells` Jacobian buffer).
+pub struct SplashPlan {
+    tf_oi: Vec<usize>,
+    lr_work: Vec<SplashLrWork>,
+    tfl_work: Vec<SplashTflWork>,
+    cis_work: Vec<SplashCisWork>,
+    n_tfs: usize,
+    n_lr: usize,
+    n_tfl: usize,
+    n_cis: usize,
+    pub n_out: usize,
+    ligand_beta_scale_factor: f32,
+}
+
+impl SplashPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_row(
+        &self,
+        bf: &BetaFrame,
+        cell: usize,
+        r: &mut [f32],
+        rw_flat: &[f32],
+        rw_nc: usize,
+        rw_tfl_flat: &[f32],
+        rw_tfl_nc: usize,
+        gex: SplashGex<'_>,
+    ) {
+        r.fill(0.0);
+        if self.n_out == 0 {
+            return;
+        }
+        let map = bf.cell_to_beta_row.as_slice();
+        let br = unsafe { *map.get_unchecked(cell) };
+        if br >= bf.n_beta_rows {
+            return;
+        }
+        let tf_flat = bf.tf_betas.as_slice_memory_order().unwrap_or(&[]);
+        let lr_flat = bf.lr_betas.as_slice_memory_order().unwrap_or(&[]);
+        let tfl_flat = bf.tfl_betas.as_slice_memory_order().unwrap_or(&[]);
+        let cis_flat = bf.cis_betas.as_slice_memory_order().unwrap_or(&[]);
+        let gex_nc = gex.ncols();
+        let rw_base = cell * rw_nc;
+        let rw_tfl_base = cell * rw_tfl_nc;
+        let gex_base = cell * gex_nc;
+        let tf_base = br * self.n_tfs;
+        for j in 0..self.n_tfs {
+            unsafe {
+                *r.get_unchecked_mut(*self.tf_oi.get_unchecked(j)) +=
+                    *tf_flat.get_unchecked(tf_base + j);
+            }
+        }
+        let lbs = self.ligand_beta_scale_factor;
+        let lr_beta_base = br * self.n_lr;
+        for lw in &self.lr_work {
+            let beta = unsafe { *lr_flat.get_unchecked(lr_beta_base + lw.beta_col) };
+            let wl = unsafe { *rw_flat.get_unchecked(rw_base + lw.wl_col) };
+            let gex_v = gex.value_at(gex_base, lw.gex_col);
+            if gex_v > 0.0f32 {
+                unsafe { *r.get_unchecked_mut(lw.rec_oi) += beta * wl * lbs };
+            }
+            unsafe { *r.get_unchecked_mut(lw.lig_oi) += beta * gex_v * lbs };
+        }
+        let tfl_beta_base = br * self.n_tfl;
+        for tw in &self.tfl_work {
+            let beta = unsafe { *tfl_flat.get_unchecked(tfl_beta_base + tw.beta_col) };
+            let gex_reg = gex.value_at(gex_base, tw.gex_col);
+            let wl = unsafe { *rw_tfl_flat.get_unchecked(rw_tfl_base + tw.wl_col) };
+            unsafe { *r.get_unchecked_mut(tw.lig_oi) += beta * gex_reg * lbs };
+            unsafe { *r.get_unchecked_mut(tw.reg_oi) += beta * wl };
+        }
+        let cis_beta_base = br * self.n_cis;
+        for cw in &self.cis_work {
+            let beta = unsafe { *cis_flat.get_unchecked(cis_beta_base + cw.beta_col) };
+            let gex_a = gex.value_at(gex_base, cw.gex_left);
+            let gex_b = gex.value_at(gex_base, cw.gex_right);
+            unsafe { *r.get_unchecked_mut(cw.left_oi) += beta * gex_b };
+            unsafe { *r.get_unchecked_mut(cw.right_oi) += beta * gex_a };
+        }
     }
 }
 

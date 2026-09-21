@@ -562,6 +562,29 @@ pub struct ExecutionConfig {
     pub random_seed: u64,
 }
 
+/// How GRN splash Jacobians are computed during perturbation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SplashMode {
+    /// Materialize all per-target Jacobians when they fit the RAM budget; otherwise fused.
+    #[default]
+    Auto,
+    /// Always allocate `n_cells × n_modulators` f32 maps for every trained target.
+    Materialize,
+    /// Never materialize Jacobians; per-cell splash row then δ dot.
+    Fused,
+}
+
+impl std::fmt::Display for SplashMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Materialize => write!(f, "materialize"),
+            Self::Fused => write!(f, "fused"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PerturbationConfig {
@@ -584,6 +607,14 @@ pub struct PerturbationConfig {
     /// Upper clip for simulated gene expression after each propagation iteration (omit for no upper bound).
     #[serde(default)]
     pub perturbed_gene_max_bound: Option<f64>,
+    /// `auto` materializes splash Jacobians when they fit the RAM budget; `fused` never does;
+    /// `materialize` always does. Default `auto`.
+    #[serde(default)]
+    pub splash_mode: SplashMode,
+    /// Cap on estimated splash Jacobian + f32 GEX bytes (mebibytes) for `splash_mode = auto`.
+    /// Overrides sysinfo / 2048 MiB fallback. Also `SPACETRAVLR_SPLASH_JACOBIAN_MAX_MB`.
+    #[serde(default)]
+    pub splash_jacobian_max_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -947,6 +978,8 @@ impl Default for PerturbationConfig {
             cells_csv_column: None,
             perturbed_gene_min_bound: None,
             perturbed_gene_max_bound: None,
+            splash_mode: SplashMode::Auto,
+            splash_jacobian_max_mb: None,
         }
     }
 }

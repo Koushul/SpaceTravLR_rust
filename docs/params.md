@@ -183,6 +183,8 @@ Used by `spacetravlr-perturb` and the spatial viewer unless overridden at runtim
 | `cells_csv` / `cells_csv_column` |  | Default ROI for perturb export. Training writes `cells.csv` at init; uncomment these to use it when CLI omits `--cells-csv`. | Restrict splash to a cell list. | — |
 | `perturbed_gene_min_bound` | `0.0` (when omitted) | Lower clip on simulated expression after each propagation step. | Keep predictions non-negative or in a biologically plausible range. | Set explicitly to allow negative values (unusual). |
 | `perturbed_gene_max_bound` |  | Upper clip on simulated expression after each propagation step. | Cap OOD overexpression from linear propagation. | Omit for no upper bound. |
+| `splash_mode` | `auto` | GRN Jacobian strategy: `auto` materializes all per-target splash maps when they fit RAM, otherwise fused; `materialize` always allocates; `fused` never does. | Force `materialize` for iter-0 HashMap reuse on small slides. | `fused` on large atlases (or let `auto` choose). |
+| `splash_jacobian_max_mb` |  | Cap (MiB) on estimated Jacobian + f32 GEX for `splash_mode = auto`. Overrides 40% of available RAM (`tui`/sysinfo) or 2048 MiB. Also `SPACETRAVLR_SPLASH_JACOBIAN_MAX_MB`. | Raise to keep materialize+cache. | Lower to force fused sooner. |
 
 ---
 

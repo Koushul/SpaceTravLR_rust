@@ -7,10 +7,12 @@ use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::betadata::{Betabase, GeneMatrix};
+use crate::betadata::{Betabase, GeneMatrix, SplashGex};
 use crate::ligand::{
     calculate_weighted_ligands_grid_with_cutoff, calculate_weighted_ligands_with_cutoff,
 };
+
+pub use crate::config::SplashMode;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PerturbTarget {
@@ -39,6 +41,10 @@ pub struct PerturbConfig {
     /// Upper clip for simulated gene expression after each propagation iteration (omit for no upper bound).
     #[serde(default)]
     pub perturbed_gene_max_bound: Option<f64>,
+    #[serde(default)]
+    pub splash_mode: SplashMode,
+    #[serde(default)]
+    pub splash_jacobian_max_mb: Option<u64>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -54,6 +60,8 @@ impl Default for PerturbConfig {
             contact_distance: None,
             perturbed_gene_min_bound: None,
             perturbed_gene_max_bound: None,
+            splash_mode: SplashMode::Auto,
+            splash_jacobian_max_mb: None,
         }
     }
 }
@@ -76,6 +84,71 @@ impl ExpressionBounds {
     pub fn clip_value(&self, value: f64) -> f64 {
         value.clamp(self.min, self.max)
     }
+}
+
+const SPLASH_JACOBIAN_MIB: usize = 1024 * 1024;
+const SPLASH_JACOBIAN_DEFAULT_CAP_MIB: usize = 2048;
+
+/// Bytes for a fully materialized splash HashMap plus the f32 GEX copy used only on that path.
+pub fn estimated_splash_jacobian_bytes(bb: &Betabase, n_cells: usize, n_genes: usize) -> usize {
+    let jac = bb.data.values().fold(0usize, |acc, bf| {
+        acc.saturating_add(
+            n_cells
+                .saturating_mul(bf.modulator_genes.len())
+                .saturating_mul(4),
+        )
+    });
+    let gex = n_cells.saturating_mul(n_genes).saturating_mul(4);
+    jac.saturating_add(gex)
+}
+
+/// RAM budget for [`SplashMode::Auto`]: config MB, then env, then sysinfo, else 2048 MiB.
+pub fn splash_jacobian_budget_bytes(config: &PerturbConfig) -> usize {
+    if let Some(mb) = config.splash_jacobian_max_mb {
+        if mb > 0 {
+            return (mb as usize).saturating_mul(SPLASH_JACOBIAN_MIB);
+        }
+    }
+    if let Ok(s) = std::env::var("SPACETRAVLR_SPLASH_JACOBIAN_MAX_MB") {
+        if let Ok(mb) = s.parse::<u64>() {
+            if mb > 0 {
+                return (mb as usize).saturating_mul(SPLASH_JACOBIAN_MIB);
+            }
+        }
+    }
+    #[cfg(feature = "tui")]
+    {
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+        let mut sys = System::new_with_specifics(
+            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
+        );
+        sys.refresh_memory();
+        let avail = sys.available_memory() as usize;
+        let budget = ((avail as f64) * 0.4).round() as usize;
+        if budget > 0 {
+            return budget;
+        }
+    }
+    SPLASH_JACOBIAN_DEFAULT_CAP_MIB.saturating_mul(SPLASH_JACOBIAN_MIB)
+}
+
+/// Resolved GRN path: `fused` or `materialize` (never `auto`).
+pub fn resolve_splash_mode(config: &PerturbConfig, estimated_bytes: usize) -> SplashMode {
+    match config.splash_mode {
+        SplashMode::Fused => SplashMode::Fused,
+        SplashMode::Materialize => SplashMode::Materialize,
+        SplashMode::Auto => {
+            if estimated_bytes > splash_jacobian_budget_bytes(config) {
+                SplashMode::Fused
+            } else {
+                SplashMode::Materialize
+            }
+        }
+    }
+}
+
+fn format_gib(bytes: usize) -> String {
+    format!("{:.3}", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
 }
 
 /// Key for iteration-0 splash reuse across perturbations (same baseline expression / RW state).
@@ -320,11 +393,24 @@ pub fn perturb_with_targets(
     const PROP_HI: u32 = 915;
     let span = ((PROP_HI - PROP_LO) / n_prop_u).max(1u32);
 
+    let splash_est = estimated_splash_jacobian_bytes(bb, n_cells, n_genes);
+    let splash_budget = splash_jacobian_budget_bytes(config);
+    let splash_compute = resolve_splash_mode(config, splash_est);
+    let use_fused = splash_compute == SplashMode::Fused;
+    let splash_mode_msg = format!(
+        "splash_mode={} estimated={} GiB budget={} GiB",
+        splash_compute,
+        format_gib(splash_est),
+        format_gib(splash_budget)
+    );
+    if timings.is_some() {
+        eprintln!("  {splash_mode_msg}");
+    }
     report_perturb_step(
         job_progress,
         job_message,
         15,
-        "GRN perturbation · building target δ…",
+        &format!("GRN perturbation · building target δ · {splash_mode_msg}"),
     );
 
     for iter in 0..n_prop {
@@ -351,13 +437,24 @@ pub fn perturb_with_targets(
             beta_cap: config.beta_cap.map(|c| c as f32),
             min_expression: config.min_expression,
         };
-        let expr_for_splash: &Array2<f64> = gene_mtx_work.as_ref().map_or(gene_mtx, |m| m);
-        let splashed: Arc<HashMap<String, GeneMatrix>> = if iter == 0 {
+        let prev_expr = gene_mtx_work.take();
+        let expr_for_splash: &Array2<f64> = prev_expr.as_ref().unwrap_or(gene_mtx);
+        let rw_lr_fused = if use_fused {
+            Some(GeneMatrix::new(
+                rw_lr_for_splash.data.clone(),
+                rw_lr_for_splash.col_names.clone(),
+            ))
+        } else {
+            None
+        };
+        let splashed: Option<Arc<HashMap<String, GeneMatrix>>> = if use_fused {
+            None
+        } else if iter == 0 {
             if let Some(slot) = baseline_splash_cache {
                 let mut guard = slot.lock().expect("baseline splash cache poisoned");
                 if let Some(cached) = guard.as_ref() {
                     if cached.key == splash_key {
-                        Arc::clone(&cached.splashed)
+                        Some(Arc::clone(&cached.splashed))
                     } else {
                         let gex_gm = gene_matrix_masked_f32_from_expr(
                             expr_for_splash,
@@ -379,7 +476,7 @@ pub fn perturb_with_targets(
                             key: splash_key,
                             splashed: Arc::clone(&arc),
                         });
-                        arc
+                        Some(arc)
                     }
                 } else {
                     let gex_gm = gene_matrix_masked_f32_from_expr(
@@ -402,7 +499,7 @@ pub fn perturb_with_targets(
                         key: splash_key,
                         splashed: Arc::clone(&arc),
                     });
-                    arc
+                    Some(arc)
                 }
             } else {
                 let gex_gm = gene_matrix_masked_f32_from_expr(
@@ -420,7 +517,7 @@ pub fn perturb_with_targets(
                     progress: job_progress.map(|p| p.as_ref()),
                     cancel,
                 })?;
-                Arc::new(map)
+                Some(Arc::new(map))
             }
         } else {
             let gex_gm = gene_matrix_masked_f32_from_expr(
@@ -438,10 +535,14 @@ pub fn perturb_with_targets(
                 progress: job_progress.map(|p| p.as_ref()),
                 cancel,
             })?;
-            Arc::new(map)
+            Some(Arc::new(map))
         };
-        if let Some(t) = timings.as_mut() {
-            t.record(format!("iter{}/splash", iter + 1), t_splash.elapsed());
+        if !use_fused {
+            if let Some(t) = timings.as_mut() {
+                t.record(format!("iter{}/splash", iter + 1), t_splash.elapsed());
+            }
+        } else {
+            let _ = t_splash;
         }
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return None;
@@ -535,13 +636,37 @@ pub fn perturb_with_targets(
             &format!("{msg_prefix} · GRN step (δ → Δexpr)"),
         );
         // 7. Perturb all cells: delta_y = splash_derivatives · delta_x
-        perturb_all_cells_into(
-            gene_names,
-            bb,
-            splashed.as_ref(),
-            &delta_simulated,
-            &mut perturb_scratch,
-        );
+        if use_fused {
+            let t_fused = Instant::now();
+            let rw = rw_lr_fused.as_ref().expect("fused rw snapshot");
+            if !perturb_all_cells_fused_into(
+                gene_names,
+                bb,
+                rw,
+                rw_tfligands_init,
+                expr_for_splash,
+                config.min_expression,
+                config.beta_scale_factor as f32,
+                config.beta_cap.map(|c| c as f32),
+                &delta_simulated,
+                &mut perturb_scratch,
+                cancel,
+                job_progress.map(|p| p.as_ref()),
+            ) {
+                return None;
+            }
+            if let Some(t) = timings.as_mut() {
+                t.record(format!("iter{}/splash", iter + 1), t_fused.elapsed());
+            }
+        } else {
+            perturb_all_cells_into(
+                gene_names,
+                bb,
+                splashed.as_ref().expect("materialized splash").as_ref(),
+                &delta_simulated,
+                &mut perturb_scratch,
+            );
+        }
         delta_simulated
             .as_slice_memory_order_mut()
             .unwrap()
@@ -839,6 +964,132 @@ fn perturb_all_cells_into(
         });
 }
 
+struct FusedGeneWork<'a> {
+    gene_col: usize,
+    plan: crate::betadata::SplashPlan,
+    splash_n_mods: usize,
+    mod_indices: &'a [usize],
+    bf: &'a crate::betadata::BetaFrame,
+}
+
+/// Same math as [`compute_splash_all`] + [`perturb_all_cells_into`] without Jacobian HashMaps.
+/// Returns `false` if `cancel` is set.
+#[allow(clippy::too_many_arguments)]
+fn perturb_all_cells_fused_into(
+    gene_names: &[String],
+    bb: &Betabase,
+    rw_ligands: &GeneMatrix,
+    rw_tfligands: &GeneMatrix,
+    expr: &Array2<f64>,
+    min_expression: f64,
+    beta_scale_factor: f32,
+    beta_cap: Option<f32>,
+    delta_simulated: &Array2<f64>,
+    out_row_major: &mut [f64],
+    cancel: Option<&AtomicBool>,
+    progress: Option<&AtomicU32>,
+) -> bool {
+    let n_cells = delta_simulated.nrows();
+    let n_genes = gene_names.len();
+    assert_eq!(out_row_major.len(), n_cells * n_genes);
+    let gex_index: HashMap<&str, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i))
+        .collect();
+    let work: Vec<FusedGeneWork<'_>> = gene_names
+        .iter()
+        .enumerate()
+        .filter_map(|(gene_idx, gene_name)| {
+            let bf = bb.data.get(gene_name)?;
+            let mod_indices = bf.modulator_gene_indices.as_ref()?;
+            if bf.modulator_genes.is_empty() {
+                return None;
+            }
+            let plan = bf.splash_plan(
+                rw_ligands,
+                rw_tfligands,
+                |n| gex_index.get(n).copied(),
+                beta_scale_factor,
+            );
+            Some(FusedGeneWork {
+                gene_col: gene_idx,
+                splash_n_mods: plan.n_out,
+                plan,
+                mod_indices: mod_indices.as_slice(),
+                bf,
+            })
+        })
+        .collect();
+    let max_mods = work.iter().map(|w| w.splash_n_mods).max().unwrap_or(0);
+    let rw_flat = rw_ligands.data.as_slice().unwrap();
+    let rw_nc = rw_ligands.data.ncols();
+    let rw_tfl_flat = rw_tfligands.data.as_slice().unwrap();
+    let rw_tfl_nc = rw_tfligands.data.ncols();
+    let expr_flat = expr.as_slice().expect("expression matrix row-major");
+    let expr_nc = expr.ncols();
+    let gex = SplashGex::F64Masked {
+        flat: expr_flat,
+        ncols: expr_nc,
+        min_expression,
+    };
+    let delta_flat = delta_simulated.as_slice_memory_order().unwrap();
+    let cancelled = AtomicBool::new(false);
+    let done_cells = AtomicU32::new(0);
+    let step = (n_cells / 28).max(1) as u32;
+    out_row_major.fill(0.0);
+    out_row_major
+        .par_chunks_mut(n_genes)
+        .enumerate()
+        .for_each(|(cell, r)| {
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            if cell % 256 == 0 && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                cancelled.store(true, Ordering::Relaxed);
+                return;
+            }
+            let mut row = vec![0.0f32; max_mods];
+            let delta_base = cell * n_genes;
+            for w in &work {
+                let n_out = w.splash_n_mods;
+                let scratch = &mut row[..n_out];
+                w.plan.fill_row(
+                    w.bf,
+                    cell,
+                    scratch,
+                    rw_flat,
+                    rw_nc,
+                    rw_tfl_flat,
+                    rw_tfl_nc,
+                    gex,
+                );
+                if let Some(cap) = beta_cap {
+                    for v in scratch.iter_mut() {
+                        *v = v.clamp(-cap, cap);
+                    }
+                }
+                let mut sum = 0.0f64;
+                for k in 0..n_out {
+                    unsafe {
+                        sum += f64::from(*scratch.get_unchecked(k))
+                            * *delta_flat
+                                .get_unchecked(delta_base + *w.mod_indices.get_unchecked(k));
+                    }
+                }
+                r[w.gene_col] = sum;
+            }
+            let n = done_cells.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(p) = progress {
+                if n % step == 0 || n as usize == n_cells {
+                    let v = 50u32 + (n.saturating_mul(700) / n_cells.max(1) as u32);
+                    p.store(v.min(750), Ordering::Relaxed);
+                }
+            }
+        });
+    !cancelled.load(Ordering::Relaxed)
+}
+
 struct RecomputeWeightedLigandsArgs<'a> {
     gene_mtx: &'a Array2<f64>,
     gene_to_idx: &'a HashMap<&'a str, usize>,
@@ -1010,5 +1261,70 @@ mod tests {
         let bounds = ExpressionBounds::from_config(&PerturbConfig::default());
         assert_eq!(bounds.min, 0.0);
         assert!(bounds.max.is_infinite());
+    }
+
+    #[test]
+    fn estimated_splash_jacobian_bytes_scales_with_cells_and_mods() {
+        let mut bf = crate::betadata::BetaFrame::from_parts(crate::betadata::BetaFrameFromParts {
+            gene_name: "T".into(),
+            row_labels: vec!["0".into()],
+            intercepts: array![0.0],
+            tf_betas: array![[1.0, 2.0]],
+            tfs: vec!["A".into(), "B".into()],
+            lr_betas: ndarray::Array2::zeros((1, 0)),
+            ligands: vec![],
+            receptors: vec![],
+            tfl_betas: ndarray::Array2::zeros((1, 0)),
+            tfl_ligands: vec![],
+            tfl_regulators: vec![],
+            cis_betas: ndarray::Array2::zeros((1, 0)),
+            cis_left: vec![],
+            cis_right: vec![],
+        });
+        let n_cells = 10usize;
+        let obs: Vec<String> = (0..n_cells).map(|i| format!("c{i}")).collect();
+        let keys: Vec<String> = vec!["0".to_string(); n_cells];
+        let mapping = std::sync::Arc::new(
+            crate::betadata::BetaFrame::compute_cell_mapping(&bf.row_labels, &obs, &keys).0,
+        );
+        bf.expand_to_cells(std::sync::Arc::new(obs), mapping);
+        let n_mods = bf.modulator_genes.len();
+        let mut data = HashMap::new();
+        data.insert("T".to_string(), bf);
+        let bb = Betabase {
+            data,
+            ligands_set: HashSet::new(),
+            receptors_set: HashSet::new(),
+            tfl_ligands_set: HashSet::new(),
+            tfs_set: HashSet::new(),
+        };
+        let n_genes = 5usize;
+        let bytes = estimated_splash_jacobian_bytes(&bb, n_cells, n_genes);
+        assert_eq!(bytes, n_cells * n_mods * 4 + n_cells * n_genes * 4);
+        let bytes2 = estimated_splash_jacobian_bytes(&bb, n_cells * 2, n_genes);
+        assert_eq!(
+            bytes2,
+            2 * (n_cells * n_mods * 4) + (n_cells * 2) * n_genes * 4
+        );
+    }
+
+    #[test]
+    fn resolve_splash_mode_honors_explicit_fused_and_budget() {
+        let mut cfg = PerturbConfig {
+            splash_mode: SplashMode::Fused,
+            splash_jacobian_max_mb: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(resolve_splash_mode(&cfg, 1), SplashMode::Fused);
+        cfg.splash_mode = SplashMode::Materialize;
+        assert_eq!(
+            resolve_splash_mode(&cfg, usize::MAX),
+            SplashMode::Materialize
+        );
+        cfg.splash_mode = SplashMode::Auto;
+        cfg.splash_jacobian_max_mb = Some(1);
+        let over = 2 * 1024 * 1024;
+        assert_eq!(resolve_splash_mode(&cfg, over), SplashMode::Fused);
+        assert_eq!(resolve_splash_mode(&cfg, 16), SplashMode::Materialize);
     }
 }

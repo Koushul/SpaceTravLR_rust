@@ -453,6 +453,8 @@ impl PerturbRuntime {
             contact_distance: None,
             perturbed_gene_min_bound: cfg.perturbation.perturbed_gene_min_bound,
             perturbed_gene_max_bound: cfg.perturbation.perturbed_gene_max_bound,
+            splash_mode: cfg.perturbation.splash_mode,
+            splash_jacobian_max_mb: cfg.perturbation.splash_jacobian_max_mb,
         };
         let bounds = ExpressionBounds::from_config(&perturb_cfg);
         anyhow::ensure!(

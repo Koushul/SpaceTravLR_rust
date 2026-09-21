@@ -2210,10 +2210,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 let mut spans = vec![
                     Span::styled(" Gene progress ", sky_bold),
                     Span::styled(" · ", Style::default().fg(pal.muted)),
-                    Span::styled(
-                        format!("{}/{}", shown_rounds, st.total_genes),
-                        title_bold,
-                    ),
+                    Span::styled(format!("{}/{}", shown_rounds, st.total_genes), title_bold),
                 ];
                 if st.pool_lasso && n_samp > 0 {
                     spans.extend([

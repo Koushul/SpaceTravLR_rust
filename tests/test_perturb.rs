@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use spacetravlr::betadata::{BetaFrame, BetaFrameFromParts, Betabase, GeneMatrix};
 use spacetravlr::ligand::calculate_weighted_ligands;
 use spacetravlr::perturb::{
-    PerturbConfig, PerturbInputs, PerturbTarget, PerturbWithTargetsInputs, perturb,
+    PerturbConfig, PerturbInputs, PerturbTarget, PerturbWithTargetsInputs, SplashMode, perturb,
     perturb_with_targets,
 };
 use spacetravlr::perturb_mode::{
@@ -196,6 +196,68 @@ fn test_perturb_knockout_propagates() {
         .map(|i| (result.simulated[[i, 4]] - gene_mtx[[i, 4]]).abs())
         .sum::<f64>();
     assert!(delta_e > 0.0, "E should change via cascade from A → D → E");
+}
+
+#[test]
+fn test_perturb_fused_matches_materialize() {
+    let n_cells = 25;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+    let targets = vec![PerturbTarget {
+        gene: "A".into(),
+        desired_expr: 0.0,
+        cell_indices: None,
+    }];
+    let run = |mode: SplashMode, cap: Option<f64>| {
+        let config = PerturbConfig {
+            n_propagation: 3,
+            beta_scale_factor: 2.0,
+            beta_cap: cap,
+            splash_mode: mode,
+            ..Default::default()
+        };
+        let mut timings = None;
+        perturb_with_targets(
+            &PerturbWithTargetsInputs {
+                bb: &bb,
+                gene_mtx: &gene_mtx,
+                gene_names: &gene_names,
+                xy: &xy,
+                rw_ligands_init: &rw_ligands,
+                rw_tfligands_init: &rw_tfligands,
+                targets: &targets,
+                config: &config,
+                lr_radii: &lr_radii,
+                job_progress: None,
+                job_message: None,
+                cancel: None,
+                baseline_splash_cache: None,
+            },
+            &mut timings,
+        )
+        .expect("perturb")
+    };
+    for cap in [None, Some(0.25)] {
+        let mat = run(SplashMode::Materialize, cap);
+        let fused = run(SplashMode::Fused, cap);
+        assert_eq!(mat.simulated.dim(), fused.simulated.dim());
+        let max_sim = mat
+            .simulated
+            .iter()
+            .zip(fused.simulated.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        let max_d = mat
+            .delta
+            .iter()
+            .zip(fused.delta.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_sim < 1e-5 && max_d < 1e-5,
+            "fused vs materialize cap={cap:?} max_sim={max_sim:e} max_delta={max_d:e}"
+        );
+    }
 }
 
 #[test]
