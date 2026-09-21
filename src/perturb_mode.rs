@@ -1498,8 +1498,7 @@ mod tests {
             "s2_c0".into(),
             "s2_c1".into(),
         ];
-        let labels: Vec<String> =
-            vec!["ct_a".into(), "ct_b".into(), "ct_a".into(), "ct_b".into()];
+        let labels: Vec<String> = vec!["ct_a".into(), "ct_b".into(), "ct_a".into(), "ct_b".into()];
         let obs_df = DataFrame::new(vec![Series::new("cell_type".into(), labels).into()]).unwrap();
         let plans = vec![
             ConditionSplitPlan {

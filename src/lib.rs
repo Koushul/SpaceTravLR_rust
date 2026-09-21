@@ -184,6 +184,7 @@ pub use microniches::{
     run_microniches,
 };
 pub mod run_setup_lock;
+pub mod run_status;
 pub mod run_summary_html;
 pub mod rust_preprocess;
 pub mod scanpy_preprocess;
@@ -238,6 +239,7 @@ pub use estimator::{
 };
 pub use h5ad_peek::print_h5ad_peek;
 pub use model::{CellularNicheNetwork, CellularNicheNetworkConfig};
+pub use run_status::print_run_status;
 pub use run_summary_html::{RunSummaryParams, write_run_summary_html};
 pub use spatial_estimator::{
     GENE_PERFORMANCE_FEATHER_NAME, SpatialCellularProgramsEstimator, gene_performance_feather_path,

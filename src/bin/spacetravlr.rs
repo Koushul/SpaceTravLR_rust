@@ -78,6 +78,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Subcommand banksy runs BANKSY spatial clustering on an AnnData .h5ad (requires `uv` on PATH).
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
+• Use --status DIR to print training progress from .lock files, feathers, remaining genes, ETA, and disk usage (DIR may be the output directory or spacetravlr_run_repro.toml).
 • Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
 • Use --view PATH to display .png, .jpg, .jpeg, or .svg images directly in the terminal (auto-detects Kitty/iTerm2/Sixel protocols for full-resolution; falls back to colored Unicode blocks). Optional --view-width / --view-height to constrain size.
 • Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74; WebGPU or CPU NdArray is accepted (set SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1 to require a GPU); confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
@@ -610,6 +611,14 @@ struct Cli {
         help = "Write cells.csv in the training output directory from --run-toml: one column per distinct [data].cluster_annot obs value (default column cell_type), each cell listing obs_names for spacetravlr-perturb --cells-csv."
     )]
     make_cells_csv: bool,
+
+    #[arg(
+        long = "status",
+        value_name = "DIR",
+        help_heading = "Utility",
+        help = "Print training progress for DIR by scanning .lock files, *_betadata.feather, remaining genes, throughput/ETA, worker slots from lock payloads, and disk usage. DIR may be the output directory or spacetravlr_run_repro.toml. Filesystem only; does not open AnnData."
+    )]
+    status: Option<PathBuf>,
 
     #[arg(
         long = "run-toml",
@@ -3458,6 +3467,14 @@ fn main() -> anyhow::Result<()> {
 
     if cli.silly {
         return silly_sheep::render();
+    }
+
+    if let Some(status_path) = &cli.status {
+        if cli.command.is_some() {
+            anyhow::bail!("--status cannot be combined with a subcommand");
+        }
+        let p = PathBuf::from(expand_user_path(status_path.to_string_lossy().as_ref()));
+        return spacetravlr::print_run_status(&p);
     }
 
     if cli.verify {

@@ -3447,6 +3447,21 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             }
 
             let total_genes = target_genes.len();
+            match crate::run_status::write_target_genes_if_missing(
+                Path::new(training_dir),
+                &target_genes,
+            ) {
+                Ok(true) => log_line(
+                    &hud,
+                    format!(
+                        "targets: wrote {}/{}",
+                        training_dir.trim_end_matches('/'),
+                        crate::run_status::TARGET_GENES_FILENAME
+                    ),
+                ),
+                Ok(false) => {}
+                Err(e) => log_line(&hud, format!("targets: write failed: {e}")),
+            }
 
             let t_val = pipeline_step_begin(
                 &hud,
@@ -4052,6 +4067,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let extra_tetraspanin_arc_w = extra_tetraspanin_arc.clone();
                 let ligand_field_plan_w = ligand_field_plan_arc.clone();
                 let pooled_ligand_plans_w = pooled_ligand_plans.clone();
+                let n_parallel_w = n_workers;
                 let layer_w = layer_for_workers.clone();
                 let cnn_w = cnn_for_workers.clone();
                 let cnn_mode_w = cnn_training_mode;
@@ -4171,27 +4187,35 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                             }
 
                             // Try to claim this gene via a lock file (exclusive with other hosts/processes on shared storage)
-                            if fs::OpenOptions::new()
+                            match fs::OpenOptions::new()
                                 .write(true)
                                 .create_new(true)
                                 .open(&lock_path)
-                                .is_err()
                             {
-                                if let Some(ref h) = hud {
-                                    if let Ok(mut g) = h.lock() {
-                                        g.genes_skipped += 1;
+                                Ok(mut f) => {
+                                    use std::io::Write;
+                                    let payload =
+                                        crate::run_status::gene_lock_payload(n_parallel_w);
+                                    let _ = f.write_all(payload.as_bytes());
+                                    let _ = f.flush();
+                                }
+                                Err(_) => {
+                                    if let Some(ref h) = hud {
+                                        if let Ok(mut g) = h.lock() {
+                                            g.genes_skipped += 1;
+                                        }
+                                        log_line(&hud, format!("skip lock {}", gene));
                                     }
-                                    log_line(&hud, format!("skip lock {}", gene));
-                                }
-                                if let Some(ref p) = pb {
-                                    p.inc(1);
-                                }
-                                if let Some(ref h) = hud {
-                                    if let Ok(mut g) = h.lock() {
-                                        g.genes_rounds += 1;
+                                    if let Some(ref p) = pb {
+                                        p.inc(1);
                                     }
+                                    if let Some(ref h) = hud {
+                                        if let Ok(mut g) = h.lock() {
+                                            g.genes_rounds += 1;
+                                        }
+                                    }
+                                    continue;
                                 }
-                                continue;
                             }
                             struct LockGuard(String);
                             impl Drop for LockGuard {

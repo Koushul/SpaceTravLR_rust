@@ -256,9 +256,7 @@ fn spatial_knn_indices(spatial: &Array2<f64>, k: usize) -> Vec<Vec<usize>> {
     if n < 2 || kk == 0 {
         return vec![Vec::new(); n];
     }
-    let points: Vec<[f64; 2]> = (0..n)
-        .map(|i| [spatial[(i, 0)], spatial[(i, 1)]])
-        .collect();
+    let points: Vec<[f64; 2]> = (0..n).map(|i| [spatial[(i, 0)], spatial[(i, 1)]]).collect();
     let tree = kiddo::ImmutableKdTree::<f64, 2>::new_from_slice(&points);
     let qty = NonZeroUsize::new(kk.saturating_add(1)).unwrap_or(NonZeroUsize::MIN);
     (0..n)
@@ -810,15 +808,12 @@ fn score_genes_pass1(
     params: &MicronichesParams,
 ) -> anyhow::Result<Vec<FeatureScore>> {
     let pb = Arc::new(progress_bar(feathers.len() as u64, "spatial β filter"));
-    let gene_results: Vec<anyhow::Result<Vec<FeatureScore>>> = par_map_limited(
-        feathers,
-        params.filter_parallelism,
-        |(gene, path)| {
+    let gene_results: Vec<anyhow::Result<Vec<FeatureScore>>> =
+        par_map_limited(feathers, params.filter_parallelism, |(gene, path)| {
             let r = score_one_gene(gene, path, obs_names, cluster_keys, spatial, knn, params);
             pb.inc(1);
             r
-        },
-    );
+        });
     pb.finish_and_clear();
     let mut scored = Vec::new();
     for r in gene_results {
@@ -934,10 +929,8 @@ fn reload_scored_features(
         .iter()
         .map(|s| (s, by_gene.get(s.gene.as_str()).copied()))
         .collect();
-    let loaded: Vec<Option<FeatureCandidate>> = par_map_limited(
-        &jobs,
-        params.filter_parallelism,
-        |(score, path)| {
+    let loaded: Vec<Option<FeatureCandidate>> =
+        par_map_limited(&jobs, params.filter_parallelism, |(score, path)| {
             let out = match path {
                 Some(path) => load_one_feature_column(
                     path,
@@ -961,8 +954,7 @@ fn reload_scored_features(
             };
             pb.inc(1);
             out
-        },
-    );
+        });
     pb.finish_and_clear();
     let mut out: Vec<FeatureCandidate> = loaded.into_iter().flatten().collect();
     if out.is_empty() {
