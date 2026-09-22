@@ -1,5 +1,4 @@
-use ndarray::{Array2, Zip, array};
-use rayon::prelude::*;
+use ndarray::{Array2, array};
 use spacetravlr::betadata::{BetaFrame, BetaFrameFromParts, Betabase, GeneMatrix};
 use spacetravlr::ligand::calculate_weighted_ligands;
 use spacetravlr::perturb::{
@@ -473,10 +472,19 @@ fn test_perturb_grid_vs_exact_consistency() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
 
+    let scale = exact
+        .simulated
+        .iter()
+        .fold(0.0f64, |m, v| m.max(v.abs()))
+        .max(1e-6);
+    let rel = max_diff / scale;
     assert!(
-        max_diff < 0.5,
-        "grid approx should be close to exact, got max_diff={:.4e}",
-        max_diff
+        rel < 0.40,
+        "grid approx relative error {rel:.4} (max_diff={max_diff:.4e}, scale={scale:.4e})"
+    );
+    assert!(
+        max_diff > 1e-6,
+        "ligand_grid_factor should change the result, not match exact (max_diff={max_diff:.4e})"
     );
 }
 
@@ -1317,14 +1325,20 @@ fn save_gene_matrix(gm: &GeneMatrix, path: &str) {
     }
 }
 
+fn betas_fixture_dir() -> String {
+    let dir = std::env::var("SPACETRAVLR_BETAS_DIR").unwrap_or_else(|_| "/tmp/betas".to_string());
+    assert!(
+        std::path::Path::new(&dir).is_dir(),
+        "set SPACETRAVLR_BETAS_DIR to a betadata directory (default /tmp/betas); missing {dir}"
+    );
+    dir
+}
+
 #[test]
 #[ignore]
 fn test_perturb_from_tmp_betas() {
-    let betas_dir = "/tmp/betas";
-    if !std::path::Path::new(betas_dir).exists() {
-        eprintln!("Skipping: /tmp/betas not found");
-        return;
-    }
+    let betas_dir = betas_fixture_dir();
+    let betas_dir = betas_dir.as_str();
 
     let n_cells = 200;
     let n_clusters = 13;
@@ -1445,11 +1459,8 @@ fn test_perturb_from_tmp_betas() {
 fn bench_perturb() {
     use std::time::Instant;
 
-    let betas_dir = "/tmp/betas";
-    if !std::path::Path::new(betas_dir).exists() {
-        eprintln!("Skipping: /tmp/betas not found");
-        return;
-    }
+    let betas_dir = betas_fixture_dir();
+    let betas_dir = betas_dir.as_str();
 
     let n_clusters = 13;
     let n_propagation = 3;
@@ -1574,110 +1585,6 @@ fn bench_perturb() {
         );
     }
     println!();
-}
-
-#[test]
-fn test_pin_nonneg_parity_and_perf() {
-    use std::time::Instant;
-
-    let n_genes = 2000;
-    let target_genes: Vec<usize> = vec![0, 42, 999];
-
-    eprintln!();
-    eprintln!("pin_nonneg parity & performance (n_genes={})", n_genes);
-    eprintln!(
-        "  {:>6}  {:>10}  {:>10}  {:>8}  {:>12}",
-        "cells", "old(ms)", "new(ms)", "speedup", "max_diff"
-    );
-    eprintln!("  {}", "-".repeat(56));
-
-    for &n_cells in &[500, 2_000, 10_000, 50_000] {
-        let gene_mtx = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
-            0.5 + 0.1 * ((c * 7 + g * 13) % 17) as f64
-        });
-
-        let delta_input = {
-            let mut d = Array2::zeros((n_cells, n_genes));
-            for &gi in &target_genes {
-                for c in 0..n_cells {
-                    d[[c, gi]] = 0.0 - gene_mtx[[c, gi]];
-                }
-            }
-            d
-        };
-
-        let delta_after_grn = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
-            -0.1 + 0.02 * ((c * 3 + g * 11) % 23) as f64
-        });
-
-        // ---- OLD implementation (full-matrix Zip + allocating nonneg) ----
-        let mut delta_old = delta_after_grn.clone();
-        let t0 = Instant::now();
-        Zip::from(&mut delta_old)
-            .and(&delta_input)
-            .for_each(|d, &di| {
-                if di != 0.0 {
-                    *d = di;
-                }
-            });
-        let gem = &gene_mtx + &delta_old;
-        let gem_flat = gem.as_slice().unwrap();
-        let gmtx_flat_old = gene_mtx.as_slice().unwrap();
-        let delta_flat_old = delta_old.as_slice_memory_order_mut().unwrap();
-        for cell in 0..n_cells {
-            let base = cell * n_genes;
-            for gene in 0..n_genes {
-                let idx = base + gene;
-                let val = gem_flat[idx].max(0.0);
-                delta_flat_old[idx] = val - gmtx_flat_old[idx];
-            }
-        }
-        let old_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-        // ---- NEW implementation (column pin + zero-alloc parallel nonneg) ----
-        let mut delta_new = delta_after_grn.clone();
-        let t0 = Instant::now();
-        for &gi in &target_genes {
-            delta_new.column_mut(gi).assign(&delta_input.column(gi));
-        }
-        let delta_flat_new = delta_new.as_slice_memory_order_mut().unwrap();
-        let gmtx_flat_new = gene_mtx.as_slice().unwrap();
-        delta_flat_new
-            .par_chunks_mut(n_genes)
-            .enumerate()
-            .for_each(|(cell, row)| {
-                let base = cell * n_genes;
-                for gene in 0..n_genes {
-                    unsafe {
-                        let orig = *gmtx_flat_new.get_unchecked(base + gene);
-                        let val = (orig + *row.get_unchecked(gene)).max(0.0);
-                        *row.get_unchecked_mut(gene) = val - orig;
-                    }
-                }
-            });
-        let new_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-        // ---- Numerical parity ----
-        let max_diff = delta_old
-            .iter()
-            .zip(delta_new.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
-
-        let speedup = old_ms / new_ms;
-        eprintln!(
-            "  {:>6}  {:>10.2}  {:>10.2}  {:>7.1}x  {:>12.2e}",
-            n_cells, old_ms, new_ms, speedup, max_diff
-        );
-
-        assert!(
-            max_diff < 1e-14,
-            "pin_nonneg old vs new max_diff={:.2e} exceeds tolerance at n_cells={}",
-            max_diff,
-            n_cells
-        );
-    }
-    eprintln!();
 }
 
 #[test]

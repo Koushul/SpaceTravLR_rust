@@ -8,8 +8,6 @@
     "build:mcp": "vite build --config vite.mcp.config.ts",
     "build:all": "npm run build && npm run build:mcp",
     "mcp:serve": "tsx mcp/stdio.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -26,7 +24,6 @@
     "@types/d3": "^7.4.3",
     "@types/node": "^25.5.0",
     "typescript": "~5.7.2",
-    "vite": "^6.0.3",
-    "vitest": "^3.0.5"
+    "vite": "^6.0.3"
   }
 }

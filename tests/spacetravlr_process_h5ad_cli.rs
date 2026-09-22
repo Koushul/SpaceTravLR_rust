@@ -3,7 +3,7 @@ use std::process::{Command, ExitStatus};
 
 mod common;
 
-use common::uv_python::{uv_available, uv_bin};
+use common::uv_python::{require_uv, uv_bin};
 
 fn uv_status_retry_no_cache(mut build: impl FnMut(bool) -> Command) -> std::io::Result<ExitStatus> {
     let s = build(false).status()?;
@@ -181,10 +181,7 @@ fn process_h5ad_hidden_alias_still_works() {
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn process_h5ad_end_to_end_writes_processed_sibling() {
     let uv = uv_bin();
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
 
     let dir = std::env::temp_dir().join(format!(
         "spacetravlr_cli_process_h5ad_{}",
@@ -271,10 +268,7 @@ a.write_h5ad(p)
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn impute_writes_imputed_sibling_after_process_h5ad() {
     let uv = uv_bin();
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
 
     let dir = std::env::temp_dir().join(format!("spacetravlr_cli_impute_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -371,10 +365,7 @@ a.write_h5ad(p)
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn plot_umap_obs_errors_when_column_missing() {
     let uv = uv_bin();
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
 
     let dir =
         std::env::temp_dir().join(format!("spacetravlr_plot_umap_obs_{}", std::process::id()));

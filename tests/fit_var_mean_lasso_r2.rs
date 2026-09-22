@@ -236,9 +236,11 @@ fn fit_all_genes_full_cnn_writes_lasso_coefs_per_cluster_feathers() {
 
     for gene in ["Reg1", "Tgt1", "Reg2"] {
         let per_cell = dir.join(format!("{gene}_betadata.feather"));
-        if !per_cell.is_file() {
-            continue;
-        }
+        assert!(
+            per_cell.is_file(),
+            "{gene}: expected per-cell betadata {}",
+            per_cell.display()
+        );
         let cell_df = IpcReader::new(std::fs::File::open(&per_cell).unwrap())
             .finish()
             .unwrap();

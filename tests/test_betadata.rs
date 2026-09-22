@@ -11,16 +11,18 @@ fn cluster_keys_from_usize(cl: &[usize]) -> Vec<String> {
 }
 
 #[test]
-fn resolve_betadata_key_column_matches_cluster_annot() {
+fn missing_cluster_annot_does_not_resolve_to_another_column() {
+    use ndarray::Array1;
     use polars::prelude::*;
+    use spacetravlr::betadata::build_cluster_id_to_betadata_cluster_key_map;
     let df = DataFrame::new(vec![Series::new("cell_type".into(), &["A", "B"]).into()]).unwrap();
-    assert_eq!(
-        spacetravlr::betadata::resolve_betadata_cluster_key_column(&df, "cell_type"),
-        "cell_type"
-    );
-    assert_eq!(
-        spacetravlr::betadata::resolve_betadata_cluster_key_column(&df, "leiden"),
-        "leiden"
+    let clusters = Array1::from_vec(vec![0usize, 1]);
+    let err = build_cluster_id_to_betadata_cluster_key_map(&df, "leiden", &clusters)
+        .expect_err("leiden is not a column");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("leiden") || msg.to_lowercase().contains("column"),
+        "{msg}"
     );
 }
 
@@ -668,14 +670,20 @@ fn build_splash_inputs(
     (bb, rw_ligands, rw_ligands_tfl, gex_df, gene_names)
 }
 
+fn betas_fixture_dir() -> String {
+    let dir = std::env::var("SPACETRAVLR_BETAS_DIR").unwrap_or_else(|_| "/tmp/betas".to_string());
+    assert!(
+        std::path::Path::new(&dir).is_dir(),
+        "set SPACETRAVLR_BETAS_DIR to a betadata directory (default /tmp/betas); missing {dir}"
+    );
+    dir
+}
+
 #[test]
 #[ignore]
 fn test_splash_from_tmp_betas() {
-    let betas_dir = "/tmp/betas";
-    if !std::path::Path::new(betas_dir).exists() {
-        eprintln!("Skipping: /tmp/betas not found");
-        return;
-    }
+    let betas_dir = betas_fixture_dir();
+    let betas_dir = betas_dir.as_str();
 
     let out_dir = "/tmp/splash_compare";
     std::fs::create_dir_all(out_dir).unwrap();
@@ -712,11 +720,8 @@ fn test_splash_from_tmp_betas() {
 fn bench_splash() {
     use std::time::Instant;
 
-    let betas_dir = "/tmp/betas";
-    if !std::path::Path::new(betas_dir).exists() {
-        eprintln!("Skipping: /tmp/betas not found");
-        return;
-    }
+    let betas_dir = betas_fixture_dir();
+    let betas_dir = betas_dir.as_str();
 
     let n_clusters = 13;
     let n_warmup = 1;

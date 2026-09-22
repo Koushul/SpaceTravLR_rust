@@ -252,17 +252,14 @@ pub fn participate_run_setup(opts: SetupParticipateOpts<'_>) -> anyhow::Result<S
             return Ok(SetupRole::Follower);
         }
 
-        if opts.can_lead {
-            match try_create_lock(&lock_path)? {
-                Some(_f) => {
-                    log(&format!(
-                        "setup: this process is leader ({})",
-                        SETUP_LOCK_FILENAME
-                    ));
-                    return Ok(SetupRole::Leader(SetupLeaderGuard::new(output_dir)));
-                }
-                None => {}
-            }
+        if opts.can_lead
+            && let Some(_f) = try_create_lock(&lock_path)?
+        {
+            log(&format!(
+                "setup: this process is leader ({})",
+                SETUP_LOCK_FILENAME
+            ));
+            return Ok(SetupRole::Leader(SetupLeaderGuard::new(output_dir)));
         }
 
         if lock_path.is_file() && steal_if_stale(&lock_path, stale, log) && opts.can_lead {

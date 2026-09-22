@@ -184,7 +184,7 @@ enum Commands {
     GetMicroniches(GetMicronichesCli),
     /// UMAP lab: build the web UI, start the API + static server, print the URL.
     Gui(GuiCli),
-    /// Compute ligand-field communication probabilities and write a CSV (hybrid LR preview).
+    /// Compute ligand-field communication probabilities and write CSVs (hybrid LR preview plus per-cell received ligand).
     #[command(name = "ligand-field", alias = "cellchat")]
     LigandField(LigandFieldCli),
     /// Run BANKSY spatial clustering on an AnnData .h5ad (isolated uv + pybanksy).
@@ -213,7 +213,7 @@ struct LigandFieldCli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "output CSV (default: ./ligand_field_commun_prob.csv)"
+        help = "output commun_prob CSV (default: ./ligand_field_commun_prob.csv); also writes ligand_field_received.csv beside it"
     )]
     out: Option<PathBuf>,
 }
@@ -1793,6 +1793,8 @@ fn load_config_for_main(cli: &Cli) -> anyhow::Result<(SpaceshipConfig, bool)> {
     }
 }
 
+// Join reload threads CLI overrides through separate out-params; not a public API.
+#[allow(clippy::too_many_arguments)]
 fn reload_cfg_from_repro_join(
     cli: &Cli,
     output_dir_pb: &Path,
@@ -1839,6 +1841,8 @@ fn reload_cfg_from_repro_join(
     Ok(())
 }
 
+// Join reload threads CLI overrides through separate out-params; not a public API.
+#[allow(clippy::too_many_arguments)]
 fn elect_or_wait_run_setup(
     cli: &Cli,
     cfg: &mut SpaceshipConfig,
@@ -2131,12 +2135,34 @@ fn run_ligand_field_cli(cli: &Cli, lf: &LigandFieldCli) -> anyhow::Result<()> {
     if desired != default_csv && default_csv.is_file() {
         std::fs::rename(&default_csv, &desired)?;
     }
-    eprintln!(
-        "Ligand field: {} interactions (mode={:?}) → {}",
-        prep.plan.interactions.len(),
-        prep.plan.mode,
-        desired.display()
-    );
+    let received_path = out_dir.join("ligand_field_received.csv");
+    match prep.plan.received_ligand_cache.as_ref() {
+        Some(cache) if !cache.is_empty() => {
+            let obs_names = adata.obs_names().into_vec();
+            spacetravlr::ligand_field::write_received_ligand_cache_csv(
+                &received_path,
+                &obs_names,
+                cache,
+            )?;
+            eprintln!(
+                "Ligand field: {} interactions (mode={:?}) → {}\n  received ligand ({} genes) → {}",
+                prep.plan.interactions.len(),
+                prep.plan.mode,
+                desired.display(),
+                cache.len(),
+                received_path.display()
+            );
+        }
+        _ => {
+            eprintln!(
+                "Ligand field: {} interactions (mode={:?}) → {}\n  skipped {}: no received-ligand cache (need [spatial].radius > 0)",
+                prep.plan.interactions.len(),
+                prep.plan.mode,
+                desired.display(),
+                received_path.display()
+            );
+        }
+    }
     adata.close()?;
     Ok(())
 }

@@ -5,7 +5,7 @@ mod common;
 
 use std::process::Command;
 
-use common::uv_python::uv_available;
+use common::uv_python::require_uv;
 use spacetravlr::rust_preprocess::{
     RustPreprocessParams, RustPreprocessSteps, rust_preprocess_h5ad_to_memory,
     rust_preprocess_h5ad_with_steps,
@@ -50,10 +50,7 @@ a.write_h5ad(p)
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn rust_preprocess_memory_repairs_digit_var_index_from_feature_name() {
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
     let dir =
         std::env::temp_dir().join(format!("rust_preprocess_digit_var_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -106,10 +103,7 @@ fn rust_preprocess_memory_repairs_digit_var_index_from_feature_name() {
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn rust_preprocess_write_roundtrip_keeps_symbolic_var_index() {
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
     let dir = std::env::temp_dir().join(format!("rust_preprocess_write_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
@@ -153,10 +147,7 @@ fn rust_preprocess_write_roundtrip_keeps_symbolic_var_index() {
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn load_h5ad_tolerates_scanpy_obsp_distances_unsorted_columns() {
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
     let py = r#"
 import sys
 from pathlib import Path

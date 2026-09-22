@@ -279,6 +279,8 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     )
 }
 
+// Same shape as the other training entry points in this file (`fit_all_genes` and export).
+#[allow(clippy::too_many_arguments)]
 fn maybe_write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     model_export: &ModelExportConfig,
     training_dir: &Path,
@@ -741,6 +743,8 @@ pub fn read_h5ad_obs_column_str(path: &Path, key: &str) -> anyhow::Result<Vec<St
 ///
 /// When `spatial_radius` is `Some`, unique-ligand received fields are precomputed once and
 /// shared across per-gene workers (major speedup for `mode = spatial`).
+// Same shape as the other training entry points in this file (`fit_all_genes` and export).
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_ligand_field_plan<AnB: Backend>(
     adata: &AnnData<AnB>,
     layer: &str,
@@ -5498,10 +5502,10 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                 if contact_seen.insert(lig.to_string()) {
                     contact_lig_genes.push(lig.to_string());
                 }
-            } else if plan_pair_names.is_empty() || !plan_pair_names.contains(pair.as_str()) {
-                if secreted_seen.insert(lig.to_string()) {
-                    secreted_lig_genes.push(lig.to_string());
-                }
+            } else if (plan_pair_names.is_empty() || !plan_pair_names.contains(pair.as_str()))
+                && secreted_seen.insert(lig.to_string())
+            {
+                secreted_lig_genes.push(lig.to_string());
             }
         }
         for pair in &self.tfl_pairs {
@@ -5773,7 +5777,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             };
             self.obs_row_subset = Some(Arc::from(global_rows.into_boxed_slice()));
             self.classic_received_slide = si;
-            if orig_ligand_plan.is_some() {
+            if let Some(gene_plan) = orig_ligand_plan.as_ref() {
                 let sample_plans = pooled_ligand_plans.ok_or_else(|| {
                     anyhow::anyhow!(
                         "fail pool: missing per-sample ligand field plans (sample index {si})"
@@ -5786,7 +5790,6 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                         si + 1
                     )
                 })?;
-                let gene_plan = orig_ligand_plan.as_ref().expect("ligand field plan");
                 self.ligand_field_plan = Some(Arc::new(gene_plan.with_spatial_universe(
                     sample_lf.cell_group.clone(),
                     sample_lf.received_ligand_cache.clone(),

@@ -22,3 +22,11 @@ pub fn uv_available() -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// Fail the test when `uv` is missing. Ignored uv tests must not return Ok.
+pub fn require_uv() {
+    assert!(
+        uv_available(),
+        "uv is required (install uv or set UV_BIN); this test must not pass without it"
+    );
+}

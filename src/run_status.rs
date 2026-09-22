@@ -1013,9 +1013,9 @@ pub fn format_run_status(st: &RunStatus, color: bool) -> String {
         paint(&progress_val, (142, 192, 124), color)
     ));
     out.push_str(&format!(
-        "{}  {}\n",
+        "{}  {} genes\n",
         lbl("In flight", color),
-        format!("{} genes", st.n_in_flight)
+        st.n_in_flight
     ));
     match st.n_remaining {
         Some(r) => out.push_str(&format!("{}  {}\n", lbl("Remaining", color), r)),

@@ -19,7 +19,7 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -587,6 +587,8 @@ fn complex_level(
     geometric_mean(&vals)
 }
 
+// CellChat field builders take the expression matrix plus independent numeric knobs.
+#[allow(clippy::too_many_arguments)]
 fn fill_prob_tensor(
     group_expr: &Array2<f64>,
     counts: &[usize],
@@ -1044,6 +1046,8 @@ fn received_ligand_field(
 }
 
 /// Precompute unique-ligand received fields into `plan.received_ligand_cache`.
+// CellChat field builders take the expression matrix plus independent numeric knobs.
+#[allow(clippy::too_many_arguments)]
 pub fn precompute_received_ligand_cache(
     plan: &mut LigandFieldPlan,
     xy: &Array2<f64>,
@@ -1065,7 +1069,7 @@ pub fn precompute_received_ligand_cache(
     ligands.sort();
     ligands.dedup();
 
-    let grid_factor = grid_factor.or_else(|| if n > 5_000 { Some(0.5) } else { None });
+    let grid_factor = grid_factor.or((n > 5_000).then_some(0.5));
 
     for lig_name in ligands {
         let idx = gene_to_idx
@@ -1099,6 +1103,8 @@ pub fn precompute_received_ligand_cache(
 }
 
 /// Clone `parent` pair list onto `cell_group` / `xy` / `expr` (FOV-isolated neighbors and \(N\)).
+// CellChat field builders take the expression matrix plus independent numeric knobs.
+#[allow(clippy::too_many_arguments)]
 pub fn relocalize_ligand_field_plan(
     parent: &LigandFieldPlan,
     cell_group: Vec<usize>,
@@ -1142,6 +1148,8 @@ pub fn relocalize_ligand_field_plan(
 ///
 /// Spatial field uses a **grid approximation** (or legacy global_n exact) for speed —
 /// diagnostics are not the training path. Training still uses `received_ligand_norm`.
+// CellChat field builders take the expression matrix plus independent numeric knobs.
+#[allow(clippy::too_many_arguments)]
 pub fn write_ligand_field_diagnostics_csv(
     path: &Path,
     xy: &Array2<f64>,
@@ -1266,7 +1274,7 @@ pub fn build_hybrid_lr_matrix_with_grid(
         return Ok(out);
     }
 
-    let grid_factor = grid_factor.or_else(|| if n > 5_000 { Some(0.5) } else { None });
+    let grid_factor = grid_factor.or((n > 5_000).then_some(0.5));
 
     let mut subunit_expr_cache: HashMap<String, Array1<f64>> = HashMap::new();
     let get_gene = |name: &str, cache: &mut HashMap<String, Array1<f64>>| -> Result<Array1<f64>> {
@@ -1402,11 +1410,68 @@ pub fn write_prob_csv(
     Ok(())
 }
 
+/// Wide CSV of precomputed received ligand: `CellID` plus one column per ligand gene.
+pub fn write_received_ligand_cache_csv(
+    path: &Path,
+    obs_names: &[String],
+    cache: &HashMap<String, Arc<Array1<f64>>>,
+) -> Result<()> {
+    let n = obs_names.len();
+    let mut ligands: Vec<&String> = cache.keys().collect();
+    ligands.sort_unstable();
+    for name in &ligands {
+        let col = cache.get(*name).expect("ligand key");
+        anyhow::ensure!(
+            col.len() == n,
+            "received ligand {name} has {} cells, obs_names has {n}",
+            col.len()
+        );
+    }
+    let mut f = BufWriter::new(
+        File::create(path).with_context(|| format!("create {}", path.display()))?,
+    );
+    write!(f, "CellID")?;
+    for name in &ligands {
+        write!(f, ",{name}")?;
+    }
+    writeln!(f)?;
+    for i in 0..n {
+        write!(f, "{}", obs_names[i])?;
+        for name in &ligands {
+            let v = cache.get(*name).expect("ligand key")[i];
+            write!(f, ",{v}")?;
+        }
+        writeln!(f)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array1};
+
+    #[test]
+    fn write_received_ligand_cache_csv_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "st_recv_lig_csv_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ligand_field_received.csv");
+        let obs = vec!["c0".into(), "c1".into()];
+        let mut cache = HashMap::new();
+        cache.insert("B".into(), Arc::new(Array1::from_vec(vec![0.25, 0.5])));
+        cache.insert("A".into(), Arc::new(Array1::from_vec(vec![1.0, 2.0])));
+        write_received_ligand_cache_csv(&path, &obs, &cache).unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines[0], "CellID,A,B");
+        assert_eq!(lines[1], "c0,1,0.25");
+        assert_eq!(lines[2], "c1,2,0.5");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn tri_mean_known_values() {

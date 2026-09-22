@@ -84,7 +84,7 @@ pub fn filter_links_p_max(rows: Vec<LinkRow>, p_max: f64) -> Vec<LinkRow> {
     rows.into_iter().filter(|r| r.p <= p_max).collect()
 }
 
-fn two_sided_p_celloracle(normal: &Normal, coef_mean: f64, coef_variance: f64) -> (f64, f64) {
+pub fn two_sided_p_celloracle(normal: &Normal, coef_mean: f64, coef_variance: f64) -> (f64, f64) {
     let coef_abs = coef_mean.abs();
     let sig = coef_variance.sqrt().max(1e-300);
     let p = 2.0 * normal.cdf(-coef_abs / sig);

@@ -42,6 +42,20 @@ jobs:
       - name: Run tests (excludes uv/python `#[ignore]` integration tests)
         run: cargo --config 'build.rustc-wrapper=""' test
 
+  # python/spacetravlr_quiver pytest is manual: it needs a maturin-built extension.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: umap_lab vitest
+        working-directory: web/umap_lab
+        run: |
+          npm ci
+          npm test
+
   install-script:
     runs-on: ubuntu-latest
     steps:

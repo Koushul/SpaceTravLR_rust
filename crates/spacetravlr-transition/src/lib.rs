@@ -644,13 +644,13 @@ pub fn compute_signature_umap_grid(
         g[0] *= gain;
         g[1] *= gain;
     }
-    if let Some(base) = base_field {
-        if base.len() == grad.len() {
-            for (k, g) in grad.iter_mut().enumerate() {
-                let b = base[k];
-                if b[0] * b[0] + b[1] * b[1] < 1e-20 {
-                    *g = [0.0, 0.0];
-                }
+    if let Some(base) = base_field
+        && base.len() == grad.len()
+    {
+        for (k, g) in grad.iter_mut().enumerate() {
+            let b = base[k];
+            if b[0] * b[0] + b[1] * b[1] < 1e-20 {
+                *g = [0.0, 0.0];
             }
         }
     }

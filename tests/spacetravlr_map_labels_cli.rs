@@ -4,7 +4,7 @@ use std::process::Command;
 
 mod common;
 
-use common::uv_python::{uv_available, uv_bin};
+use common::uv_python::{require_uv, uv_bin};
 
 fn spacetravlr_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_spacetravlr"))
@@ -44,17 +44,12 @@ fn map_labels_requires_reference_and_query() {
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn map_labels_end_to_end_toy_h5ad() {
-    if std::env::var_os("SPACETRAVLR_MAP_LABELS_E2E").is_none() {
-        eprintln!(
-            "skip: set SPACETRAVLR_MAP_LABELS_E2E=1 to run map-labels e2e (uv + torch download)"
-        );
-        return;
-    }
+    assert!(
+        std::env::var_os("SPACETRAVLR_MAP_LABELS_E2E").is_some(),
+        "set SPACETRAVLR_MAP_LABELS_E2E=1 to run map-labels e2e (uv + torch download)"
+    );
+    require_uv();
     let uv = uv_bin();
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
 
     let dir = std::env::temp_dir().join(format!("spacetravlr_map_labels_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -160,17 +155,12 @@ q.write_h5ad(sys.argv[2])
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn map_labels_spatial_toy_h5ad_with_seed_betadata() {
-    if std::env::var_os("SPACETRAVLR_MAP_LABELS_E2E").is_none() {
-        eprintln!(
-            "skip: set SPACETRAVLR_MAP_LABELS_E2E=1 to run spatial map-labels e2e (uv + torch download)"
-        );
-        return;
-    }
+    assert!(
+        std::env::var_os("SPACETRAVLR_MAP_LABELS_E2E").is_some(),
+        "set SPACETRAVLR_MAP_LABELS_E2E=1 to run spatial map-labels e2e (uv + torch download)"
+    );
+    require_uv();
     let uv = uv_bin();
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
 
     let dir = std::env::temp_dir().join(format!(
         "spacetravlr_spatial_map_labels_{}",

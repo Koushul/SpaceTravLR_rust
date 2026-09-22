@@ -1855,6 +1855,13 @@ mod tests {
             .unwrap_or(false)
     }
 
+    fn require_uv() {
+        assert!(
+            uv_available(),
+            "uv is required (install uv or set UV_BIN); this test must not pass without it"
+        );
+    }
+
     fn write_minimal_h5ad_via_uv(path: &Path) -> anyhow::Result<()> {
         let path_str = path.to_str().context("toy path utf-8")?;
         let status = uv_run_status_retry_no_cache(|no_cache| {
@@ -1951,10 +1958,7 @@ a.write_h5ad(p)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_isolated_scanpy_basic_preprocess_writes_sibling_processed() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_scanpy_uv_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2045,10 +2049,7 @@ a.write_h5ad(p)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_preprocess_scales_obsm_spatial_microns() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_spatial_um_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2153,10 +2154,7 @@ a.write_h5ad(p)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_preprocess_classifies_log1p_like_input() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_scanpy_log_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2363,10 +2361,7 @@ a.write_h5ad(out)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_probe_and_plan_leiden_only_normalized_not_imputed() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_probe_leiden_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2408,10 +2403,7 @@ a.obs["leiden"] = np.array([str(i % 3) for i in range(n_obs)], dtype=object)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_probe_cell_type_normalized_not_imputed_is_impute_only() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir = std::env::temp_dir().join(format!("spacetravlr_probe_ct_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2450,10 +2442,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_probe_ready_for_training_is_noop() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_probe_noop_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2489,10 +2478,7 @@ a.obs["cell_type"] = np.array([str(i % 2) for i in range(n_obs)], dtype=object)
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_magic_impute_batch_obs_column_produces_imputed_layer() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_magic_batch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2536,10 +2522,7 @@ a.obs["sample"] = np.where(np.arange(n_obs) % 2 == 0, "A", "B")
     #[test]
     #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
     fn uv_magic_impute_unknown_batch_obs_column_fails() {
-        if !uv_available() {
-            eprintln!("skip: uv not on PATH");
-            return;
-        }
+        require_uv();
         let dir =
             std::env::temp_dir().join(format!("spacetravlr_magic_badbatch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

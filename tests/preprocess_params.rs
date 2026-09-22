@@ -4,7 +4,7 @@ mod common;
 
 use std::process::Command;
 
-use common::uv_python::uv_available;
+use common::uv_python::require_uv;
 use spacetravlr::rust_preprocess::{
     RustPreprocessParams, RustPreprocessSteps, rust_preprocess_h5ad_to_memory,
 };
@@ -88,10 +88,7 @@ fn run_pca_only(h5: &std::path::Path, params: &RustPreprocessParams) -> (usize, 
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn n_pca_components_sets_x_pca_width() {
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
     let dir = std::env::temp_dir().join(format!("prep_params_pca_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
@@ -126,10 +123,7 @@ fn n_pca_components_sets_x_pca_width() {
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn n_top_hvg_caps_gene_subset() {
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
     let dir = std::env::temp_dir().join(format!("prep_params_hvg_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
@@ -170,10 +164,7 @@ fn n_top_hvg_caps_gene_subset() {
 #[test]
 #[ignore = "requires uv/python (isolated `uv run`); default off — run `cargo test -- --ignored`"]
 fn min_genes_filters_sparse_cells() {
-    if !uv_available() {
-        eprintln!("skip: uv not on PATH");
-        return;
-    }
+    require_uv();
     let dir = std::env::temp_dir().join(format!("prep_params_qc_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");

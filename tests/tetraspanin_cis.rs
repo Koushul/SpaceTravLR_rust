@@ -169,16 +169,19 @@ fn training_omits_tetraspanin_column_when_list_empty() {
     let dir = setup_run_dir("off");
     run_fit(&dir, vec![]);
     assert!(
-        dir.join("Tgt1.orphan").is_file() || !dir.join("Tgt1_betadata.feather").is_file(),
-        "empty tetraspanin_pairs with TF/LR/TFL off should not produce a cis feather column"
+        !dir.join("Tgt1_betadata.feather").is_file(),
+        "empty tetraspanin_pairs with TF/LR/TFL off must not write Tgt1_betadata.feather"
     );
-    if dir.join("Tgt1_betadata.feather").is_file() {
-        let cols = feather_colnames(&dir);
-        assert!(
-            !cols.iter().any(|c| c.contains('&')),
-            "unexpected cis column in {cols:?}"
-        );
-    }
+    let cis_cols = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains('&') || n.contains("beta_"))
+        .collect::<Vec<_>>();
+    assert!(
+        cis_cols.is_empty(),
+        "empty modulator set must not leave cis artifacts: {cis_cols:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

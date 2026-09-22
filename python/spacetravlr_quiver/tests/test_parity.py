@@ -80,6 +80,8 @@ def test_raw_vs_clip_differ():
     a = sq.compute_transition_grid(expr, delta, umap, null_subtract_mode="raw", **kw)
     b = sq.compute_transition_grid(expr, delta, umap, null_subtract_mode="clip_renorm", **kw)
     # Not required to always differ, but on random data they almost always do
-    da = np.asarray(a["cell_u"])
-    db = np.asarray(b["cell_u"])
+    da = np.asarray(a["cell_u"], dtype=float)
+    db = np.asarray(b["cell_u"], dtype=float)
     assert da.shape == db.shape
+    assert np.isfinite(da).all() and np.isfinite(db).all()
+    assert not np.allclose(da, db), "raw and clip_renorm cell vectors should differ"

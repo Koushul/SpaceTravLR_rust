@@ -34,6 +34,8 @@ fn umap_from_py(a: PyReadonlyArray2<'_, f64>) -> PyResult<Vec<[f64; 2]>> {
     Ok(out)
 }
 
+// Argument list is the PyO3 keyword surface for `compute_transition_grid`.
+#[allow(clippy::too_many_arguments)]
 fn params_from_kwargs(
     n_neighbors: usize,
     temperature: f64,
@@ -170,6 +172,8 @@ fn umap_knn(umap: PyReadonlyArray2<'_, f64>, k: usize) -> PyResult<Vec<Vec<usize
 }
 
 /// Adaptive grid axes matching `get_grid_layout` + cartography scale.
+// Return type is the PyO3 surface: two bound NumPy vectors.
+#[allow(clippy::type_complexity)]
 #[pyfunction]
 fn umap_grid_axes_py<'py>(
     py: Python<'py>,
@@ -203,6 +207,8 @@ fn umap_grid_axes_py<'py>(
     null_subtract_mode="raw",
     round_delta=true,
 ))]
+// Argument list is the PyO3 keyword surface for this function.
+#[allow(clippy::too_many_arguments)]
 fn compute_transition_grid<'py>(
     py: Python<'py>,
     expr: PyReadonlyArray2<'_, f64>,

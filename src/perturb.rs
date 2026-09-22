@@ -1218,6 +1218,44 @@ mod tests {
     use ndarray::array;
 
     #[test]
+    fn clip_simulated_delta_matches_elementwise_reference() {
+        let n_cells = 64;
+        let n_genes = 40;
+        let gene_mtx = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
+            0.5 + 0.1 * ((c * 7 + g * 13) % 17) as f64
+        });
+        let mut delta = Array2::from_shape_fn((n_cells, n_genes), |(c, g)| {
+            -0.1 + 0.02 * ((c * 3 + g * 11) % 23) as f64
+        });
+        for &gi in &[0usize, 7, 39] {
+            for c in 0..n_cells {
+                delta[[c, gi]] = 0.0 - gene_mtx[[c, gi]];
+            }
+        }
+        let bounds = ExpressionBounds {
+            min: 0.0,
+            max: f64::INFINITY,
+        };
+        let mut expected = delta.clone();
+        for c in 0..n_cells {
+            for g in 0..n_genes {
+                let val = bounds.clip_value(gene_mtx[[c, g]] + expected[[c, g]]);
+                expected[[c, g]] = val - gene_mtx[[c, g]];
+            }
+        }
+        clip_simulated_delta_in_place(&gene_mtx, &mut delta, bounds);
+        let max_diff = delta
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_diff < 1e-12,
+            "clip vs reference max_diff={max_diff:.2e}"
+        );
+    }
+
+    #[test]
     fn clip_simulated_delta_respects_bounds() {
         let gene_mtx = array![[1.0, 5.0], [2.0, -1.0]];
         let mut delta = array![[0.0, 6.0], [0.0, 2.0]];

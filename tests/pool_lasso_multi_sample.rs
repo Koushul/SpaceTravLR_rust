@@ -222,16 +222,15 @@ fn pool_lasso_seed_writes_identical_cluster_betadata_per_sample() {
         assert_eq!(label.trim(), sample);
     }
 
-    let mut n_ok = 0usize;
     for gene in ["Reg1", "Tgt1", "Reg2"] {
         let p1 = sample_dir(&dir, "s1").join(format!("{gene}_betadata.feather"));
         let p2 = sample_dir(&dir, "s2").join(format!("{gene}_betadata.feather"));
-        if !p1.is_file() && !p2.is_file() {
-            continue;
-        }
-        n_ok += 1;
-        assert!(p1.is_file(), "{}", p1.display());
-        assert!(p2.is_file(), "{}", p2.display());
+        assert!(
+            p1.is_file() && p2.is_file(),
+            "{gene}: expected pooled seed betadata in both samples ({} / {})",
+            p1.display(),
+            p2.display()
+        );
         let df1 = IpcReader::new(std::fs::File::open(&p1).unwrap())
             .finish()
             .unwrap();
@@ -254,10 +253,6 @@ fn pool_lasso_seed_writes_identical_cluster_betadata_per_sample() {
             }
         }
     }
-    assert!(
-        n_ok > 0,
-        "expected at least one gene with pooled seed betadata"
-    );
 
     assert_pool_lasso_cells_csv(&dir);
 
@@ -277,32 +272,34 @@ fn pool_lasso_full_cnn_identical_lasso_coefs_and_cellid_betadata() {
         );
     }
 
-    let mut n_cellid = 0usize;
-    let mut n_lasso_pairs = 0usize;
     for gene in ["Reg1", "Tgt1", "Reg2"] {
         let mut lasso_paths = Vec::new();
         for sample in ["s1", "s2"] {
             let d = sample_dir(&dir, sample);
             let per_cell = d.join(format!("{gene}_betadata.feather"));
-            if per_cell.is_file() {
-                n_cellid += 1;
-                let df = IpcReader::new(std::fs::File::open(&per_cell).unwrap())
-                    .finish()
-                    .unwrap();
-                assert!(
-                    df.column("CellID").is_ok(),
-                    "{gene} {sample}: expected CellID"
-                );
-            }
+            assert!(
+                per_cell.is_file(),
+                "{gene} {sample}: expected per-cell betadata {}",
+                per_cell.display()
+            );
+            let df = IpcReader::new(std::fs::File::open(&per_cell).unwrap())
+                .finish()
+                .unwrap();
+            assert!(
+                df.column("CellID").is_ok(),
+                "{gene} {sample}: expected CellID"
+            );
             let lp = d
                 .join("lasso_coefs")
                 .join(format!("{gene}_lasso_coefs.feather"));
-            if lp.is_file() {
-                lasso_paths.push(lp);
-            }
+            assert!(
+                lp.is_file(),
+                "{gene} {sample}: expected lasso coefs {}",
+                lp.display()
+            );
+            lasso_paths.push(lp);
         }
-        if lasso_paths.len() == 2 {
-            n_lasso_pairs += 1;
+        {
             let df1 = IpcReader::new(std::fs::File::open(&lasso_paths[0]).unwrap())
                 .finish()
                 .unwrap();
@@ -332,14 +329,6 @@ fn pool_lasso_full_cnn_identical_lasso_coefs_and_cellid_betadata() {
             }
         }
     }
-    assert!(
-        n_cellid > 0,
-        "expected at least one per-cell betadata with CellID"
-    );
-    assert!(
-        n_lasso_pairs > 0,
-        "expected identical lasso_coefs feathers in both sample dirs"
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -349,18 +338,7 @@ fn pool_lasso_resume_skips_completed_genes() {
     let dir = setup_run_dir("resume");
     run_fit(&dir, CnnTrainingMode::Seed, None);
 
-    let mut done_genes = Vec::new();
-    for gene in ["Reg1", "Tgt1", "Reg2"] {
-        let p1 = sample_dir(&dir, "s1").join(format!("{gene}_betadata.feather"));
-        let p2 = sample_dir(&dir, "s2").join(format!("{gene}_betadata.feather"));
-        if p1.is_file() && p2.is_file() {
-            done_genes.push(gene);
-        }
-    }
-    assert!(
-        !done_genes.is_empty(),
-        "expected at least one completed gene before resume"
-    );
+    let done_genes = completed_pool_genes(&dir);
 
     let mut mtimes = Vec::new();
     for gene in &done_genes {
@@ -389,15 +367,18 @@ fn pool_lasso_resume_skips_completed_genes() {
 }
 
 fn completed_pool_genes(dir: &Path) -> Vec<&'static str> {
-    let mut done = Vec::new();
-    for gene in ["Reg1", "Tgt1", "Reg2"] {
+    let genes = ["Reg1", "Tgt1", "Reg2"];
+    for gene in genes {
         let p1 = sample_dir(dir, "s1").join(format!("{gene}_betadata.feather"));
         let p2 = sample_dir(dir, "s2").join(format!("{gene}_betadata.feather"));
-        if p1.is_file() && p2.is_file() {
-            done.push(gene);
-        }
+        assert!(
+            p1.is_file() && p2.is_file(),
+            "{gene}: expected betadata on both samples before resume ({} / {})",
+            p1.display(),
+            p2.display()
+        );
     }
-    done
+    genes.to_vec()
 }
 
 fn feather_mtime(dir: &Path, sample: &str, gene: &str) -> std::time::SystemTime {

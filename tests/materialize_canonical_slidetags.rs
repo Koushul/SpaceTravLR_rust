@@ -1,7 +1,7 @@
 //! Timing / behavior checks for [`spacetravlr::spatial_estimator::materialize_canonical_training_adata`].
 //!
-//! Uses `SlideTags_human_tonsil_processed.h5ad` at the repo root when present (typical dev checkout).
-//! Skips automatically when the file is missing or very large (>500 MiB) so CI stays light.
+//! Ignored by default. Uses `SPACETRAVLR_MATERIALIZE_H5AD` or `SlideTags_human_tonsil_processed.h5ad`
+//! at the repo root. Fails if that file is missing or larger than 500 MiB.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -15,20 +15,23 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
+#[ignore = "local SlideTags h5ad; set SPACETRAVLR_MATERIALIZE_H5AD or place the file at the repo root"]
 fn materialize_reuse_canonical_skips_full_copy_second_pass() {
-    let src = repo_root().join("SlideTags_human_tonsil_processed.h5ad");
-    if !src.is_file() {
-        eprintln!("skip: {} not found", src.display());
-        return;
-    }
-    let Ok(meta) = std::fs::metadata(&src) else {
-        eprintln!("skip: could not stat {}", src.display());
-        return;
-    };
-    if meta.len() > 500 * 1024 * 1024 {
-        eprintln!("skip: {} is >500 MiB", src.display());
-        return;
-    }
+    let src = std::env::var("SPACETRAVLR_MATERIALIZE_H5AD").map_or_else(
+        |_| repo_root().join("SlideTags_human_tonsil_processed.h5ad"),
+        PathBuf::from,
+    );
+    assert!(
+        src.is_file(),
+        "missing {} (set SPACETRAVLR_MATERIALIZE_H5AD)",
+        src.display()
+    );
+    let meta = std::fs::metadata(&src).unwrap_or_else(|e| panic!("stat {}: {e}", src.display()));
+    assert!(
+        meta.len() <= 500 * 1024 * 1024,
+        "{} is >500 MiB",
+        src.display()
+    );
 
     let tmp = std::env::temp_dir().join(format!("st_materialize_slidetags_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);

@@ -4,9 +4,10 @@
 
 use approx::assert_relative_eq;
 use nalgebra::{DMatrix, DVector};
+use ndarray::Array2;
 use serde::Deserialize;
-use spacetravlr::celloracle::bayesian_ridge_fit;
-use statrs::distribution::{ContinuousCDF, Normal};
+use spacetravlr::celloracle::{bayesian_ridge_fit, scale_gem_no_center, two_sided_p_celloracle};
+use statrs::distribution::Normal;
 use std::fs;
 use std::path::PathBuf;
 
@@ -26,30 +27,27 @@ struct StandardScalerFixture {
     description: String,
     #[serde(rename = "X")]
     x: Vec<Vec<f64>>,
+    #[allow(dead_code)]
     scale_: Vec<f64>,
     #[serde(rename = "X_transformed")]
     x_transformed: Vec<Vec<f64>>,
 }
 
-fn standard_scale_no_mean(x: &[Vec<f64>], scale: &[f64]) -> Vec<Vec<f64>> {
-    let n = x.len();
-    let p = x[0].len();
-    let mut out = vec![vec![0.0_f64; p]; n];
-    for i in 0..n {
-        for j in 0..p {
-            out[i][j] = x[i][j] / scale[j];
-        }
-    }
-    out
-}
-
 #[test]
 fn parity_standard_scaler_no_mean() {
     let f: StandardScalerFixture = read_json("standard_scaler_no_mean");
-    let got = standard_scale_no_mean(&f.x, &f.scale_);
-    for (got_row, exp_row) in got.iter().zip(&f.x_transformed) {
-        for (got_val, exp_val) in got_row.iter().zip(exp_row) {
-            assert_relative_eq!(*got_val, *exp_val, max_relative = 1e-12);
+    let n = f.x.len();
+    let p = f.x[0].len();
+    let gem = Array2::from_shape_fn((n, p), |(i, j)| f.x[i][j]);
+    let got = scale_gem_no_center(&gem);
+    for i in 0..n {
+        for j in 0..p {
+            assert_relative_eq!(
+                got[[i, j]],
+                f.x_transformed[i][j],
+                max_relative = 1e-9,
+                epsilon = 1e-12
+            );
         }
     }
 }
@@ -66,29 +64,15 @@ struct StatsBayesianFixture {
     neg_log_p: Vec<f64>,
 }
 
-fn stats_from_bayesian_ridge(coef_mean: &[f64], coef_variance: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let normal = Normal::new(0.0, 1.0).expect("std normal");
-    let mut p = Vec::with_capacity(coef_mean.len());
-    let mut neg = Vec::with_capacity(coef_mean.len());
-    for i in 0..coef_mean.len() {
-        let coef_abs = coef_mean[i].abs();
-        let sig = coef_variance[i].sqrt();
-        let tail = normal.cdf(-coef_abs / sig);
-        let pi = 2.0 * tail;
-        p.push(pi);
-        neg.push(-pi.ln());
-    }
-    (p, neg)
-}
-
 #[test]
 fn parity_stats_bayesian() {
     let f: StatsBayesianFixture = read_json("stats_bayesian");
-    let (p, neg_log_p) = stats_from_bayesian_ridge(&f.coef_mean, &f.coef_variance);
-    for i in 0..p.len() {
-        assert_relative_eq!(p[i], f.p[i], max_relative = 1e-9, epsilon = 1e-14);
+    let normal = Normal::new(0.0, 1.0).expect("std normal");
+    for i in 0..f.coef_mean.len() {
+        let (p, neg_log_p) = two_sided_p_celloracle(&normal, f.coef_mean[i], f.coef_variance[i]);
+        assert_relative_eq!(p, f.p[i], max_relative = 1e-9, epsilon = 1e-14);
         assert_relative_eq!(
-            neg_log_p[i],
+            neg_log_p,
             f.neg_log_p[i],
             max_relative = 1e-9,
             epsilon = 1e-14

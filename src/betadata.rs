@@ -3161,7 +3161,7 @@ pub fn betadata_collect_interactions_pooled(
             )
             .map(|ws| {
                 let mut rows = collect_interactions_all_cell_types_from_workspace(&ws, mode);
-                let cond = slice.condition.as_deref().map(|c| c.as_ref());
+                let cond = slice.condition.as_deref();
                 for row in &mut rows {
                     stamp_row_sample(row, slice.sample.as_ref(), cond);
                 }
@@ -3307,7 +3307,7 @@ pub fn betadata_collect_interactions_pooled_full(
             )
             .map(|ws| {
                 let mut rows = collect_interactions_all_cell_types_full_from_workspace(&ws);
-                let cond = slice.condition.as_deref().map(|c| c.as_ref());
+                let cond = slice.condition.as_deref();
                 for row in &mut rows {
                     stamp_row_full_sample(row, slice.sample.as_ref(), cond);
                 }
@@ -4198,9 +4198,9 @@ mod pooled_collect_independence_tests {
         assert!((row_beta(&rows, "s2", "T") - 100.0).abs() < 1e-9);
         let only_s1 = betadata_collect_interactions_all_cell_types(
             samples[0].output_dir.to_str().unwrap(),
-            &obs_names[0..2].to_vec(),
-            &cluster_keys[0..2].to_vec(),
-            &labels[0..2].to_vec(),
+            &obs_names[0..2],
+            &cluster_keys[0..2],
+            &labels[0..2],
             BetadataCollectAggregate::Mean,
             None,
         )

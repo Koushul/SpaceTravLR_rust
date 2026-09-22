@@ -58,3 +58,5 @@ python -m spacetravlr_quiver.sweep \
 cargo test -p spacetravlr-transition
 pytest python/spacetravlr_quiver/tests/test_parity.py
 ```
+
+GitHub CI runs the Rust transition tests and the web Vitest suites. The pytest file is manual: it needs a maturin-built `spacetravlr_quiver` extension and is not part of CI.
