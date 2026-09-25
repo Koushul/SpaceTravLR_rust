@@ -3416,6 +3416,150 @@ fn write_adata_h5ad(adata: &IMAnnData, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite `path` in place so `X` and every `layers` matrix are gzip-compressed CSR.
+/// Other root groups are copied unchanged.
+pub fn compress_h5ad_inplace(path: &Path) -> Result<()> {
+    use std::time::Instant;
+
+    use anndata::{ArrayElemOp, HasShape};
+    use hdf5_metno::File as H5File;
+
+    let started = Instant::now();
+    let before = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    let tmp = path.with_file_name(format!(
+        ".{}.compressing.h5ad",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("adata.h5ad")
+    ));
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).with_context(|| format!("remove {}", tmp.display()))?;
+    }
+
+    let copy_result = (|| -> Result<()> {
+        let src = H5File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let dst = H5File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        for name in src.member_names()? {
+            if name == "X" || name == "layers" {
+                continue;
+            }
+            if dst.link_exists(&name) {
+                dst.unlink(&name)?;
+            }
+            h5o_copy_link(&src, &dst, &name)?;
+        }
+        copy_root_string_attrs(&src, &dst)?;
+        src.close().context("close source during compress copy")?;
+        dst.close().context("close temp during compress copy")?;
+        Ok(())
+    })();
+    if let Err(e) = copy_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    let write_result = (|| -> Result<(usize, usize, usize, usize)> {
+        let src = AnnData::<H5>::open(H5::open(path).context("reopen source")?)
+            .context("open source AnnData")?;
+        let dst = AnnData::<H5>::open(H5::open_rw(&tmp).context("reopen temp")?)
+            .context("open temp AnnData")?;
+        let x = src
+            .x()
+            .get::<ArrayData>()?
+            .context("source X is empty")?;
+        let x_csr = array_data_to_csr_f64_for_h5_export(x).context("sparsify X")?;
+        let nnz = csr_nnz(&x_csr);
+        let shape = x_csr.shape();
+        dst.set_x(x_csr).context("write gzip CSR X")?;
+        let mut n_layers = 0usize;
+        for key in src.layers().keys() {
+            let data = src
+                .layers()
+                .get(&key)
+                .with_context(|| format!("missing layer {key}"))?
+                .get::<ArrayData>()?
+                .with_context(|| format!("layer {key} is empty"))?;
+            let csr = array_data_to_csr_f64_for_h5_export(data)
+                .with_context(|| format!("sparsify layer {key}"))?;
+            dst.layers()
+                .add(&key, csr)
+                .with_context(|| format!("write layer {key}"))?;
+            n_layers += 1;
+        }
+        src.close().context("close source")?;
+        dst.close().context("close temp")?;
+        Ok((shape[0], shape[1], nnz, n_layers))
+    })();
+    let (n_obs, n_vars, nnz, n_layers) = match write_result {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("replace {} with compressed file", path.display()))?;
+    let after = std::fs::metadata(path)?.len();
+    eprintln!(
+        "compressed {} ({n_obs}×{n_vars}, X nnz={nnz}, {n_layers} layer(s)) in {:.2} s ({before} -> {after} bytes)",
+        path.display(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn h5o_copy_link(src: &hdf5_metno::File, dst: &hdf5_metno::File, name: &str) -> Result<()> {
+    use std::ffi::CString;
+    let src_name = CString::new(name).context("HDF5 name")?;
+    let dst_name = CString::new(name).context("HDF5 name")?;
+    hdf5_metno::sync::sync(|| {
+        let rc = unsafe {
+            hdf5_metno_sys::h5o::H5Ocopy(
+                src.id(),
+                src_name.as_ptr(),
+                dst.id(),
+                dst_name.as_ptr(),
+                hdf5_metno_sys::h5p::H5P_DEFAULT,
+                hdf5_metno_sys::h5p::H5P_DEFAULT,
+            )
+        };
+        if rc < 0 {
+            bail!("failed to copy HDF5 object {name}");
+        }
+        Ok(())
+    })
+}
+
+fn copy_root_string_attrs(src: &hdf5_metno::File, dst: &hdf5_metno::File) -> Result<()> {
+    use std::str::FromStr;
+    use hdf5_metno::types::{VarLenAscii, VarLenUnicode};
+    for name in src.attr_names()? {
+        let attr = src.attr(&name)?;
+        let text = if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {
+            v.to_string()
+        } else if let Ok(v) = attr.read_scalar::<VarLenAscii>() {
+            v.to_string()
+        } else {
+            continue;
+        };
+        let unicode = VarLenUnicode::from_str(&text)?;
+        dst.new_attr::<VarLenUnicode>()
+            .create(name.as_str())?
+            .write_scalar(&unicode)?;
+    }
+    Ok(())
+}
+
+fn csr_nnz(data: &ArrayData) -> usize {
+    match data {
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => m.nnz(),
+        _ => 0,
+    }
+}
+
 pub fn rust_preprocess_h5ad(
     input: &Path,
     output: &Path,

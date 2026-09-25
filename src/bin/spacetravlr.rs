@@ -575,6 +575,14 @@ struct Cli {
     )]
     peek: Option<PathBuf>,
 
+    #[arg(
+        long = "compress",
+        value_name = "PATH",
+        help_heading = "Utility",
+        help = "Rewrite this .h5ad in place: store X and every layer as gzip-compressed CSR. obs, var, obsm, obsp, uns, and other groups are copied unchanged."
+    )]
+    compress_h5ad: Option<PathBuf>,
+
     #[cfg(feature = "view-image")]
     #[arg(
         long = "view",
@@ -3608,6 +3616,14 @@ fn main() -> anyhow::Result<()> {
             cli.obs.as_deref().map(str::trim),
             &peek_genes,
         );
+    }
+
+    if let Some(compress_path) = &cli.compress_h5ad {
+        let p = PathBuf::from(expand_user_path(compress_path.to_string_lossy().as_ref()));
+        if !p.is_file() {
+            anyhow::bail!("--compress: not a file: {}", p.display());
+        }
+        return spacetravlr::compress_h5ad_inplace(p.as_path());
     }
 
     #[cfg(feature = "view-image")]

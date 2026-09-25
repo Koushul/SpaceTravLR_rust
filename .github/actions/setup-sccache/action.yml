@@ -1,0 +1,16 @@
+name: Setup sccache
+description: Install sccache and enable the GitHub Actions cache backend for rustc and CMake.
+
+runs:
+  using: composite
+  steps:
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+    - name: Enable sccache for Cargo and CMake
+      shell: bash
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> "$GITHUB_ENV"
+        echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> "$GITHUB_ENV"
+        echo "${{ github.workspace }}/scripts" >> "$GITHUB_PATH"

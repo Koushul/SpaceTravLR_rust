@@ -373,6 +373,57 @@ fn preprocess_leaves_source_obsp_in_place() {
 }
 
 #[test]
+fn compress_h5ad_makes_x_and_layers_gzip_csr() {
+    use anndata::data::ArrayData;
+    use anndata::{AnnData, AnnDataOp, AxisArraysOp, Backend};
+    use anndata_hdf5::H5;
+    use hdf5_metno::filters::Filter;
+    use ndarray::Array2;
+
+    let path = std::env::temp_dir().join(format!(
+        "spacetravlr_compress_{}.h5ad",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    write_small_h5ad(&path, true);
+    {
+        let a = AnnData::<H5>::open(H5::open_rw(&path).expect("rw")).expect("open");
+        let layer = Array2::<f64>::from_elem((24, 12), 1.0);
+        a.layers()
+            .add("counts", ArrayData::from(layer))
+            .expect("layer");
+        a.close().ok();
+    }
+    spacetravlr::compress_h5ad_inplace(&path).expect("compress");
+    let file = hdf5_metno::File::open(&path).expect("reopen");
+    assert!(file.link_exists("obsp"), "obsp copied");
+    let x = file.group("X").expect("X group");
+    let enc = x
+        .attr("encoding-type")
+        .expect("encoding")
+        .read_scalar::<hdf5_metno::types::VarLenUnicode>()
+        .expect("encoding str");
+    assert_eq!(enc.to_string(), "csr_matrix");
+    let filters = x.dataset("data").expect("X/data").filters();
+    assert!(
+        filters.iter().any(|f| matches!(f, Filter::Deflate(_))),
+        "X/data filters: {filters:?}"
+    );
+    let counts = file.group("layers/counts").expect("layer");
+    let layer_filters = counts.dataset("data").expect("layer data").filters();
+    assert!(
+        layer_filters.iter().any(|f| matches!(f, Filter::Deflate(_))),
+        "layer filters: {layer_filters:?}"
+    );
+    file.close().ok();
+    let adata = anndata_memory::load_h5ad_fast(&path).expect("reload");
+    assert_eq!(adata.n_obs(), 24);
+    assert_eq!(adata.n_vars(), 12);
+    assert!(adata.layers().keys().iter().any(|k| k == "counts"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn failed_load_still_prints_load_and_total() {
     use spacetravlr::rust_preprocess::testing_begin_preprocess_timing_capture;
     use spacetravlr::rust_preprocess::testing_take_preprocess_timing_capture;

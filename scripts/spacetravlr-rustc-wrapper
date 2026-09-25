@@ -1,0 +1,6 @@
+#!/bin/sh
+# Cargo rustc-wrapper: use sccache when it is on PATH, otherwise invoke rustc.
+if command -v sccache >/dev/null 2>&1; then
+  exec sccache "$@"
+fi
+exec "$@"

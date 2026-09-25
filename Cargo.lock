@@ -8306,6 +8306,7 @@ dependencies = [
  "fs4",
  "glob",
  "hdf5-metno",
+ "hdf5-metno-sys",
  "image",
  "indicatif 0.17.11",
  "instant-distance",

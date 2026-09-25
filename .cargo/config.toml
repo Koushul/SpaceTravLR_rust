@@ -1,4 +1,6 @@
 [build]
 # No `target-cpu=native`: optimizes for the build CPU only and can SIGILL on older CPUs during training.
 # Use RUSTFLAGS='-C target-cpu=native' locally if wanted.
-# Omit rustc-wrapper so builds work without sccache; set RUSTC_WRAPPER=sccache locally if you use it.
+# sccache when installed (CI installs it; locally `brew install sccache` or `cargo install sccache`).
+# The wrapper falls back to rustc if sccache is not on PATH.
+rustc-wrapper = "spacetravlr-rustc-wrapper"

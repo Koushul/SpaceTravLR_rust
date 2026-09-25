@@ -12,6 +12,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   build:
@@ -34,13 +36,19 @@ jobs:
           echo "SPACETRAVLR_GIT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
           echo "SPACETRAVLR_TARGET_TRIPLE=$(rustc -vV | awk '/host:/ {print $2}')" >> "$GITHUB_ENV"
 
+      - uses: ./.github/actions/setup-sccache
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build workspace (default features incl. RCTD)
-        run: cargo --config 'build.rustc-wrapper=""' build
+        run: cargo build
 
       - name: Run tests (excludes uv/python `#[ignore]` integration tests)
-        run: cargo --config 'build.rustc-wrapper=""' test
+        run: cargo test
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   # python/spacetravlr_quiver pytest is manual: it needs a maturin-built extension.
   web:
