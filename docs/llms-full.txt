@@ -124,6 +124,8 @@ To skip automatic preparation entirely, pass `--skip-auto-adata-prep` or set `[p
 ```bash
 spacetravlr --peek data.h5ad                    # fast metadata summary, no full load
 spacetravlr --peek data.h5ad --obs cell_type    # ranked value counts for one obs column
+spacetravlr --peek data.h5ad --obs cell_type --gene GATA3   # per-group log1p of one gene
+spacetravlr --peek data.h5ad --obs cell_type --genes CD3D,MS4A1,PECAM1   # marker panel
 spacetravlr --infer-species --h5ad data.h5ad    # human vs mouse detection
 spacetravlr --plot-h5ad --h5ad data.h5ad        # spatial scatter rendered in the terminal
 spacetravlr --plot-umap data.h5ad --obs cell_type
@@ -287,7 +289,9 @@ Add `--plain` for line-oriented logs instead of the full-screen dashboard — **
 | `-c, --config PATH` | `spaceship_config.toml` overlay; merged over defaults, then overridden by CLI flags |
 | `--h5ad PATH` | Spatial AnnData input |
 | `--peek PATH` (alias `--peak`) | HDF5 metadata summary without a full load |
-| `--obs STR` | With `--peek`, print value counts; with `--plot-umap`, choose the color column |
+| `--obs STR` | With `--peek`, print value counts; with `--peek --gene`, group expression; with `--plot-umap`, choose the color column |
+| `--gene SYMBOL` | With `--peek` and `--obs`: per-group log1p bar plot (min, mean, median, max) for one gene. Case-insensitive. Reads only that column of `X`. Comma-separated symbols join `--genes` as a marker panel |
+| `--genes LIST` | Training target list. With `--peek` and `--obs`: marker panel, one column per symbol, bars scaled within each gene |
 | `--skip-auto-adata-prep` | Skip automatic Scanpy-equivalent preprocessing and imputation (also `[preprocess].skip_auto_adata_prep`) |
 | `--tf-prior PATH` | Precomputed TF priors feather |
 
@@ -295,7 +299,7 @@ Add `--plain` for line-oriented logs instead of the full-screen dashboard — **
 
 | Flag | Meaning |
 |---|---|
-| `--genes A,B,C` | Comma-separated list of target genes to train |
+| `--genes A,B,C` | Comma-separated target genes to train. With `--peek` and `--obs`, the same list is a marker panel |
 | `--max-genes N` | Cap the gene count after the `--genes` filter |
 | `--max-ligands N` (alias `--max-lr`) | Keep only the top-N ligands by mean expression |
 | `--extra-modulators A,B` | Additional raw-expression Lasso predictors |

@@ -133,7 +133,7 @@ Required AnnData shape: expression in `.X`, 2D coordinates in `.obsm['spatial']`
 ### Utility flags (exit without training)
 
 - `--verify` — install smoke test: downloads a tonsil `.h5ad`, runs Rust prep, trains two genes, accepts WebGPU or CPU (NdArray). Best first command on a new machine.
-- `--peek PATH` (alias `--peak`) — fast HDF5 metadata summary without a full load; works on `.h5ad` and 10x `.h5`. Add `--obs COL` for value counts.
+- `--peek PATH` (alias `--peak`) — fast HDF5 metadata summary without a full load; works on `.h5ad` and 10x `.h5`. Add `--obs COL` for value counts. Add `--gene SYMBOL` with `--obs` for one gene's per-group log1p bar. Add `--genes A,B,C` with `--obs` for a marker panel (case-insensitive; those columns of `X` in one pass, each bar scaled within that gene).
 - `--make-cells-csv --run-toml PATH` — regenerate `cells.csv` in the training output directory (also written automatically when training starts), one column per distinct `[data].cluster_annot` value, each listing `obs_names`. Use with `spacetravlr-perturb --cells-csv`. Pool-lasso runs also write per-sample copies under each sample directory.
 - `--infer-species --h5ad PATH` — print human/mouse inference
 - `--plot-h5ad`, `--plot-umap [PATH]` (`--plot-umap-backend rust|scanpy`) — terminal scatter plots
@@ -246,6 +246,8 @@ spacetravlr --verify
 
 # Inspect an input before committing to a run
 spacetravlr --peek /path/data.h5ad --obs cell_type
+spacetravlr --peek /path/data.h5ad --obs cell_type --gene GATA3
+spacetravlr --peek /path/data.h5ad --obs cell_type --genes CD3D,MS4A1,PECAM1
 
 # Train with plain logs
 spacetravlr --plain --config spaceship_config.toml --h5ad /path/data.h5ad --output-dir /path/run

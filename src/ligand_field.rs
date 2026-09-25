@@ -1427,9 +1427,8 @@ pub fn write_received_ligand_cache_csv(
             col.len()
         );
     }
-    let mut f = BufWriter::new(
-        File::create(path).with_context(|| format!("create {}", path.display()))?,
-    );
+    let mut f =
+        BufWriter::new(File::create(path).with_context(|| format!("create {}", path.display()))?);
     write!(f, "CellID")?;
     for name in &ligands {
         write!(f, ",{name}")?;
@@ -1450,14 +1449,11 @@ pub fn write_received_ligand_cache_csv(
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::{array, Array1};
+    use ndarray::{Array1, array};
 
     #[test]
     fn write_received_ligand_cache_csv_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "st_recv_lig_csv_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("st_recv_lig_csv_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("ligand_field_received.csv");
         let obs = vec!["c0".into(), "c1".into()];

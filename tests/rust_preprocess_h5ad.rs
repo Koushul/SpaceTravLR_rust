@@ -212,3 +212,192 @@ a.write_h5ad(p)
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn recompress_f64_dataset_lzf(group: &hdf5_metno::Group, name: &str) {
+    use std::str::FromStr;
+    use hdf5_metno::types::{VarLenAscii, VarLenUnicode};
+    let ds = group.dataset(name).expect(name);
+    let shape = ds.shape();
+    let values: Vec<f64> = ds.read_raw().unwrap_or_else(|e| panic!("read {name}: {e}"));
+    let mut attrs = Vec::new();
+    for attr_name in ds.attr_names().expect("attr names") {
+        let attr = ds.attr(&attr_name).expect("attr");
+        if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {
+            attrs.push((attr_name, v.to_string()));
+        } else if let Ok(v) = attr.read_scalar::<VarLenAscii>() {
+            attrs.push((attr_name, v.to_string()));
+        }
+    }
+    drop(ds);
+    group.unlink(name).expect("unlink");
+    let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), values).expect("shape");
+    let created = group
+        .new_dataset_builder()
+        .with_data(&arr)
+        .lzf()
+        .create(name)
+        .expect("lzf dataset");
+    assert!(
+        created.filters().iter().any(|f| f.id() == 32000),
+        "filter id on {name}: {:?}",
+        created.filters()
+    );
+    for (attr_name, value) in attrs {
+        let unicode = VarLenUnicode::from_str(&value).expect("unicode attr");
+        created
+            .new_attr::<VarLenUnicode>()
+            .create(attr_name.as_str())
+            .expect("attr")
+            .write_scalar(&unicode)
+            .expect("write attr");
+    }
+}
+
+#[test]
+fn hdf5_lzf_roundtrip_numeric_chunk() {
+    assert!(hdf5_metno::filters::lzf_available());
+    let path = std::env::temp_dir().join(format!("spacetravlr_lzf_rt_{}.h5", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let data: Vec<f64> = (0..4096).map(|i| (i % 17) as f64).collect();
+    {
+        let file = hdf5_metno::File::create(&path).expect("create");
+        let ds = file
+            .new_dataset_builder()
+            .with_data(&data)
+            .lzf()
+            .create("x_centroid")
+            .expect("write lzf");
+        assert!(
+            ds.filters().iter().any(|f| f.id() == 32000),
+            "filters: {:?}",
+            ds.filters()
+        );
+        file.close().ok();
+    }
+    let file = hdf5_metno::File::open(&path).expect("reopen");
+    let got: Vec<f64> = file
+        .dataset("x_centroid")
+        .expect("dataset")
+        .read_raw()
+        .expect("read");
+    assert_eq!(got, data);
+    file.close().ok();
+    let _ = std::fs::remove_file(&path);
+}
+
+fn write_small_h5ad(path: &std::path::Path, with_obsp: bool) {
+    use anndata::data::ArrayData;
+    use anndata::{AnnData, AnnDataOp};
+    use anndata_hdf5::H5;
+    use ndarray::Array2;
+    use polars::prelude::{DataFrame, NamedFrom, Series};
+
+    spacetravlr::ensure_process_env();
+    let n = 24usize;
+    let n_vars = 12usize;
+    let a = AnnData::<H5>::new(path).expect("create h5ad");
+    let obs_names: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+    let var_names: Vec<String> = (0..n_vars).map(|i| format!("g{i}")).collect();
+    a.set_obs_names(obs_names.into()).expect("obs names");
+    a.set_var_names(var_names.into()).expect("var names");
+    let x = Array2::<f64>::from_shape_fn((n, n_vars), |(i, j)| ((i * 3 + j) % 11) as f64);
+    a.set_x(ArrayData::from(x)).expect("set x");
+    let centroids: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+    let obs = DataFrame::new(vec![Series::new("x_centroid".into(), centroids).into()]).expect("obs");
+    a.set_obs(obs).expect("set obs");
+    if with_obsp {
+        let dist = Array2::<f64>::eye(n);
+        a.set_obsp([("distances".to_string(), ArrayData::from(dist))])
+            .expect("set obsp");
+    }
+    a.close().expect("close");
+}
+
+#[test]
+fn load_h5ad_fast_reads_lzf_x_and_obs_centroid() {
+    let path = std::env::temp_dir().join(format!(
+        "spacetravlr_lzf_h5ad_{}.h5ad",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    write_small_h5ad(&path, false);
+    {
+        let file = hdf5_metno::File::open_rw(&path).expect("rw");
+        recompress_f64_dataset_lzf(&file, "X");
+        let obs = file.group("obs").expect("obs");
+        recompress_f64_dataset_lzf(&obs, "x_centroid");
+        file.close().ok();
+    }
+    let adata = anndata_memory::load_h5ad_fast(&path).expect("load lzf h5ad");
+    assert_eq!(adata.n_obs(), 24);
+    assert_eq!(adata.n_vars(), 12);
+    let obs = adata.obs().get_data();
+    let col = obs.column("x_centroid").expect("x_centroid");
+    assert_eq!(col.len(), 24);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn preprocess_leaves_source_obsp_in_place() {
+    use spacetravlr::rust_preprocess::testing_begin_preprocess_timing_capture;
+    use spacetravlr::rust_preprocess::testing_take_preprocess_timing_capture;
+    use spacetravlr::rust_preprocess::PREPROCESS_TIMING_LABELS;
+
+    let path = std::env::temp_dir().join(format!(
+        "spacetravlr_obsp_keep_{}.h5ad",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    write_small_h5ad(&path, true);
+    let params = RustPreprocessParams {
+        n_top_hvg: 8,
+        n_pca_components: 4,
+        ..Default::default()
+    };
+    testing_begin_preprocess_timing_capture();
+    rust_preprocess_h5ad_to_memory(&path, &params, &RustPreprocessSteps::UMAP_LAB_PCA_ONLY)
+        .expect("preprocess");
+    let summary = testing_take_preprocess_timing_capture().expect("timing summary");
+    for label in PREPROCESS_TIMING_LABELS {
+        assert!(
+            summary.contains(&format!("{label}:")),
+            "missing {label} in:\n{summary}"
+        );
+    }
+    assert!(summary.contains("QC: not run"));
+    assert!(summary.contains("Scale: not run"));
+    let file = hdf5_metno::File::open(&path).expect("reopen source");
+    assert!(file.link_exists("obsp"), "source obsp was removed");
+    file.close().ok();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn failed_load_still_prints_load_and_total() {
+    use spacetravlr::rust_preprocess::testing_begin_preprocess_timing_capture;
+    use spacetravlr::rust_preprocess::testing_take_preprocess_timing_capture;
+
+    let path = std::env::temp_dir().join(format!(
+        "spacetravlr_missing_{}.h5ad",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    testing_begin_preprocess_timing_capture();
+    let err = match rust_preprocess_h5ad_to_memory(
+        &path,
+        &RustPreprocessParams::default(),
+        &RustPreprocessSteps::UMAP_LAB_PCA_ONLY,
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("expected missing file to fail"),
+    };
+    let summary = testing_take_preprocess_timing_capture().expect("timing summary");
+    assert!(
+        summary.contains("Load:") && !summary.contains("Load: not run"),
+        "{summary}\nerr: {err:#}"
+    );
+    assert!(
+        summary.contains("Total:") && !summary.contains("Total: not run"),
+        "{summary}"
+    );
+}

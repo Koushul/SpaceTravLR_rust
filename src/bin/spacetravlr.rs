@@ -79,7 +79,7 @@ const SPACETRAVLR_LONG_ABOUT: &str = r#"Spatial gene regulatory network (GRN) tr
 • Use --map-labels with --reference and --query for MALT label transfer (requires uv on PATH; may download PyTorch on first run).
 • Use --make-cells-csv with --run-toml to write cells.csv in the training output directory (one column per [data].cluster_annot value for spacetravlr-perturb --cells-csv).
 • Use --status DIR to print training progress from .lock files, feathers, remaining genes, ETA, and disk usage (DIR may be the output directory or spacetravlr_run_repro.toml).
-• Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData.
+• Use --peek PATH (e.g. .h5ad or 10x .h5; alias --peak) for a compact summary: wrapped lines to terminal width, obs/var names in a small grid, human-only file size. Add --obs COL for value_counts on AnnData. Add --gene SYMBOL with --obs for one gene's per-group log1p bar, or --genes A,B,C for a marker panel (case-insensitive; those columns of X are read in one pass).
 • Use --view PATH to display .png, .jpg, .jpeg, or .svg images directly in the terminal (auto-detects Kitty/iTerm2/Sixel protocols for full-resolution; falls back to colored Unicode blocks). Optional --view-width / --view-height to constrain size.
 • Use --verify for a smoke test: download tonsil .h5ad (or local path), strip prep layers to force Rust full preprocess + MAGIC, parallel-2 full-mode train on AICDA and CD74; WebGPU or CPU NdArray is accepted (set SPACETRAVLR_VERIFY_REQUIRE_WEBGPU=1 to require a GPU); confirms two betadata feathers; writes a plain-text log (hardware + checklist). Override log path with SPACETRAVLR_VERIFY_LOG. Needs curl and spaceship_config.toml (see --help)."#;
 
@@ -571,7 +571,7 @@ struct Cli {
         visible_alias = "peak",
         value_name = "PATH",
         help_heading = "Input",
-        help = "Peek: path/size/shape (wrapped); obs & var column names in a grid; other keys wrapped. --obs COL adds value_counts. HDF5 metadata only"
+        help = "Peek: path/size/shape (wrapped); obs & var column names in a grid; other keys wrapped. --obs COL adds value_counts. --obs COL --gene SYMBOL prints one gene's per-group log1p bar. --obs COL --genes A,B,C prints a marker panel. HDF5 metadata plus those X columns"
     )]
     peek: Option<PathBuf>,
 
@@ -632,9 +632,17 @@ struct Cli {
         long = "obs",
         value_name = "COLUMN",
         help_heading = "Input",
-        help = "With --peek: load only this obs column and print value_counts (rank, count, %, category). With --plot-umap: color the terminal UMAP by this obs column (overrides `--leiden` default coloring; without `--obs`, defaults are auto cell_type/leiden, or `leiden` when `--plot-umap --leiden`)."
+        help = "With --peek: load only this obs column and print value_counts (rank, count, %, category). With --peek and --gene or --genes: group log1p expression by this column instead of value_counts. With --plot-umap: color the terminal UMAP by this obs column (overrides `--leiden` default coloring; without `--obs`, defaults are auto cell_type/leiden, or `leiden` when `--plot-umap --leiden`)."
     )]
     obs: Option<String>,
+
+    #[arg(
+        long = "gene",
+        value_name = "GENE",
+        help_heading = "Input",
+        help = "With --peek and --obs: bar plot of per-group log1p expression (min, mean, median, max; bars scaled to the highest mean). Comma-separated symbols join --genes as a marker panel. Symbols match var names case-insensitively. Reads only those X columns. Uses stored values when X is already log1p."
+    )]
+    gene: Option<String>,
 
     #[arg(
         long = "skip-auto-adata-prep",
@@ -656,7 +664,7 @@ struct Cli {
         long,
         value_name = "LIST",
         help_heading = "Gene list & GRN extras",
-        help = "Train only these targets — comma-separated symbols, same style as a single-line gene list"
+        help = "Train only these targets — comma-separated symbols, same style as a single-line gene list. With --peek and --obs: marker panel, one column per symbol (bars scaled within each gene)"
     )]
     genes: Option<String>,
 
@@ -3487,6 +3495,23 @@ fn render_svg_high_res(path: &Path) -> anyhow::Result<image::DynamicImage> {
     Ok(image::DynamicImage::ImageRgba8(rgba))
 }
 
+fn peek_marker_queries(gene: Option<&str>, genes: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for src in [gene, genes].into_iter().flatten() {
+        for part in src.split(',') {
+            let symbol = part.trim();
+            if symbol.is_empty() {
+                continue;
+            }
+            if seen.insert(symbol.to_ascii_lowercase()) {
+                out.push(symbol.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn main() -> anyhow::Result<()> {
     spacetravlr::ensure_process_env();
     let cli = Cli::parse();
@@ -3534,6 +3559,21 @@ fn main() -> anyhow::Result<()> {
         None => {}
     }
 
+    if cli.gene.is_some() && cli.peek.is_none() {
+        anyhow::bail!("--gene requires --peek PATH and --obs COLUMN");
+    }
+    let peek_genes = if cli.peek.is_some() {
+        peek_marker_queries(cli.gene.as_deref(), cli.genes.as_deref())
+    } else {
+        Vec::new()
+    };
+    if cli.peek.is_some()
+        && !peek_genes.is_empty()
+        && cli.obs.as_ref().is_none_or(|s| s.trim().is_empty())
+    {
+        anyhow::bail!("--gene/--genes require --obs COLUMN when used with --peek");
+    }
+
     if cli.obs.is_some() && cli.peek.is_none() && cli.plot_umap.is_none() {
         anyhow::bail!(
             "--obs requires --peek PATH (or --peak PATH), or use --plot-umap to color the UMAP"
@@ -3563,7 +3603,11 @@ fn main() -> anyhow::Result<()> {
         if !p.is_file() {
             anyhow::bail!("--peek: not a file: {}", p.display());
         }
-        return spacetravlr::print_h5ad_peek(p.as_path(), cli.obs.as_deref().map(str::trim));
+        return spacetravlr::print_h5ad_peek(
+            p.as_path(),
+            cli.obs.as_deref().map(str::trim),
+            &peek_genes,
+        );
     }
 
     #[cfg(feature = "view-image")]

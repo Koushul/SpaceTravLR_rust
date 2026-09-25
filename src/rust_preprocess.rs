@@ -860,6 +860,7 @@ pub fn run_umap_on_pca(
     params: &RustPreprocessParams,
     log: &mut Vec<(String, f64)>,
     knn_cache_in: Option<&UmapLabKnnCache>,
+    step_secs: &mut PreprocessStepSeconds,
 ) -> Result<(Array2Umap<f32>, FuzzyGraph, UmapLabKnnCache)> {
     let n = pca.nrows();
     let dim = params.n_pca_components;
@@ -871,6 +872,7 @@ pub fn run_umap_on_pca(
         );
     }
 
+    let t_neighbors = Instant::now();
     let (knn_idx, knn_dist, knn_cache) = match knn_cache_in {
         Some(cache) if cache.matches(pca, params) => {
             let t0 = Instant::now();
@@ -957,7 +959,9 @@ pub fn run_umap_on_pca(
         "umap learn_manifold (fuzzy graph)".to_string(),
         t1.elapsed().as_secs_f64(),
     ));
+    step_secs.neighbors = Some(t_neighbors.elapsed().as_secs_f64());
 
+    let t_umap = Instant::now();
     let t2 = Instant::now();
     eprintln!(">>> umap spectral init");
     let init = spectral_init_2d(manifold.graph(), 2, 42);
@@ -981,6 +985,7 @@ pub fn run_umap_on_pca(
         "umap optimize (umap-rs)".to_string(),
         t3.elapsed().as_secs_f64(),
     ));
+    step_secs.umap = Some(t_umap.elapsed().as_secs_f64());
 
     Ok((fitted.into_embedding(), fuzzy_graph, knn_cache))
 }
@@ -1141,6 +1146,109 @@ pub fn umap_lab_load_pca_session(
     })
 }
 
+/// Seconds for the fixed preprocess timing report. `None` means that step did not run.
+/// QC and Scale are always omitted: this pipeline has no `calculate_qc_metrics` pass and does
+/// not run Scanpy `pp.scale` (PCA mean-centers only).
+#[derive(Clone, Debug, Default)]
+pub struct PreprocessStepSeconds {
+    pub load: Option<f64>,
+    pub filter_cells: Option<f64>,
+    pub filter_genes: Option<f64>,
+    pub normalize: Option<f64>,
+    pub log1p: Option<f64>,
+    pub highly_variable_genes: Option<f64>,
+    pub subset_genes: Option<f64>,
+    pub pca: Option<f64>,
+    pub neighbors: Option<f64>,
+    pub umap: Option<f64>,
+    pub leiden: Option<f64>,
+    pub total: f64,
+}
+
+pub const PREPROCESS_TIMING_LABELS: [&str; 14] = [
+    "Load",
+    "QC",
+    "Filter cells",
+    "Filter genes",
+    "Normalize",
+    "Log1p",
+    "Highly variable genes",
+    "Subset to those genes",
+    "Scale",
+    "PCA",
+    "Neighbors",
+    "UMAP",
+    "Leiden",
+    "Total",
+];
+
+fn format_timing_line(label: &str, secs: Option<f64>) -> String {
+    match secs {
+        Some(s) => format!("{label}: {s:.2} s\n"),
+        None => format!("{label}: not run\n"),
+    }
+}
+
+pub fn format_preprocess_step_timings(t: &PreprocessStepSeconds) -> String {
+    let mut out = String::new();
+    out.push_str(&format_timing_line("Load", t.load));
+    out.push_str(&format_timing_line("QC", None));
+    out.push_str(&format_timing_line("Filter cells", t.filter_cells));
+    out.push_str(&format_timing_line("Filter genes", t.filter_genes));
+    out.push_str(&format_timing_line("Normalize", t.normalize));
+    out.push_str(&format_timing_line("Log1p", t.log1p));
+    out.push_str(&format_timing_line(
+        "Highly variable genes",
+        t.highly_variable_genes,
+    ));
+    out.push_str(&format_timing_line(
+        "Subset to those genes",
+        t.subset_genes,
+    ));
+    out.push_str(&format_timing_line("Scale", None));
+    out.push_str(&format_timing_line("PCA", t.pca));
+    out.push_str(&format_timing_line("Neighbors", t.neighbors));
+    out.push_str(&format_timing_line("UMAP", t.umap));
+    out.push_str(&format_timing_line("Leiden", t.leiden));
+    out.push_str(&format_timing_line("Total", Some(t.total)));
+    out
+}
+
+thread_local! {
+    static PREPROCESS_TIMING_CAPTURE: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// Record the next preprocess timing summary into a thread-local buffer (in addition to stderr).
+pub fn testing_begin_preprocess_timing_capture() {
+    PREPROCESS_TIMING_CAPTURE.with(|slot| *slot.borrow_mut() = Some(String::new()));
+}
+
+pub fn testing_take_preprocess_timing_capture() -> Option<String> {
+    PREPROCESS_TIMING_CAPTURE.with(|slot| slot.borrow_mut().take())
+}
+
+fn emit_preprocess_step_timings(t: &PreprocessStepSeconds) {
+    let text = format_preprocess_step_timings(t);
+    eprint!("{text}");
+    PREPROCESS_TIMING_CAPTURE.with(|slot| {
+        if let Some(buf) = slot.borrow_mut().as_mut() {
+            buf.push_str(&text);
+        }
+    });
+}
+
+struct PreprocessTimingGuard {
+    started: Instant,
+    steps: PreprocessStepSeconds,
+}
+
+impl Drop for PreprocessTimingGuard {
+    fn drop(&mut self) {
+        self.steps.total = self.started.elapsed().as_secs_f64();
+        emit_preprocess_step_timings(&self.steps);
+    }
+}
+
 /// Run UMAP on `pca` (same umap-rs + HNSW path as [`rust_preprocess_h5ad_to_memory`]).
 ///
 /// Pass `knn_cache_in` from a previous run when only manifold or optimization parameters changed;
@@ -1151,7 +1259,9 @@ pub fn umap_lab_run_embedding(
     knn_cache_in: Option<&UmapLabKnnCache>,
 ) -> Result<UmapLabEmbeddingResult> {
     let mut log = Vec::new();
-    let (emb_umap, graph, knn_cache) = run_umap_on_pca(pca, params, &mut log, knn_cache_in)?;
+    let mut ignored_steps = PreprocessStepSeconds::default();
+    let (emb_umap, graph, knn_cache) =
+        run_umap_on_pca(pca, params, &mut log, knn_cache_in, &mut ignored_steps)?;
     let n = emb_umap.nrows();
     let m = emb_umap.ncols();
     let emb = Array2::<f32>::from_shape_fn((n, m), |(i, j)| emb_umap[(i, j)]);
@@ -1567,8 +1677,35 @@ fn h5ad_attr_encoding_type_string(attr: &hdf5_metno::Attribute) -> Option<String
     None
 }
 
+fn dataset_encoding_is_null(ds: &hdf5_metno::Dataset) -> bool {
+    ds.attr("encoding-type")
+        .ok()
+        .and_then(|a| h5ad_attr_encoding_type_string(&a))
+        .is_some_and(|s| s == "null")
+}
+
+fn group_has_null_encoding_dataset(g: &hdf5_metno::Group) -> Result<bool> {
+    use hdf5_metno::LocationType;
+    for sub in g.member_names()? {
+        match g.loc_type_by_name(&sub)? {
+            LocationType::Group => {
+                if group_has_null_encoding_dataset(&g.group(&sub)?)? {
+                    return Ok(true);
+                }
+            }
+            LocationType::Dataset => {
+                if dataset_encoding_is_null(&g.dataset(&sub)?) {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
 fn h5ad_strip_uns_datasets_encoding_null(path: &Path) -> Result<usize> {
-    use hdf5_metno::{Dataset, File as H5File, Group, LocationType};
+    use hdf5_metno::{File as H5File, Group, LocationType};
 
     fn strip_in_group(g: &Group, removed: &mut usize) -> Result<()> {
         let names = g.member_names()?;
@@ -1576,13 +1713,7 @@ fn h5ad_strip_uns_datasets_encoding_null(path: &Path) -> Result<usize> {
             match g.loc_type_by_name(&sub)? {
                 LocationType::Group => strip_in_group(&g.group(&sub)?, removed)?,
                 LocationType::Dataset => {
-                    let ds: Dataset = g.dataset(&sub)?;
-                    let is_null = ds
-                        .attr("encoding-type")
-                        .ok()
-                        .and_then(|a| h5ad_attr_encoding_type_string(&a))
-                        .is_some_and(|s| s == "null");
-                    if is_null {
+                    if dataset_encoding_is_null(&g.dataset(&sub)?) {
                         g.unlink(&sub)?;
                         *removed += 1;
                     }
@@ -1593,16 +1724,28 @@ fn h5ad_strip_uns_datasets_encoding_null(path: &Path) -> Result<usize> {
         Ok(())
     }
 
+    let f = H5File::open(path).with_context(|| {
+        format!(
+            "open {} to scan uns datasets with encoding-type=null",
+            path.display()
+        )
+    })?;
+    let needs_strip = if f.link_exists("uns") {
+        group_has_null_encoding_dataset(&f.group("uns")?)?
+    } else {
+        false
+    };
+    f.close().context("HDF5 close after uns scan")?;
+    if !needs_strip {
+        return Ok(0);
+    }
+
     let f = H5File::open_rw(path).with_context(|| {
         format!(
             "open {} read-write to remove uns datasets with encoding-type=null (anndata-rs cannot read them)",
             path.display()
         )
     })?;
-    if !f.link_exists("uns") {
-        f.close().context("HDF5 close")?;
-        return Ok(0);
-    }
     let uns = f.group("uns")?;
     let mut removed = 0usize;
     strip_in_group(&uns, &mut removed)?;
@@ -1628,36 +1771,6 @@ fn prepare_h5ad_path_for_anndata_memory_load(path: &Path) {
             e
         ),
     }
-    match h5ad_strip_obsp_for_preprocess_load(path) {
-        Ok(false) => {}
-        Ok(true) => eprintln!(
-            "rust_preprocess: removed obsp (Scanpy neighbor graphs) from {} — full prep recomputes UMAP/Leiden",
-            path.display()
-        ),
-        Err(e) => eprintln!(
-            "rust_preprocess: warning: could not strip obsp from {}: {:#}. \
-             Loading may still work if obsp CSR is canonical.",
-            path.display(),
-            e
-        ),
-    }
-}
-
-fn h5ad_strip_obsp_for_preprocess_load(path: &Path) -> Result<bool> {
-    use hdf5_metno::File as H5File;
-
-    let f = match H5File::open_rw(path) {
-        Ok(f) => f,
-        Err(_) => return Ok(false),
-    };
-    if !f.link_exists("obsp") {
-        f.close().context("HDF5 close")?;
-        return Ok(false);
-    }
-    f.unlink("obsp").context("unlink obsp group")?;
-    f.flush().context("HDF5 flush after obsp strip")?;
-    f.close().context("HDF5 close after obsp strip")?;
-    Ok(true)
 }
 
 fn umap_lab_h5_dense_x_column_f32(
@@ -2712,6 +2825,7 @@ fn sync_labels_after_embedding(
     run_magic: bool,
     params: &RustPreprocessParams,
     log: &mut Vec<(String, f64)>,
+    step_secs: &mut PreprocessStepSeconds,
 ) -> Result<Vec<String>> {
     let obs = adata.obs().get_data();
     let had_cell_type = obs_column_as_strings(&obs, "cell_type")?.is_some();
@@ -2722,8 +2836,10 @@ fn sync_labels_after_embedding(
         eprintln!(">>> leiden-rs");
         let labels =
             leiden_labels_from_graph(graph, params.leiden_resolution, params.leiden_max_iter);
-        eprintln!("<<< leiden-rs: {:.2} s", t.elapsed().as_secs_f64());
-        log.push(("leiden-rs".to_string(), t.elapsed().as_secs_f64()));
+        let dt = t.elapsed().as_secs_f64();
+        eprintln!("<<< leiden-rs: {dt:.2} s");
+        log.push(("leiden-rs".to_string(), dt));
+        step_secs.leiden = Some(dt);
 
         let mut patched = adata.obs().get_data();
         let leiden_ids: Vec<i32> = labels
@@ -2892,15 +3008,27 @@ pub fn rust_preprocess_h5ad_to_memory(
     steps: &RustPreprocessSteps,
 ) -> Result<IMAnnData> {
     let mut log: Vec<(String, f64)> = Vec::new();
+    let mut timing = PreprocessTimingGuard {
+        started: Instant::now(),
+        steps: PreprocessStepSeconds::default(),
+    };
 
     let t0 = Instant::now();
     eprintln!(">>> read_h5ad");
     prepare_h5ad_path_for_anndata_memory_load(input);
-    let mut adata = load_h5ad_fast(input).context("load_h5ad_fast")?;
+    let mut adata = match load_h5ad_fast(input) {
+        Ok(adata) => adata,
+        Err(e) => {
+            timing.steps.load = Some(t0.elapsed().as_secs_f64());
+            return Err(e).context("load_h5ad_fast");
+        }
+    };
     maybe_restore_var_names_in_memory(&adata).context("restore var_names from var columns")?;
     eprintln!("  loaded shape=({}, {})", adata.n_obs(), adata.n_vars());
-    eprintln!("<<< read_h5ad: {:.2} s", t0.elapsed().as_secs_f64());
-    log.push(("read_h5ad".to_string(), t0.elapsed().as_secs_f64()));
+    let load_secs = t0.elapsed().as_secs_f64();
+    eprintln!("<<< read_h5ad: {load_secs:.2} s");
+    log.push(("read_h5ad".to_string(), load_secs));
+    timing.steps.load = Some(load_secs);
 
     if steps.qc_filter {
         let t = Instant::now();
@@ -2920,10 +3048,9 @@ pub fn rust_preprocess_h5ad_to_memory(
             params.min_cells,
             t.elapsed().as_secs_f64()
         );
-        log.push((
-            format!("filter_genes(min_cells={})", params.min_cells),
-            t.elapsed().as_secs_f64(),
-        ));
+        let dt = t.elapsed().as_secs_f64();
+        log.push((format!("filter_genes(min_cells={})", params.min_cells), dt));
+        timing.steps.filter_genes = Some(dt);
 
         let t = Instant::now();
         eprintln!(">>> filter_cells(min_genes={})", params.min_genes);
@@ -2942,10 +3069,9 @@ pub fn rust_preprocess_h5ad_to_memory(
             params.min_genes,
             t.elapsed().as_secs_f64()
         );
-        log.push((
-            format!("filter_cells(min_genes={})", params.min_genes),
-            t.elapsed().as_secs_f64(),
-        ));
+        let dt = t.elapsed().as_secs_f64();
+        log.push((format!("filter_cells(min_genes={})", params.min_genes), dt));
+        timing.steps.filter_cells = Some(dt);
 
         let t = Instant::now();
         eprintln!(">>> apply masks (subset)");
@@ -3009,16 +3135,20 @@ pub fn rust_preprocess_h5ad_to_memory(
             .map_err(|e| anyhow!("normalize_expression: {e:?}"))?;
             let norm_data = adata.x().get_data().context("x after normalize")?;
             layer_replace_if_present(&adata, "normalized_count", norm_data)?;
-            eprintln!("<<< normalize_total: {:.2} s", t.elapsed().as_secs_f64());
-            log.push(("normalize_total".to_string(), t.elapsed().as_secs_f64()));
+            let dt = t.elapsed().as_secs_f64();
+            eprintln!("<<< normalize_total: {dt:.2} s");
+            log.push(("normalize_total".to_string(), dt));
+            timing.steps.normalize = Some(dt);
 
             let t = Instant::now();
             eprintln!(">>> log1p");
             log1p_expression(&adata.x(), None).map_err(|e| anyhow!("log1p_expression: {e:?}"))?;
             let log_data = adata.x().get_data().context("x after log1p")?;
             layer_replace_if_present(&adata, "log1p", log_data)?;
-            eprintln!("<<< log1p: {:.2} s", t.elapsed().as_secs_f64());
-            log.push(("log1p".to_string(), t.elapsed().as_secs_f64()));
+            let dt = t.elapsed().as_secs_f64();
+            eprintln!("<<< log1p: {dt:.2} s");
+            log.push(("log1p".to_string(), dt));
+            timing.steps.log1p = Some(dt);
         }
     } else if steps.hvg_pca || steps.run_umap_and_graph || steps.run_magic_impute {
         bail!(
@@ -3057,10 +3187,9 @@ pub fn rust_preprocess_h5ad_to_memory(
                 "<<< highly_variable_genes({hvg_target}): {:.2} s",
                 t.elapsed().as_secs_f64()
             );
-            log.push((
-                format!("highly_variable_genes({hvg_target})"),
-                t.elapsed().as_secs_f64(),
-            ));
+            let dt = t.elapsed().as_secs_f64();
+            log.push((format!("highly_variable_genes({hvg_target})"), dt));
+            timing.steps.highly_variable_genes = Some(dt);
 
             let hvg_mask = read_var_hvg_mask(&adata)?;
             let var_names = adata.var_names();
@@ -3097,7 +3226,9 @@ pub fn rust_preprocess_h5ad_to_memory(
                 adata.n_obs(),
                 adata.n_vars()
             );
-            log.push(("subset HVG genes".to_string(), t.elapsed().as_secs_f64()));
+            let dt = t.elapsed().as_secs_f64();
+            log.push(("subset HVG genes".to_string(), dt));
+            timing.steps.subset_genes = Some(dt);
         } else {
             eprintln!(
                 "rust_preprocess: retaining all {n_keep} genes (no column subset; matches HVG mask)"
@@ -3106,14 +3237,15 @@ pub fn rust_preprocess_h5ad_to_memory(
 
         mark_all_var_highly_variable(&adata).context("var highly_variable after HVG subset")?;
 
-        let t = Instant::now();
+        let t_pca = Instant::now();
         eprintln!(">>> convert X to CSR (for PCA)");
         ensure_x_csr_for_pca(&adata)?;
-        eprintln!("<<< convert X to CSR: {:.2} s", t.elapsed().as_secs_f64());
-        log.push(("convert X to CSR".to_string(), t.elapsed().as_secs_f64()));
+        eprintln!(
+            "<<< convert X to CSR: {:.2} s",
+            t_pca.elapsed().as_secs_f64()
+        );
 
         let pca_feature_mask = vec![true; adata.n_vars()];
-        let t = Instant::now();
         eprintln!(">>> pca");
         let pca_res = run_pca_sparse_masked::<f64>(
             &adata.x(),
@@ -3134,8 +3266,10 @@ pub fn rust_preprocess_h5ad_to_memory(
         .map_err(|e| anyhow!("PCA: {e:?}"))?;
         pca = pca_res.transformed;
         eprintln!("  PCA shape: {:?}", pca.shape());
-        eprintln!("<<< pca: {:.2} s", t.elapsed().as_secs_f64());
-        log.push(("pca".to_string(), t.elapsed().as_secs_f64()));
+        let dt = t_pca.elapsed().as_secs_f64();
+        eprintln!("<<< pca: {dt:.2} s");
+        log.push(("pca".to_string(), dt));
+        timing.steps.pca = Some(dt);
     } else if steps.run_umap_and_graph {
         bail!("rust_preprocess: UMAP requires hvg_pca=true");
     }
@@ -3151,7 +3285,8 @@ pub fn rust_preprocess_h5ad_to_memory(
     }
 
     if steps.run_umap_and_graph {
-        let (emb_umap, fuzzy_graph, _knn_cache) = run_umap_on_pca(&pca, params, &mut log, None)?;
+        let (emb_umap, fuzzy_graph, _knn_cache) =
+            run_umap_on_pca(&pca, params, &mut log, None, &mut timing.steps)?;
 
         let n = emb_umap.nrows();
         let umap_f64 =
@@ -3170,16 +3305,11 @@ pub fn rust_preprocess_h5ad_to_memory(
             steps.run_magic_impute,
             params,
             &mut log,
+            &mut timing.steps,
         )?;
         if steps.run_magic_impute {
             add_magic_imputed_count(&adata, &fuzzy_graph, &labels, params.magic_t, &mut log)?;
         }
-    }
-
-    let total: f64 = log.iter().map(|(_, s)| s).sum();
-    eprintln!("rust_preprocess: TOTAL (sum of steps) {total:.2} s");
-    for (name, dt) in &log {
-        eprintln!("  {name}: {dt:.2} s");
     }
 
     Ok(adata)
