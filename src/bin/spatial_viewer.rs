@@ -21,10 +21,10 @@ use ndarray::{Array2, Axis};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use spacetravlr::adata_query::{
-    cell_expression_map, cell_type_encoding, clusters_as_u32_le_bytes,
-    expression_matrix_genes_subset, expression_profiles_for_cells, f32_vec_to_le_bytes,
-    gene_expression_f32, genes_with_prefix, obs_names, open_adata, spatial_obsm_key_used,
-    spatial_xy, spatial_xy_f32_interleaved, try_umap_xy, u16_vec_to_le_bytes, var_names,
+    cell_expression_map, clusters_as_u32_le_bytes, expression_matrix_genes_subset,
+    expression_profiles_for_cells, f32_vec_to_le_bytes, gene_expression_f32, genes_with_prefix,
+    obs_column_label_encoding, obs_names, open_adata, spatial_obsm_key_used, spatial_xy,
+    spatial_xy_f32_interleaved, try_umap_xy, u16_vec_to_le_bytes, var_names,
 };
 use spacetravlr::betadata::{
     BetadataCollectAggregate, BetadataUiProgress, CollectedInteraction, GeneMatrix, PairLrBetaRow,
@@ -124,8 +124,11 @@ struct Cli {
     h5ad: Option<PathBuf>,
     #[arg(long, default_value = "imputed_count")]
     layer: String,
-    #[arg(long, default_value = "cell_type")]
-    cluster_annot: String,
+    #[arg(
+        long,
+        help = "obs column for clusters (default: [data].cluster_annot from --run-toml, else cell_type)"
+    )]
+    cluster_annot: Option<String>,
     #[arg(long, default_value = "127.0.0.1")]
     bind: String,
     #[arg(long, default_value_t = 8080)]
@@ -1367,6 +1370,17 @@ fn resolve_load_inputs(
             anyhow::bail!("run TOML {} has empty data.adata_path", rtp.display());
         }
         inputs.h5ad = PathBuf::from(ap);
+        if inputs.cluster_annot.trim().is_empty() {
+            let from_cfg = cfg.data.cluster_annot.trim();
+            inputs.cluster_annot = if from_cfg.is_empty() {
+                "cell_type".to_string()
+            } else {
+                from_cfg.to_string()
+            };
+        }
+        if inputs.layer.trim().is_empty() {
+            inputs.layer = cfg.data.layer.clone();
+        }
         Some(cfg)
     } else {
         if inputs.h5ad.as_os_str().is_empty() {
@@ -1374,6 +1388,9 @@ fn resolve_load_inputs(
         }
         None
     };
+    if inputs.cluster_annot.trim().is_empty() {
+        inputs.cluster_annot = "cell_type".to_string();
+    }
     Ok((inputs, run_spaceship_cfg))
 }
 
@@ -1481,7 +1498,7 @@ fn load_app_state(inputs: ViewerLoadInputs) -> anyhow::Result<AppDataset> {
     );
     let clusters_bin = Arc::new(clusters_as_u32_le_bytes(clusters.as_ref()));
     let n_vars = adata.n_vars();
-    let cell_type_enc = cell_type_encoding(&adata)?;
+    let cell_type_enc = obs_column_label_encoding(&adata, &inputs.cluster_annot).map(Some)?;
     let (cell_type_column, cell_type_categories, cell_type_codes_bin) = match cell_type_enc {
         Some((name, cats, codes)) => (
             Some(name),
@@ -1619,7 +1636,7 @@ async fn api_session_configure(
         ));
     }
     let layer = non_empty_trimmed(&body.layer, "imputed_count");
-    let cluster_annot = non_empty_trimmed(&body.cluster_annot, "cell_type");
+    let cluster_annot = body.cluster_annot.trim().to_string();
     let network_dir = session_path_field(&body.network_dir);
     let inputs = ViewerLoadInputs {
         h5ad,
@@ -1693,9 +1710,10 @@ async fn api_session_configure(
     w.perturb_bg_pending.store(false, Ordering::SeqCst);
     w.perturb_suppress_bg_loading_ui
         .store(false, Ordering::SeqCst);
+    let resolved_annot = new_dataset.cluster_annot.clone();
     w.dataset = Some(new_dataset);
     w.default_layer = layer;
-    w.default_cluster_annot = cluster_annot;
+    w.default_cluster_annot = resolved_annot;
     w.default_network_dir = network_dir;
     w.default_run_toml = run_toml;
     w.default_perturb_overlay = perturb_overlay;
@@ -5513,7 +5531,7 @@ fn build_app(
         Some(load_app_state(ViewerLoadInputs {
             h5ad: cli.h5ad.clone().unwrap_or_default(),
             layer: cli.layer.clone(),
-            cluster_annot: cli.cluster_annot.clone(),
+            cluster_annot: cli.cluster_annot.clone().unwrap_or_default(),
             network_dir: cli.network_dir.clone(),
             run_toml: cli.run_toml.clone(),
             perturb_overlay: cli.perturb_overlay.clone(),
@@ -5525,7 +5543,11 @@ fn build_app(
     let state = Arc::new(RwLock::new(AppState {
         dataset,
         default_layer: cli.layer.clone(),
-        default_cluster_annot: cli.cluster_annot.clone(),
+        default_cluster_annot: cli
+            .cluster_annot
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "cell_type".to_string()),
         default_network_dir: cli.network_dir.clone(),
         default_run_toml: cli.run_toml.clone(),
         default_perturb_overlay: cli.perturb_overlay.clone(),

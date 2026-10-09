@@ -159,8 +159,24 @@ pub fn cell_type_encoding(
     let Some(col_name) = resolve_cell_type_column(&obs) else {
         return Ok(None);
     };
+    obs_column_label_encoding_from_frame(&obs, &col_name).map(Some)
+}
+
+/// Same encoding as [`cell_type_encoding`] for an explicit obs column (for example `[data].cluster_annot`).
+pub fn obs_column_label_encoding(
+    adata: &AnnData<H5>,
+    column: &str,
+) -> anyhow::Result<(String, Vec<String>, Vec<u16>)> {
+    let obs = adata.read_obs()?;
+    obs_column_label_encoding_from_frame(&obs, column)
+}
+
+fn obs_column_label_encoding_from_frame(
+    obs: &DataFrame,
+    col_name: &str,
+) -> anyhow::Result<(String, Vec<String>, Vec<u16>)> {
     let cell_col = obs
-        .column(&col_name)
+        .column(col_name)
         .map_err(|_| anyhow::anyhow!("obs column {:?} missing", col_name))?;
     let series = cell_col.as_materialized_series();
     let mut uniq: HashSet<String> = HashSet::new();
@@ -175,7 +191,7 @@ pub fn cell_type_encoding(
     let mut categories: Vec<String> = uniq.into_iter().collect();
     categories.sort();
     if categories.len() >= u16::MAX as usize {
-        anyhow::bail!("too many distinct cell_type labels");
+        anyhow::bail!("too many distinct labels in obs column {col_name:?}");
     }
     let cat_to_id: std::collections::HashMap<String, u16> = categories
         .iter()
@@ -192,7 +208,7 @@ pub fn cell_type_encoding(
             codes.push(*cat_to_id.get(t).unwrap_or(&u16::MAX));
         }
     }
-    Ok(Some((col_name, categories, codes)))
+    Ok((col_name.to_string(), categories, codes))
 }
 
 pub fn u16_vec_to_le_bytes(codes: &[u16]) -> Vec<u8> {

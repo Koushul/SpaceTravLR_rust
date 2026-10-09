@@ -738,7 +738,10 @@ impl App {
                     ),
                 ]),
                 vec![Line::from(Span::styled(
-                    "Select a gene (↑/↓) for mean expression by cell_type / cluster (obs column cell_type when present).",
+                    format!(
+                        "Select a gene (↑/↓) for mean expression by obs column {}.",
+                        rt.cfg.data.cluster_annot
+                    ),
                     Style::default().fg(p.muted),
                 ))],
             );
@@ -1094,6 +1097,23 @@ impl App {
                 picked,
                 list_state,
             } => {
+                let annot = self
+                    .runtime
+                    .as_ref()
+                    .map(|rt| rt.cfg.data.cluster_annot.as_str())
+                    .unwrap_or("cluster");
+                let label_for = |ct: &usize| -> String {
+                    self.runtime
+                        .as_ref()
+                        .map(|rt| {
+                            crate::perturb_mode::cluster_label_for_id(
+                                &rt.cell_types,
+                                &rt.expression_preview_labels,
+                                *ct,
+                            )
+                        })
+                        .unwrap_or_else(|| ct.to_string())
+                };
                 let items: Vec<ListItem> = cell_types
                     .iter()
                     .map(|ct| {
@@ -1104,8 +1124,8 @@ impl App {
                         };
                         ListItem::new(Line::from(vec![
                             Span::styled(format!("{m} "), Style::default().fg(mc)),
-                            Span::styled("cell_type ", Style::default().fg(pal.muted)),
-                            Span::styled(format!("{ct}"), Style::default().fg(pal.title)),
+                            Span::styled(format!("{annot} "), Style::default().fg(pal.muted)),
+                            Span::styled(label_for(ct), Style::default().fg(pal.title)),
                         ]))
                     })
                     .collect();

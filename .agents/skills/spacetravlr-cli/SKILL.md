@@ -76,7 +76,7 @@ Written under `[execution].output_dir` by the leader run. Records the **effectiv
 | `get-microniches` | Discover spatial microniches from a finished run’s β feathers (spatial β filter → PCA → Leiden) |
 | `gui` | Build the UMAP lab web UI, start the API + static server, print the URL |
 
-`collect-interactions` flags: `--run-toml PATH` (required), `--annot` (default `cell_type`), `--cluster-col`, `--aggregate` (`mean` | `min` | `max` | `sum` | `positive` | `negative`, default `mean`), `--across-samples` (pool-lasso: also emit cell-weighted `sample="_all"` rows), `--out` (default `<output_dir>/plucked_feathers.feather`).
+`collect-interactions` flags: `--run-toml PATH` (required), `--annot` (default: `[data].cluster_annot` from the run TOML), `--cluster-col`, `--aggregate` (`mean` | `min` | `max` | `sum` | `positive` | `negative`, default `mean`), `--across-samples` (pool-lasso: also emit cell-weighted `sample="_all"` rows), `--out` (default `<output_dir>/plucked_feathers.feather`).
 
 On pool-lasso repro TOMLs, collect walks sample directories in parallel (one progress bar over all `*_betadata.feather` files), stamps `sample` / `condition`, and does not join one slide’s coefficients onto another slide’s cells.
 
@@ -95,7 +95,7 @@ spacetravlr get-microniches \
   --out ./microniches
 ```
 
-Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`, `--filter-parallelism` (max concurrent feather loads; default 4). Writes `microniche_labels.csv` (obs names as index, `microniche` column), `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
+Useful flags: `--features-csv` (skip filter; reuse a prior kept-β list), `--resolution-min/max/step`, `--n-pcs`, `--n-neighbors`, `--q-bh-max`, `--filter-parallelism` (max concurrent feather loads; default 4). `--annot` defaults to `[data].cluster_annot` from the run TOML. Writes `microniche_labels.csv` (obs names as index, `microniche` column), `kept_beta_features.csv`, `resolution_sweep.csv`, `summary.json`, `microniche_pca.feather`.
 
 ### Input
 

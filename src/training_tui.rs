@@ -1025,7 +1025,7 @@ pub fn run_dataset_paths_prompt(
                     " AnnData (.h5ad) ",
                     vec![
                         Line::from(Span::styled(
-                            "Make sure `cell_type` is in .obs and `spatial` is in .obsm",
+                            "Make sure the cluster obs column (default `cell_type`) is in .obs and `spatial` is in .obsm",
                             Style::default().fg(pal.muted),
                         )),
                         Line::from(Span::styled(
@@ -2100,7 +2100,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                 )));
             } else if cell_counts.is_empty() {
                 cell_lines.push(Line::from(Span::styled(
-                    "  ·  no cell-type label column  ·",
+                    format!("  ·  no labels in obs.{}  ·", st.run_config.cluster_annot),
                     Style::default().fg(pal.muted),
                 )));
             } else {
@@ -2132,7 +2132,7 @@ pub fn run_training_dashboard(hud: TrainingHud) -> anyhow::Result<TrainingDashbo
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(pal.tel_bord))
                             .title(Span::styled(
-                                " Cell Types ",
+                                format!(" {} ", st.run_config.cluster_annot),
                                 Style::default().fg(pal.title).add_modifier(Modifier::BOLD),
                             )),
                     )

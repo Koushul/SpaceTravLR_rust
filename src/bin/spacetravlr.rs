@@ -272,10 +272,9 @@ struct CollectInteractionsCli {
     run_toml: PathBuf,
     #[arg(
         long,
-        default_value = "cell_type",
-        help = "obs column for cell-type grouping"
+        help = "obs column for cell-type grouping (default: [data].cluster_annot from the run TOML)"
     )]
-    annot: String,
+    annot: Option<String>,
     #[arg(
         long,
         value_name = "COL",
@@ -317,10 +316,9 @@ struct GetMicronichesCli {
     cell_type: Option<String>,
     #[arg(
         long,
-        default_value = "cell_type",
-        help = "obs column used with --cell-type"
+        help = "obs column used with --cell-type (default: [data].cluster_annot from the run TOML)"
     )]
-    annot: String,
+    annot: Option<String>,
     #[arg(
         long,
         value_name = "DIR",
@@ -2259,7 +2257,12 @@ fn run_run_summary(cli: &Cli, rs: &RunSummaryCli) -> anyhow::Result<()> {
 
 fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
     let cfg = SpaceshipConfig::from_file(&ci.run_toml)?;
-    let annot_col = ci.annot.trim();
+    let annot_col = ci
+        .annot
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cfg.data.cluster_annot.trim());
     anyhow::ensure!(
         !annot_col.is_empty(),
         "--annot must be a non-empty obs column name"
@@ -2441,8 +2444,20 @@ fn run_collect_interactions(ci: &CollectInteractionsCli) -> anyhow::Result<()> {
 }
 
 fn run_get_microniches(gm: &GetMicronichesCli) -> anyhow::Result<()> {
+    let cfg = SpaceshipConfig::from_file(&gm.run_toml)?;
+    let annot_col = gm
+        .annot
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cfg.data.cluster_annot.trim())
+        .to_string();
+    anyhow::ensure!(
+        !annot_col.is_empty(),
+        "--annot must be a non-empty obs column name"
+    );
     let params = MicronichesParams {
-        annot_col: gm.annot.clone(),
+        annot_col,
         cell_type: gm.cell_type.clone(),
         n_neighbors: gm.n_neighbors,
         n_pcs: gm.n_pcs,

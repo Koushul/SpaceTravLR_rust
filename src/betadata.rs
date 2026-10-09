@@ -147,8 +147,9 @@ pub fn build_cluster_id_to_betadata_cluster_key_map(
     Ok(out)
 }
 
-/// `usize` cluster codes for UI / colormap grouping (Float64 cast + round). For betadata row
-/// matching use [`betadata_cluster_keys_from_obs_dataframe`] instead when the column is categorical.
+/// Per-cell cluster indices for `cluster_annot`: numeric ids, categorical codes, or stable
+/// indices from string labels. String columns use the sorted unique labels (same mapping as
+/// training), so a column other than `cell_type` still groups correctly.
 pub fn clusters_usize_from_obs_dataframe(
     obs: &DataFrame,
     cluster_annot: &str,
@@ -166,18 +167,58 @@ pub fn clusters_usize_from_obs_dataframe(
             preview
         )
     })?;
-    let f = col.cast(&DataType::Float64).map_err(|e| {
-        anyhow::anyhow!(
-            "obs column {:?} must be numeric (cluster ids): {}",
-            cluster_annot,
-            e
-        )
-    })?;
-    let ca = f.f64()?;
-    Ok(ca
-        .into_iter()
-        .map(|v| v.unwrap_or(0.0).round() as i64 as usize)
-        .collect())
+    let s = col.as_materialized_series();
+    let n = obs.height();
+    let v: Vec<usize> = match s.dtype() {
+        DataType::String => {
+            let ca = s
+                .str()
+                .map_err(|e| anyhow::anyhow!("obs column {:?} as string: {}", cluster_annot, e))?;
+            let mut seen = HashSet::<String>::new();
+            for x in ca.into_iter().flatten() {
+                seen.insert(x.to_string());
+            }
+            let mut uniq: Vec<String> = seen.into_iter().collect();
+            uniq.sort();
+            let map: HashMap<String, usize> =
+                uniq.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
+            ca.into_iter()
+                .map(|o| o.and_then(|x| map.get(x).copied()).unwrap_or(0))
+                .collect()
+        }
+        DataType::Categorical(_, _) | DataType::Enum(_, _) => {
+            let phys = s.cast(&DataType::UInt32).map_err(|e| {
+                anyhow::anyhow!(
+                    "obs column {:?} (categorical) could not be read as codes: {}",
+                    cluster_annot,
+                    e
+                )
+            })?;
+            let ca = phys.u32().map_err(|e| anyhow::anyhow!("{}", e))?;
+            ca.into_iter().map(|o| o.unwrap_or(0) as usize).collect()
+        }
+        _ => {
+            let f_series = s.cast(&DataType::Float64).map_err(|e| {
+                anyhow::anyhow!(
+                    "obs column {:?} must be numeric, string, or categorical for clusters: {}",
+                    cluster_annot,
+                    e
+                )
+            })?;
+            let f = f_series.f64().map_err(|e| anyhow::anyhow!("{}", e))?;
+            f.into_iter()
+                .map(|o| o.unwrap_or(0.0).round() as usize)
+                .collect()
+        }
+    };
+    anyhow::ensure!(
+        v.len() == n,
+        "cluster column {:?} length {} != n_obs {}",
+        cluster_annot,
+        v.len(),
+        n
+    );
+    Ok(v)
 }
 
 /// Beta coefficients for a single target gene.

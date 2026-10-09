@@ -1201,10 +1201,7 @@ pub fn format_preprocess_step_timings(t: &PreprocessStepSeconds) -> String {
         "Highly variable genes",
         t.highly_variable_genes,
     ));
-    out.push_str(&format_timing_line(
-        "Subset to those genes",
-        t.subset_genes,
-    ));
+    out.push_str(&format_timing_line("Subset to those genes", t.subset_genes));
     out.push_str(&format_timing_line("Scale", None));
     out.push_str(&format_timing_line("PCA", t.pca));
     out.push_str(&format_timing_line("Neighbors", t.neighbors));
@@ -3465,10 +3462,7 @@ pub fn compress_h5ad_inplace(path: &Path) -> Result<()> {
             .context("open source AnnData")?;
         let dst = AnnData::<H5>::open(H5::open_rw(&tmp).context("reopen temp")?)
             .context("open temp AnnData")?;
-        let x = src
-            .x()
-            .get::<ArrayData>()?
-            .context("source X is empty")?;
+        let x = src.x().get::<ArrayData>()?.context("source X is empty")?;
         let x_csr = array_data_to_csr_f64_for_h5_export(x).context("sparsify X")?;
         let nnz = csr_nnz(&x_csr);
         let shape = x_csr.shape();
@@ -3534,8 +3528,8 @@ fn h5o_copy_link(src: &hdf5_metno::File, dst: &hdf5_metno::File, name: &str) -> 
 }
 
 fn copy_root_string_attrs(src: &hdf5_metno::File, dst: &hdf5_metno::File) -> Result<()> {
-    use std::str::FromStr;
     use hdf5_metno::types::{VarLenAscii, VarLenUnicode};
+    use std::str::FromStr;
     for name in src.attr_names()? {
         let attr = src.attr(&name)?;
         let text = if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {

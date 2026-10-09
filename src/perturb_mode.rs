@@ -310,23 +310,24 @@ impl PerturbRuntime {
             betadata_cluster_keys_from_obs_dataframe(&obs_df, betadata_key_col.as_str())?;
         let clusters_full =
             clusters_usize_from_obs_dataframe(&obs_df, cfg.data.cluster_annot.as_str())?;
+        let preview_labels_full =
+            cluster_annot_labels_from_obs(&obs_df, cfg.data.cluster_annot.as_str())?;
         let obs_names: Vec<String> = row_idx.iter().map(|&i| obs_names_full[i].clone()).collect();
         let cluster_keys: Vec<String> = row_idx
             .iter()
             .map(|&i| cluster_keys_full[i].clone())
             .collect();
-        let expression_preview_labels: Vec<String> = if obs_df.column("cell_type").is_ok() {
-            let col = obs_df
-                .column("cell_type")
-                .with_context(|| "read obs column cell_type")?;
-            let series = col.as_materialized_series();
-            row_idx
-                .iter()
-                .map(|&i| obs_series_row_str(series, i))
-                .collect::<anyhow::Result<Vec<_>>>()?
-        } else {
-            cluster_keys.clone()
-        };
+        let expression_preview_labels: Vec<String> = row_idx
+            .iter()
+            .map(|&i| {
+                preview_labels_full.get(i).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "obs row {i} missing while reading {:?}",
+                        cfg.data.cluster_annot
+                    )
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
         let clusters: Vec<usize> = row_idx.iter().map(|&i| clusters_full[i]).collect();
         let xy_full = load_spatial_coords_f64(&adata)?;
         let xy = subset_xy_rows(&xy_full, &row_idx)?;
@@ -666,6 +667,44 @@ fn escape_csv_field(s: &str) -> String {
 }
 
 pub const CELLS_CSV_FILENAME: &str = "cells.csv";
+
+pub fn cluster_label_for_id(cell_types: &[usize], labels: &[String], id: usize) -> String {
+    cell_types
+        .iter()
+        .zip(labels.iter())
+        .find(|(ct, _)| **ct == id)
+        .map(|(_, lab)| lab.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| id.to_string())
+}
+
+pub fn parse_cluster_scope_token(
+    token: &str,
+    cell_types: &[usize],
+    labels: &[String],
+) -> anyhow::Result<usize> {
+    let token = token.trim();
+    let mut matched: Vec<usize> = cell_types
+        .iter()
+        .zip(labels.iter())
+        .filter(|(_, lab)| lab.as_str() == token)
+        .map(|(id, _)| *id)
+        .collect();
+    matched.sort_unstable();
+    matched.dedup();
+    if matched.len() == 1 {
+        return Ok(matched[0]);
+    }
+    if matched.len() > 1 {
+        anyhow::bail!("cluster label {token:?} maps to more than one id");
+    }
+    if let Ok(id) = token.parse::<usize>() {
+        if cell_types.contains(&id) {
+            return Ok(id);
+        }
+    }
+    anyhow::bail!("unknown cluster label {token:?} in obs annotation");
+}
 
 pub fn cluster_annot_labels_from_obs(
     obs_df: &polars::prelude::DataFrame,
@@ -1160,23 +1199,34 @@ pub fn run_interactive(runtime: PerturbRuntime) -> anyhow::Result<()> {
     println!(
         "Commands: list [N], search <query>, mark <gene> [all|ct1,ct2], scope <gene> <all|ct1,ct2>, unmark <gene>, show, run <value>, quit"
     );
-    println!("Available cell_type values: {:?}", all_cell_types);
+    let annot = runtime.cfg.data.cluster_annot.as_str();
+    let mut shown: Vec<(usize, String)> = all_cell_types
+        .iter()
+        .map(|&id| {
+            (
+                id,
+                cluster_label_for_id(&runtime.cell_types, &runtime.expression_preview_labels, id),
+            )
+        })
+        .collect();
+    shown.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    println!("Available {annot} values: {shown:?}");
 
-    fn parse_cell_type_scope(raw: &str) -> anyhow::Result<Option<HashSet<usize>>> {
+    let parse_cell_type_scope = |raw: &str| -> anyhow::Result<Option<HashSet<usize>>> {
         let cleaned = raw.trim();
         if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("all") {
             return Ok(None);
         }
         let mut out = HashSet::new();
         for part in cleaned.split(',') {
-            let v = part
-                .trim()
-                .parse::<usize>()
-                .with_context(|| format!("Invalid cell_type '{}'", part.trim()))?;
-            out.insert(v);
+            out.insert(parse_cluster_scope_token(
+                part,
+                &runtime.cell_types,
+                &runtime.expression_preview_labels,
+            )?);
         }
         Ok(Some(out))
-    }
+    };
 
     loop {
         let cmd = prompt_line("perturb> ")?;
@@ -1540,6 +1590,45 @@ mod tests {
         assert_eq!(parsed_s2.indices_for_column("ct_a").unwrap(), &[2usize]);
         assert_eq!(parsed_s2.indices_for_column("ct_b").unwrap(), &[3usize]);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cells_csv_and_scope_tokens_use_custom_obs_column() {
+        use polars::prelude::{DataFrame, NamedFrom, Series};
+
+        let obs = vec!["c0".into(), "c1".into(), "c2".into()];
+        let obs_df = DataFrame::new(vec![
+            Series::new("cell_type".into(), &["T", "T", "B"]).into(),
+            Series::new("annotation".into(), &["Epithelial", "B cell", "Epithelial"]).into(),
+        ])
+        .unwrap();
+        let labels = cluster_annot_labels_from_obs(&obs_df, "annotation").unwrap();
+        assert_eq!(labels, vec!["Epithelial", "B cell", "Epithelial"]);
+        let ids =
+            crate::betadata::clusters_usize_from_obs_dataframe(&obs_df, "annotation").unwrap();
+        let epithelial = parse_cluster_scope_token("Epithelial", &ids, &labels).unwrap();
+        let bcell = parse_cluster_scope_token("B cell", &ids, &labels).unwrap();
+        assert_ne!(epithelial, bcell);
+        assert_eq!(
+            cluster_label_for_id(&ids, &labels, epithelial),
+            "Epithelial"
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "spacetravlr_custom_annot_cells_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_training_init_cells_csv(&dir, &obs, &obs_df, "annotation", None).unwrap();
+        let parsed = parse_obs_columns_csv(&path, &obs).unwrap();
+        assert_eq!(
+            parsed.indices_for_column("Epithelial").unwrap(),
+            &[0usize, 2]
+        );
+        assert_eq!(parsed.indices_for_column("B cell").unwrap(), &[1usize]);
+        assert!(parsed.indices_for_column("T").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

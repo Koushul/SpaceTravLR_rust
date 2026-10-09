@@ -196,7 +196,7 @@ fn cluster_rows_all_tf_coef_columns_zero(rows: &[Vec<f64>], n_tf: usize) -> bool
 
 /// CNN-mode counterpart to the seed-only per-cluster betadata Feather: writes
 /// `<training_dir>/lasso_coefs/<gene>_lasso_coefs.feather` with one row per cluster
-/// (label column `cell_type`, then `beta0` + `beta_<modulator>` columns) using the
+/// (label column named after `[data].cluster_annot`, then `beta0` + `beta_<modulator>` columns) using the
 /// raw lasso intercepts/coefficients (no CNN). Mirrors the seed-only branch's
 /// scaling, zeroing of bad-fit clusters, and cluster→label mapping so downstream
 /// code (Betabase / spatial_viewer) sees identical numbers regardless of CNN mode.
@@ -212,11 +212,12 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     bad_betadata_clusters: &HashSet<usize>,
     cluster_betadata_row_keys: &HashMap<usize, String>,
     unscale_betas_on_export: bool,
+    label_col: &str,
 ) -> anyhow::Result<()> {
-    // Always emit ONE row per cell type seen in obs (the full training universe),
+    // Always emit ONE row per cluster seen in obs (the full training universe),
     // not just the clusters that successfully fit. Clusters with no Lasso fit, that
     // were filtered as "bad", or that errored out, get a row of zeros so downstream
-    // Betabase joins by `cell_type` key never fall back to row 0.
+    // joins by the cluster_annot label never fall back to row 0.
     let mut cluster_ids: Vec<usize> = cluster_betadata_row_keys.keys().copied().collect();
     cluster_ids.sort();
     if cluster_ids.is_empty() {
@@ -270,9 +271,14 @@ fn write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     let dir = training_dir.join("lasso_coefs");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let out_path = dir.join(format!("{}_lasso_coefs.feather", gene));
+    let label_col = if label_col.trim().is_empty() {
+        "cell_type"
+    } else {
+        label_col
+    };
     write_betadata_feather(
         out_path.to_string_lossy().as_ref(),
-        "cell_type",
+        label_col,
         &ids,
         col_names,
         &mat,
@@ -292,6 +298,7 @@ fn maybe_write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
     bad_betadata_clusters: &HashSet<usize>,
     cluster_betadata_row_keys: &HashMap<usize, String>,
     unscale_betas_on_export: bool,
+    label_col: &str,
 ) -> anyhow::Result<()> {
     if !model_export.save_lasso_coefs {
         return Ok(());
@@ -306,6 +313,7 @@ fn maybe_write_lasso_coefs_feather_for_gene<AB: AutodiffBackend>(
         bad_betadata_clusters,
         cluster_betadata_row_keys,
         unscale_betas_on_export,
+        label_col,
     )
 }
 
@@ -437,6 +445,7 @@ fn export_pooled_sample_gene<AB: AutodiffBackend>(
                         &bad_betadata_clusters,
                         cluster_betadata_row_keys,
                         unscale_betas_on_export,
+                        estimator.cluster_annot.as_str(),
                     );
                 }
                 Err(e) => {
@@ -1099,59 +1108,7 @@ pub fn clusters_array1_from_obs_column(
     obs_df: &DataFrame,
     cluster_annot: &str,
 ) -> anyhow::Result<Array1<usize>> {
-    use polars::prelude::DataType;
-    let col = obs_df.column(cluster_annot)?;
-    let s = col.as_materialized_series();
-    let n = obs_df.height();
-    let v: Vec<usize> = match s.dtype() {
-        DataType::String => {
-            let ca = s
-                .str()
-                .map_err(|e| anyhow::anyhow!("obs column {:?} as string: {}", cluster_annot, e))?;
-            let mut seen = HashSet::<String>::new();
-            for x in ca.into_iter().flatten() {
-                seen.insert(x.to_string());
-            }
-            let mut uniq: Vec<String> = seen.into_iter().collect();
-            uniq.sort();
-            let map: HashMap<String, usize> =
-                uniq.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
-            ca.into_iter()
-                .map(|o| o.and_then(|x| map.get(x).copied()).unwrap_or(0))
-                .collect()
-        }
-        DataType::Categorical(_, _) | DataType::Enum(_, _) => {
-            let phys = s.cast(&DataType::UInt32).map_err(|e| {
-                anyhow::anyhow!(
-                    "obs column {:?} (categorical) could not be read as codes: {}",
-                    cluster_annot,
-                    e
-                )
-            })?;
-            let ca = phys.u32().map_err(|e| anyhow::anyhow!("{}", e))?;
-            ca.into_iter().map(|o| o.unwrap_or(0) as usize).collect()
-        }
-        _ => {
-            let f_series = s.cast(&DataType::Float64).map_err(|e| {
-                anyhow::anyhow!(
-                    "obs column {:?} must be numeric, string, or categorical for clusters: {}",
-                    cluster_annot,
-                    e
-                )
-            })?;
-            let f = f_series.f64().map_err(|e| anyhow::anyhow!("{}", e))?;
-            f.into_iter()
-                .map(|o| o.unwrap_or(0.0).round() as usize)
-                .collect()
-        }
-    };
-    anyhow::ensure!(
-        v.len() == n,
-        "cluster column {:?} length {} != n_obs {}",
-        cluster_annot,
-        v.len(),
-        n
-    );
+    let v = crate::betadata::clusters_usize_from_obs_dataframe(obs_df, cluster_annot)?;
     Ok(Array1::from_vec(v))
 }
 
@@ -1172,11 +1129,11 @@ fn resolve_obs_cell_type_label_column(obs_df: &DataFrame) -> Option<String> {
     None
 }
 
-fn cell_type_label_counts_from_obs(obs_df: &DataFrame) -> Vec<(String, usize)> {
-    let Some(ct_name) = resolve_obs_cell_type_label_column(obs_df) else {
-        return Vec::new();
-    };
-    let Ok(cell_col) = obs_df.column(&ct_name) else {
+fn cell_type_label_counts_from_obs(
+    obs_df: &DataFrame,
+    cluster_annot: &str,
+) -> Vec<(String, usize)> {
+    let Ok(cell_col) = obs_df.column(cluster_annot) else {
         return Vec::new();
     };
     let series = cell_col.as_materialized_series();
@@ -1192,11 +1149,28 @@ fn cell_type_label_counts_from_obs(obs_df: &DataFrame) -> Vec<(String, usize)> {
     v
 }
 
+/// Label column used to look up TF priors. String or categorical `cluster_annot` values are
+/// the cluster names (even when the column is not called `cell_type`). Numeric cluster ids
+/// fall back to a `cell_type`-like column when one exists.
+fn tf_prior_label_column(obs_df: &DataFrame, cluster_annot: &str) -> Option<String> {
+    use polars::prelude::DataType;
+    if let Ok(col) = obs_df.column(cluster_annot) {
+        let dt = col.dtype();
+        if matches!(
+            dt,
+            DataType::String | DataType::Categorical(_, _) | DataType::Enum(_, _)
+        ) {
+            return Some(cluster_annot.to_string());
+        }
+    }
+    resolve_obs_cell_type_label_column(obs_df)
+}
+
 fn build_cluster_to_cell_type_map(
     obs_df: &DataFrame,
     cluster_annot: &str,
 ) -> anyhow::Result<HashMap<usize, String>> {
-    let Some(ct_name) = resolve_obs_cell_type_label_column(obs_df) else {
+    let Some(ct_name) = tf_prior_label_column(obs_df, cluster_annot) else {
         return Ok(HashMap::new());
     };
     let cell_col = match obs_df.column(&ct_name) {
@@ -1273,6 +1247,7 @@ fn export_minimal_repro_adata_with_cache(
     src: &AnnData<H5>,
     output_dir: &str,
     layer: &str,
+    cluster_annot: &str,
 ) -> anyhow::Result<String> {
     let out_path = format!("{}/spacetravlr_minimal_repro.h5ad", output_dir);
     let dst = AnnData::<H5>::new(&out_path)?;
@@ -1281,11 +1256,15 @@ fn export_minimal_repro_adata_with_cache(
     dst.set_var_names(src.var_names())?;
 
     let obs = src.read_obs()?;
-    let cell_type = obs
-        .column("cell_type")
-        .map_err(|_| anyhow::anyhow!("obs.cell_type is required for minimal reproducibility file"))?
+    let cluster_col = obs
+        .column(cluster_annot)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "obs column {cluster_annot:?} is required for minimal reproducibility file"
+            )
+        })?
         .clone();
-    let obs_min = DataFrame::new(vec![cell_type])?;
+    let obs_min = DataFrame::new(vec![cluster_col])?;
     dst.set_obs(obs_min)?;
 
     let spatial_key = detect_spatial_obsm_key(src)?;
@@ -1342,9 +1321,6 @@ fn verify_minimal_repro_adata_loadable(
 ) -> anyhow::Result<()> {
     let adata = AnnData::<H5>::open(H5::open(path)?)?;
     let obs = adata.read_obs()?;
-    if obs.column("cell_type").is_err() {
-        anyhow::bail!("Minimal AnnData missing required obs column cell_type.");
-    }
     if obs.column(cluster_annot).is_err() {
         anyhow::bail!(
             "Minimal AnnData missing cluster annotation column {:?}.",
@@ -3493,7 +3469,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             };
 
             let t_cl = pipeline_step_begin(&hud, "build cluster labels & cell-type map");
-            let cell_type_counts = cell_type_label_counts_from_obs(&obs_df);
+            let cell_type_counts = cell_type_label_counts_from_obs(&obs_df, cluster_annot);
             let clusters: Arc<Array1<usize>> =
                 Arc::new(clusters_array1_from_obs_column(&obs_df, cluster_annot)?);
             let num_clusters = clusters
@@ -3513,8 +3489,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             if tf_priors_feather.is_some() && cluster_to_cell_type.is_empty() {
                 log_line(
                     &hud,
-                    "TF priors: no cell_type column — target-level priors (no per-type mask)"
-                        .to_string(),
+                    format!(
+                        "TF priors: target-level priors (obs.{cluster_annot} has no string labels for a per-type mask)"
+                    ),
                 );
             }
 
@@ -3676,15 +3653,11 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             };
             let t_repro = pipeline_step_begin(&hud, repro_label);
             let worker_adata_path: String = if write_minimal_repro_h5ad {
-                if cluster_annot != "cell_type" {
-                    anyhow::bail!(
-                        "Minimal reproducibility export keeps only obs.cell_type; set [data].cluster_annot = \"cell_type\"."
-                    );
-                }
                 let out = export_minimal_repro_adata_with_cache(
                     setup_adata.as_ref(),
                     training_dir,
                     layer,
+                    cluster_annot,
                 )?;
                 verify_minimal_repro_adata_loadable(&out, layer, cluster_annot)?;
                 log_line(&hud, format!("minimal repro .h5ad -> {}", out));
@@ -4968,6 +4941,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     &bad_betadata_clusters,
                                                     &cluster_betadata_row_keys,
                                                     unscale_betas_on_export_w,
+                                                    estimator.cluster_annot.as_str(),
                                                 ) {
                                                     log_line(
                                                         &hud,
@@ -7076,5 +7050,39 @@ mod classic_received_x_identity_tests {
             );
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod cluster_annot_label_tests {
+    use super::build_cluster_to_cell_type_map;
+    use polars::prelude::*;
+
+    #[test]
+    fn string_cluster_annot_is_the_tf_prior_label_even_when_cell_type_exists() {
+        let df = df![
+            "cell_type" => ["T", "T", "B"],
+            "annotation" => ["Epithelial", "B cell", "Epithelial"],
+        ]
+        .unwrap();
+        let map = build_cluster_to_cell_type_map(&df, "annotation").unwrap();
+        assert_eq!(map.len(), 2);
+        let values: std::collections::HashSet<_> = map.values().cloned().collect();
+        assert!(values.contains("Epithelial"));
+        assert!(values.contains("B cell"));
+        assert!(!values.contains("T"));
+        assert!(!values.contains("B"));
+    }
+
+    #[test]
+    fn numeric_cluster_annot_still_uses_cell_type_labels() {
+        let df = df![
+            "leiden" => [0i32, 0, 1],
+            "cell_type" => ["T", "T", "B"],
+        ]
+        .unwrap();
+        let map = build_cluster_to_cell_type_map(&df, "leiden").unwrap();
+        assert_eq!(map.get(&0).map(String::as_str), Some("T"));
+        assert_eq!(map.get(&1).map(String::as_str), Some("B"));
     }
 }

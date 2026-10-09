@@ -214,8 +214,8 @@ a.write_h5ad(p)
 }
 
 fn recompress_f64_dataset_lzf(group: &hdf5_metno::Group, name: &str) {
-    use std::str::FromStr;
     use hdf5_metno::types::{VarLenAscii, VarLenUnicode};
+    use std::str::FromStr;
     let ds = group.dataset(name).expect(name);
     let shape = ds.shape();
     let values: Vec<f64> = ds.read_raw().unwrap_or_else(|e| panic!("read {name}: {e}"));
@@ -303,7 +303,8 @@ fn write_small_h5ad(path: &std::path::Path, with_obsp: bool) {
     let x = Array2::<f64>::from_shape_fn((n, n_vars), |(i, j)| ((i * 3 + j) % 11) as f64);
     a.set_x(ArrayData::from(x)).expect("set x");
     let centroids: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
-    let obs = DataFrame::new(vec![Series::new("x_centroid".into(), centroids).into()]).expect("obs");
+    let obs =
+        DataFrame::new(vec![Series::new("x_centroid".into(), centroids).into()]).expect("obs");
     a.set_obs(obs).expect("set obs");
     if with_obsp {
         let dist = Array2::<f64>::eye(n);
@@ -315,10 +316,8 @@ fn write_small_h5ad(path: &std::path::Path, with_obsp: bool) {
 
 #[test]
 fn load_h5ad_fast_reads_lzf_x_and_obs_centroid() {
-    let path = std::env::temp_dir().join(format!(
-        "spacetravlr_lzf_h5ad_{}.h5ad",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("spacetravlr_lzf_h5ad_{}.h5ad", std::process::id()));
     let _ = std::fs::remove_file(&path);
     write_small_h5ad(&path, false);
     {
@@ -339,14 +338,12 @@ fn load_h5ad_fast_reads_lzf_x_and_obs_centroid() {
 
 #[test]
 fn preprocess_leaves_source_obsp_in_place() {
+    use spacetravlr::rust_preprocess::PREPROCESS_TIMING_LABELS;
     use spacetravlr::rust_preprocess::testing_begin_preprocess_timing_capture;
     use spacetravlr::rust_preprocess::testing_take_preprocess_timing_capture;
-    use spacetravlr::rust_preprocess::PREPROCESS_TIMING_LABELS;
 
-    let path = std::env::temp_dir().join(format!(
-        "spacetravlr_obsp_keep_{}.h5ad",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("spacetravlr_obsp_keep_{}.h5ad", std::process::id()));
     let _ = std::fs::remove_file(&path);
     write_small_h5ad(&path, true);
     let params = RustPreprocessParams {
@@ -380,10 +377,8 @@ fn compress_h5ad_makes_x_and_layers_gzip_csr() {
     use hdf5_metno::filters::Filter;
     use ndarray::Array2;
 
-    let path = std::env::temp_dir().join(format!(
-        "spacetravlr_compress_{}.h5ad",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("spacetravlr_compress_{}.h5ad", std::process::id()));
     let _ = std::fs::remove_file(&path);
     write_small_h5ad(&path, true);
     {
@@ -412,7 +407,9 @@ fn compress_h5ad_makes_x_and_layers_gzip_csr() {
     let counts = file.group("layers/counts").expect("layer");
     let layer_filters = counts.dataset("data").expect("layer data").filters();
     assert!(
-        layer_filters.iter().any(|f| matches!(f, Filter::Deflate(_))),
+        layer_filters
+            .iter()
+            .any(|f| matches!(f, Filter::Deflate(_))),
         "layer filters: {layer_filters:?}"
     );
     file.close().ok();
@@ -428,10 +425,8 @@ fn failed_load_still_prints_load_and_total() {
     use spacetravlr::rust_preprocess::testing_begin_preprocess_timing_capture;
     use spacetravlr::rust_preprocess::testing_take_preprocess_timing_capture;
 
-    let path = std::env::temp_dir().join(format!(
-        "spacetravlr_missing_{}.h5ad",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("spacetravlr_missing_{}.h5ad", std::process::id()));
     let _ = std::fs::remove_file(&path);
     testing_begin_preprocess_timing_capture();
     let err = match rust_preprocess_h5ad_to_memory(

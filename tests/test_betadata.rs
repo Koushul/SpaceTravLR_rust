@@ -11,6 +11,20 @@ fn cluster_keys_from_usize(cl: &[usize]) -> Vec<String> {
 }
 
 #[test]
+fn string_cluster_annot_ids_follow_that_column() {
+    use polars::prelude::*;
+    use spacetravlr::betadata::clusters_usize_from_obs_dataframe;
+    let df = DataFrame::new(vec![
+        Series::new("cell_type".into(), &["A", "A", "A"]).into(),
+        Series::new("annotation".into(), &["Epithelial", "B cell", "Epithelial"]).into(),
+    ])
+    .unwrap();
+    let ids = clusters_usize_from_obs_dataframe(&df, "annotation").unwrap();
+    // Sorted unique labels: "B cell" = 0, "Epithelial" = 1.
+    assert_eq!(ids, vec![1, 0, 1]);
+}
+
+#[test]
 fn missing_cluster_annot_does_not_resolve_to_another_column() {
     use ndarray::Array1;
     use polars::prelude::*;
