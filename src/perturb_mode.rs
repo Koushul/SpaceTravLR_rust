@@ -487,6 +487,37 @@ impl PerturbRuntime {
     }
 }
 
+/// After a successful perturbation, check output shape and (for near-zero targets) that each KO gene is ~0 on its scoped rows.
+pub fn validate_perturb_simulated_targets(
+    gene_mtx: &Array2<f64>,
+    gene_names: &[String],
+    simulated: &Array2<f64>,
+    targets: &[PerturbTarget],
+) -> anyhow::Result<()> {
+    if targets.is_empty() {
+        anyhow::bail!("no perturbation targets to validate");
+    }
+    let nrows = gene_mtx.nrows();
+    let ngenes = gene_names.len();
+    if simulated.nrows() != nrows || simulated.ncols() != ngenes {
+        anyhow::bail!(
+            "perturb output shape {:?} != expected ({nrows}, {ngenes})",
+            simulated.dim()
+        );
+    }
+    for target in targets {
+        validate_ko_column(
+            nrows,
+            gene_names,
+            simulated,
+            &target.gene,
+            target.desired_expr,
+            target.cell_indices.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 /// After a successful perturbation, check output shape and (for near-zero targets) that the KO gene is ~0 on scoped rows.
 pub fn validate_perturb_simulated_matrix(
     gene_mtx: &Array2<f64>,
@@ -496,14 +527,26 @@ pub fn validate_perturb_simulated_matrix(
     desired_expr: f64,
     cell_indices: Option<&[usize]>,
 ) -> anyhow::Result<()> {
-    let nrows = gene_mtx.nrows();
-    let ngenes = gene_names.len();
-    if simulated.nrows() != nrows || simulated.ncols() != ngenes {
-        anyhow::bail!(
-            "perturb output shape {:?} != expected ({nrows}, {ngenes})",
-            simulated.dim()
-        );
-    }
+    validate_perturb_simulated_targets(
+        gene_mtx,
+        gene_names,
+        simulated,
+        &[PerturbTarget {
+            gene: target_gene.to_string(),
+            desired_expr,
+            cell_indices: cell_indices.map(|ix| ix.to_vec()),
+        }],
+    )
+}
+
+fn validate_ko_column(
+    nrows: usize,
+    gene_names: &[String],
+    simulated: &Array2<f64>,
+    target_gene: &str,
+    desired_expr: f64,
+    cell_indices: Option<&[usize]>,
+) -> anyhow::Result<()> {
     let g_col = gene_names
         .iter()
         .position(|g| g == target_gene)
@@ -1677,5 +1720,112 @@ mod tests {
         let names = vec!["A".into()];
         let sim = array![[0.0, 1.0]];
         assert!(validate_perturb_simulated_matrix(&g, &names, &sim, "A", 0.0, None).is_err());
+    }
+
+    fn joint_target(gene: &str, desired: f64, cells: Option<Vec<usize>>) -> PerturbTarget {
+        PerturbTarget {
+            gene: gene.into(),
+            desired_expr: desired,
+            cell_indices: cells,
+        }
+    }
+
+    #[test]
+    fn validate_joint_double_ko_passes() {
+        let g = array![[1.0, 1.0], [1.0, 1.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[1e-8, 0.0], [0.0, 1e-9]];
+        validate_perturb_simulated_targets(
+            &g,
+            &names,
+            &sim,
+            &[joint_target("A", 0.0, None), joint_target("B", 0.0, None)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_joint_double_ko_names_residual_gene() {
+        let g = array![[1.0, 1.0], [1.0, 1.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[0.0, 0.4], [0.0, 0.0]];
+        let err = validate_perturb_simulated_targets(
+            &g,
+            &names,
+            &sim,
+            &[joint_target("A", 0.0, None), joint_target("B", 0.0, None)],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("\"B\""), "{msg}");
+        assert!(!msg.contains("\"A\""), "{msg}");
+    }
+
+    #[test]
+    fn validate_joint_mixed_ko_and_overexpression() {
+        let g = array![[1.0, 1.0], [1.0, 1.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[1e-8, 3.2], [0.0, 4.0]];
+        validate_perturb_simulated_targets(
+            &g,
+            &names,
+            &sim,
+            &[joint_target("A", 0.0, None), joint_target("B", 5.0, None)],
+        )
+        .unwrap();
+        let bad = array![[0.2, 5.0], [0.0, 5.0]];
+        assert!(
+            validate_perturb_simulated_targets(
+                &g,
+                &names,
+                &bad,
+                &[joint_target("A", 0.0, None), joint_target("B", 5.0, None),],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_joint_scopes_are_independent() {
+        let g = array![[1.0, 1.0], [1.0, 1.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[0.8, 1e-8], [1e-9, 0.7]];
+        validate_perturb_simulated_targets(
+            &g,
+            &names,
+            &sim,
+            &[
+                joint_target("A", 0.0, Some(vec![1])),
+                joint_target("B", 0.0, Some(vec![0])),
+            ],
+        )
+        .unwrap();
+        let err = validate_perturb_simulated_targets(
+            &g,
+            &names,
+            &sim,
+            &[
+                joint_target("A", 0.0, None),
+                joint_target("B", 0.0, Some(vec![0])),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("\"A\""), "{err}");
+    }
+
+    #[test]
+    fn validate_joint_shape_mismatch() {
+        let g = array![[0.0, 1.0], [1.0, 2.0]];
+        let names = vec!["A".into(), "B".into()];
+        let sim = array![[0.0, 1.0]];
+        assert!(
+            validate_perturb_simulated_targets(
+                &g,
+                &names,
+                &sim,
+                &[joint_target("A", 0.0, None), joint_target("B", 1.5, None),],
+            )
+            .is_err()
+        );
     }
 }

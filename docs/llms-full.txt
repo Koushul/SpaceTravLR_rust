@@ -400,8 +400,8 @@ Perturbation reads the training outputs and writes simulated expression; it does
 | `--run-toml PATH` | — | `spacetravlr_run_repro.toml` from a finished training run. Effectively required. |
 | `--config PATH` (alias `--perturb-toml`, or positional) | — | Perturbation TOML; may set `run_toml` and overlay config sections |
 | `--export PATH` (alias `--out`) | — | Single-gene feather export (also selects batch mode) |
-| `--gene SYMBOL` | — | Gene to perturb |
-| `--desired-expr F` | `0.0` | Target expression. `0` = knockout. Higher = overexpression. |
+| `--gene SYMBOL` | — | Gene to perturb. Repeat or comma-separate to clamp several genes in one propagation. |
+| `--desired-expr F` | `0.0` | Target expression. One value broadcasts to every `--gene`; N values zip. `0` = knockout. Higher = overexpression. |
 | `--n-propagation N` | from TOML (4) | Rounds of signal propagation through the GRN and ligand field |
 | `--beta-scale-factor F` | from TOML (100.0) | Global multiplier on β before propagation |
 | `--cells-csv PATH` | — | Restrict the perturbation to a region or population of interest |
@@ -464,11 +464,22 @@ contact_distance = 30.0
 ligand_grid_factor = 0.5            # approximate received ligands; faster, ~few % error
 ```
 
-Also accepted: `gene` and `out` for the single-gene form. Default output name when using `out_dir` is `{gene}_perturb_expr.feather`.
+Also accepted: `gene` and `out` for the single-gene form. Default output name when using `out_dir` is `{gene}_perturb_expr.feather`. Without `joint = true` this is one simulation per gene.
 
 ### Combinatorial perturbations
 
-Perturbing two or more genes simultaneously is supported and is one of the validated capabilities (for example `Bcl6` overexpression combined with `Il21` knockout, or a `Prdm1` + `Nr4a3` double knockout). Express this by listing multiple genes with their target expressions in the perturbation config so they are applied in the same propagation, rather than by running separate single-gene jobs and adding the results.
+Set `joint = true` so every listed gene is clamped to its own desired expression and then one propagation runs. Separate single-gene jobs (the default when `joint` is omitted) are not the same thing: those feathers cannot be added together to recover a double perturbation.
+
+```toml
+run_toml = "/runs/tonsil/spacetravlr_run_repro.toml"
+joint = true
+genes = ["BCL6", "IL21"]
+desired_expr = [2.0, 0.0]          # overexpression and knockout in one hop loop
+n_propagation = 4                  # one value; a per-gene list must be uniform
+out = "/tmp/bcl6_il21.feather"
+```
+
+The same pairing is `--gene BCL6 --desired-expr 2.0 --gene IL21 --desired-expr 0` (or `--gene BCL6,IL21 --desired-expr 2.0,0`). `screen` rejects `joint = true` and still writes one knockout feather per gene.
 
 ---
 

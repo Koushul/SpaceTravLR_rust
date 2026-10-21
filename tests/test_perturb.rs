@@ -601,6 +601,282 @@ fn test_perturb_with_target_cell_subset() {
     }
 }
 
+fn max_abs_delta(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0_f64, f64::max)
+}
+
+fn run_synthetic(
+    inputs: &SyntheticPerturbInputs,
+    targets: &[(&str, f64)],
+    config: &PerturbConfig,
+) -> spacetravlr::perturb::PerturbResult {
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) = inputs;
+    let owned: Vec<(String, f64)> = targets
+        .iter()
+        .map(|(g, d)| ((*g).to_string(), *d))
+        .collect();
+    perturb(PerturbInputs {
+        bb,
+        gene_mtx,
+        gene_names,
+        xy,
+        rw_ligands_init: rw_ligands,
+        rw_tfligands_init: rw_tfligands,
+        targets: &owned,
+        config,
+        lr_radii,
+    })
+}
+
+fn make_a_regulates_b_inputs(n_cells: usize) -> SyntheticPerturbInputs {
+    let gene_names: Vec<String> = ["A", "B", "D"].into_iter().map(String::from).collect();
+    let gene2index: HashMap<String, usize> = gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.clone(), i))
+        .collect();
+    let rows = vec!["0".to_string()];
+    let obs: Vec<String> = (0..n_cells).map(|i| format!("cell_{i}")).collect();
+    let cluster_keys: Vec<String> = vec!["0".into(); n_cells];
+    let mapping = Arc::new(BetaFrame::compute_cell_mapping(&rows, &obs, &cluster_keys).0);
+    let obs_arc = Arc::new(obs);
+
+    let mut frames = Vec::new();
+    let specs: [(&str, Vec<String>, Vec<f32>); 2] = [
+        ("B", vec!["A".into()], vec![0.8]),
+        ("D", vec!["A".into(), "B".into()], vec![0.5, 0.4]),
+    ];
+    for (gene, tfs, betas) in specs {
+        let mut bf = BetaFrame::from_parts(BetaFrameFromParts {
+            gene_name: gene.into(),
+            row_labels: rows.clone(),
+            intercepts: array![0.0],
+            tf_betas: Array2::from_shape_vec((1, betas.len()), betas).unwrap(),
+            tfs,
+            lr_betas: Array2::zeros((1, 0)),
+            ligands: vec![],
+            receptors: vec![],
+            tfl_betas: Array2::zeros((1, 0)),
+            tfl_ligands: vec![],
+            tfl_regulators: vec![],
+            cis_betas: Array2::zeros((1, 0)),
+            cis_left: vec![],
+            cis_right: vec![],
+        });
+        bf.expand_to_cells(obs_arc.clone(), mapping.clone());
+        bf.modulator_gene_indices = Some(
+            bf.modulator_genes
+                .iter()
+                .map(|g| {
+                    let plain = g.strip_prefix("beta_").unwrap_or(g);
+                    *gene2index.get(plain).unwrap()
+                })
+                .collect(),
+        );
+        frames.push((gene.to_string(), bf));
+    }
+    let mut data = HashMap::new();
+    for (gene, bf) in frames {
+        data.insert(gene, bf);
+    }
+    let bb = Betabase {
+        data,
+        ligands_set: HashSet::new(),
+        receptors_set: HashSet::new(),
+        tfl_ligands_set: HashSet::new(),
+        tfs_set: ["A".into(), "B".into()].into_iter().collect(),
+    };
+    let gene_mtx = Array2::from_elem((n_cells, gene_names.len()), 1.0);
+    let xy = Array2::from_shape_fn((n_cells, 2), |(i, d)| if d == 0 { i as f64 } else { 0.0 });
+    let empty_lr = GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), vec![]);
+    let empty_tfl = GeneMatrix::new(Array2::<f32>::zeros((n_cells, 0)), vec![]);
+    (
+        bb,
+        gene_mtx,
+        gene_names,
+        xy,
+        empty_lr,
+        empty_tfl,
+        HashMap::new(),
+    )
+}
+
+#[test]
+fn test_joint_two_genes_stay_pinned_and_are_not_additive() {
+    let n_cells = 25;
+    let inputs = make_a_regulates_b_inputs(n_cells);
+    let config = PerturbConfig {
+        n_propagation: 3,
+        ..Default::default()
+    };
+    let joint = run_synthetic(&inputs, &[("A", 0.0), ("B", 3.0)], &config);
+    let only_a = run_synthetic(&inputs, &[("A", 0.0)], &config);
+    let only_b = run_synthetic(&inputs, &[("B", 3.0)], &config);
+    for i in 0..n_cells {
+        assert!(
+            (joint.simulated[[i, 0]]).abs() < 1e-8,
+            "A must stay knocked out"
+        );
+        assert!(
+            (joint.simulated[[i, 1]] - 3.0).abs() < 1e-8,
+            "B must stay at the requested overexpression"
+        );
+    }
+    assert!(
+        max_abs_delta(&joint.simulated, &only_a.simulated) > 1e-3,
+        "joint run must differ from A-only"
+    );
+    assert!(
+        max_abs_delta(&joint.simulated, &only_b.simulated) > 1e-3,
+        "joint run must differ from B-only"
+    );
+    let summed = &only_a.delta + &only_b.delta;
+    let non_add = max_abs_delta(&joint.delta, &summed);
+    assert!(
+        non_add > 1e-3,
+        "joint delta must not equal the sum of single-gene deltas (max diff {non_add:.3e})"
+    );
+
+    let swapped = run_synthetic(&inputs, &[("B", 3.0), ("A", 0.0)], &config);
+    let order = max_abs_delta(&joint.simulated, &swapped.simulated);
+    assert!(
+        order < 1e-8,
+        "target order changed the result by {order:.3e}"
+    );
+}
+
+#[test]
+fn test_joint_fused_matches_materialize() {
+    let inputs = make_synthetic_inputs(25);
+    let run = |mode: SplashMode| {
+        let config = PerturbConfig {
+            n_propagation: 3,
+            splash_mode: mode,
+            ..Default::default()
+        };
+        run_synthetic(&inputs, &[("A", 0.0), ("B", 3.0)], &config)
+    };
+    let mat = run(SplashMode::Materialize);
+    let fused = run(SplashMode::Fused);
+    let max_sim = max_abs_delta(&mat.simulated, &fused.simulated);
+    let max_d = max_abs_delta(&mat.delta, &fused.delta);
+    assert!(
+        max_sim < 1e-5 && max_d < 1e-5,
+        "fused vs materialize max_sim={max_sim:e} max_delta={max_d:e}"
+    );
+}
+
+#[test]
+fn test_joint_per_target_cell_scope() {
+    let n_cells = 12;
+    let (bb, gene_mtx, gene_names, xy, rw_ligands, rw_tfligands, lr_radii) =
+        make_synthetic_inputs(n_cells);
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
+    let targets = [
+        PerturbTarget {
+            gene: "A".into(),
+            desired_expr: 0.0,
+            cell_indices: Some(vec![0, 1, 2]),
+        },
+        PerturbTarget {
+            gene: "B".into(),
+            desired_expr: 3.0,
+            cell_indices: Some(vec![6, 7, 8]),
+        },
+    ];
+    let mut timings = None;
+    let result = perturb_with_targets(
+        &PerturbWithTargetsInputs {
+            bb: &bb,
+            gene_mtx: &gene_mtx,
+            gene_names: &gene_names,
+            xy: &xy,
+            rw_ligands_init: &rw_ligands,
+            rw_tfligands_init: &rw_tfligands,
+            targets: &targets,
+            config: &config,
+            lr_radii: &lr_radii,
+            job_progress: None,
+            job_message: None,
+            cancel: None,
+            baseline_splash_cache: None,
+        },
+        &mut timings,
+    )
+    .unwrap();
+    for cell in [0usize, 1, 2] {
+        assert!((result.simulated[[cell, 0]]).abs() < 1e-8);
+    }
+    for cell in 3..n_cells {
+        assert!(
+            result.simulated[[cell, 0]].abs() > 1e-3,
+            "unscoped A cell {cell} should not be knocked out, got {}",
+            result.simulated[[cell, 0]]
+        );
+    }
+    for cell in [6usize, 7, 8] {
+        assert!((result.simulated[[cell, 1]] - 3.0).abs() < 1e-8);
+    }
+    for cell in (0..n_cells).filter(|c| !matches!(c, 6 | 7 | 8)) {
+        assert!(
+            (result.simulated[[cell, 1]] - 3.0).abs() > 1e-3,
+            "unscoped B cell {cell} should not be pinned to 3, got {}",
+            result.simulated[[cell, 1]]
+        );
+    }
+}
+
+#[test]
+fn test_joint_expression_bounds_clip_both_targets() {
+    let n_cells = 16;
+    let inputs = make_synthetic_inputs(n_cells);
+    let config = PerturbConfig {
+        n_propagation: 2,
+        perturbed_gene_max_bound: Some(2.0),
+        ..Default::default()
+    };
+    let result = run_synthetic(&inputs, &[("A", 10.0), ("B", 12.0)], &config);
+    for i in 0..n_cells {
+        assert!((result.simulated[[i, 0]] - 2.0).abs() < 1e-8);
+        assert!((result.simulated[[i, 1]] - 2.0).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn test_joint_baseline_is_quiet_and_one_move_still_pins() {
+    let n_cells = 20;
+    let inputs = make_synthetic_inputs(n_cells);
+    let gene_mtx = inputs.1.clone();
+    let config = PerturbConfig {
+        n_propagation: 2,
+        ..Default::default()
+    };
+    let quiet = run_synthetic(&inputs, &[("A", 1.0), ("B", 1.0)], &config);
+    let noise = max_abs_delta(&quiet.delta, &Array2::zeros(quiet.delta.dim()));
+    assert!(
+        noise < 1e-6,
+        "both targets at baseline should not move the tissue (max |Δ|={noise:.3e})"
+    );
+    let moved = run_synthetic(&inputs, &[("A", 1.0), ("B", 0.0)], &config);
+    for i in 0..n_cells {
+        assert!((moved.simulated[[i, 0]] - 1.0).abs() < 1e-8);
+        assert!((moved.simulated[[i, 1]]).abs() < 1e-8);
+    }
+    let downstream: f64 = (0..n_cells)
+        .map(|i| (moved.simulated[[i, 3]] - gene_mtx[[i, 3]]).abs())
+        .sum();
+    assert!(
+        downstream > 0.0,
+        "knocking out ligand B with A held at baseline should move D"
+    );
+}
+
 #[test]
 fn test_synthetic_tf_lr_spatial_propagation_known_effects() {
     let gene_names: Vec<String> = vec!["TF1", "LIG", "REC", "TARGET"]

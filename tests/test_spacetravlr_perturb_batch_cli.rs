@@ -83,3 +83,113 @@ fn temp_batch_dir() -> PathBuf {
     fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[test]
+fn pair_genes_comma_repeat_broadcast_and_errors() {
+    let zipped = spacetravlr::perturb_batch::pair_genes_with_desired_expr(
+        &["BCL6,IL21".into()],
+        &[2.0, 0.0],
+    )
+    .unwrap();
+    assert_eq!(zipped, vec![("BCL6".into(), 2.0), ("IL21".into(), 0.0)]);
+
+    let repeated = spacetravlr::perturb_batch::pair_genes_with_desired_expr(
+        &["BCL6".into(), "IL21".into()],
+        &[0.0],
+    )
+    .unwrap();
+    assert_eq!(repeated, vec![("BCL6".into(), 0.0), ("IL21".into(), 0.0)]);
+
+    let mismatch = spacetravlr::perturb_batch::pair_genes_with_desired_expr(
+        &["A".into(), "B".into()],
+        &[0.0, 1.0, 2.0],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(mismatch.contains("desired-expr"), "{mismatch}");
+
+    let dup =
+        spacetravlr::perturb_batch::pair_genes_with_desired_expr(&["A".into(), "A".into()], &[])
+            .unwrap_err()
+            .to_string();
+    assert!(dup.contains("duplicate"), "{dup}");
+}
+
+#[test]
+fn cli_rejects_mismatched_desired_before_run_toml() {
+    let out = Command::new(perturb_bin())
+        .args([
+            "--run-toml",
+            "/nonexistent/run.toml",
+            "--gene",
+            "A,B",
+            "--desired-expr",
+            "0,1,2",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("desired-expr"),
+        "stderr should reject the length mismatch before loading a run: {stderr}"
+    );
+    assert!(
+        !stderr.contains("No such file") && !stderr.contains("spacetravlr_run_repro"),
+        "stderr should not open the run toml: {stderr}"
+    );
+}
+
+#[test]
+fn cli_rejects_duplicate_gene_before_run_toml() {
+    let out = Command::new(perturb_bin())
+        .args([
+            "--run-toml",
+            "/nonexistent/run.toml",
+            "--gene",
+            "A",
+            "--gene",
+            "A",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("duplicate"), "stderr: {stderr}");
+}
+
+#[test]
+fn cli_rejects_joint_toml_with_disagreeing_hops_before_run_toml() {
+    let dir = temp_batch_dir();
+    let batch = dir.join("joint.toml");
+    fs::write(
+        &batch,
+        r#"
+joint = true
+genes = ["A", "B"]
+desired_expr = [0.0, 2.0]
+n_propagation = [2, 3]
+out = "combo.feather"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(perturb_bin())
+        .args([
+            "--batch-toml",
+            batch.to_str().unwrap(),
+            "--run-toml",
+            "/nonexistent/run.toml",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("n_propagation"),
+        "stderr should name n_propagation: {stderr}"
+    );
+    assert!(
+        !stderr.contains("No such file"),
+        "stderr should fail before opening the run toml: {stderr}"
+    );
+}

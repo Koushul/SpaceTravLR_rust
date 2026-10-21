@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::perturb_batch::{
-    BatchRunOptions, PerturbBatchFile, PreparedPerturbJob, batch_from_perturb_table,
-    effective_parallelism, resolve_prepared_job_cell_indices, resolve_relative_to, run_batch_jobs,
-    sanitize_gene_for_filename, validate_jobs_genes,
+    BatchRunOptions, PerturbBatchFile, PreparedJobTarget, PreparedPerturbJob,
+    batch_from_perturb_table, effective_parallelism, resolve_prepared_job_cell_indices,
+    resolve_relative_to, run_batch_jobs, sanitize_gene_for_filename, validate_jobs_genes,
 };
 use crate::perturb_mode::PerturbRuntime;
 
@@ -80,6 +80,9 @@ pub fn expand_screen_jobs(
     if genes.is_empty() {
         anyhow::bail!("screen: no perturbable modulator genes found in AnnData var_names");
     }
+    if batch_file.joint {
+        anyhow::bail!("screen does not support joint = true; it runs one knockout per gene");
+    }
 
     let n = genes.len();
     let desired = crate::perturb_batch::broadcast_f64_field(
@@ -108,15 +111,17 @@ pub fn expand_screen_jobs(
         .iter()
         .enumerate()
         .map(|(i, gene)| PreparedPerturbJob {
-            gene: gene.clone(),
-            desired_expr: desired[i],
+            targets: vec![PreparedJobTarget {
+                gene: gene.clone(),
+                desired_expr: desired[i],
+                cell_indices: None,
+            }],
             n_propagation: n_props[i],
             out_path: perturbations_dir.join(screen_feather_name(gene)),
             radius,
             ligand_grid_factor,
             contact_distance,
             beta_scale_factor: beta_scales[i],
-            cell_indices: None,
         })
         .collect())
 }
@@ -147,6 +152,9 @@ pub fn run_perturb_screen(args: RunPerturbScreenArgs<'_>) -> anyhow::Result<()> 
         Some(tbl) => batch_from_perturb_table(tbl)?,
         None => PerturbBatchFile::default(),
     };
+    if batch_file.joint {
+        anyhow::bail!("screen does not support joint = true; it runs one knockout per gene");
+    }
     let batch_parent = config_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -342,7 +350,7 @@ mod tests {
         let dir = Path::new("/out/root/perturbations");
         let jobs = expand_screen_jobs(&["SOX2".into(), "A/B".into()], dir, &batch, 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 2);
-        assert!((jobs[0].desired_expr).abs() < 1e-9);
+        assert!((jobs[0].targets[0].desired_expr).abs() < 1e-9);
         assert_eq!(jobs[0].n_propagation, 4);
         assert_eq!(
             jobs[0].out_path,
@@ -352,6 +360,31 @@ mod tests {
             jobs[1].out_path,
             PathBuf::from("/out/root/perturbations/A_B_KO.feather")
         );
+    }
+
+    #[test]
+    fn expand_screen_jobs_rejects_joint() {
+        let batch: PerturbBatchFile = toml::from_str("joint = true\nout_dir = \"o\"").unwrap();
+        let err = expand_screen_jobs(&["SOX2".into()], Path::new("/out"), &batch, 4, 1.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("joint"), "{err}");
+    }
+
+    #[test]
+    fn expand_screen_jobs_without_joint_is_one_job_per_gene() {
+        let batch: PerturbBatchFile = toml::from_str("joint = false").unwrap();
+        let jobs = expand_screen_jobs(
+            &["SOX2".into(), "PAX6".into()],
+            Path::new("/out"),
+            &batch,
+            4,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].targets.len(), 1);
+        assert_eq!(jobs[1].targets[0].gene, "PAX6");
     }
 
     #[test]

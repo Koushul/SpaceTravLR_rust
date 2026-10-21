@@ -19,9 +19,9 @@ use crate::perturb::{
 };
 use crate::perturb_mode::{
     ComputeInitialWeightedLigandsArgs, PerturbRuntime, compute_initial_weighted_ligands,
-    parse_obs_columns_csv, perturb_obs_indices_from_file, validate_perturb_simulated_matrix,
+    parse_obs_columns_csv, perturb_obs_indices_from_file, validate_perturb_simulated_targets,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -95,20 +95,39 @@ pub struct PerturbBatchFile {
     /// Per-gene ligand β scale (scalar, length-1 broadcast, or one per `genes`). Omit = run / `[perturbation]` default.
     #[serde(default)]
     pub beta_scale_factor: Option<F64OrVec>,
+    /// When true, every gene is clamped in one propagation. Otherwise each gene is its own job.
+    #[serde(default)]
+    pub joint: bool,
+}
+
+/// One gene clamped to a desired expression inside a [`PreparedPerturbJob`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedJobTarget {
+    pub gene: String,
+    pub desired_expr: f64,
+    /// Resolved cell row indices; `None` = all cells.
+    pub cell_indices: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedPerturbJob {
-    pub gene: String,
-    pub desired_expr: f64,
+    pub targets: Vec<PreparedJobTarget>,
     pub n_propagation: usize,
     pub out_path: PathBuf,
     pub radius: Option<f64>,
     pub ligand_grid_factor: Option<f64>,
     pub contact_distance: Option<f64>,
     pub beta_scale_factor: f64,
-    /// Resolved cell row indices for scoped perturbation; `None` = all cells.
-    pub cell_indices: Option<Vec<usize>>,
+}
+
+impl PreparedPerturbJob {
+    pub fn label(&self) -> String {
+        self.targets
+            .iter()
+            .map(|t| t.gene.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 pub fn default_worker_parallelism() -> usize {
@@ -368,6 +387,148 @@ fn default_feather_name(gene: &str) -> String {
     format!("{}_perturb_expr.feather", sanitize_gene_for_filename(gene))
 }
 
+fn joint_feather_name(genes: &[String]) -> String {
+    let joined = genes
+        .iter()
+        .map(|g| sanitize_gene_for_filename(g))
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("{joined}_perturb_expr.feather")
+}
+
+fn ensure_unique_genes(genes: &[String]) -> anyhow::Result<()> {
+    let mut seen = HashSet::new();
+    for g in genes {
+        if !seen.insert(g.as_str()) {
+            anyhow::bail!("duplicate gene {g:?}");
+        }
+    }
+    Ok(())
+}
+
+fn uniform_usize(values: &[usize], field: &str) -> anyhow::Result<usize> {
+    let Some(&first) = values.first() else {
+        anyhow::bail!("joint perturbation: `{field}` is empty");
+    };
+    if values.iter().any(|v| *v != first) {
+        anyhow::bail!("joint perturbation: `{field}` must be a single value, got {values:?}");
+    }
+    Ok(first)
+}
+
+fn uniform_f64(values: &[f64], field: &str) -> anyhow::Result<f64> {
+    let Some(&first) = values.first() else {
+        anyhow::bail!("joint perturbation: `{field}` is empty");
+    };
+    if values.iter().any(|v| (v - first).abs() > 1e-12) {
+        anyhow::bail!("joint perturbation: `{field}` must be a single value, got {values:?}");
+    }
+    Ok(first)
+}
+
+/// Pair gene symbols with desired expression.
+///
+/// `genes` may already be split or still contain commas. One desired value broadcasts.
+/// An empty `desired` broadcasts `0`. Any other length must match the gene count.
+pub fn pair_genes_with_desired_expr(
+    genes: &[String],
+    desired: &[f64],
+) -> anyhow::Result<Vec<(String, f64)>> {
+    let genes: Vec<String> = genes
+        .iter()
+        .flat_map(|g| g.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if genes.is_empty() {
+        anyhow::bail!("--gene is required");
+    }
+    ensure_unique_genes(&genes)?;
+    let desired_vals = if desired.len() <= 1 {
+        let v = desired.first().copied().unwrap_or(0.0);
+        vec![v; genes.len()]
+    } else if desired.len() == genes.len() {
+        desired.to_vec()
+    } else {
+        anyhow::bail!(
+            "--desired-expr count {} must be 1 or {} (one value per --gene)",
+            desired.len(),
+            genes.len()
+        );
+    };
+    Ok(genes.into_iter().zip(desired_vals).collect())
+}
+
+fn job_target(gene: String, desired_expr: f64) -> PreparedJobTarget {
+    PreparedJobTarget {
+        gene,
+        desired_expr,
+        cell_indices: None,
+    }
+}
+
+fn separate_out_paths(
+    file: &PerturbBatchFile,
+    batch_parent: &Path,
+    genes: &[String],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let n = genes.len();
+    match (&file.out, &file.out_dir) {
+        (Some(_), Some(_)) => anyhow::bail!("batch TOML: set either `out` or `out_dir`, not both"),
+        (Some(OutSpec::One(p)), None) => {
+            if n != 1 {
+                anyhow::bail!(
+                    "batch TOML: scalar `out` is only valid when there is exactly one gene (set joint = true to clamp several genes in one run)"
+                );
+            }
+            Ok(vec![resolve_relative_to(batch_parent, p)])
+        }
+        (Some(OutSpec::Many(paths)), None) => {
+            if paths.len() != n {
+                anyhow::bail!(
+                    "batch TOML: `out` array length {} must equal gene count {}",
+                    paths.len(),
+                    n
+                );
+            }
+            Ok(paths
+                .iter()
+                .map(|p| resolve_relative_to(batch_parent, p))
+                .collect())
+        }
+        (None, Some(dir)) => {
+            let d = resolve_relative_to(batch_parent, dir);
+            Ok(genes
+                .iter()
+                .map(|g| d.join(default_feather_name(g)))
+                .collect())
+        }
+        (None, None) => {
+            anyhow::bail!("batch TOML: set `out_dir` (default names per gene) or `out`")
+        }
+    }
+}
+
+fn joint_out_path(
+    file: &PerturbBatchFile,
+    batch_parent: &Path,
+    genes: &[String],
+) -> anyhow::Result<PathBuf> {
+    match (&file.out, &file.out_dir) {
+        (Some(_), Some(_)) => anyhow::bail!("batch TOML: set either `out` or `out_dir`, not both"),
+        (Some(OutSpec::Many(_)), None) => {
+            anyhow::bail!("joint perturbation: `out` must be a single path, not an array")
+        }
+        (Some(OutSpec::One(p)), None) => Ok(resolve_relative_to(batch_parent, p)),
+        (None, Some(dir)) => {
+            Ok(resolve_relative_to(batch_parent, dir).join(joint_feather_name(genes)))
+        }
+        (None, None) => {
+            anyhow::bail!("batch TOML: set `out_dir` (one joint feather) or `out`")
+        }
+    }
+}
+
 pub fn expand_prepared_jobs(
     file: &PerturbBatchFile,
     batch_parent: &Path,
@@ -384,63 +545,49 @@ pub fn expand_prepared_jobs(
         default_beta_scale_factor,
         "beta_scale_factor",
     )?;
-
-    let out_paths: Vec<PathBuf> = match (&file.out, &file.out_dir) {
-        (Some(_), Some(_)) => anyhow::bail!("batch TOML: set either `out` or `out_dir`, not both"),
-        (Some(OutSpec::One(p)), None) => {
-            if n != 1 {
-                anyhow::bail!(
-                    "batch TOML: scalar `out` is only valid when there is exactly one gene"
-                );
-            }
-            vec![resolve_relative_to(batch_parent, p)]
-        }
-        (Some(OutSpec::Many(paths)), None) => {
-            if paths.len() != n {
-                anyhow::bail!(
-                    "batch TOML: `out` array length {} must equal gene count {}",
-                    paths.len(),
-                    n
-                );
-            }
-            paths
-                .iter()
-                .map(|p| resolve_relative_to(batch_parent, p))
-                .collect()
-        }
-        (None, Some(dir)) => {
-            let d = resolve_relative_to(batch_parent, dir);
-            genes
-                .iter()
-                .map(|g| d.join(default_feather_name(g)))
-                .collect()
-        }
-        (None, None) => {
-            anyhow::bail!("batch TOML: set `out_dir` (default names per gene) or `out`")
-        }
-    };
-
-    let n = genes.len();
     let radius = file.radius;
     let ligand_grid_factor = file.ligand_grid_factor;
     let contact_distance = file.contact_distance;
 
+    if file.joint {
+        ensure_unique_genes(&genes)?;
+        let n_propagation = uniform_usize(&n_props, "n_propagation")?;
+        let beta_scale_factor = uniform_f64(&beta_scales, "beta_scale_factor")?;
+        let out_path = joint_out_path(file, batch_parent, &genes)?;
+        return Ok(vec![PreparedPerturbJob {
+            targets: genes
+                .into_iter()
+                .zip(desired)
+                .map(|(gene, desired_expr)| job_target(gene, desired_expr))
+                .collect(),
+            n_propagation,
+            out_path,
+            radius,
+            ligand_grid_factor,
+            contact_distance,
+            beta_scale_factor,
+        }]);
+    }
+
+    let out_paths = separate_out_paths(file, batch_parent, &genes)?;
     Ok((0..n)
         .map(|i| PreparedPerturbJob {
-            gene: genes[i].clone(),
-            desired_expr: desired[i],
+            targets: vec![job_target(genes[i].clone(), desired[i])],
             n_propagation: n_props[i],
             out_path: out_paths[i].clone(),
             radius,
             ligand_grid_factor,
             contact_distance,
             beta_scale_factor: beta_scales[i],
-            cell_indices: None,
         })
         .collect())
 }
 
-/// Fills [`PreparedPerturbJob::cell_indices`] for each job (`None` = all cells).
+/// Fills each target's `cell_indices` (`None` = all cells).
+///
+/// `cells_csv_columns` zips across targets in job order. A joint job with several
+/// targets therefore takes one column per gene. A single `cells_csv_column` is copied
+/// onto every target.
 pub fn resolve_prepared_job_cell_indices(
     file: &PerturbBatchFile,
     batch_parent: &Path,
@@ -457,7 +604,7 @@ pub fn resolve_prepared_job_cell_indices(
             anyhow::bail!("batch TOML: `cells_csv_columns` requires `cells_csv`");
         }
     }
-    let n = jobs.len();
+    let n_targets: usize = jobs.iter().map(|j| j.targets.len()).sum();
     let csv = file
         .cells_csv
         .as_ref()
@@ -477,7 +624,9 @@ pub fn resolve_prepared_job_cell_indices(
             let path = resolve_relative_to(batch_parent, p);
             let idx = perturb_obs_indices_from_file(&path, obs_names)?;
             for j in jobs.iter_mut() {
-                j.cell_indices = Some(idx.clone());
+                for target in &mut j.targets {
+                    target.cell_indices = Some(idx.clone());
+                }
             }
         }
         (Some(cs), None) => {
@@ -489,34 +638,42 @@ pub fn resolve_prepared_job_cell_indices(
             let path = resolve_relative_to(batch_parent, cs);
             let parsed = parse_obs_columns_csv(&path, obs_names)?;
 
-            let col_per_job: Vec<String> = if let Some(ref spec) = file.cells_csv_columns {
-                broadcast_str_cols(Some(spec), n)?
+            let col_per_target: Vec<String> = if let Some(ref spec) = file.cells_csv_columns {
+                broadcast_str_cols(Some(spec), n_targets)?
             } else if let Some(ref g) = file.cells_csv_column {
-                vec![g.clone(); n]
+                vec![g.clone(); n_targets]
             } else {
                 anyhow::bail!(
                     "batch TOML: when `cells_csv` is set, provide `cells_csv_column` or `cells_csv_columns`"
                 );
             };
 
-            for (job, col_raw) in jobs.iter_mut().zip(col_per_job.iter()) {
-                let col = col_raw.trim();
-                if col.is_empty() {
-                    job.cell_indices = None;
-                } else {
-                    let sl = parsed.indices_for_column(col).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "batch TOML: cells_csv column {:?} not found in CSV header",
-                            col
-                        )
+            let mut cols = col_per_target.into_iter();
+            for job in jobs.iter_mut() {
+                for target in &mut job.targets {
+                    let col_raw = cols.next().ok_or_else(|| {
+                        anyhow::anyhow!("internal: cells_csv column list shorter than targets")
                     })?;
-                    job.cell_indices = Some(sl.to_vec());
+                    let col = col_raw.trim();
+                    if col.is_empty() {
+                        target.cell_indices = None;
+                    } else {
+                        let sl = parsed.indices_for_column(col).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "batch TOML: cells_csv column {:?} not found in CSV header",
+                                col
+                            )
+                        })?;
+                        target.cell_indices = Some(sl.to_vec());
+                    }
                 }
             }
         }
         (None, None) => {
             for j in jobs.iter_mut() {
-                j.cell_indices = None;
+                for target in &mut j.targets {
+                    target.cell_indices = None;
+                }
             }
         }
     }
@@ -700,11 +857,13 @@ pub fn validate_jobs_genes(
     gene_names: &[String],
 ) -> anyhow::Result<()> {
     for j in jobs {
-        if !gene_names.iter().any(|g| g == &j.gene) {
-            anyhow::bail!(
-                "batch TOML: gene {:?} is not present in AnnData var_names",
-                j.gene
-            );
+        for target in &j.targets {
+            if !gene_names.iter().any(|g| g == &target.gene) {
+                anyhow::bail!(
+                    "batch TOML: gene {:?} is not present in AnnData var_names",
+                    target.gene
+                );
+            }
         }
     }
     Ok(())
@@ -716,12 +875,18 @@ fn run_one_job(
     opts: &BatchRunOptions,
     job_progress: Option<&Arc<AtomicU32>>,
 ) -> anyhow::Result<()> {
-    let cell_indices = job.cell_indices.clone();
-    let targets = vec![PerturbTarget {
-        gene: job.gene.clone(),
-        desired_expr: job.desired_expr,
-        cell_indices,
-    }];
+    if job.targets.is_empty() {
+        anyhow::bail!("perturbation job has no target genes");
+    }
+    let targets: Vec<PerturbTarget> = job
+        .targets
+        .iter()
+        .map(|t| PerturbTarget {
+            gene: t.gene.clone(),
+            desired_expr: t.desired_expr,
+            cell_indices: t.cell_indices.clone(),
+        })
+        .collect();
     let ligand_grid = job
         .ligand_grid_factor
         .or(runtime.perturb_cfg.ligand_grid_factor);
@@ -817,15 +982,12 @@ fn run_one_job(
         },
         &mut timings,
     )
-    .ok_or_else(|| anyhow::anyhow!("perturbation failed for gene {}", job.gene))?;
-    let cell_scope = job.cell_indices.as_deref();
-    validate_perturb_simulated_matrix(
+    .ok_or_else(|| anyhow::anyhow!("perturbation failed for {}", job.label()))?;
+    validate_perturb_simulated_targets(
         &runtime.gene_mtx,
         &runtime.gene_names,
         &result.simulated,
-        &job.gene,
-        job.desired_expr,
-        cell_scope,
+        &targets,
     )?;
     let p = job
         .out_path
@@ -844,11 +1006,15 @@ fn run_one_job(
         &result.simulated,
     )?;
     if opts.verbose {
+        let spec = job
+            .targets
+            .iter()
+            .map(|t| format!("{}={}", t.gene, t.desired_expr))
+            .collect::<Vec<_>>()
+            .join(", ");
         eprintln!(
-            "Wrote {} (gene={}, desired_expr={}, n_propagation={}, beta_scale_factor={})",
+            "Wrote {} (targets=[{spec}], n_propagation={}, beta_scale_factor={})",
             job.out_path.display(),
-            job.gene,
-            job.desired_expr,
             job.n_propagation,
             job.beta_scale_factor
         );
@@ -884,9 +1050,9 @@ pub fn run_batch_jobs(
                     break;
                 };
                 if let Some(ref sp) = screen {
-                    sp.job_started(worker_id, &job.gene);
+                    sp.job_started(worker_id, &job.label());
                 }
-                let gene = job.gene.clone();
+                let gene = job.label();
                 let res = run_one_job(rt.as_ref(), job, &opts, job_permille.as_ref());
                 if let Some(ref sp) = screen {
                     if res.is_ok() {
@@ -957,7 +1123,7 @@ out_dir = "o"
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
         let jobs = expand_prepared_jobs(&f, Path::new("/proj/root"), 5, 1.0).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].gene, "SOX2");
+        assert_eq!(jobs[0].targets[0].gene, "SOX2");
         assert_eq!(
             jobs[0].out_path,
             PathBuf::from("/proj/root/o/SOX2_perturb_expr.feather")
@@ -973,9 +1139,9 @@ out = "solo.feather"
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
         let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].gene, "SOX2");
+        assert_eq!(jobs[0].targets[0].gene, "SOX2");
         assert_eq!(jobs[0].n_propagation, 4);
-        assert!((jobs[0].desired_expr - 0.0).abs() < 1e-9);
+        assert!((jobs[0].targets[0].desired_expr - 0.0).abs() < 1e-9);
         assert_eq!(jobs[0].out_path, PathBuf::from("/tmp/solo.feather"));
     }
 
@@ -988,7 +1154,10 @@ out_dir = "panel"
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
         let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 2);
-        assert!(jobs.iter().all(|j| (j.desired_expr - 0.0).abs() < 1e-9));
+        assert!(
+            jobs.iter()
+                .all(|j| (j.targets[0].desired_expr - 0.0).abs() < 1e-9)
+        );
         assert!(jobs.iter().all(|j| j.n_propagation == 4));
         assert_eq!(
             jobs[0].out_path,
@@ -1011,8 +1180,8 @@ out_dir = "panel"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
         let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 99, 1.0).unwrap();
-        assert_eq!(jobs[0].desired_expr, 0.0);
-        assert_eq!(jobs[1].desired_expr, 0.5);
+        assert_eq!(jobs[0].targets[0].desired_expr, 0.0);
+        assert_eq!(jobs[1].targets[0].desired_expr, 0.5);
         assert_eq!(jobs[0].n_propagation, 2);
         assert_eq!(jobs[1].n_propagation, 3);
         assert!((jobs[0].beta_scale_factor - 1.0).abs() < 1e-9);
@@ -1068,7 +1237,10 @@ out_dir = "panel"
 "#;
         let f: PerturbBatchFile = toml::from_str(s).unwrap();
         let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
-        assert!(jobs.iter().all(|j| (j.desired_expr - 0.25).abs() < 1e-9));
+        assert!(
+            jobs.iter()
+                .all(|j| (j.targets[0].desired_expr - 0.25).abs() < 1e-9)
+        );
         assert!(jobs.iter().all(|j| j.n_propagation == 7));
     }
 
@@ -1208,9 +1380,15 @@ cells_csv_columns = ["col_a", "col_b", ""]
         let mut jobs = expand_prepared_jobs(&f, parent, 4, 1.0).unwrap();
         assert_eq!(jobs.len(), 3);
         resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
-        assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[0usize]);
-        assert_eq!(jobs[1].cell_indices.as_ref().unwrap().as_slice(), &[1usize]);
-        assert!(jobs[2].cell_indices.is_none());
+        assert_eq!(
+            jobs[0].targets[0].cell_indices.as_ref().unwrap().as_slice(),
+            &[0usize]
+        );
+        assert_eq!(
+            jobs[1].targets[0].cell_indices.as_ref().unwrap().as_slice(),
+            &[1usize]
+        );
+        assert!(jobs[2].targets[0].cell_indices.is_none());
     }
 
     #[test]
@@ -1234,8 +1412,14 @@ cells_csv_columns = ["only"]
         let parent = dir.as_path();
         let mut jobs = expand_prepared_jobs(&f, parent, 4, 1.0).unwrap();
         resolve_prepared_job_cell_indices(&f, parent, &obs, &mut jobs).unwrap();
-        assert_eq!(jobs[0].cell_indices, jobs[1].cell_indices);
-        assert_eq!(jobs[0].cell_indices.as_ref().unwrap().as_slice(), &[1usize]);
+        assert_eq!(
+            jobs[0].targets[0].cell_indices,
+            jobs[1].targets[0].cell_indices
+        );
+        assert_eq!(
+            jobs[0].targets[0].cell_indices.as_ref().unwrap().as_slice(),
+            &[1usize]
+        );
     }
 
     #[test]
@@ -1258,5 +1442,283 @@ cells_csv_columns = ["a"]
         let obs = vec!["alpha".into()];
         let mut jobs = expand_prepared_jobs(&f, dir.as_path(), 4, 1.0).unwrap();
         assert!(resolve_prepared_job_cell_indices(&f, dir.as_path(), &obs, &mut jobs).is_err());
+    }
+
+    #[test]
+    fn joint_zips_desired_into_one_job() {
+        let s = r#"
+joint = true
+genes = ["A", "B"]
+desired_expr = [2.0, 0.0]
+out = "combo.feather"
+"#;
+        let f: PerturbBatchFile = toml::from_str(s).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/proj/batch"), 4, 1.0).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].targets.len(), 2);
+        assert_eq!(jobs[0].targets[0].gene, "A");
+        assert_eq!(jobs[0].targets[0].desired_expr, 2.0);
+        assert_eq!(jobs[0].targets[1].gene, "B");
+        assert_eq!(jobs[0].targets[1].desired_expr, 0.0);
+        assert_eq!(jobs[0].out_path, PathBuf::from("/proj/batch/combo.feather"));
+        assert_eq!(jobs[0].n_propagation, 4);
+    }
+
+    #[test]
+    fn joint_broadcasts_scalar_and_len_one_desired() {
+        let scalar: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B", "C"]
+desired_expr = 1.5
+out_dir = "panel"
+"#,
+        )
+        .unwrap();
+        let jobs = expand_prepared_jobs(&scalar, Path::new("/tmp"), 3, 9.0).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].targets.len(), 3);
+        assert!(
+            jobs[0]
+                .targets
+                .iter()
+                .all(|t| (t.desired_expr - 1.5).abs() < 1e-12)
+        );
+        assert_eq!(
+            jobs[0].out_path,
+            PathBuf::from("/tmp/panel/A_B_C_perturb_expr.feather")
+        );
+
+        let len_one: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+desired_expr = [0.25]
+n_propagation = [6]
+beta_scale_factor = [2.0]
+out = "j.feather"
+"#,
+        )
+        .unwrap();
+        let jobs = expand_prepared_jobs(&len_one, Path::new("/tmp"), 1, 1.0).unwrap();
+        assert!(
+            jobs[0]
+                .targets
+                .iter()
+                .all(|t| (t.desired_expr - 0.25).abs() < 1e-12)
+        );
+        assert_eq!(jobs[0].n_propagation, 6);
+        assert!((jobs[0].beta_scale_factor - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn joint_false_stays_one_job_per_gene() {
+        let s = r#"
+joint = false
+genes = ["SOX2", "PAX6"]
+desired_expr = [0.0, 0.5]
+out_dir = "panel"
+"#;
+        let f: PerturbBatchFile = toml::from_str(s).unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 4, 1.0).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].targets.len(), 1);
+        assert_eq!(jobs[1].targets[0].desired_expr, 0.5);
+    }
+
+    #[test]
+    fn joint_errors_on_duplicate_disagreement_and_out_array() {
+        let dup: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "A"]
+out = "x.feather"
+"#,
+        )
+        .unwrap();
+        assert!(expand_prepared_jobs(&dup, Path::new("/tmp"), 4, 1.0).is_err());
+
+        let hops: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+n_propagation = [2, 3]
+out = "x.feather"
+"#,
+        )
+        .unwrap();
+        let err = expand_prepared_jobs(&hops, Path::new("/tmp"), 4, 1.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("n_propagation"), "{err}");
+
+        let beta: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+beta_scale_factor = [1.0, 2.0]
+out = "x.feather"
+"#,
+        )
+        .unwrap();
+        let err = expand_prepared_jobs(&beta, Path::new("/tmp"), 4, 1.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("beta_scale_factor"), "{err}");
+
+        let outs: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+out = ["a.feather", "b.feather"]
+"#,
+        )
+        .unwrap();
+        assert!(expand_prepared_jobs(&outs, Path::new("/tmp"), 4, 1.0).is_err());
+
+        let both: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+out = "a.feather"
+out_dir = "q"
+"#,
+        )
+        .unwrap();
+        assert!(expand_prepared_jobs(&both, Path::new("/tmp"), 4, 1.0).is_err());
+
+        let missing: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+"#,
+        )
+        .unwrap();
+        assert!(expand_prepared_jobs(&missing, Path::new("/tmp"), 4, 1.0).is_err());
+
+        let bad_len: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+desired_expr = [0.0, 0.5, 1.0]
+out = "x.feather"
+"#,
+        )
+        .unwrap();
+        assert!(expand_prepared_jobs(&bad_len, Path::new("/tmp"), 4, 1.0).is_err());
+    }
+
+    #[test]
+    fn joint_equal_hop_list_is_one_value() {
+        let f: PerturbBatchFile = toml::from_str(
+            r#"
+joint = true
+genes = ["A", "B"]
+n_propagation = [4, 4]
+out = "x.feather"
+"#,
+        )
+        .unwrap();
+        let jobs = expand_prepared_jobs(&f, Path::new("/tmp"), 1, 1.0).unwrap();
+        assert_eq!(jobs[0].n_propagation, 4);
+    }
+
+    #[test]
+    fn joint_cell_scopes_share_column_or_zip() {
+        let dir =
+            std::env::temp_dir().join(format!("spacetravlr_joint_cells_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("lists.csv");
+        std::fs::write(
+            &csv_path,
+            "shared,col_a,col_b\nalpha,alpha,beta\nbeta,gamma,\n",
+        )
+        .unwrap();
+        let obs = vec!["alpha".into(), "beta".into(), "gamma".into()];
+
+        let shared = format!(
+            r#"
+joint = true
+genes = ["A", "B"]
+out = "j.feather"
+cells_csv = "{}"
+cells_csv_column = "shared"
+"#,
+            csv_path.display()
+        );
+        let f: PerturbBatchFile = toml::from_str(&shared).unwrap();
+        let mut jobs = expand_prepared_jobs(&f, dir.as_path(), 4, 1.0).unwrap();
+        resolve_prepared_job_cell_indices(&f, dir.as_path(), &obs, &mut jobs).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].targets[0].cell_indices,
+            jobs[0].targets[1].cell_indices
+        );
+        assert_eq!(
+            jobs[0].targets[0].cell_indices.as_ref().unwrap().as_slice(),
+            &[0usize, 1]
+        );
+
+        let zipped = format!(
+            r#"
+joint = true
+genes = ["A", "B"]
+out = "j.feather"
+cells_csv = "{}"
+cells_csv_columns = ["col_a", ""]
+"#,
+            csv_path.display()
+        );
+        let f: PerturbBatchFile = toml::from_str(&zipped).unwrap();
+        let mut jobs = expand_prepared_jobs(&f, dir.as_path(), 4, 1.0).unwrap();
+        resolve_prepared_job_cell_indices(&f, dir.as_path(), &obs, &mut jobs).unwrap();
+        assert_eq!(
+            jobs[0].targets[0].cell_indices.as_ref().unwrap().as_slice(),
+            &[0usize, 2]
+        );
+        assert!(jobs[0].targets[1].cell_indices.is_none());
+    }
+
+    #[test]
+    fn validate_jobs_genes_rejects_any_joint_target() {
+        let jobs = vec![PreparedPerturbJob {
+            targets: vec![
+                job_target("A".into(), 0.0),
+                job_target("MISSING".into(), 1.0),
+            ],
+            n_propagation: 1,
+            out_path: PathBuf::from("o.feather"),
+            radius: None,
+            ligand_grid_factor: None,
+            contact_distance: None,
+            beta_scale_factor: 1.0,
+        }];
+        let err = validate_jobs_genes(&jobs, &["A".into(), "B".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MISSING"), "{err}");
+    }
+
+    #[test]
+    fn pair_genes_splits_broadcasts_and_rejects() {
+        let zipped = pair_genes_with_desired_expr(&["BCL6,IL21".into()], &[2.0, 0.0]).unwrap();
+        assert_eq!(zipped, vec![("BCL6".into(), 2.0), ("IL21".into(), 0.0)]);
+
+        let repeated =
+            pair_genes_with_desired_expr(&["BCL6".into(), "IL21".into()], &[0.0]).unwrap();
+        assert_eq!(repeated, vec![("BCL6".into(), 0.0), ("IL21".into(), 0.0)]);
+
+        let defaulted = pair_genes_with_desired_expr(&["A".into(), "B".into()], &[]).unwrap();
+        assert!(defaulted.iter().all(|(_, d)| d.abs() < 1e-12));
+
+        let mismatch = pair_genes_with_desired_expr(&["A".into(), "B".into()], &[0.0, 1.0, 2.0])
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("desired-expr"), "{mismatch}");
+
+        let dup = pair_genes_with_desired_expr(&["A".into(), "A".into()], &[0.0])
+            .unwrap_err()
+            .to_string();
+        assert!(dup.contains("duplicate"), "{dup}");
     }
 }

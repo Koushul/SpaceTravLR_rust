@@ -6,11 +6,12 @@ use spacetravlr::perturb::{
 };
 use spacetravlr::perturb_batch::{
     BatchRunOptions, PerturbBatchFile, batch_from_perturb_table, effective_parallelism,
-    expand_prepared_jobs, load_batch_file, load_perturb_cli_toml, resolve_effective_run_toml,
-    resolve_prepared_job_cell_indices, run_batch_jobs, validate_jobs_genes,
+    expand_prepared_jobs, load_batch_file, load_perturb_cli_toml, pair_genes_with_desired_expr,
+    resolve_effective_run_toml, resolve_prepared_job_cell_indices, run_batch_jobs,
+    validate_jobs_genes,
 };
 use spacetravlr::perturb_mode::{
-    PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_matrix,
+    PerturbRuntime, parse_obs_columns_csv, validate_perturb_simulated_targets,
 };
 #[cfg(not(feature = "tui"))]
 use spacetravlr::perturb_mode::{interactive_run_toml_prompt, run_interactive};
@@ -28,11 +29,11 @@ use std::time::{Duration, Instant};
 
 Batch mode (fully non-interactive) uses --export PATH or --out PATH (same flag), or --batch-toml PATH for many single-gene jobs. Batch keys can live in --config instead of a separate batch file.
 
-Single-job batch: requires a repro TOML (--run-toml or run_toml in --config), --gene, --export/--out. Optional: --desired-expr (default 0), --n-propagation, --beta-scale-factor, --cells-csv + --cells-csv-column, --verbose.
+Single export: requires a repro TOML (--run-toml or run_toml in --config), --gene, and --export/--out. Repeat --gene (or pass a comma-separated list) to clamp every gene in one propagation. --desired-expr matches that list: one value broadcasts, N values zip with the genes. Optional: --n-propagation, --beta-scale-factor, --cells-csv + --cells-csv-column (one cell scope for every gene), --verbose.
 
-Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Do not combine with --gene, --export/--out, or --cells-*.
+Batch TOML: repro path + --batch-toml (gene lists, zips, out_dir or out; parallelism inside the file or --batch-parallelism). Without `joint = true`, each gene is a separate simulation. With `joint = true`, every gene is clamped, then one propagation runs and one feather is written. Do not combine batch keys with --gene, --export/--out, or --cells-*.
 
-Screen subcommand: `spacetravlr-perturb screen --config PATH` loads the same KO/batch TOML shape (`run_toml`, `[perturbation]`, optional `out_dir`, `cells_csv`, `parallelism`, …) but ignores explicit `gene` / `genes` / `out` paths. It KOs every TF, ligand, receptor, `[grn].extra_modulators` gene, and ligand/receptor from `extra_lr`, writing `{out_dir or run output}/perturbations/{gene}_KO.feather`.
+Screen subcommand: `spacetravlr-perturb screen --config PATH` loads the same KO/batch TOML shape (`run_toml`, `[perturbation]`, optional `out_dir`, `cells_csv`, `parallelism`, …) but ignores explicit `gene` / `genes` / `out` paths. It KOs every TF, ligand, receptor, `[grn].extra_modulators` gene, and ligand/receptor from `extra_lr`, writing `{out_dir or run output}/perturbations/{gene}_KO.feather`. `joint = true` is rejected.
 
 Example:
   spacetravlr-perturb \
@@ -46,9 +47,16 @@ Example:
     --cells-csv-column selected \
     --verbose
 
+  spacetravlr-perturb \
+    --run-toml /path/to/spacetravlr_run_repro.toml \
+    --out /tmp/bcl6_il21.feather \
+    --gene BCL6 --desired-expr 2.0 \
+    --gene IL21 --desired-expr 0 \
+    --n-propagation 4
+
   spacetravlr-perturb screen --config /path/to/ko_screen.toml --verbose
 
-If --cells-csv is set, --cells-csv-column is required in single-job batch mode."#
+If --cells-csv is set, --cells-csv-column is required in single-export mode."#
 )]
 struct Cli {
     #[command(subcommand)]
@@ -76,22 +84,23 @@ struct Cli {
         long = "export",
         visible_alias = "out",
         value_name = "PATH",
-        help = "Write simulated expression as feather (rows = cells, columns = CellID + genes); exit. Same as --out. Requires --gene and a repro path (--run-toml and/or run_toml in --config); not for multi-job batch."
+        help = "Write simulated expression as feather (rows = cells, columns = CellID + genes); exit. Same as --out. Requires --gene and a repro path (--run-toml and/or run_toml in --config). Two or more --gene values are clamped in one propagation. Not for multi-job batch."
     )]
     export: Option<PathBuf>,
 
     #[arg(
         long = "gene",
-        help = "Gene to perturb (single-job --export / --out). For multi-job output, use batch keys in --config or --batch-toml."
+        value_delimiter = ',',
+        help = "Gene to perturb (repeat or comma-separate for a joint clamp). For multi-job output, use batch keys in --config or --batch-toml."
     )]
-    gene: Option<String>,
+    gene: Vec<String>,
 
     #[arg(
         long = "desired-expr",
-        default_value_t = 0.0,
-        help = "Batch: target expression. TUI: initial desired_expr."
+        value_delimiter = ',',
+        help = "Target expression for --gene (default 0). One value broadcasts; N values zip with the genes. TUI uses the first value."
     )]
-    desired_expr: f64,
+    desired_expr: Vec<f64>,
 
     #[arg(
         long = "n-propagation",
@@ -189,9 +198,26 @@ enum Commands {
     },
 }
 
+fn cli_paired_targets(cli: &Cli) -> anyhow::Result<Option<Vec<(String, f64)>>> {
+    if cli.gene.is_empty() {
+        if cli.desired_expr.len() > 1 {
+            anyhow::bail!(
+                "--desired-expr count {} must be 1 or match --gene (no --gene was set)",
+                cli.desired_expr.len()
+            );
+        }
+        return Ok(None);
+    }
+    Ok(Some(pair_genes_with_desired_expr(
+        &cli.gene,
+        &cli.desired_expr,
+    )?))
+}
+
 fn main() -> anyhow::Result<()> {
     spacetravlr::ensure_process_env();
     let cli = Cli::parse();
+    let cli_targets = cli_paired_targets(&cli)?;
 
     if let Some(Commands::Screen {
         config,
@@ -238,7 +264,7 @@ fn main() -> anyhow::Result<()> {
                 "--export/--out cannot be used in multi-job batch mode (outputs come from the batch spec)."
             );
         }
-        if cli.gene.is_some() {
+        if !cli.gene.is_empty() {
             anyhow::bail!("--gene cannot be used in batch mode.");
         }
         if cli.cells_csv.is_some() || cli.cells_csv_column.is_some() {
@@ -246,6 +272,12 @@ fn main() -> anyhow::Result<()> {
                 "--cells-csv / --cells-csv-column cannot be used in batch mode (set cells in the batch TOML if needed)."
             );
         }
+        expand_prepared_jobs(
+            &batch_file,
+            batch_parent,
+            cli.n_propagation.unwrap_or(1),
+            cli.beta_scale_factor.unwrap_or(1.0),
+        )?;
         let t_load = Instant::now();
         let mut runtime =
             PerturbRuntime::from_run_toml_with_config_overlay(run_toml_eff.as_path(), overlay_ref)?;
@@ -339,11 +371,14 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| parsed_opt.as_ref().and_then(|p| p.run_toml.clone()));
 
     if cli.export.is_none() {
+        if cli_targets.as_ref().is_some_and(|t| t.len() > 1) {
+            anyhow::bail!("joint perturbation (more than one --gene) requires --export/--out");
+        }
         #[cfg(feature = "tui")]
         {
             let opts = spacetravlr::perturb_tui::PerturbTuiOptions {
                 run_toml: run_for_interactive.clone(),
-                default_desired_expr: cli.desired_expr,
+                default_desired_expr: cli.desired_expr.first().copied().unwrap_or(0.0),
                 n_propagation_initial: cli.n_propagation,
                 beta_scale_factor_initial: cli.beta_scale_factor,
                 verbose: cli.verbose,
@@ -384,10 +419,8 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let export_path = cli.export.as_ref().unwrap();
-    let gene = cli
-        .gene
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--gene is required with --export / --out"))?;
+    let paired =
+        cli_targets.ok_or_else(|| anyhow::anyhow!("--gene is required with --export / --out"))?;
     let t_load = Instant::now();
     let mut runtime =
         PerturbRuntime::from_run_toml_with_config_overlay(run_toml.as_path(), overlay_ref)?;
@@ -398,8 +431,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(b) = cli.beta_scale_factor {
         runtime.perturb_cfg.beta_scale_factor = b;
     }
-    if !runtime.gene_names.iter().any(|g| g == gene) {
-        anyhow::bail!("Gene '{}' is not present in AnnData var_names.", gene);
+    for (gene, _) in &paired {
+        if !runtime.gene_names.iter().any(|g| g == gene) {
+            anyhow::bail!("Gene '{gene}' is not present in AnnData var_names.");
+        }
     }
 
     let run_parent = run_toml
@@ -444,11 +479,14 @@ fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("internal: inconsistent cells CSV path / column state"),
     };
 
-    let targets = vec![PerturbTarget {
-        gene: gene.to_string(),
-        desired_expr: cli.desired_expr,
-        cell_indices: cell_indices_batch,
-    }];
+    let targets: Vec<PerturbTarget> = paired
+        .iter()
+        .map(|(gene, desired_expr)| PerturbTarget {
+            gene: gene.clone(),
+            desired_expr: *desired_expr,
+            cell_indices: cell_indices_batch.clone(),
+        })
+        .collect();
     let mut timings: Option<PerturbTimings> = if cli.verbose {
         Some(PerturbTimings::default())
     } else {
@@ -474,13 +512,11 @@ fn main() -> anyhow::Result<()> {
         &mut timings,
     )
     .ok_or_else(|| anyhow::anyhow!("perturbation failed"))?;
-    validate_perturb_simulated_matrix(
+    validate_perturb_simulated_targets(
         &runtime.gene_mtx,
         &runtime.gene_names,
         &result.simulated,
-        gene,
-        cli.desired_expr,
-        targets[0].cell_indices.as_deref(),
+        &targets,
     )?;
     let perturb_elapsed = t_perturb.elapsed();
     let p = export_path
