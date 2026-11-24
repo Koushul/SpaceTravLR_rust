@@ -192,6 +192,9 @@ pub struct DataConfig {
     pub spatial_species: String,
     /// Override median k-NN target distance (µm) for spatial scaling; omit to use the species default.
     pub spatial_median_nn_target_um: Option<f64>,
+    /// Cell-type labels in `[data].cluster_annot` that receive betas. Empty: fit every cell.
+    /// Ligand fields and spatial niche maps still use every cell in the training universe.
+    pub train_cell_types: Vec<String>,
 }
 
 /// Rust / training auto-prep pipeline ([`crate::rust_preprocess`]): QC, normalize, HVG, PCA, UMAP, Leiden, MAGIC.
@@ -654,6 +657,7 @@ impl Default for DataConfig {
             perturb_obs_subset_file: None,
             spatial_species: default_data_spatial_species(),
             spatial_median_nn_target_um: None,
+            train_cell_types: Vec::new(),
         }
     }
 }
@@ -1667,6 +1671,31 @@ mod resolve_training_output_dir_tests {
     }
 
     #[test]
+    fn train_cell_types_defaults_empty_and_round_trips() {
+        let omitted = r#"
+[data]
+adata_path = "/tmp/x.h5ad"
+layer = "X"
+cluster_annot = "cell_type"
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(omitted).unwrap();
+        assert!(cfg.data.train_cell_types.is_empty());
+
+        let listed = r#"
+[data]
+cluster_annot = "cell_type"
+train_cell_types = ["B_germinal_center", "Tfh"]
+"#;
+        let cfg: SpaceshipConfig = toml::from_str(listed).unwrap();
+        assert_eq!(
+            cfg.data.train_cell_types,
+            vec!["B_germinal_center".to_string(), "Tfh".to_string()]
+        );
+        let pretty = cfg.to_toml_pretty().unwrap();
+        let back: SpaceshipConfig = toml::from_str(&pretty).unwrap();
+        assert_eq!(back.data.train_cell_types, cfg.data.train_cell_types);
+    }
+
     fn grn_max_lr_toml_alias_deserializes_to_max_ligands() {
         let toml = r#"
 [data]

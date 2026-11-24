@@ -19,6 +19,8 @@
 # adata_path      = "/data/slideseq_brain.h5ad"
 layer           = "imputed_count"
 cluster_annot   = "cell_type"
+# Fit betas only for these obs[cluster_annot] labels. Ligands still come from every cell.
+# train_cell_types = ["B_germinal_center", "Tfh"]
 # Optional: split into independent training by this condition
 # condition      = "batch"
 # obs column for sample when pooling . Requires [training].pool_lasso.

@@ -9,6 +9,7 @@ use crate::config::{
 use crate::estimator::{
     CachedSpatialData, ClusteredGCNNWR, ClusteredGcnNwrCnnRefineInputs, ClusteredGcnNwrFitInputs,
     CnnEpochHudSlot, PredictBetasInput, cached_spatial_for, finite_or_zero_f64,
+    slice_cached_spatial,
 };
 use crate::lasso::GroupLassoParams;
 use crate::ligand::{
@@ -338,7 +339,15 @@ fn export_pooled_sample_gene<AB: AutodiffBackend>(
     epochs: usize,
     n_iter: usize,
     tol: f64,
+    trained_cell_types_only: bool,
 ) -> (bool, bool, Option<usize>) {
+    let trained_keys;
+    let cluster_betadata_row_keys = if trained_cell_types_only {
+        trained_keys = cluster_keys_for_trained_rows(cluster_betadata_row_keys, clusters);
+        &trained_keys
+    } else {
+        cluster_betadata_row_keys
+    };
     let n_mods = estimator.modulators_genes.len();
     let mut wrote = false;
     let mut orphan_zero_mod_betas = false;
@@ -1147,6 +1156,72 @@ fn cell_type_label_counts_from_obs(
     let mut v: Vec<(String, usize)> = map.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
     v
+}
+
+/// Row indices whose `cluster_annot` label is in `train_cell_types`.
+///
+/// `None` means the allow-list is empty and every row is trained. Labels are trimmed.
+/// Every non-empty listed name must occur in this obs frame.
+pub fn receiver_indices_for_cell_types(
+    obs_df: &DataFrame,
+    cluster_annot: &str,
+    train_cell_types: &[String],
+) -> anyhow::Result<Option<Vec<usize>>> {
+    let allow: Vec<String> = train_cell_types
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if allow.is_empty() {
+        return Ok(None);
+    }
+    let allow_set: HashSet<&str> = allow.iter().map(|s| s.as_str()).collect();
+    let cell_col = obs_df.column(cluster_annot).with_context(|| {
+        format!("obs column {cluster_annot:?} not found while resolving train_cell_types")
+    })?;
+    let series = cell_col.as_materialized_series();
+    let mut present: HashSet<String> = HashSet::new();
+    let mut idx = Vec::new();
+    for i in 0..series.len() {
+        let key = obs_series_row_str(series, i).unwrap_or_default();
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        present.insert(key.to_string());
+        if allow_set.contains(key) {
+            idx.push(i);
+        }
+    }
+    let missing: Vec<&str> = allow
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| !present.contains(*s))
+        .collect();
+    if !missing.is_empty() {
+        let mut have: Vec<String> = present.into_iter().collect();
+        have.sort();
+        anyhow::bail!(
+            "train_cell_types {missing:?} not found in obs column {cluster_annot:?}. Present labels: {}",
+            have.join(", ")
+        );
+    }
+    if idx.is_empty() {
+        anyhow::bail!("train_cell_types matched no cells in obs column {cluster_annot:?}");
+    }
+    Ok(Some(idx))
+}
+
+/// Cluster keys that still have at least one trained row. Unlisted types are omitted.
+fn cluster_keys_for_trained_rows(
+    keys: &HashMap<usize, String>,
+    clusters: &Array1<usize>,
+) -> HashMap<usize, String> {
+    let present: HashSet<usize> = clusters.iter().copied().collect();
+    keys.iter()
+        .filter(|(id, _)| present.contains(id))
+        .map(|(id, label)| (*id, label.clone()))
+        .collect()
 }
 
 /// Label column used to look up TF priors. String or categorical `cluster_annot` values are
@@ -3480,6 +3555,30 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 .unwrap_or(1);
             let cluster_to_cell_type =
                 Arc::new(build_cluster_to_cell_type_map(&obs_df, cluster_annot)?);
+            let receiver_idx = receiver_indices_for_cell_types(
+                &obs_df,
+                cluster_annot,
+                &spaceship_config.data.train_cell_types,
+            )?;
+            if let Some(ref rows) = receiver_idx {
+                let labels: Vec<&str> = spaceship_config
+                    .data
+                    .train_cell_types
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                log_line(
+                    &hud,
+                    format!(
+                        "train_cell_types: fitting {} / {} cells ({})",
+                        rows.len(),
+                        obs_names.len(),
+                        labels.join(", ")
+                    ),
+                );
+            }
+            let receiver_idx = receiver_idx.map(Arc::new);
             let cluster_betadata_row_keys = Arc::new(build_cluster_id_to_betadata_cluster_key_map(
                 &obs_df,
                 cluster_annot,
@@ -3718,6 +3817,20 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 } else {
                     None
                 };
+            if let (Some(plans), Some(rows)) = (sample_plans.as_ref(), receiver_idx.as_ref()) {
+                let allowed: HashSet<usize> = rows.iter().map(|&i| clusters[i]).collect();
+                for plan in plans.iter() {
+                    let any = plan
+                        .obs_indices
+                        .iter()
+                        .any(|&i| allowed.contains(&clusters[i]));
+                    anyhow::ensure!(
+                        any,
+                        "train_cell_types matched no cells in sample {:?}",
+                        plan.label
+                    );
+                }
+            }
             let cells_csv_path = crate::perturb_mode::write_training_init_cells_csv(
                 Path::new(training_dir),
                 obs_names.as_ref(),
@@ -4021,6 +4134,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                 let xy = xy.clone();
                 let clusters = clusters.clone();
                 let obs_names = obs_names.clone();
+                let receiver_idx = receiver_idx.clone();
                 let global_grn = global_grn.clone();
                 let tf_priors = tf_priors.clone();
                 let cluster_to_cell_type = cluster_to_cell_type.clone();
@@ -4417,6 +4531,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     cnn_epoch_slot_fit.clone(),
                                     pooled_spatial.as_deref().map(|v| v.as_slice()),
                                     pooled_ligand_plans_w.as_deref().map(|v| v.as_slice()),
+                                    receiver_idx.as_deref().map(|v| v.as_slice()),
                                     on_lasso_progress,
                                 );
                                 match pooled {
@@ -4601,6 +4716,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 epochs,
                                                 n_iter,
                                                 tol,
+                                                receiver_idx.is_some(),
                                             );
                                             any_wrote |= wrote;
                                             any_orphan |= orphan;
@@ -4736,6 +4852,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                     cached_spatial.as_deref(),
                                     cnn_epoch_slot_fit,
                                     random_seed_w,
+                                    receiver_idx.as_deref().map(|v| v.as_slice()),
                                     on_lasso_progress,
                                 )
                                 .is_ok();
@@ -4843,22 +4960,64 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             )
                                             .collect();
 
+                                    let export_xy_owned;
+                                    let export_clusters_owned;
+                                    let export_obs_owned;
+                                    let export_cached_owned;
+                                    let export_keys_owned;
+                                    let (export_xy, export_clusters, export_obs, export_cached, export_keys) =
+                                        if let Some(idx) = receiver_idx.as_deref() {
+                                            export_xy_owned = xy.select(Axis(0), idx);
+                                            export_clusters_owned = clusters.select(Axis(0), idx);
+                                            export_obs_owned = idx
+                                                .iter()
+                                                .map(|&i| obs_names[i].clone())
+                                                .collect::<Vec<_>>();
+                                            export_cached_owned = cached_spatial
+                                                .as_ref()
+                                                .map(|c| slice_cached_spatial(c.as_ref(), idx));
+                                            export_keys_owned = cluster_keys_for_trained_rows(
+                                                cluster_betadata_row_keys.as_ref(),
+                                                &export_clusters_owned,
+                                            );
+                                            (
+                                                &export_xy_owned,
+                                                &export_clusters_owned,
+                                                export_obs_owned.as_slice(),
+                                                export_cached_owned.as_ref(),
+                                                &export_keys_owned,
+                                            )
+                                        } else {
+                                            export_xy_owned = Array2::zeros((0, 2));
+                                            export_clusters_owned = Array1::zeros(0);
+                                            export_obs_owned = Vec::new();
+                                            export_cached_owned = None;
+                                            export_keys_owned = HashMap::new();
+                                            (
+                                                xy.as_ref(),
+                                                clusters.as_ref(),
+                                                obs_names.as_slice(),
+                                                cached_spatial.as_deref(),
+                                                cluster_betadata_row_keys.as_ref(),
+                                            )
+                                        };
+
                                     if export_per_cell {
-                                        let x_mock = Array2::<f64>::zeros((xy.nrows(), n_mods));
+                                        let x_mock = Array2::<f64>::zeros((export_xy.nrows(), n_mods));
                                         let mut all_betas = est_inner.predict_betas(
                                             PredictBetasInput {
                                                 x: &x_mock,
-                                                xy: &xy,
-                                                clusters: &clusters,
+                                                xy: export_xy,
+                                                clusters: export_clusters,
                                                 num_clusters,
                                                 device: &device,
-                                                cached_spatial: cached_spatial.as_deref(),
+                                                cached_spatial: export_cached,
                                                 inference_batch_size: cnn_w.cnn_inference_batch_size,
                                             },
                                         );
                                         if !bad_betadata_clusters.is_empty() {
                                             for i in 0..all_betas.nrows() {
-                                                if bad_betadata_clusters.contains(&clusters[i]) {
+                                                if bad_betadata_clusters.contains(&export_clusters[i]) {
                                                     all_betas.row_mut(i).fill(0.0);
                                                 }
                                             }
@@ -4906,7 +5065,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             };
                                             log_line(&hud, orphan_msg);
                                         } else {
-                                            let n_rows = obs_names.len();
+                                            let n_rows = export_obs.len();
                                             let n_keep = keep.len();
                                             let mut mat = Array2::<f64>::zeros((n_rows, n_keep));
                                             for (new_j, &j) in keep.iter().enumerate() {
@@ -4922,7 +5081,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             if write_betadata_feather(
                                                 &betadata_path,
                                                 "CellID",
-                                                obs_names.as_ref(),
+                                                export_obs,
                                                 &data_cols,
                                                 &mat,
                                             )
@@ -4939,7 +5098,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                     &col_names,
                                                     n_mods,
                                                     &bad_betadata_clusters,
-                                                    &cluster_betadata_row_keys,
+                                                    export_keys,
                                                     unscale_betas_on_export_w,
                                                     estimator.cluster_annot.as_str(),
                                                 ) {
@@ -4954,15 +5113,16 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             }
                                         }
                                     } else {
-                                        // Always emit ONE row per cell type seen in obs (training
-                                        // universe), so downstream Betabase joins by `Cluster` key
-                                        // never fall back to "row 0" for clusters that didn't fit.
+                                        // Emit one row per cell type in `export_keys`. That is every
+                                        // type in obs, unless `train_cell_types` narrowed the fit.
+                                        // Unfitted types in that set still get an explicit zero row
+                                        // so Betabase joins by `Cluster` do not fall back to row 0.
                                         // Clusters that were skipped, errored, fell below
                                         // threshold, or simply have no Lasso coefficients get a
                                         // row of zeros (intercept = 0, all βs = 0) and are treated
                                         // as no contribution.
                                         let mut cluster_ids: Vec<usize> =
-                                            cluster_betadata_row_keys.keys().copied().collect();
+                                            export_keys.keys().copied().collect();
                                         cluster_ids.sort();
 
                                         let rows_scaled: Vec<Vec<f64>> = cluster_ids
@@ -5064,7 +5224,7 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                             let ids: Vec<String> = cluster_ids
                                                 .iter()
                                                 .map(|&c| {
-                                                    cluster_betadata_row_keys
+                                                    export_keys
                                                         .get(&c)
                                                         .cloned()
                                                         .unwrap_or_else(|| c.to_string())
@@ -5638,9 +5798,28 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         cached_spatial: Option<&CachedSpatialData>,
         cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
         random_seed: u64,
+        receiver_idx: Option<&[usize]>,
         lasso_progress: F,
     ) -> anyhow::Result<()> {
-        let (mut x_modulators, target_expr) = self.build_x_modulators_and_target_y(xy)?;
+        let (mut x_modulators, mut target_expr) = self.build_x_modulators_and_target_y(xy)?;
+        // Ligand columns were built on the full `xy`. Scale and fit only the receiver rows.
+        let mut xy_owned: Option<Array2<f64>> = None;
+        let mut clusters_owned: Option<Array1<usize>> = None;
+        let mut cached_owned: Option<CachedSpatialData> = None;
+        if let Some(idx) = receiver_idx {
+            anyhow::ensure!(!idx.is_empty(), "train_cell_types matched no cells");
+            x_modulators = x_modulators.select(Axis(0), idx);
+            target_expr = target_expr.select(Axis(0), idx);
+            xy_owned = Some(xy.select(Axis(0), idx));
+            clusters_owned = Some(clusters.select(Axis(0), idx));
+            cached_owned = cached_spatial.map(|c| slice_cached_spatial(c, idx));
+        }
+        let xy = xy_owned.as_ref().unwrap_or(xy);
+        let clusters = clusters_owned.as_ref().unwrap_or(clusters);
+        let cached_spatial = match cached_owned.as_ref() {
+            Some(c) => Some(c),
+            None => cached_spatial,
+        };
         if scale_modulators {
             let scales = scale_columns_no_center(&mut x_modulators);
             self.modulator_scales = Some(scales);
@@ -5728,6 +5907,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
         _cnn_epoch_slot: Option<Arc<CnnEpochHudSlot>>,
         pooled_spatial: Option<&[Arc<CachedSpatialData>]>,
         pooled_ligand_plans: Option<&[Arc<crate::ligand_field::LigandFieldPlan>]>,
+        receiver_idx: Option<&[usize]>,
         lasso_progress: F,
     ) -> anyhow::Result<Vec<PooledSampleFit>> {
         let orig_subset = self.obs_row_subset.clone();
@@ -5782,6 +5962,35 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
                         cnn.ego_center_spatial_maps,
                     ))
                 });
+            let (x, y, sample_xy, sample_clusters, sample_names, cached_spatial) =
+                if let Some(idx) = receiver_idx {
+                    let allowed: HashSet<usize> = idx.iter().map(|&i| clusters_all[i]).collect();
+                    let keep: Vec<usize> = (0..sample_clusters.len())
+                        .filter(|&j| allowed.contains(&sample_clusters[j]))
+                        .collect();
+                    anyhow::ensure!(
+                        !keep.is_empty(),
+                        "train_cell_types matched no cells in sample {:?}",
+                        plan.label
+                    );
+                    (
+                        x.select(Axis(0), &keep),
+                        y.select(Axis(0), &keep),
+                        sample_xy.select(Axis(0), &keep),
+                        sample_clusters.select(Axis(0), &keep),
+                        keep.iter().map(|&j| sample_names[j].clone()).collect(),
+                        Arc::new(slice_cached_spatial(cached_spatial.as_ref(), &keep)),
+                    )
+                } else {
+                    (
+                        x,
+                        y,
+                        sample_xy,
+                        sample_clusters,
+                        sample_names,
+                        cached_spatial,
+                    )
+                };
             x_parts.push(x.clone());
             y_parts.push(y.clone());
             c_parts.push(sample_clusters.clone());
@@ -5968,6 +6177,7 @@ impl<AB: AutodiffBackend, AnB: Backend> SpatialCellularProgramsEstimator<AB, AnB
             None,
             None,
             ExecutionConfig::default().random_seed,
+            None,
             |_, _| {},
         )
     }
@@ -7055,7 +7265,7 @@ mod classic_received_x_identity_tests {
 
 #[cfg(test)]
 mod cluster_annot_label_tests {
-    use super::build_cluster_to_cell_type_map;
+    use super::{build_cluster_to_cell_type_map, receiver_indices_for_cell_types};
     use polars::prelude::*;
 
     #[test]
@@ -7084,5 +7294,64 @@ mod cluster_annot_label_tests {
         let map = build_cluster_to_cell_type_map(&df, "leiden").unwrap();
         assert_eq!(map.get(&0).map(String::as_str), Some("T"));
         assert_eq!(map.get(&1).map(String::as_str), Some("B"));
+    }
+
+    fn two_type_obs() -> DataFrame {
+        df![
+            "cell_type" => ["ct_a", " ct_b", "ct_a", "ct_b", ""],
+        ]
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_allow_list_trains_every_row() {
+        let df = two_type_obs();
+        assert!(
+            receiver_indices_for_cell_types(&df, "cell_type", &[])
+                .unwrap()
+                .is_none()
+        );
+        let blanks = vec![" ".to_string(), String::new()];
+        assert!(
+            receiver_indices_for_cell_types(&df, "cell_type", &blanks)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn allow_list_trims_and_keeps_only_named_types() {
+        let df = two_type_obs();
+        let idx = receiver_indices_for_cell_types(
+            &df,
+            "cell_type",
+            &[" ct_a ".to_string(), "ct_a".to_string(), "".to_string()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(idx, vec![0, 2]);
+        let both = receiver_indices_for_cell_types(
+            &df,
+            "cell_type",
+            &["ct_b".to_string(), "ct_a".to_string()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(both, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn unknown_label_names_the_labels_that_exist() {
+        let df = two_type_obs();
+        let err = receiver_indices_for_cell_types(
+            &df,
+            "cell_type",
+            &["ct_a".to_string(), "missing".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("missing"), "{err}");
+        assert!(err.contains("ct_a"), "{err}");
+        assert!(err.contains("ct_b"), "{err}");
     }
 }

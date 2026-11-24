@@ -494,6 +494,7 @@ SpaceTravLR reads `spaceship_config.toml` from the repo build, from the installe
 | `adata_path` | — | Path to the `.h5ad`; usually set via `--h5ad` |
 | `layer` | `imputed_count` | Expression matrix for means, Lasso targets, ligand ranking |
 | `cluster_annot` | `cell_type` | obs column with cluster labels |
+| `train_cell_types` | — | Labels in `cluster_annot` that receive betas. Empty or omitted fits every cell. Received-ligand fields, mean-field means, ligand ranking, and spatial niche maps still use every cell in the condition or sample. Betadata feathers omit unlisted types. `cells.csv` still lists every loaded cell. |
 | `condition` | — | Split training per unique obs value into fully separate models |
 | `sample` | — | Independent slides for pool-lasso. Must be set with `[training].pool_lasso` |
 | `perturb_obs_subset_file` | — | One `obs_name` per line to scope perturbation |

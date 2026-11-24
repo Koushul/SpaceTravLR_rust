@@ -40,7 +40,7 @@ Install: `cargo install --path . --locked`, `cargo run --bin …`, or the releas
 
 Typical sections:
 
-- `[data]` — `adata_path`, `layer` (e.g. `imputed_count`), `cluster_annot`, optional `condition`, optional `perturb_obs_subset_file` (one `obs_names` per line; **perturbation** loads only those rows for smaller RAM)
+- `[data]` — `adata_path`, `layer` (e.g. `imputed_count`), `cluster_annot`, optional `train_cell_types` (list of `cluster_annot` labels that receive betas; ligand fields and niche maps still use every cell in the condition or sample; omitted or empty fits all cells), optional `condition`, optional `perturb_obs_subset_file` (one `obs_names` per line; **perturbation** loads only those rows for smaller RAM)
 - `[preprocess]` — QC / MAGIC knobs for auto-prep; `skip_auto_adata_prep` (same as `--skip-auto-adata-prep`)
 - `[spatial]` — `radius`, `spatial_dim`, `contact_distance`, `weighted_ligand_scale_factor`
 - `[grn]` — `network_data_dir`, `tf_priors_feather`, `tf_ligand_cutoff`, `max_ligands` (serde aliases `max_lr` and legacy `max_lr_pairs`), modulator toggles, `extra_modulators`, `extra_lr`, file variants

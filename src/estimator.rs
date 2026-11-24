@@ -76,6 +76,14 @@ pub struct CachedSpatialData {
     pub spatial_maps: Array4<f32>,
 }
 
+/// Keep niche maps that were built on the full tissue, but only the receiver rows.
+pub fn slice_cached_spatial(src: &CachedSpatialData, rows: &[usize]) -> CachedSpatialData {
+    CachedSpatialData {
+        spatial_features: src.spatial_features.select(Axis(0), rows),
+        spatial_maps: src.spatial_maps.select(Axis(0), rows),
+    }
+}
+
 /// Same kernels as the uncached CNN path: [`create_spatial_features`] + [`xyc2spatial_fast`].
 pub fn cached_spatial_for(
     xy: &Array2<f64>,
