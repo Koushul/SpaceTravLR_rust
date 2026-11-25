@@ -77,7 +77,7 @@ Each target gene is predicted from modulator groups: **TFs**, **ligand–recepto
 
 ## `[ligand_field]` — received ligand + communication-prob pair selection
 
-Used whenever LR modulators are on (`use_lr_modulators` / `train_modulators` includes `lr`). Pick **`mode`** and params; there is no `enabled` flag. Default is Gaussian spatial. See [Ligand field](ligand_field.md).
+`mode` and the received-ligand scale apply whenever LR modulators are on. CellChat database load, communication probabilities, diagnostics, and the CellChat received-ligand cache run only when `replace_lr_pairs = true` (or via `spacetravlr ligand-field`). Default is Gaussian spatial on the built-in GRN pairs. See [Ligand field](ligand_field.md).
 
 | Parameter | Template | What it does | Turn up | Turn down |
 |-----------|----------|--------------|---------|-----------|
@@ -94,7 +94,7 @@ Used whenever LR modulators are on (`use_lr_modulators` / `train_modulators` inc
 | `n_perm` | `0` | Label-shuffle permutations for p-values (`0` = skip). | e.g. `100` for significance testing. | Keep `0` for speed. |
 | `p_threshold` | `0.05` | Keep interactions with min p ≤ this (needs `n_perm > 0`). | More pairs. | Stricter significance. |
 | `min_prob` | `0.0` | Drop interactions whose max \(P\) is below this (ignored when `pair_selection = expressed`). | Stronger-only edges. | Keep weak links. |
-| `replace_lr_pairs` | `true` | Replace GRN `lr` edges with probability-selected `Lig$Rec` units (complexes pre-expanded). | Force DB pair set. | `false` to keep GRN pairs (probs still written for inspection). |
+| `replace_lr_pairs` | `false` | When `true`, replace GRN `lr` edges with probability-selected `Lig$Rec` units (complexes pre-expanded). Training loads the CellChat DB and builds probabilities only in that case. | `true` to train the CellChat pair set. | `false` (default) keeps GRN pairs and skips the CellChat computation and cache. Use `spacetravlr ligand-field` to write probabilities without training. |
 | `max_interactions` | `200` | Cap after ranking by max \(P\) or mean \(L\times R\). | Broader LR block. | Faster, sparser. |
 | `write_ligand_diagnostics` | `true` | Write `ligand_field_L_diagnostics.csv` (meanfield vs spatial \(L\)). | Keep on for A/B audits. | `false` to skip I/O. |
 | `signaling_types` |  | Restrict to classes (e.g. `Secreted Signaling`). | Focus paracrine. | Empty = all classes. |

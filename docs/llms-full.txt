@@ -513,12 +513,13 @@ Coordinate units must match `obsm['spatial']` (microns after prep). Received-lig
 
 ### `[ligand_field]` — received ligand and LR pair selection
 
-Used whenever LR modulators are on. There is no `enabled` flag. Default is Gaussian spatial. **FreeTravLR** is `mode = "meanfield"`. Legacy `[cellchat]` keys are ignored or migrated.
+Received-ligand `mode` applies whenever LR modulators are on. The CellChat database, communication probabilities, diagnostics CSV, and CellChat received-ligand cache are built only when `replace_lr_pairs = true`. Default is Gaussian spatial on the built-in GRN pairs. **FreeTravLR** is `mode = "meanfield"`. Legacy `[cellchat]` keys are ignored or migrated.
 
 | Key | Template | Meaning |
 |---|---|---|
 | `mode` (`lr_mode` alias) | `spatial` | `spatial` = Gaussian neighborhood \(\widetilde{L}R\). `meanfield` = FreeTravLR, global \(\bar L R_c\) (ligand kernel ignores coordinates). |
-| `pair_selection` | `prob` | `prob` = CellChat \(P\) rank/filter. `expressed` = all present pairs ranked by mean \(L\times R\). |
+| `replace_lr_pairs` | `false` | `false` trains built-in GRN `LIG$REC` pairs and does not load the CellChat DB, compute \(P\), or cache received ligands for that DB. `true` replaces GRN edges with the probability-selected CellChat set (complexes expanded). `spacetravlr ligand-field` computes the table on demand either way. |
+| `pair_selection` | `prob` | Used when `replace_lr_pairs = true`. `prob` = CellChat \(P\) rank/filter. `expressed` = all present pairs ranked by mean \(L\times R\). |
 | `received_ligand_norm` | `global_n` | Spatial weights: `global_n` = `(1/N)Σ w L`; `kernel_mass` = \(Σ w L / Σ w\) (fair vs meanfield). |
 | `weighted_ligand_scale_factor` | `1.0` | Linear multiplier on Gaussian received-ligand weights |
 | `ligand_grid_factor` | — | Grid spacing as a fraction of `[spatial].radius` for approximate received ligands; `0.5` is much faster with a few percent error |
@@ -765,7 +766,7 @@ HTTP API under `/api`: `GET /api/status`, `POST /api/load`, `POST /api/umap`, `P
 
 ## 12. How the model works
 
-**Step 1 — Received ligand fields.** Spatial mode: for each cell and each ligand, aggregate expression from neighboring sender cells weighted by a Gaussian kernel with σ = `[spatial].radius`. Juxtacrine terms use a hard `contact_distance` cutoff. FreeTravLR (`[ligand_field].mode = "meanfield"`): received ligand is the global mean ligand (no neighborhood). CellChat-style \(P\) selects which LR pairs enter Lasso; the field supplies the per-cell \(L\times R\) feature so \(P\) is not absorbed by the intercept.
+**Step 1 — Received ligand fields.** Spatial mode: for each cell and each ligand, aggregate expression from neighboring sender cells weighted by a Gaussian kernel with σ = `[spatial].radius`. Juxtacrine terms use a hard `contact_distance` cutoff. FreeTravLR (`[ligand_field].mode = "meanfield"`): received ligand is the global mean ligand (no neighborhood). By default the LR columns are the built-in GRN pairs, and training does not load the CellChat database or build communication probabilities. CellChat-style \(P\) selects which pairs enter Lasso only when `replace_lr_pairs = true`; the field then supplies the per-cell \(L\times R\) feature so a constant \(P\) is not absorbed by the intercept.
 
 **Step 2 — Sparse group lasso.** For each target gene and each cluster, fit a sparse group lasso (solved by FISTA) predicting expression from three modulator groups — TF terms, `LIG$REC` products of receptor expression and received ligand, and `TF#LIG` ligand-mediated TF terms — plus optional extras. This produces global, cell-type-specific baseline coefficients β_SGL and acts as a quality gate via `score_threshold`.
 

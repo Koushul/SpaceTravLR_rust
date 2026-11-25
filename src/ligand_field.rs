@@ -93,6 +93,8 @@ pub struct LigandFieldConfig {
     /// Ignored when `pair_selection = expressed`.
     pub min_prob: f64,
     /// When true, replace GRN `edge_type=lr` pairs with probability-selected interactions.
+    /// Default false: train the built-in GRN pairs and skip the CellChat database, probabilities, and cache.
+    /// `spacetravlr ligand-field` still computes them when invoked.
     pub replace_lr_pairs: bool,
     /// Cap retained interactions after filtering (by max \(P\) or expression product).
     pub max_interactions: Option<usize>,
@@ -132,7 +134,7 @@ impl Default for LigandFieldConfig {
             n_perm: 0,
             p_threshold: 0.05,
             min_prob: 0.0,
-            replace_lr_pairs: true,
+            replace_lr_pairs: false,
             max_interactions: Some(200),
             signaling_types: Vec::new(),
             random_seed: 42,
@@ -1467,6 +1469,13 @@ mod tests {
         assert_eq!(lines[1], "c0,1,0.25");
         assert_eq!(lines[2], "c1,2,0.5");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_keeps_builtin_grn_lr_pairs() {
+        assert!(!LigandFieldConfig::default().replace_lr_pairs);
+        let cfg: LigandFieldConfig = toml::from_str("").unwrap();
+        assert!(!cfg.replace_lr_pairs);
     }
 
     #[test]

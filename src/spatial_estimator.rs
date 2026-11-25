@@ -3931,7 +3931,9 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
             let extra_tetraspanin_arc = Arc::new(extras.tetraspanin_pairs);
 
             let ligand_field_prep: Option<crate::ligand_field::LigandFieldPrep> =
-                if spaceship_config.grn.use_lr_modulators {
+                if spaceship_config.grn.use_lr_modulators
+                    && spaceship_config.ligand_field.replace_lr_pairs
+                {
                     let t_cc =
                         pipeline_step_begin(&hud, "Ligand-field pair selection probabilities");
                     let group_names: Vec<String> = (0..num_clusters)
@@ -3975,6 +3977,12 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                         ),
                     );
                     Some(prep)
+                } else if spaceship_config.grn.use_lr_modulators {
+                    log_line(
+                        &hud,
+                        "Ligand field: built-in GRN LR pairs (CellChat DB, probabilities, and received-ligand cache skipped)".to_string(),
+                    );
+                    None
                 } else {
                     None
                 };
@@ -4988,11 +4996,6 @@ impl<AB: AutodiffBackend> SpatialCellularProgramsEstimator<AB, anndata_hdf5::H5>
                                                 &export_keys_owned,
                                             )
                                         } else {
-                                            export_xy_owned = Array2::zeros((0, 2));
-                                            export_clusters_owned = Array1::zeros(0);
-                                            export_obs_owned = Vec::new();
-                                            export_cached_owned = None;
-                                            export_keys_owned = HashMap::new();
                                             (
                                                 xy.as_ref(),
                                                 clusters.as_ref(),

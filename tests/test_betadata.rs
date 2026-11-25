@@ -275,7 +275,14 @@ fn test_feather_roundtrip_seed_only() {
 
 #[test]
 fn test_betabase_from_directory_cnn_cellid() {
-    let dir = std::env::temp_dir().join("betadata_test_dir_cnn_feather");
+    let dir = std::env::temp_dir().join(format!(
+        "betadata_test_dir_cnn_feather_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
 
     let ids = vec!["c0".into(), "c1".into()];

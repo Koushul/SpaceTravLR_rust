@@ -1696,6 +1696,7 @@ train_cell_types = ["B_germinal_center", "Tfh"]
         assert_eq!(back.data.train_cell_types, cfg.data.train_cell_types);
     }
 
+    #[test]
     fn grn_max_lr_toml_alias_deserializes_to_max_ligands() {
         let toml = r#"
 [data]

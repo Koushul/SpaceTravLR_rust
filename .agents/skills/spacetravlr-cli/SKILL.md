@@ -44,6 +44,7 @@ Typical sections:
 - `[preprocess]` — QC / MAGIC knobs for auto-prep; `skip_auto_adata_prep` (same as `--skip-auto-adata-prep`)
 - `[spatial]` — `radius`, `spatial_dim`, `contact_distance`, `weighted_ligand_scale_factor`
 - `[grn]` — `network_data_dir`, `tf_priors_feather`, `tf_ligand_cutoff`, `max_ligands` (serde aliases `max_lr` and legacy `max_lr_pairs`), modulator toggles, `extra_modulators`, `extra_lr`, file variants
+- `[ligand_field]` — received-ligand mode and pair source. Default `replace_lr_pairs = false` trains built-in GRN `Lig$Rec` pairs and skips the CellChat database, communication probabilities, diagnostics CSV, and received-ligand cache. `true` replaces those edges with CellChat-ranked pairs (`pair_selection = "prob"` or `"expressed"`). `spacetravlr ligand-field` still computes the probability table when you run it.
 - `[cnn]`, `[lasso]`, `[training]` — CNN and Lasso hyperparameters
 - `[execution]` — `n_parallel`, `output_dir`, `write_minimal_repro_h5ad`, `stale_lock_secs` (join lock recovery)
 - `[perturbation]` — `beta_scale_factor`, optional `beta_cap`, `n_propagation`, `ligand_grid_factor` (grid vs exact received ligands), optional `cells_csv` / `cells_csv_column` (defaults for `spacetravlr-perturb --export` and TUI cell-scope CSV when the CLI does not pass `--cells-csv`; paths relative to the run TOML's directory unless absolute), `splash_mode` (`auto` / `materialize` / `fused`), optional `splash_jacobian_max_mb`

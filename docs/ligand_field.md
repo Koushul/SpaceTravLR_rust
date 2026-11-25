@@ -1,6 +1,6 @@
 # Ligand field
 
-When LR modulators are enabled, SpaceTravLR selects pairs via group-level communication probabilities (CellChat-style; Jin et al., *Nat Commun* 2021) and builds **per-cell** design columns from a received-ligand field × local receptor.
+When LR modulators are enabled, the default `Lig$Rec` columns are the built-in GRN pairs. Training does not load the CellChat database, compute communication probabilities, or cache those received-ligand fields unless `replace_lr_pairs = true`. That flag swaps the GRN edges for CellChat-style pairs (Jin et al., *Nat Commun* 2021). `spacetravlr ligand-field` computes the probability table without training. Design columns are a received-ligand field × local receptor.
 
 Set **`mode`** and related params under `[ligand_field]` — there is no on/off switch. Default mode is **`spatial`** (Gaussian neighborhood).
 
@@ -29,7 +29,8 @@ Unique-ligand fields are **precomputed once** per run and shared across gene wor
 ```toml
 [ligand_field]
 mode = "spatial"                 # or "meanfield"
-pair_selection = "prob"          # or "expressed"
+replace_lr_pairs = false         # true: CellChat-ranked pairs replace GRN lr edges
+pair_selection = "prob"          # used when replace_lr_pairs = true; or "expressed"
 received_ligand_norm = "global_n" # or "kernel_mass"
 weighted_ligand_scale_factor = 1.0
 max_interactions = 200

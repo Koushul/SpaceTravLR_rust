@@ -100,7 +100,8 @@ population_size_weight = false
 n_perm = 0
 p_threshold = 0.05
 min_prob = 0.0
-replace_lr_pairs = true
+# false: train built-in GRN Lig$Rec pairs. true: replace them with CellChat-ranked pairs.
+replace_lr_pairs = false
 max_interactions = 200
 write_ligand_diagnostics = true
 # signaling_types = ["Secreted Signaling"]

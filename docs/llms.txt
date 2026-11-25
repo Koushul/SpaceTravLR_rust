@@ -27,7 +27,7 @@ Key facts an agent should know before answering questions or running commands:
 - **`--sample` and `--pool-lasso` must be set together.** Concatenate slides first (`scanpy.concat(..., label="sample")`). Do not use pool-lasso as a substitute for `--condition` when groups must not share a Lasso (different treatments); `--condition` trains fully separate models.
 - Training writes `{output_dir}/cells.csv` at init (one column per `[data].cluster_annot` value listing `obs_names`). Pool-lasso also writes per-sample copies under each sample directory. `[perturbation].cells_csv` is not auto-enabled — perturb still hits all cells unless you pass `--cells-csv` / `--cells-csv-column`. `--make-cells-csv --run-toml` regenerates the file.
 - `[model_export].save_lasso_coefs` defaults to **false**. Full-CNN overwrites `{gene}_betadata.feather` with per-cell CNN βs; set `true` to also keep cluster-level raw Lasso under `lasso_coefs/`.
-- Ligand–receptor design lives under `[ligand_field]` (not a legacy `[cellchat]` block). Default `mode = "spatial"` (Gaussian received ligand). Pair selection: `prob` (CellChat \(P\)) or `expressed`. CLI: `spacetravlr ligand-field` (alias `cellchat`).
+- Ligand–receptor design lives under `[ligand_field]` (not a legacy `[cellchat]` block). Default `mode = "spatial"` (Gaussian received ligand) and `replace_lr_pairs = false` (built-in GRN `LIG$REC` pairs). Training does not load the CellChat database or cache communication probabilities unless `replace_lr_pairs = true`. CLI: `spacetravlr ligand-field` (alias `cellchat`) computes that table on demand.
 - Perturbation configs drive batch knockouts/overexpression. Example `config_ko.toml`:
   ```
   run_toml = "/output/spacetravlr_run_repro.toml"
